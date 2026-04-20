@@ -10,15 +10,27 @@ import (
 
 // Config is the top-level configuration.
 type Config struct {
-	Server    ServerConfig            `yaml:"server"`
+	Server    ServerConfig              `yaml:"server"`
+	Database  DatabaseConfig            `yaml:"database"`
+	Admin     AdminConfig               `yaml:"admin"`
 	Providers map[string]ProviderConfig `yaml:"providers"`
-	Refresh   RefreshConfig           `yaml:"refresh"`
-	Log       LogConfig               `yaml:"log"`
+	Refresh   RefreshConfig             `yaml:"refresh"`
+	Log       LogConfig                 `yaml:"log"`
 }
 
 // ServerConfig configures the HTTP server.
 type ServerConfig struct {
 	Listen string `yaml:"listen"`
+}
+
+// DatabaseConfig configures the SQLite database.
+type DatabaseConfig struct {
+	Path string `yaml:"path"`
+}
+
+// AdminConfig configures the admin authentication.
+type AdminConfig struct {
+	Password string `yaml:"password,omitempty"`
 }
 
 // ProviderConfig configures a single provider.
@@ -49,6 +61,9 @@ func DefaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
 			Listen: "127.0.0.1:9876",
+		},
+		Database: DatabaseConfig{
+			Path: "cli-relay.db",
 		},
 		Providers: map[string]ProviderConfig{
 			"codex": {

@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/config"
-	codexprovider "github.com/AutoCONFIG/cli-relay/internal/provider/codex"
+	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/manager"
+	codexprovider "github.com/AutoCONFIG/cli-relay/internal/provider/codex"
 	"github.com/AutoCONFIG/cli-relay/internal/provider"
 	"github.com/AutoCONFIG/cli-relay/internal/server"
-	"github.com/AutoCONFIG/cli-relay/internal/store"
 )
 
 func main() {
@@ -45,12 +45,28 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
-	// Setup store
-	dataDir := fmt.Sprintf("%s/cli-relay", os.Getenv("HOME"))
-	tokenStore, err := store.NewFileStore(dataDir)
+	// Setup database
+	database, err := db.Open(cfg.Database.Path)
 	if err != nil {
-		logger.Error("failed to create token store", "error", err)
+		logger.Error("failed to open database", "error", err)
 		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Setup admin password from config if set and DB has none
+	if cfg.Admin.Password != "" {
+		hasAdmin, err := database.HasAdmin()
+		if err != nil {
+			logger.Error("failed to check admin", "error", err)
+			os.Exit(1)
+		}
+		if !hasAdmin {
+			if err := database.SetAdminPassword(cfg.Admin.Password); err != nil {
+				logger.Error("failed to set admin password", "error", err)
+				os.Exit(1)
+			}
+			logger.Info("admin password initialized from config")
+		}
 	}
 
 	// Setup providers
@@ -79,7 +95,7 @@ func main() {
 	}
 
 	// Create manager
-	mgr := manager.NewTokenManager(providerList, tokenStore, cfg.Providers, logger)
+	mgr := manager.NewTokenManager(providerList, database, cfg.Providers, logger)
 
 	// Create and start scheduler
 	sched := manager.NewScheduler(mgr, cfg.Refresh, logger)
@@ -88,7 +104,7 @@ func main() {
 	go sched.Start(ctx)
 
 	// Create HTTP server
-	srv := server.New(mgr, logger)
+	srv := server.New(mgr, database, logger)
 	httpServer := &http.Server{
 		Addr:         cfg.Server.Listen,
 		Handler:      srv.Handler(),

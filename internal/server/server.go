@@ -2,41 +2,66 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/manager"
 	"github.com/AutoCONFIG/cli-relay/internal/provider"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Server is the HTTP API server.
 type Server struct {
-	manager *manager.TokenManager
-	logger  *slog.Logger
-	mux     *http.ServeMux
+	manager   *manager.TokenManager
+	db        *db.DB
+	logger    *slog.Logger
+	mux       *http.ServeMux
+	sessions  map[string]time.Time
+	oauth     *OAuthProxy
+	mu        sync.Mutex
 }
 
 // New creates a new HTTP server.
-func New(m *manager.TokenManager, logger *slog.Logger) *Server {
+func New(m *manager.TokenManager, database *db.DB, logger *slog.Logger) *Server {
 	s := &Server{
-		manager: m,
-		logger:  logger,
-		mux:     http.NewServeMux(),
+		manager:  m,
+		db:       database,
+		logger:   logger,
+		mux:      http.NewServeMux(),
+		sessions: make(map[string]time.Time),
+		oauth:    NewOAuthProxy(m, logger),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
+	// Public API routes
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
-	s.mux.HandleFunc("GET /api/v1/providers", s.handleListProviders)
-	s.mux.HandleFunc("GET /api/v1/providers/{name}/token", s.handleGetToken)
-	s.mux.HandleFunc("POST /api/v1/providers/{name}/login", s.handleLogin)
-	s.mux.HandleFunc("DELETE /api/v1/providers/{name}/token", s.handleLogout)
-	s.mux.HandleFunc("POST /api/v1/providers/{name}/refresh", s.handleRefresh)
-	s.mux.HandleFunc("POST /api/v1/providers/{name}/recover", s.handleRecover)
+	s.mux.HandleFunc("POST /api/v1/auth/login", s.handleAdminLogin)
+	s.mux.HandleFunc("POST /api/v1/auth/logout", s.handleAdminLogout)
+	s.mux.HandleFunc("GET /api/v1/auth/status", s.handleAuthStatus)
+
+	// Protected API routes
+	s.mux.HandleFunc("GET /api/v1/providers", s.requireAuth(s.handleListProviders))
+	s.mux.HandleFunc("GET /api/v1/providers/{name}/token", s.requireAuth(s.handleGetToken))
+	s.mux.HandleFunc("POST /api/v1/providers/{name}/login", s.requireAuth(s.handleLogin))
+	s.mux.HandleFunc("DELETE /api/v1/providers/{name}/token", s.requireAuth(s.handleLogout))
+	s.mux.HandleFunc("POST /api/v1/providers/{name}/refresh", s.requireAuth(s.handleRefresh))
+	s.mux.HandleFunc("POST /api/v1/providers/{name}/recover", s.requireAuth(s.handleRecover))
+
+	// OAuth proxy routes
+	s.oauth.RegisterRoutes(s.mux)
+
+	// Web UI
+	s.mux.Handle("/", http.FileServer(http.FS(webUIFS)))
 }
 
 // Handler returns the HTTP handler.
@@ -44,8 +69,142 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+// --- Auth middleware ---
+
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hasAdmin, err := s.db.HasAdmin()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		// If no admin set, allow all access (first-time setup)
+		if !hasAdmin {
+			next(w, r)
+			return
+		}
+
+		token := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		} else {
+			if c, err := r.Cookie("session"); err == nil {
+				token = c.Value
+			}
+		}
+
+		if token == "" || !s.validSession(token) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func (s *Server) validSession(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	expiry, ok := s.sessions[token]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		delete(s.sessions, token)
+		return false
+	}
+	return true
+}
+
+func (s *Server) createSession() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	token := hex.EncodeToString(b)
+
+	s.mu.Lock()
+	s.sessions[token] = time.Now().Add(24 * time.Hour)
+	s.mu.Unlock()
+
+	return token
+}
+
+func (s *Server) removeSession(token string) {
+	s.mu.Lock()
+	delete(s.sessions, token)
+	s.mu.Unlock()
+}
+
+// --- Handlers ---
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "password required")
+		return
+	}
+
+	hash, err := s.db.GetAdminPassword()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if hash == "" {
+		// First login: set the password
+		h, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if err := s.db.SetAdminPassword(string(h)); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		hash = string(h)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid password")
+		return
+	}
+
+	token := s.createSession()
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "token": token})
+}
+
+func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("session"); err == nil {
+		s.removeSession(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+}
+
+func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
+	hasAdmin, _ := s.db.HasAdmin()
+	writeJSON(w, http.StatusOK, map[string]bool{"has_admin": hasAdmin})
 }
 
 func (s *Server) handleListProviders(w http.ResponseWriter, _ *http.Request) {
@@ -96,7 +255,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Method string `json:"method"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Default to browser if no body
 		req.Method = "browser"
 	}
 
@@ -143,8 +301,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	tokens, err := s.manager.RefreshForce(r.Context(), name)
 	if err != nil {
-		status := http.StatusInternalServerError
-		writeError(w, status, err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

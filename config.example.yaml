@@ -1,6 +1,12 @@
 server:
   listen: "127.0.0.1:9876"
 
+database:
+  path: "cli-relay.db"
+
+# admin:
+#   password: "your-admin-password"  # Set on first login via Web UI, or pre-configure here
+
 providers:
   codex:
     enabled: true

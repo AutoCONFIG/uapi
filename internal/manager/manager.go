@@ -9,8 +9,14 @@ import (
 
 	"github.com/AutoCONFIG/cli-relay/internal/config"
 	"github.com/AutoCONFIG/cli-relay/internal/provider"
-	"github.com/AutoCONFIG/cli-relay/internal/store"
 )
+
+// TokenStorer is the minimal interface the manager needs for token persistence.
+type TokenStorer interface {
+	Load(ctx context.Context, providerName string) (*provider.TokenSet, error)
+	Save(ctx context.Context, providerName string, tokens *provider.TokenSet) error
+	Delete(ctx context.Context, providerName string) error
+}
 
 // ProviderStatus represents the current health of a provider's authentication.
 type ProviderStatus string
@@ -37,7 +43,7 @@ type ProviderInfo struct {
 // TokenManager orchestrates token lifecycle across all configured providers.
 type TokenManager struct {
 	providers map[string]provider.Provider
-	store     store.TokenStore
+	store     TokenStorer
 	configs   map[string]config.ProviderConfig
 	logger    *slog.Logger
 
@@ -52,7 +58,7 @@ type TokenManager struct {
 // NewTokenManager creates a manager with the given providers and store.
 func NewTokenManager(
 	providers []provider.Provider,
-	store store.TokenStore,
+	store TokenStorer,
 	configs map[string]config.ProviderConfig,
 	logger *slog.Logger,
 ) *TokenManager {
