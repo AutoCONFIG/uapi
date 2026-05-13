@@ -1,9 +1,9 @@
-.PHONY: build run clean
+.PHONY: build run clean tidy test fmt dev
 
 BINARY=cli-relay
 
 build:
-	go build -o bin/$(BINARY) .
+	go build -o bin/$(BINARY) ./cmd/relay/
 
 run: build
 	./bin/$(BINARY) -config config.yaml
@@ -19,3 +19,6 @@ test:
 
 fmt:
 	gofmt -w .
+
+dev:
+	docker compose -f docker-compose.dev.yaml up -d

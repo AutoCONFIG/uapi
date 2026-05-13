@@ -3,133 +3,97 @@ package config
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the top-level configuration.
 type Config struct {
-	Server    ServerConfig              `yaml:"server"`
-	Database  DatabaseConfig            `yaml:"database"`
-	Admin     AdminConfig               `yaml:"admin"`
-	Providers map[string]ProviderConfig `yaml:"providers"`
-	Refresh   RefreshConfig             `yaml:"refresh"`
-	Log       LogConfig                 `yaml:"log"`
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+	Security SecurityConfig `yaml:"security"`
+	Billing  BillingConfig  `yaml:"billing"`
+	Logging  LoggingConfig  `yaml:"logging"`
 }
 
-// ServerConfig configures the HTTP server.
 type ServerConfig struct {
-	Listen string `yaml:"listen"`
+	Host          string `yaml:"host"`
+	Port          int    `yaml:"port"`
+	MaxBodySizeMB int    `yaml:"max_body_size_mb"`
 }
 
-// DatabaseConfig configures the SQLite database.
 type DatabaseConfig struct {
-	Path string `yaml:"path"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	DBName   string `yaml:"dbname"`
+	SSLMode  string `yaml:"sslmode"`
 }
 
-// AdminConfig configures the admin authentication.
-type AdminConfig struct {
-	Password string `yaml:"password,omitempty"`
+func (d DatabaseConfig) DSN() string {
+	return fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode,
+	)
 }
 
-// ProviderConfig configures a single provider.
-type ProviderConfig struct {
-	Enabled             bool          `yaml:"enabled"`
-	AuthMethod          string        `yaml:"auth_method"`
-	Issuer              string        `yaml:"issuer,omitempty"`
-	StoragePath         string        `yaml:"storage_path,omitempty"`
-	ProactiveRefreshAge time.Duration `yaml:"proactive_refresh_age,omitempty"`
-	RefreshBuffer       time.Duration `yaml:"refresh_buffer,omitempty"`
+type SecurityConfig struct {
+	JWTSecret         string `yaml:"jwt_secret"`
+	EncryptionKey     string `yaml:"encryption_key"`
+	AdminUsername     string `yaml:"admin_username"`
+	AdminPasswordHash string `yaml:"admin_password_hash"`
 }
 
-// RefreshConfig configures the token refresh scheduler.
-type RefreshConfig struct {
-	CheckInterval time.Duration `yaml:"check_interval"`
-	MaxRetries    int           `yaml:"max_retries"`
-	RetryBackoff  time.Duration `yaml:"retry_backoff"`
+type BillingConfig struct {
+	DefaultPlanID string `yaml:"default_plan_id"`
 }
 
-// LogConfig configures logging.
-type LogConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+type LoggingConfig struct {
+	Level         string `yaml:"level"`
+	RetentionDays int    `yaml:"retention_days"`
 }
 
-// DefaultConfig returns a config with sensible defaults.
-func DefaultConfig() Config {
-	return Config{
-		Server: ServerConfig{
-			Listen: "127.0.0.1:9876",
-		},
-		Database: DatabaseConfig{
-			Path: "cli-relay.db",
-		},
-		Providers: map[string]ProviderConfig{
-			"codex": {
-				Enabled:             true,
-				AuthMethod:          "browser",
-				Issuer:              "https://auth.openai.com",
-				ProactiveRefreshAge: 192 * time.Hour, // 8 days
-				RefreshBuffer:       5 * time.Minute,
-			},
-		},
-		Refresh: RefreshConfig{
-			CheckInterval: 1 * time.Minute,
-			MaxRetries:    3,
-			RetryBackoff:  30 * time.Second,
-		},
-		Log: LogConfig{
-			Level:  "info",
-			Format: "json",
-		},
-	}
-}
-
-// Load reads config from a YAML file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-
-	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	cfg := &Config{
+		Server: ServerConfig{
+			Host:          "0.0.0.0",
+			Port:          8080,
+			MaxBodySizeMB: 50,
+		},
+		Database: DatabaseConfig{
+			Host:    "localhost",
+			Port:    5432,
+			User:    "relay",
+			DBName:  "cli_relay",
+			SSLMode: "disable",
+		},
+		Logging: LoggingConfig{
+			Level:         "info",
+			RetentionDays: 180,
+		},
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
-// Validate checks the config for errors.
-func (c *Config) Validate() error {
-	if c.Server.Listen == "" {
-		return fmt.Errorf("server.listen is required")
+func (c *Config) validate() error {
+	if c.Security.JWTSecret == "" {
+		return fmt.Errorf("security.jwt_secret is required")
 	}
-	if c.Database.Path == "" {
-		return fmt.Errorf("database.path is required")
+	if c.Security.EncryptionKey == "" {
+		return fmt.Errorf("security.encryption_key is required (32-byte hex)")
 	}
-	if c.Refresh.CheckInterval <= 0 {
-		return fmt.Errorf("refresh.check_interval must be positive")
-	}
-	if c.Refresh.MaxRetries < 0 {
-		return fmt.Errorf("refresh.max_retries must be non-negative")
-	}
-	if c.Refresh.RetryBackoff < 0 {
-		return fmt.Errorf("refresh.retry_backoff must be non-negative")
-	}
-	for name, pcfg := range c.Providers {
-		if pcfg.Enabled && pcfg.AuthMethod != "" {
-			switch pcfg.AuthMethod {
-			case "browser", "device_code", "api_key":
-				// valid
-			default:
-				return fmt.Errorf("providers.%s.auth_method: invalid value %q (must be browser, device_code, or api_key)", name, pcfg.AuthMethod)
-			}
-		}
+	if len(c.Security.EncryptionKey) != 64 {
+		return fmt.Errorf("security.encryption_key must be 64 hex characters (32 bytes)")
 	}
 	return nil
 }

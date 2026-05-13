@@ -1,32 +1,25 @@
 server:
-  listen: "127.0.0.1:9876"
+  host: "0.0.0.0"
+  port: 8080
+  max_body_size_mb: 50
 
 database:
-  path: "cli-relay.db"
+  host: "localhost"
+  port: 5432
+  user: "relay"
+  password: "relay_dev"
+  dbname: "cli_relay"
+  sslmode: "disable"
 
-# admin:
-#   password: "your-admin-password"  # Set on first login via Web UI, or pre-configure here
+security:
+  jwt_secret: "change-me-to-a-random-string-at-least-32-chars"
+  encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  admin_username: "admin"
+  admin_password_hash: ""  # 留空则首次启动自动生成
 
-providers:
-  codex:
-    enabled: true
-    auth_method: browser
-    issuer: "https://auth.openai.com"
-    proactive_refresh_age: 192h
-    refresh_buffer: 5m
+billing:
+  default_plan_id: ""
 
-  gemini:
-    enabled: false
-    auth_method: browser
-
-  kilocode:
-    enabled: false
-    auth_method: device_code
-
-refresh:
-  check_interval: 1m
-  max_retries: 3
-  retry_backoff: 30s
-
-log:
-  level: info
+logging:
+  level: "info"
+  retention_days: 180

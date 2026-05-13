@@ -1,10 +1,10 @@
 bin/
-*.db
-*.db-wal
-*.db-shm
 upstream/
 *.swp
 *.swo
 *~
 .env
 config.yaml
+*.db
+*.db-wal
+*.db-shm

@@ -1,179 +1,135 @@
 package db
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/AutoCONFIG/cli-relay/internal/provider"
-
-	_ "modernc.org/sqlite"
+	"github.com/google/uuid"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
-// DB wraps an SQLite database for cli-relay persistence.
-type DB struct {
-	db *sql.DB
+type Base struct {
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `gorm:"index" json:"deleted_at,omitempty"`
 }
 
-// Open creates or opens a SQLite database at the given path.
-func Open(path string) (*DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return nil, fmt.Errorf("create db dir: %w", err)
-	}
+type Channel struct {
+	Base
+	Name     string `gorm:"size:100;not null" json:"name"`
+	Type     string `gorm:"size:50;not null" json:"type"` // openai, anthropic, gemini
+	Endpoint string `gorm:"size:500;not null" json:"endpoint"`
+	Enabled  bool   `gorm:"default:true" json:"enabled"`
+	Models   string `gorm:"type:text" json:"models"` // comma-separated
+	Priority int    `gorm:"default:0" json:"priority"`
+}
 
-	// Add busy_timeout for concurrent access resilience
-	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL", path)
-	db, err := sql.Open("sqlite", dsn)
+func (Channel) TableName() string { return "channels" }
+
+type Account struct {
+	Base
+	ChannelID     uuid.UUID  `gorm:"type:uuid;index;not null" json:"channel_id"`
+	Name          string     `gorm:"size:100;not null" json:"name"`
+	Credentials   string     `gorm:"type:text;not null" json:"-"` // AES-256-GCM encrypted
+	Weight        int        `gorm:"default:1" json:"weight"`
+	Enabled       bool       `gorm:"default:true" json:"enabled"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+}
+
+func (Account) TableName() string { return "accounts" }
+
+type Token struct {
+	Base
+	Name         string `gorm:"size:100;not null" json:"name"`
+	Key          string `gorm:"size:100;uniqueIndex;not null" json:"key"`
+	Enabled      bool   `gorm:"default:true" json:"enabled"`
+	IPWhitelist  string `gorm:"type:text" json:"ip_whitelist"`
+	Unlimited    bool   `gorm:"default:false" json:"unlimited"`
+}
+
+func (Token) TableName() string { return "tokens" }
+
+type Plan struct {
+	Base
+	Name            string `gorm:"size:100;not null" json:"name"`
+	Type            string `gorm:"size:20;not null" json:"type"` // count_based, token_based
+	Limits          string `gorm:"type:jsonb" json:"limits"`
+	ModelRatios     string `gorm:"type:jsonb" json:"model_ratios"`
+	CompletionRatio string `gorm:"type:jsonb" json:"completion_ratio"`
+	TokenQuota      int64  `json:"token_quota"`
+	Enabled         bool   `gorm:"default:true" json:"enabled"`
+}
+
+func (Plan) TableName() string { return "plans" }
+
+type TokenPlan struct {
+	Base
+	TokenID       uuid.UUID `gorm:"type:uuid;index;not null" json:"token_id"`
+	PlanID        uuid.UUID `gorm:"type:uuid;index;not null" json:"plan_id"`
+	WindowUsage   string    `gorm:"type:jsonb" json:"window_usage"`
+	WindowResetAt string    `gorm:"type:jsonb" json:"window_reset_at"`
+	UsedQuota     int64     `gorm:"default:0" json:"used_quota"`
+}
+
+func (TokenPlan) TableName() string { return "token_plans" }
+
+type Log struct {
+	ID               int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	CreatedAt        time.Time `gorm:"index" json:"created_at"`
+	TokenID          uuid.UUID `gorm:"type:uuid;index" json:"token_id"`
+	ChannelID        uuid.UUID `gorm:"type:uuid;index" json:"channel_id"`
+	AccountID        uuid.UUID `gorm:"type:uuid;index" json:"account_id"`
+	Model            string    `gorm:"size:100;index" json:"model"`
+	IsStream         bool      `json:"is_stream"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	LatencyMs        int       `json:"latency_ms"`
+	StatusCode       int       `json:"status_code"`
+	ErrorMessage     string    `gorm:"type:text" json:"error_message,omitempty"`
+}
+
+func (Log) TableName() string { return "logs" }
+
+type AuditLog struct {
+	ID         int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	CreatedAt  time.Time `gorm:"index" json:"created_at"`
+	User       string    `gorm:"size:100;not null" json:"user"`
+	Action     string    `gorm:"size:50;not null" json:"action"`
+	Resource   string    `gorm:"size:50;not null" json:"resource"`
+	ResourceID string   `gorm:"size:100" json:"resource_id"`
+	OldValue   string    `gorm:"type:text" json:"old_value,omitempty"`
+	NewValue   string    `gorm:"type:text" json:"new_value,omitempty"`
+	IPAddress  string    `gorm:"size:50" json:"ip_address"`
+}
+
+func (AuditLog) TableName() string { return "audit_log" }
+
+var AllModels = []interface{}{
+	&Channel{}, &Account{}, &Token{}, &Plan{}, &TokenPlan{}, &Log{}, &AuditLog{},
+}
+
+func Init(dsn string) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("connect database: %w", err)
 	}
-
-	// Set connection pool limits for SQLite
-	db.SetMaxOpenConns(1)
-
-	d := &DB{db: db}
-	if err := d.migrate(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
-
-	return d, nil
-}
-
-// Close closes the database.
-func (d *DB) Close() error {
-	return d.db.Close()
-}
-
-func (d *DB) migrate() error {
-	_, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS tokens (
-			provider    TEXT PRIMARY KEY,
-			data        TEXT NOT NULL,
-			updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS admin (
-			id          INTEGER PRIMARY KEY CHECK (id = 1),
-			password    TEXT NOT NULL,
-			updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS settings (
-			key         TEXT PRIMARY KEY,
-			value       TEXT NOT NULL,
-			updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);
-	`)
-	return err
-}
-
-// --- TokenStore implementation ---
-
-// Load reads the stored tokens for a provider.
-func (d *DB) Load(_ context.Context, providerName string) (*provider.TokenSet, error) {
-	var data string
-	err := d.db.QueryRow("SELECT data FROM tokens WHERE provider = ?", providerName).Scan(&data)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	sqlDB, err := db.DB()
 	if err != nil {
-		return nil, fmt.Errorf("query token: %w", err)
+		return nil, fmt.Errorf("get sql.DB: %w", err)
 	}
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
-	var ts provider.TokenSet
-	if err := json.Unmarshal([]byte(data), &ts); err != nil {
-		return nil, fmt.Errorf("unmarshal token: %w", err)
+	db.Exec("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\"")
+	if err := db.AutoMigrate(AllModels...); err != nil {
+		return nil, fmt.Errorf("auto migrate: %w", err)
 	}
-	return &ts, nil
-}
-
-// Save persists tokens for a provider.
-func (d *DB) Save(_ context.Context, providerName string, tokens *provider.TokenSet) error {
-	data, err := json.Marshal(tokens)
-	if err != nil {
-		return fmt.Errorf("marshal tokens: %w", err)
-	}
-
-	_, err = d.db.Exec(
-		"INSERT OR REPLACE INTO tokens (provider, data, updated_at) VALUES (?, ?, ?)",
-		providerName, string(data), time.Now().UTC(),
-	)
-	return err
-}
-
-// Delete removes stored tokens for a provider.
-func (d *DB) Delete(_ context.Context, providerName string) error {
-	_, err := d.db.Exec("DELETE FROM tokens WHERE provider = ?", providerName)
-	return err
-}
-
-// ListProviders returns all provider names that have stored tokens.
-func (d *DB) ListProviders() ([]string, error) {
-	rows, err := d.db.Query("SELECT provider FROM tokens")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names = append(names, name)
-	}
-	return names, rows.Err()
-}
-
-// --- Admin password ---
-
-// SetAdminPassword sets the admin password hash.
-func (d *DB) SetAdminPassword(hash string) error {
-	_, err := d.db.Exec(
-		"INSERT OR REPLACE INTO admin (id, password, updated_at) VALUES (1, ?, ?)",
-		hash, time.Now().UTC(),
-	)
-	return err
-}
-
-// GetAdminPassword returns the stored admin password hash, or empty string if none.
-func (d *DB) GetAdminPassword() (string, error) {
-	var hash string
-	err := d.db.QueryRow("SELECT password FROM admin WHERE id = 1").Scan(&hash)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return hash, err
-}
-
-// HasAdmin returns true if an admin password has been set.
-func (d *DB) HasAdmin() (bool, error) {
-	var count int
-	err := d.db.QueryRow("SELECT COUNT(*) FROM admin WHERE id = 1").Scan(&count)
-	return count > 0, err
-}
-
-// --- Settings ---
-
-// GetSetting returns a setting value by key.
-func (d *DB) GetSetting(key string) (string, error) {
-	var value string
-	err := d.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return value, err
-}
-
-// SetSetting sets a setting value.
-func (d *DB) SetSetting(key, value string) error {
-	_, err := d.db.Exec(
-		"INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-		key, value, time.Now().UTC(),
-	)
-	return err
+	return db, nil
 }
