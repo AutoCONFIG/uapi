@@ -50,7 +50,6 @@ type SecurityConfig struct {
 }
 
 type BillingConfig struct {
-	DefaultPlanID string `yaml:"default_plan_id,omitempty"`
 }
 
 type UserConfig struct {

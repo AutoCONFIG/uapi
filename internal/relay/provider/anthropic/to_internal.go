@@ -182,6 +182,7 @@ func parseAnthropicMessage(msg map[string]interface{}) provider.InternalMessage 
 					isError = e
 				}
 				im.ToolResult = &provider.InternalToolResult{
+					Name:       "", // Anthropic tool_result doesn't carry function name; matched by tool_use_id
 					ToolCallID: toolUseID,
 					Content:    resultContent,
 					IsError:    isError,

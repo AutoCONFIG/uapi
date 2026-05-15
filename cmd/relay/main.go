@@ -54,7 +54,7 @@ func main() {
 			jwtExpiry = d
 		}
 	}
-	userSvc := user.NewService(database, cfg.Security.JWTSecret, jwtExpiry)
+	userSvc := user.NewService(database, cfg.Security.JWTSecret, jwtExpiry, cfg.User.MaxKeysPerUser)
 
 	srv := server.New(cfg, database, pools, billing, userSvc, *configPath)
 	log.Println("cli-relay ready")

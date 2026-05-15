@@ -24,7 +24,7 @@ func StartLogCleanup(database *gorm.DB, retentionDays int) {
 // InitPools loads all channels and their accounts into the pool manager at startup.
 func InitPools(database *gorm.DB, setPool func(channelID string, accounts []*db.Account)) error {
 	var channels []db.Channel
-	if err := database.Where("enabled = true").Find(&channels).Error; err != nil {
+	if err := database.Where("enabled = true AND deleted_at IS NULL").Find(&channels).Error; err != nil {
 		return err
 	}
 	for _, ch := range channels {

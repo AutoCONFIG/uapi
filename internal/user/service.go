@@ -15,16 +15,27 @@ import (
 )
 
 type Service struct {
-	db        *gorm.DB
-	jwtSecret string
-	jwtExpiry time.Duration
+	db             *gorm.DB
+	jwtSecret      string
+	jwtExpiry      time.Duration
+	maxKeysPerUser int
 }
 
-func NewService(database *gorm.DB, jwtSecret string, jwtExpiry time.Duration) *Service {
-	return &Service{db: database, jwtSecret: jwtSecret, jwtExpiry: jwtExpiry}
+func NewService(database *gorm.DB, jwtSecret string, jwtExpiry time.Duration, maxKeysPerUser int) *Service {
+	return &Service{db: database, jwtSecret: jwtSecret, jwtExpiry: jwtExpiry, maxKeysPerUser: maxKeysPerUser}
 }
 
 func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
+	// Validate email format
+	if !strings.Contains(req.Email, "@") {
+		return nil, errors.New("invalid email format")
+	}
+
+	// Validate password length
+	if len(req.Password) < 6 {
+		return nil, errors.New("password must be at least 6 characters")
+	}
+
 	// Check email uniqueness
 	var count int64
 	s.db.Model(&db.User{}).Where("email = ?", req.Email).Count(&count)
@@ -176,6 +187,13 @@ func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
 }
 
 func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse, error) {
+	// Enforce max keys per user
+	var keyCount int64
+	s.db.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
+	if keyCount >= int64(s.maxKeysPerUser) {
+		return nil, errors.New("maximum number of API keys reached")
+	}
+
 	// Generate key: sk-relay- + UUID without dashes
 	keyUUID := uuid.New().String()
 	key := "sk-relay-" + strings.ReplaceAll(keyUUID, "-", "")
@@ -307,7 +325,7 @@ func (s *Service) Subscribe(userID, planID string) error {
 
 func (s *Service) RedeemCode(userID, code string) (int64, error) {
 	var redeemCode db.RedeemCode
-	if err := s.db.Where("code = ? AND status = ?", code, "active").First(&redeemCode).Error; err != nil {
+	if err := s.db.Where("code = ? AND status = ? AND expires_at > ?", code, "active", time.Now()).First(&redeemCode).Error; err != nil {
 		return 0, errors.New("invalid or expired code")
 	}
 

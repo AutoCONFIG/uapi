@@ -48,6 +48,7 @@ type InternalToolCall struct {
 
 type InternalToolResult struct {
 	ToolCallID string
+	Name       string
 	Content    string
 	IsError    bool
 }

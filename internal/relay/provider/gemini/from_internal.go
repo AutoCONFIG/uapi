@@ -142,8 +142,11 @@ func buildGeminiAssistantMessage(im provider.InternalMessage) []interface{} {
 func buildGeminiToolResult(im provider.InternalMessage) map[string]interface{} {
 	name := ""
 	content := ""
+	toolCallID := ""
 	if im.ToolResult != nil {
+		name = im.ToolResult.Name
 		content = im.ToolResult.Content
+		toolCallID = im.ToolResult.ToolCallID
 	}
 
 	var parts []interface{}
@@ -151,11 +154,6 @@ func buildGeminiToolResult(im provider.InternalMessage) map[string]interface{} {
 		parts = append(parts, map[string]interface{}{
 			"text": content,
 		})
-	}
-
-	toolCallID := ""
-	if im.ToolResult != nil {
-		toolCallID = im.ToolResult.ToolCallID
 	}
 
 	return map[string]interface{}{

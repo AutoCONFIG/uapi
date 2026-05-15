@@ -7,10 +7,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-func RequireAdmin(secret string) func(fasthttp.RequestHandler) fasthttp.RequestHandler {
-	return requireToken(secret, TokenTypeAdmin)
-}
-
+// RequireUser returns a middleware that requires a valid user JWT.
 func RequireUser(secret string) func(fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return requireToken(secret, TokenTypeUser)
 }

@@ -157,6 +157,7 @@ func parseGeminiContent(content map[string]interface{}) provider.InternalMessage
 		// Function response part (tool result)
 		if fr, ok := part["functionResponse"].(map[string]interface{}); ok {
 			id, _ := fr["id"].(string)
+			frName, _ := fr["name"].(string)
 			// Extract response content
 			var resultContent string
 			if resp, ok := fr["response"].(map[string]interface{}); ok {
@@ -174,6 +175,7 @@ func parseGeminiContent(content map[string]interface{}) provider.InternalMessage
 			}
 			im.Role = "tool"
 			im.ToolResult = &provider.InternalToolResult{
+				Name:       frName,
 				ToolCallID: id,
 				Content:    resultContent,
 			}
