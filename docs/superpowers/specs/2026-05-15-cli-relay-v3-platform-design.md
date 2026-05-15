@@ -286,6 +286,8 @@ Gemini            需新增         需新增         需新增         透传
 
 直接转换优势：无二次序列化开销，流式场景无精度损失，代码直观。
 
+透传兼容性：透传时 adaptor 的 `SetupRequestHeader` 已处理各 provider 的 header/URL 差异（如 Anthropic 的 `anthropic-version`、Gemini 的 `?key=` query），客户端只需改 base URL 即可。但所有格式（含透传）都必须实现 `ParseUsage` 和 `ParseStreamUsage`，relay 需要从响应中提取 usage 做计费统计。
+
 Token 统一计量：无论客户端用哪种格式，usage 都归一化为 `prompt_tokens + completion_tokens` 进行计费。
 
 ## 5. 数据模型
