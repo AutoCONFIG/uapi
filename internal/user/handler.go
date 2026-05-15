@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 
+	"github.com/AutoCONFIG/cli-relay/internal/auth"
 	"github.com/valyala/fasthttp"
 )
 
@@ -273,12 +274,12 @@ func (h *Handler) ListPlans(ctx *fasthttp.RequestCtx) {
 
 // getUserID extracts the user ID from JWT claims set in the context
 func getUserID(ctx *fasthttp.RequestCtx) string {
-	v := ctx.UserValue("userID")
+	v := ctx.UserValue("claims")
 	if v == nil {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return s
+	if claims, ok := v.(*auth.Claims); ok {
+		return claims.UserID
 	}
 	return ""
 }
