@@ -78,13 +78,12 @@ func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
 			p.accounts[i].CurrentWeight = 0
 			until := time.Now().Add(duration)
 			p.accounts[i].Account.CooldownUntil = &until
-			go func(idx int) {
-				<-time.After(duration)
+			time.AfterFunc(duration, func() {
 				p.mu.Lock()
 				defer p.mu.Unlock()
-				p.accounts[idx].Weight = p.accounts[idx].OriginalWeight
-				p.totalWeight += p.accounts[idx].OriginalWeight
-			}(i)
+				p.accounts[i].Weight = p.accounts[i].OriginalWeight
+				p.totalWeight += p.accounts[i].OriginalWeight
+			})
 			return
 		}
 	}

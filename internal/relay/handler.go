@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AutoCONFIG/cli-relay/internal/crypto"
 	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider"
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/anthropic"
@@ -54,6 +53,21 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
 
+	// Detect client format from request path
+	var clientFormat provider.Format
+	switch {
+	case strings.HasPrefix(path, "/v1/chat/completions"):
+		clientFormat = provider.FormatOpenAIChat
+	case strings.HasPrefix(path, "/v1/responses"):
+		clientFormat = provider.FormatOpenAIResp
+	case strings.HasPrefix(path, "/v1/messages"):
+		clientFormat = provider.FormatAnthropic
+	case strings.HasPrefix(path, "/v1beta/"):
+		clientFormat = provider.FormatGemini
+	default:
+		clientFormat = provider.FormatOpenAIChat // backward compat
+	}
+
 	// 1. Auth
 	tokenKey := extractBearerToken(ctx)
 	if tokenKey == "" {
@@ -79,6 +93,13 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		if err := r.billing.CheckLimit(token.ID.String()); err != nil {
 			ctx.Error(`{"error":"rate limit exceeded"}`, 429)
 			return
+		}
+		// Check user balance if token is linked to a user
+		if token.UserID != "" {
+			if err := r.billing.CheckUserBalance(token.UserID); err != nil {
+				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, 402)
+				return
+			}
 		}
 	}
 
@@ -123,7 +144,28 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		body = injectStreamTrue(body)
 	}
 
-	convertedBody := body
+	// Determine upstream format from channel type
+	var upstreamFormat provider.Format
+	switch targetChannel.Type {
+	case "openai":
+		if targetChannel.APIFormat == "responses" {
+			upstreamFormat = provider.FormatOpenAIResp
+		} else {
+			upstreamFormat = provider.FormatOpenAIChat
+		}
+	case "anthropic":
+		upstreamFormat = provider.FormatAnthropic
+	case "gemini":
+		upstreamFormat = provider.FormatGemini
+	default:
+		upstreamFormat = provider.FormatOpenAIChat
+	}
+
+	convertedBody, err := provider.ConvertRequest(clientFormat, upstreamFormat, body)
+	if err != nil {
+		ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
+		return
+	}
 
 	// 7. Dispatch
 	if req.Stream && !forceStreamActive {
@@ -251,7 +293,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 		return
 	}
 
-	// Response format conversion deferred to Task 7
+	// TODO: Response format conversion (requires reverse converters, upstreamFormat -> clientFormat)
 	// SSE -> non-stream JSON
 	respBody = StreamToNonStream(respBody)
 
@@ -316,7 +358,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 			}
 			respAccount = currentAccount
 			adaptor.Init(ch, currentAccount)
-			currentCreds, err = crypto.Decrypt(currentAccount.Credentials)
+			currentCreds, err = EnsureValidCredentials(currentAccount, r.db)
 			if err != nil {
 				log.Printf("decrypt error on retry %d: %v", retry, err)
 				currentAccount = r.retryNext(ch, currentAccount)
@@ -351,7 +393,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 		return
 	}
 
-	// Response format conversion deferred to Task 7
+	// TODO: Response format conversion (requires reverse converters, upstreamFormat -> clientFormat)
 
 	ctx.SetStatusCode(statusCode)
 	respHeaders.VisitAll(func(key, value []byte) {
@@ -409,7 +451,7 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 	if !ok {
 		return nil, nil, "", fmt.Errorf("no available account")
 	}
-	creds, err := crypto.Decrypt(account.Credentials)
+	creds, err := EnsureValidCredentials(account, r.db)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("decrypt error")
 	}

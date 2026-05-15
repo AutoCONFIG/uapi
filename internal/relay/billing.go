@@ -150,6 +150,8 @@ func (b *BillingService) preConsumeTokens(tp *db.TokenPlan, amount int) error {
 }
 
 // Settle adjusts token usage after actual response.
+// The flow is: PreConsume(estTokens) → request → Refund(estTokens) + Settle(actual).
+// Settle records actual usage. The caller must also call Refund to reverse the pre-consumption.
 func (b *BillingService) Settle(tokenID string, promptTokens, completionTokens int, model string) error {
 	var tp db.TokenPlan
 	if err := b.db.Where("token_id = ?", tokenID).First(&tp).Error; err != nil {
@@ -166,7 +168,7 @@ func (b *BillingService) Settle(tokenID string, promptTokens, completionTokens i
 		return nil
 	}
 
-	// token_based: calculate actual cost with model ratio and adjust
+	// token_based: record actual cost (pre-consumed amount is reversed via Refund)
 	ratios := parseMap(plan.ModelRatios)
 	ratio := 1.0
 	if r, ok := ratios[model]; ok {
@@ -175,25 +177,68 @@ func (b *BillingService) Settle(tokenID string, promptTokens, completionTokens i
 		}
 	}
 
-	// actual cost in "tokens"
-	actual := float64(promptTokens) + float64(completionTokens)*ratio
-	// We pre-consumed promptTokens + completionTokens as rough estimate
-	estimate := float64(promptTokens + completionTokens)
-	delta := int(actual - estimate)
-
-	if delta != 0 {
-		return b.db.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", delta)).Error
+	actual := int(float64(promptTokens) + float64(completionTokens)*ratio)
+	if actual > 0 {
+		return b.db.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", actual)).Error
 	}
 	return nil
 }
 
-// Refund returns pre-consumed tokens on failure.
+// Refund returns pre-consumed tokens on failure or after actual usage is settled.
 func (b *BillingService) Refund(tokenID string, amount int) error {
 	var tp db.TokenPlan
 	if err := b.db.Where("token_id = ?", tokenID).First(&tp).Error; err != nil {
 		return err
 	}
-	return b.db.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
+
+	var plan db.Plan
+	if err := b.db.First(&plan, "id = ?", tp.PlanID).Error; err != nil {
+		// Can't determine plan type, try token refund anyway
+		return b.db.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
+	}
+
+	switch plan.Type {
+	case "count_based":
+		// Decrement window_usage to reverse the pre-consumed count
+		return b.decrementCountUsage(&tp, &plan, amount)
+	default:
+		return b.db.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
+	}
+}
+
+func (b *BillingService) decrementCountUsage(tp *db.TokenPlan, plan *db.Plan, amount int) error {
+	usage := parseMap(tp.WindowUsage)
+	limits := parseMap(plan.Limits)
+
+	for window := range limits {
+		if _, ok := usage[window]; !ok {
+			continue
+		}
+		if f, ok := toFloat(usage[window]); ok {
+			usage[window] = f - float64(amount)
+			if f-float64(amount) < 0 {
+				usage[window] = float64(0)
+			}
+		}
+	}
+
+	usageJSON, _ := json.Marshal(usage)
+	return b.db.Model(tp).Update("window_usage", string(usageJSON)).Error
+}
+
+// CheckUserBalance verifies the user has a positive balance. Returns error if insufficient.
+func (b *BillingService) CheckUserBalance(userID string) error {
+	var user db.User
+	if err := b.db.Where("id = ? AND status = 'active'", userID).First(&user).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil // user not found — skip balance check
+		}
+		return err
+	}
+	if user.Balance <= 0 {
+		return fmt.Errorf("insufficient user balance")
+	}
+	return nil
 }
 
 // Helper functions

@@ -140,6 +140,7 @@ func StreamToNonStream(sseBody []byte) []byte {
 	resp := map[string]interface{}{
 		"id":      respID,
 		"object":  "chat.completion",
+		"created": 0,
 		"model":   model,
 		"choices": []interface{}{
 			map[string]interface{}{
