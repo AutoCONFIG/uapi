@@ -13,6 +13,7 @@ import (
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/openai"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
@@ -135,6 +136,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	adaptor.Init(targetChannel, account)
 	upstreamURL, err := adaptor.GetRequestURL(path)
 	if err != nil {
+		if r.billing != nil {
+			go r.billing.Refund(token.ID.String(), estimatedTokens)
+		}
 		ctx.Error(`{"error":"build url failed"}`, fasthttp.StatusInternalServerError)
 		return
 	}
@@ -163,6 +167,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	convertedBody, err := provider.ConvertRequest(clientFormat, upstreamFormat, body)
 	if err != nil {
+		if r.billing != nil {
+			go r.billing.Refund(token.ID.String(), estimatedTokens)
+		}
 		ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
 		return
 	}
@@ -588,11 +595,11 @@ func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model stri
 	}
 }
 
-func toUUID(v interface{}) [16]byte {
-	if id, ok := v.([16]byte); ok {
+func toUUID(v interface{}) uuid.UUID {
+	if id, ok := v.(uuid.UUID); ok {
 		return id
 	}
-	return [16]byte{}
+	return uuid.UUID{}
 }
 
 func jsonEscape(s string) string {

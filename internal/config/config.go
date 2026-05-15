@@ -119,7 +119,8 @@ func Save(cfg *Config, path string) error {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Port: 8080,
+			Port:          8080,
+			MaxBodySizeMB: 100,
 		},
 		Database: DatabaseConfig{
 			Port:    5432,

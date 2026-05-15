@@ -106,7 +106,12 @@ func (h *Handler) RequireAuth(ctx *fasthttp.RequestCtx) bool {
 		return false
 	}
 	tokenStr := authHeader[7:]
-	if _, err := auth.ParseToken(tokenStr, h.cfg.Security.JWTSecret); err != nil {
+	claims, err := auth.ParseToken(tokenStr, h.cfg.Security.JWTSecret)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	if claims.Type != auth.TokenTypeAdmin {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
 		return false
 	}
