@@ -1,4 +1,4 @@
-.PHONY: build run clean tidy test fmt dev
+.PHONY: build run clean tidy test fmt dev web
 
 BINARY=cli-relay
 
@@ -22,3 +22,6 @@ fmt:
 
 dev:
 	docker compose -f docker-compose.dev.yaml up -d
+
+web:
+	@echo "Frontend build not yet configured. See web/ directory."
