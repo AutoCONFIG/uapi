@@ -7,8 +7,10 @@ import (
 	"strings"
 
 	"github.com/AutoCONFIG/cli-relay/internal/admin"
+	"github.com/AutoCONFIG/cli-relay/internal/auth"
 	"github.com/AutoCONFIG/cli-relay/internal/config"
 	"github.com/AutoCONFIG/cli-relay/internal/relay"
+	"github.com/AutoCONFIG/cli-relay/internal/user"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
@@ -21,11 +23,11 @@ type Server struct {
 	billing      *relay.BillingService
 	relayer      *relay.Relayer
 	adminHandler *admin.Handler
-	// userHandler will be added in Task 4
-	router *Router
+	userHandler  *user.Handler
+	router       *Router
 }
 
-func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billing *relay.BillingService, cfgPath string) *Server {
+func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billing *relay.BillingService, userSvc *user.Service, cfgPath string) *Server {
 	s := &Server{
 		cfg:          cfg,
 		cfgPath:      cfgPath,
@@ -34,6 +36,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		billing:      billing,
 		relayer:      relay.NewRelayer(database, pools, billing, relay.NewAffinityCache(), cfg.Server.ConcurrencyLimit),
 		adminHandler: admin.NewHandler(database, cfg, cfgPath),
+		userHandler:  user.NewHandler(userSvc),
 	}
 	s.setupRoutes()
 	return s
@@ -108,8 +111,25 @@ func (s *Server) setupRoutes() {
 	r.DELETE("/api/admin/plans", s.handleAdminAuth(s.adminHandler.HandlePlans))
 	r.GET("/api/admin/logs", s.handleAdminAuth(s.adminHandler.HandleLogs))
 
-	// User routes will be added in Task 4/8 when userHandler is wired in
-	// For now, return 404 for user API paths
+	// User auth (no JWT required)
+	r.POST("/api/user/register", s.userHandler.Register)
+	r.POST("/api/user/login", s.userHandler.Login)
+	r.POST("/api/user/refresh", s.userHandler.RefreshToken)
+
+	// User routes (JWT required)
+	userAuth := auth.RequireUser(s.cfg.Security.JWTSecret)
+	r.GET("/api/user/profile", userAuth(s.userHandler.GetProfile))
+	r.POST("/api/user/password", userAuth(s.userHandler.UpdatePassword))
+	r.POST("/api/user/email", userAuth(s.userHandler.UpdateEmail))
+	r.GET("/api/user/keys", userAuth(s.userHandler.ListKeys))
+	r.POST("/api/user/keys", userAuth(s.userHandler.CreateKey))
+	r.DELETE("/api/user/keys/:keyID", userAuth(s.userHandler.DeleteKey))
+	r.GET("/api/user/usage", userAuth(s.userHandler.GetUsage))
+	r.GET("/api/user/usage/logs", userAuth(s.userHandler.GetUsageLogs))
+	r.GET("/api/user/subscription", userAuth(s.userHandler.GetSubscription))
+	r.POST("/api/user/subscription/:planID", userAuth(s.userHandler.Subscribe))
+	r.POST("/api/user/redeem", userAuth(s.userHandler.RedeemCode))
+	r.GET("/api/user/plans", userAuth(s.userHandler.ListPlans))
 
 	s.router = r
 }

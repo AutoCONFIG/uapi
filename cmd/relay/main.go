@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/admin"
 	"github.com/AutoCONFIG/cli-relay/internal/config"
@@ -10,6 +11,7 @@ import (
 	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/relay"
 	"github.com/AutoCONFIG/cli-relay/internal/server"
+	"github.com/AutoCONFIG/cli-relay/internal/user"
 )
 
 func main() {
@@ -45,7 +47,16 @@ func main() {
 	// Start background log cleanup
 	admin.StartLogCleanup(database, cfg.Logging.RetentionDays)
 
-	srv := server.New(cfg, database, pools, billing)
+	// Initialize user service
+	jwtExpiry := 24 * time.Hour
+	if cfg.User.JWTExpiry != "" {
+		if d, err := time.ParseDuration(cfg.User.JWTExpiry); err == nil {
+			jwtExpiry = d
+		}
+	}
+	userSvc := user.NewService(database, cfg.Security.JWTSecret, jwtExpiry)
+
+	srv := server.New(cfg, database, pools, billing, userSvc, *configPath)
 	log.Println("cli-relay ready")
 	if err := srv.Start(); err != nil {
 		log.Fatalf("server error: %v", err)

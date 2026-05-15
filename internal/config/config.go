@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 
@@ -13,12 +16,14 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	User     UserConfig     `yaml:"user"`
 }
 
 type ServerConfig struct {
-	Host          string `yaml:"host"`
-	Port          int    `yaml:"port"`
-	MaxBodySizeMB int    `yaml:"max_body_size_mb"`
+	Host             string `yaml:"host"`
+	Port             int    `yaml:"port"`
+	MaxBodySizeMB    int    `yaml:"max_body_size_mb"`
+	ConcurrencyLimit int    `yaml:"concurrency_limit"`
 }
 
 type DatabaseConfig struct {
@@ -40,12 +45,17 @@ func (d DatabaseConfig) DSN() string {
 type SecurityConfig struct {
 	JWTSecret         string `yaml:"jwt_secret"`
 	EncryptionKey     string `yaml:"encryption_key"`
-	AdminUsername     string `yaml:"admin_username"`
-	AdminPasswordHash string `yaml:"admin_password_hash"`
+	AdminUsername     string `yaml:"admin_username,omitempty"`
+	AdminPasswordHash string `yaml:"admin_password_hash,omitempty"`
 }
 
 type BillingConfig struct {
-	DefaultPlanID string `yaml:"default_plan_id"`
+	DefaultPlanID string `yaml:"default_plan_id,omitempty"`
+}
+
+type UserConfig struct {
+	JWTExpiry      string `yaml:"jwt_expiry"`        // default "24h"
+	MaxKeysPerUser int    `yaml:"max_keys_per_user"`  // default 5
 }
 
 type LoggingConfig struct {
@@ -53,19 +63,66 @@ type LoggingConfig struct {
 	RetentionDays int    `yaml:"retention_days"`
 }
 
+// Initialized returns true if an admin password has been set (setup completed).
+func (c *Config) Initialized() bool {
+	return c.Security.AdminPasswordHash != ""
+}
+
+// Load reads config from path. If the file doesn't exist, it auto-generates
+// a minimal config with random secrets and writes it to path.
 func Load(path string) (*Config, error) {
+	cfg := defaultConfig()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		if os.IsNotExist(err) {
+			// Auto-generate config with random secrets
+			if err := generateSecrets(&cfg.Security); err != nil {
+				return nil, fmt.Errorf("generate secrets: %w", err)
+			}
+			if err := Save(cfg, path); err != nil {
+				return nil, fmt.Errorf("write auto-generated config: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("read config: %w", err)
+		}
+	} else {
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
 	}
-	cfg := &Config{
+
+	// Auto-generate missing secrets
+	if cfg.Security.JWTSecret == "" || cfg.Security.EncryptionKey == "" {
+		if err := generateSecrets(&cfg.Security); err != nil {
+			return nil, fmt.Errorf("generate secrets: %w", err)
+		}
+		if err := Save(cfg, path); err != nil {
+			return nil, fmt.Errorf("write config with generated secrets: %w", err)
+		}
+	}
+
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Save writes the config to path as YAML.
+func Save(cfg *Config, path string) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func defaultConfig() *Config {
+	return &Config{
 		Server: ServerConfig{
-			Host:          "0.0.0.0",
-			Port:          8080,
-			MaxBodySizeMB: 50,
+			Port: 8080,
 		},
 		Database: DatabaseConfig{
-			Host:    "localhost",
 			Port:    5432,
 			User:    "relay",
 			DBName:  "cli_relay",
@@ -75,23 +132,32 @@ func Load(path string) (*Config, error) {
 			Level:         "info",
 			RetentionDays: 180,
 		},
+		User: UserConfig{
+			JWTExpiry:      "24h",
+			MaxKeysPerUser: 5,
+		},
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+}
+
+func generateSecrets(sec *SecurityConfig) error {
+	if sec.JWTSecret == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		sec.JWTSecret = base64.RawStdEncoding.EncodeToString(b)
 	}
-	if err := cfg.validate(); err != nil {
-		return nil, err
+	if sec.EncryptionKey == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		sec.EncryptionKey = hex.EncodeToString(b)
 	}
-	return cfg, nil
+	return nil
 }
 
 func (c *Config) validate() error {
-	if c.Security.JWTSecret == "" {
-		return fmt.Errorf("security.jwt_secret is required")
-	}
-	if c.Security.EncryptionKey == "" {
-		return fmt.Errorf("security.encryption_key is required (32-byte hex)")
-	}
 	if len(c.Security.EncryptionKey) != 64 {
 		return fmt.Errorf("security.encryption_key must be 64 hex characters (32 bytes)")
 	}
