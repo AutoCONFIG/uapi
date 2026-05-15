@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/AutoCONFIG/cli-relay/internal/db"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider"
 	"github.com/valyala/fasthttp"
 )
 
@@ -31,17 +32,26 @@ func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 }
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {
-	req.Header.Set("Authorization", "Bearer "+credentials)
+	req.Header.Set("Authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
 	req.Header.Set("Content-Type", "application/json")
 	return nil
 }
 
-func (a *OpenAIAdaptor) ConvertRequest(body []byte) ([]byte, error) {
-	if a.channel.APIFormat == "responses" {
-		return ChatToResponses(body)
-	}
-	return body, nil
+// --- Intermediate format conversion ---
+
+func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
+	return openaiChatToInternal(body)
 }
+
+func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
+	if a.channel.APIFormat == "responses" {
+		// Convert InternalRequest to OpenAI Responses API format
+		return internalToResponses(req)
+	}
+	return internalToOpenAIChat(req)
+}
+
+// --- Response/stream handling ---
 
 type openAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
@@ -71,14 +81,14 @@ func (a *OpenAIAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, nil
 }
 
-func (a *OpenAIAdaptor) ConvertResponse(respBody []byte, isStream bool) ([]byte, error) {
-	if a.channel.APIFormat == "responses" {
-		if isStream {
-			return StreamResponsesToChat(respBody), nil
-		}
-		return ResponsesToChat(respBody)
-	}
-	return respBody, nil
+// ConvertStreamLine passes SSE lines through (OpenAI format is already the target).
+func (a *OpenAIAdaptor) ConvertStreamLine(line []byte) []byte {
+	return line
 }
 
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
+
+func init() {
+	provider.RegisterToInternal(provider.FormatOpenAIChat, openaiChatToInternal)
+	provider.RegisterFromInternal(provider.FormatOpenAIChat, internalToOpenAIChat)
+}

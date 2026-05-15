@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // --- Chat Completions → Responses API request conversion ---
@@ -102,11 +101,7 @@ func ResponsesToChat(body []byte) ([]byte, error) {
 	chatResp["id"] = resp["id"]
 	chatResp["object"] = "chat.completion"
 	chatResp["model"] = resp["model"]
-	if createdAt, ok := resp["created_at"]; ok {
-		chatResp["created"] = createdAt
-	} else {
-		chatResp["created"] = time.Now().Unix()
-	}
+	chatResp["created"] = 0
 
 	// Convert output items to choices
 	choices := convertOutputToChoices(resp)
@@ -122,7 +117,7 @@ func ResponsesToChat(body []byte) ([]byte, error) {
 
 // --- Responses API → Chat Completions SSE stream conversion ---
 
-func StreamResponsesToChat(sseBody []byte) ([]byte) {
+func StreamResponsesToChat(sseBody []byte) []byte {
 	lines := strings.Split(string(sseBody), "\n")
 	var outLines []string
 	var respID, model string
@@ -131,8 +126,7 @@ func StreamResponsesToChat(sseBody []byte) ([]byte) {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data: ") {
-			// Pass through non-data lines (empty lines for SSE framing, etc.)
-			outLines = append(outLines, line)
+			// Skip non-data lines (event: types, empty SSE framing lines)
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
@@ -199,11 +193,34 @@ func StreamResponsesToChat(sseBody []byte) ([]byte) {
 				}, "")
 				outLines = append(outLines, "data: "+roleChunk)
 			}
-			// Get function name from the function_call event that precedes args
-			fnName, _ := event["name"].(string)
 			callID, _ := event["call_id"].(string)
-			chunk := buildStreamToolChunk(respID, model, outIdx, callID, fnName, args)
+			chunk := buildStreamToolChunk(respID, model, outIdx, callID, nil, args)
 			outLines = append(outLines, "data: "+chunk)
+
+		case eventType == "response.function_call_arguments.done":
+			// Arguments complete, no action needed
+
+		case eventType == "response.output_item.added":
+			// Handle function_call item being added — send tool_calls delta with name
+			item, _ := event["item"].(map[string]interface{})
+			itemType, _ := item["type"].(string)
+			if itemType == "function_call" {
+				if !roleSent {
+					roleSent = true
+					roleChunk := buildStreamChunk(respID, model, map[string]interface{}{
+						"role": "assistant",
+					}, "")
+					outLines = append(outLines, "data: "+roleChunk)
+				}
+				outIdx := 0
+				if v, ok := event["output_index"].(float64); ok {
+					outIdx = int(v)
+				}
+				callID, _ := item["call_id"].(string)
+				fnName, _ := item["name"].(string)
+				chunk := buildStreamToolChunk(respID, model, outIdx, callID, fnName, "")
+				outLines = append(outLines, "data: "+chunk)
+			}
 
 		case eventType == "response.completed" || eventType == "response.done":
 			var usage interface{}
@@ -212,7 +229,7 @@ func StreamResponsesToChat(sseBody []byte) ([]byte) {
 					usage = convertResponsesUsage(u)
 				}
 			}
-			chunk := buildStreamChunk(respID, model, nil, "stop")
+			chunk := buildStreamChunk(respID, model, map[string]interface{}{}, "stop")
 			if usage != nil {
 				// Add usage to the chunk
 				var chunkMap map[string]interface{}
@@ -230,7 +247,7 @@ func StreamResponsesToChat(sseBody []byte) ([]byte) {
 		}
 	}
 
-	return []byte(strings.Join(outLines, "\n"))
+	return []byte(strings.Join(outLines, "\n\n"))
 }
 
 // --- Helpers ---
@@ -379,6 +396,10 @@ func toFloat(v interface{}) (float64, bool) {
 }
 
 func buildStreamChunk(id, model string, delta map[string]interface{}, finishReason string) string {
+	finishVal := interface{}(nil)
+	if finishReason != "" {
+		finishVal = finishReason
+	}
 	chunk := map[string]interface{}{
 		"id":      id,
 		"object":  "chat.completion.chunk",
@@ -387,7 +408,7 @@ func buildStreamChunk(id, model string, delta map[string]interface{}, finishReas
 			map[string]interface{}{
 				"index":         0,
 				"delta":         delta,
-				"finish_reason": finishReason,
+				"finish_reason": finishVal,
 			},
 		},
 	}
