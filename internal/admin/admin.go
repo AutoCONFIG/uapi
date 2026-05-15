@@ -16,12 +16,13 @@ import (
 )
 
 type Handler struct {
-	db  *gorm.DB
-	cfg *config.Config
+	db       *gorm.DB
+	cfg      *config.Config
+	cfgPath  string
 }
 
-func NewHandler(database *gorm.DB, cfg *config.Config) *Handler {
-	return &Handler{db: database, cfg: cfg}
+func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string) *Handler {
+	return &Handler{db: database, cfg: cfg, cfgPath: cfgPath}
 }
 
 func (h *Handler) jsonResponse(ctx *fasthttp.RequestCtx, status int, data interface{}) {
@@ -84,7 +85,7 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	token, err := auth.GenerateToken("admin", h.cfg.Security.JWTSecret)
+	token, err := auth.GenerateToken(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, 24*time.Hour)
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
 		return
@@ -101,7 +102,7 @@ func (h *Handler) RequireAuth(ctx *fasthttp.RequestCtx) bool {
 		return false
 	}
 	tokenStr := authHeader[7:]
-	if _, err := auth.ValidateToken(tokenStr, h.cfg.Security.JWTSecret); err != nil {
+	if _, err := auth.ParseToken(tokenStr, h.cfg.Security.JWTSecret); err != nil {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
 		return false
 	}
@@ -586,7 +587,66 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 	})
 }
 
-// --- Dashboard ---
+// --- Setup / Init ---
+
+func (h *Handler) HandleInitStatus(ctx *fasthttp.RequestCtx) {
+	h.jsonResponse(ctx, 200, map[string]interface{}{
+		"initialized": h.cfg.Initialized(),
+	})
+}
+
+func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
+	// Already initialized — reject
+	if h.cfg.Initialized() {
+		h.jsonError(ctx, fasthttp.StatusForbidden, "already initialized")
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "username and password are required")
+		return
+	}
+	if len(req.Password) < 6 {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "password must be at least 6 characters")
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Update in-memory config
+	h.cfg.Security.AdminUsername = req.Username
+	h.cfg.Security.AdminPasswordHash = string(hash)
+
+	// Persist to config file
+	if err := config.Save(h.cfg, h.cfgPath); err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save config failed")
+		return
+	}
+
+	// Auto-login: generate JWT
+	token, err := auth.GenerateToken(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, 24*time.Hour)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
+		return
+	}
+
+	h.jsonResponse(ctx, 200, map[string]interface{}{
+		"token":     token,
+		"username":  h.cfg.Security.AdminUsername,
+	})
+}
 
 func (h *Handler) HandleDashboard(ctx *fasthttp.RequestCtx) {
 	if string(ctx.Method()) != "GET" {
