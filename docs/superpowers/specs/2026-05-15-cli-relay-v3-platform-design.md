@@ -247,7 +247,7 @@ ANY    /v1beta/*                      # Gemini generateContent 格式
 
 ### 多格式中转
 
-客户端可用四种原生格式中的任一种接入 relay，relay 根据入口路径判断客户端格式，再根据上游渠道类型进行直接格式转换：
+客户端可用四种原生格式中的任一种接入 relay，relay 根据入口路径判断客户端格式，再根据上游渠道类型进行格式转换：
 
 ```
 入口路径                 客户端格式
@@ -257,36 +257,66 @@ ANY    /v1beta/*                      # Gemini generateContent 格式
 /v1beta/*               Gemini generateContent
 ```
 
-格式转换矩阵（直接转换，无中间格式）：
+#### 转换策略：统一中间格式
+
+参考 Bifrost 架构，采用统一中间格式（`InternalRequest`/`InternalResponse`）：
 
 ```
-                  → OAI-Chat   → OAI-Resp   → Anthropic   → Gemini
-OAI-Chat          透传          已实现        已实现         已实现
-OAI-Resp          已实现        透传           需新增         需新增
-Anthropic         需新增         需新增         透传           需新增
-Gemini            需新增         需新增         需新增         透传
+客户端格式 → ToInternal() → InternalRequest → FromInternal() → 上游格式
 ```
 
-4×4 矩阵，排除4个透传 = 12 个转换器。已有 4 个，需新增 8 个：
+只需 8 个转换器（4 个 ToInternal + 4 个 FromInternal），而非直接转换的 12 个。新增 provider 只需加 1 个 `FromInternal()`，直接转换方案要加 4 个。
 
-| 转换 | 状态 | 说明 |
-|------|------|------|
-| OAI-Chat → OAI-Resp | ✓ 已实现 | ChatToResponses |
-| OAI-Resp → OAI-Chat | ✓ 已实现 | ResponsesToChat, StreamResponsesToChat |
-| OAI-Chat → Anthropic | ✓ 已实现 | anthropic/adaptor.go |
-| OAI-Chat → Gemini | ✓ 已实现 | gemini/adaptor.go |
-| Anthropic → OAI-Chat | 需新增 | 与 OAI-Chat→Anthropic 对称 |
-| Gemini → OAI-Chat | 需新增 | 与 OAI-Chat→Gemini 对称 |
-| OAI-Resp → Anthropic | 需新增 | |
-| Anthropic → OAI-Resp | 需新增 | |
-| OAI-Resp → Gemini | 需新增 | |
-| Gemini → OAI-Resp | 需新增 | |
-| Anthropic → Gemini | 需新增 | |
-| Gemini → Anthropic | 需新增 | |
+| 转换 | 说明 |
+|------|------|
+| OpenAI Chat → Internal | 已有（当前 adaptor 的反向） |
+| OpenAI Resp → Internal | 已有（ResponsesToChat 的反向） |
+| Anthropic → Internal | 需新增 |
+| Gemini → Internal | 需新增 |
+| Internal → OpenAI Chat | 已有（当前 adaptor 逻辑） |
+| Internal → OpenAI Resp | 已有（ChatToResponses） |
+| Internal → Anthropic | 已有（anthropic/adaptor.go） |
+| Internal → Gemini | 已有（gemini/adaptor.go） |
 
-直接转换优势：无二次序列化开销，流式场景无精度损失，代码直观。
+性能影响：中间格式多出一次 Go struct 字段拷贝（纳秒级），不是多一次 JSON 序列化。流式 SSE 逐行转换不走中间格式，两种方案无差异。透传场景零开销。
 
-透传兼容性：透传时 adaptor 的 `SetupRequestHeader` 已处理各 provider 的 header/URL 差异（如 Anthropic 的 `anthropic-version`、Gemini 的 `?key=` query），客户端只需改 base URL 即可。但所有格式（含透传）都必须实现 `ParseUsage` 和 `ParseStreamUsage`，relay 需要从响应中提取 usage 做计费统计。
+#### 中间格式定义（核心字段）
+
+```go
+type InternalRequest struct {
+    Model       string
+    Messages    []InternalMessage   // 统一消息格式
+    Tools       []InternalTool      // 统一工具定义
+    ToolChoice  *InternalToolChoice
+    Stream      bool
+    MaxTokens   *int
+    Temperature *float64
+    TopP        *float64
+    StopWords   []string
+    // ... 其他通用参数
+}
+
+type InternalMessage struct {
+    Role       string               // system, user, assistant, tool
+    Content    []InternalContentPart // 支持文本+图片混合
+    ToolCalls  []InternalToolCall   // assistant 发起的工具调用
+    ToolResult *InternalToolResult  // 工具返回结果
+}
+```
+
+#### 流式转换
+
+SSE 逐行转换不走中间格式，直接在 adaptor 层做 provider-specific 的行转换（与当前实现一致）：
+
+```
+上游 SSE line → adaptor.ConvertStreamLine() → 客户端格式的 SSE line
+```
+
+每个 adaptor 实现两种流式转换：`ToInternalStreamLine` 和 `FromInternalStreamLine`，覆盖所有 4×3=12 种非透传组合。
+
+#### 透传
+
+客户端格式与上游格式相同时，直接透传请求和响应，零转换开销。adaptor 的 `SetupRequestHeader` 处理各 provider 的 header/URL 差异。所有格式（含透传）都必须实现 `ParseUsage` 和 `ParseStreamUsage`，relay 需要从响应中提取 usage 做计费统计。
 
 Token 统一计量：无论客户端用哪种格式，usage 都归一化为 `prompt_tokens + completion_tokens` 进行计费。
 
