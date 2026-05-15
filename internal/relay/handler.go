@@ -1,31 +1,47 @@
 package relay
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/crypto"
 	"github.com/AutoCONFIG/cli-relay/internal/db"
-	"github.com/AutoCONFIG/cli-relay/internal/relay/anthropic"
-	"github.com/AutoCONFIG/cli-relay/internal/relay/gemini"
-	"github.com/AutoCONFIG/cli-relay/internal/relay/openai"
-	"github.com/AutoCONFIG/cli-relay/internal/relay/types"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/anthropic"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/gemini"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/openai"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
-
-type Relayer struct {
-	db       *gorm.DB
-	pools    *PoolManager
-	billing  *BillingService
-	affinity *AffinityCache
+// streamingClient is configured for real-time streaming:
+// no timeouts, streaming body response enabled.
+var streamingClient = &fasthttp.Client{
+	ReadTimeout:        0,
+	WriteTimeout:       0,
+	MaxConnDuration:    0,
+	StreamResponseBody: true,
 }
 
-func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache) *Relayer {
-	return &Relayer{db: database, pools: pools, billing: billing, affinity: affinity}
+type Relayer struct {
+	db        *gorm.DB
+	pools     *PoolManager
+	billing   *BillingService
+	affinity  *AffinityCache
+	concLimiter *ConcurrencyLimiter
+}
+
+func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int) *Relayer {
+	return &Relayer{
+		db:          database,
+		pools:       pools,
+		billing:     billing,
+		affinity:    affinity,
+		concLimiter: NewConcurrencyLimiter(concLimit),
+	}
 }
 
 type relayRequest struct {
@@ -38,7 +54,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
 
-	// 1. Extract and validate Bearer token
+	// 1. Auth
 	tokenKey := extractBearerToken(ctx)
 	if tokenKey == "" {
 		ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
@@ -50,7 +66,15 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 2. Check billing limits
+	// 2. Concurrency check
+	tokenID := token.ID.String()
+	if !r.concLimiter.Acquire(tokenID) {
+		ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
+		return
+	}
+	defer r.concLimiter.Release(tokenID)
+
+	// 3. Billing check
 	if r.billing != nil {
 		if err := r.billing.CheckLimit(token.ID.String()); err != nil {
 			ctx.Error(`{"error":"rate limit exceeded"}`, 429)
@@ -58,7 +82,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	// 3. Parse model from request body
+	// 3. Parse request
 	var req relayRequest
 	body := ctx.PostBody()
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -70,59 +94,14 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 4. Find channel — affinity first, then priority
-	var targetChannel *db.Channel
-
-	// 4a. Try affinity cache
-	if chID := r.affinity.Get(token.ID.String(), req.Model); chID != "" {
-		var ch db.Channel
-		if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
-			if modelInList(req.Model, ch.Models) {
-				targetChannel = &ch
-			}
-		}
-	}
-
-	// 4b. Fall back to priority-based selection
-	if targetChannel == nil {
-		var channels []db.Channel
-		if err := r.db.Where("enabled = true AND deleted_at IS NULL").Order("priority DESC").Find(&channels).Error; err != nil {
-			ctx.Error(`{"error":"internal error"}`, fasthttp.StatusInternalServerError)
-			return
-		}
-		for i := range channels {
-			if modelInList(req.Model, channels[i].Models) {
-				targetChannel = &channels[i]
-				break
-			}
-		}
-	}
-	if targetChannel == nil {
-		ctx.Error(`{"error":"no available channel for model"}`, fasthttp.StatusNotFound)
+	// 4. Find channel + account
+	targetChannel, account, adaptor, creds, err := r.resolveChannelAndAccount(token.ID.String(), req.Model)
+	if err != nil {
+		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
 	}
 
-	// 5. Get adaptor for channel type
-	adaptor := getAdaptor(targetChannel.Type)
-	if adaptor == nil {
-		ctx.Error(`{"error":"unsupported channel type"}`, fasthttp.StatusInternalServerError)
-		return
-	}
-
-	// 6. Pick account from pool
-	pool, ok := r.pools.GetPool(targetChannel.ID.String())
-	if !ok {
-		ctx.Error(`{"error":"channel pool not initialized"}`, fasthttp.StatusServiceUnavailable)
-		return
-	}
-
-	account, ok := pool.Pick()
-	if !ok {
-		ctx.Error(`{"error":"no available account"}`, fasthttp.StatusServiceUnavailable)
-		return
-	}
-
-	// 7. Pre-consume billing
+	// 5. Pre-consume billing
 	estimatedTokens := req.MaxTokens
 	if estimatedTokens == 0 {
 		estimatedTokens = 1000
@@ -131,15 +110,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		_ = r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens)
 	}
 
-	// 8. Decrypt credentials
-	creds, err := crypto.Decrypt(account.Credentials)
-	if err != nil {
-		log.Printf("decrypt credentials error: %v", err)
-		ctx.Error(`{"error":"internal error"}`, fasthttp.StatusInternalServerError)
-		return
-	}
-
-	// 9. Init adaptor and build upstream request
+	// 6. Build upstream request
 	adaptor.Init(targetChannel, account)
 	upstreamURL, err := adaptor.GetRequestURL(path)
 	if err != nil {
@@ -147,199 +118,384 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 9a. Force stream: override stream=true if channel requires it
 	forceStreamActive := targetChannel.ForceStream && !req.Stream
 	if forceStreamActive {
-		// Inject stream=true into body for upstream
-		if idx := bytes.LastIndexByte(body, '}'); idx > 0 {
-			if bytes.Contains(body, []byte(`"stream"`)) {
-				// Replace existing "stream":false with "stream":true
-				body = bytes.Replace(body, []byte(`"stream":false`), []byte(`"stream":true`), 1)
-				body = bytes.Replace(body, []byte(`"stream": false`), []byte(`"stream": true`), 1)
-			} else {
-				body = append(body[:idx], append([]byte(`,"stream":true}`), body[idx+1:]...)...)
-			}
-		} else {
-			var bodyMap map[string]interface{}
-			if err := json.Unmarshal(body, &bodyMap); err == nil {
-				bodyMap["stream"] = true
-				body, _ = json.Marshal(bodyMap)
-			}
-		}
+		body = injectStreamTrue(body)
 	}
 
-	convertedBody, err := adaptor.ConvertRequest(body)
-	if err != nil {
-		ctx.Error(`{"error":"convert request failed"}`, fasthttp.StatusBadRequest)
+	convertedBody := body
+
+	// 7. Dispatch
+	if req.Stream && !forceStreamActive {
+		r.handleStreaming(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+	} else if forceStreamActive {
+		r.handleForceStream(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+	} else {
+		r.handleBuffered(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+	}
+
+	// 8. Record affinity
+	if targetChannel.AffinityTTL > 0 {
+		r.affinity.Set(token.ID.String(), req.Model, targetChannel.ID.String(), targetChannel.AffinityTTL)
+	}
+}
+
+// handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
+	upReq := fasthttp.AcquireRequest()
+	upResp := fasthttp.AcquireResponse()
+
+	upReq.SetRequestURI(url)
+	upReq.Header.SetMethodBytes([]byte("POST"))
+	upReq.SetBody(body)
+	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed")
 		return
 	}
 
-	// 10. Send request with retry on failure
+	// streamingClient returns after receiving headers, body streamed via BodyStream
+	if err := streamingClient.Do(upReq, upResp); err != nil {
+		log.Printf("streaming upstream error: %v", err)
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error")
+		return
+	}
+
+	statusCode := upResp.StatusCode()
+	if statusCode >= 400 {
+		respBody := upResp.Body()
+		bodyCopy := make([]byte, len(respBody))
+		copy(bodyCopy, respBody)
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start)
+		return
+	}
+
+	// SSE headers for downstream
+	ctx.SetStatusCode(statusCode)
+	ctx.Response.Header.Set("Content-Type", "text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.Response.Header.Set("X-Accel-Buffering", "no")
+
+	reader := NewSSEStreamReader()
+	ctx.Response.SetBodyStream(reader, -1)
+
+	tracker := newStreamTracker(adaptor)
+
+	// Determine if we need line conversion (Anthropic/Gemini need format conversion)
+	var convertLine func([]byte) []byte
+	if adaptor.GetChannelType() != "openai" {
+		convertLine = adaptor.ConvertStreamLine
+	}
+
+	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
+	go func() {
+		defer fasthttp.ReleaseRequest(upReq)
+		defer fasthttp.ReleaseResponse(upResp)
+
+		result := streamAndForward(upResp.BodyStream(), reader, tracker, convertLine)
+		if result.err != nil {
+			log.Printf("stream forward error: %v", result.err)
+		}
+		pt, ct := tracker.Result()
+		go r.writeLog(token.ID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode)
+		if r.billing != nil {
+			go r.billing.Refund(token.ID.String(), estTokens)
+			if pt > 0 || ct > 0 {
+				go r.billing.Settle(token.ID.String(), pt, ct, model)
+			}
+		}
+	}()
+}
+
+// handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
+	upReq := fasthttp.AcquireRequest()
+	upResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(upReq)
+	defer fasthttp.ReleaseResponse(upResp)
+
+	upReq.SetRequestURI(url)
+	upReq.Header.SetMethodBytes([]byte("POST"))
+	upReq.SetBody(body)
+	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed")
+		return
+	}
+
+	if err := streamingClient.Do(upReq, upResp); err != nil {
+		log.Printf("force stream upstream error: %v", err)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error")
+		return
+	}
+
+	statusCode := upResp.StatusCode()
+	if statusCode >= 400 {
+		respBody := upResp.Body()
+		bodyCopy := make([]byte, len(respBody))
+		copy(bodyCopy, respBody)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start)
+		return
+	}
+
+	// Buffer entire stream
+	respBody, err := io.ReadAll(upResp.BodyStream())
+	if err != nil {
+		log.Printf("force stream read error: %v", err)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error")
+		return
+	}
+
+	// Response format conversion deferred to Task 7
+	// SSE -> non-stream JSON
+	respBody = StreamToNonStream(respBody)
+
+	ctx.SetStatusCode(statusCode)
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetBody(respBody)
+
+	pt, ct := parseNonStreamUsage(respBody)
+	go r.writeLog(token.ID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode)
+	if r.billing != nil {
+		go r.billing.Refund(token.ID.String(), estTokens)
+		if pt > 0 || ct > 0 {
+			go r.billing.Settle(token.ID.String(), pt, ct, model)
+		}
+	}
+}
+
+// handleBuffered: standard buffered request with retry.
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
-	var respAccount *db.Account
-	maxRetries := 3
+	respAccount := acc
+	currentCreds := creds
+	currentAccount := acc
 
-	for retry := 0; retry < maxRetries; retry++ {
+	for retry := 0; retry < 3; retry++ {
 		upReq := fasthttp.AcquireRequest()
 		upResp := fasthttp.AcquireResponse()
 
-		upReq.SetRequestURI(upstreamURL)
+		upReq.SetRequestURI(url)
 		upReq.Header.SetMethodBytes(ctx.Method())
-		upReq.SetBody(convertedBody)
-		if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		upReq.SetBody(body)
+		if err := adaptor.SetupRequestHeader(upReq, currentCreds); err != nil {
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
-			ctx.Error(`{"error":"setup headers failed"}`, fasthttp.StatusInternalServerError)
+			r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed")
 			return
 		}
 
 		err := fasthttp.Do(upReq, upResp)
 		fasthttp.ReleaseRequest(upReq)
 
+		shouldRetry := false
 		if err != nil {
-			log.Printf("upstream request error (retry %d): %v", retry, err)
-			fasthttp.ReleaseResponse(upResp)
-			pool.Cooldown(account.ID.String(), 5*time.Minute)
-			r.affinity.EvictChannel(targetChannel.ID.String())
-			account, ok = pool.Pick()
-			if !ok {
-				break
-			}
-			respAccount = account
-			adaptor.Init(targetChannel, account)
-			creds, _ = crypto.Decrypt(account.Credentials)
-			continue
+			log.Printf("upstream error (retry %d): %v", retry, err)
+			shouldRetry = true
+		} else if upResp.StatusCode() >= 500 {
+			log.Printf("upstream %d (retry %d)", upResp.StatusCode(), retry)
+			respBody = copyBody(upResp)
+			statusCode = upResp.StatusCode()
+			copyHeaders(upResp, &respHeaders)
+			shouldRetry = true
 		}
 
-		if upResp.StatusCode() >= 500 {
-			log.Printf("upstream %d error (retry %d)", upResp.StatusCode(), retry)
-			pool.Cooldown(account.ID.String(), 5*time.Minute)
-			respBody = make([]byte, len(upResp.Body()))
-			copy(respBody, upResp.Body())
-			statusCode = upResp.StatusCode()
-			upResp.Header.VisitAll(func(k, v []byte) { respHeaders.SetBytesKV(k, v) })
+		if shouldRetry {
 			fasthttp.ReleaseResponse(upResp)
-			r.affinity.EvictChannel(targetChannel.ID.String())
-			account, ok = pool.Pick()
-			if !ok {
+			r.cooldownAndEvict(ch, currentAccount)
+			currentAccount = r.pickNext(ch, poolFromChannel(r.pools, ch))
+			if currentAccount == nil {
 				break
 			}
-			respAccount = account
-			adaptor.Init(targetChannel, account)
-			creds, _ = crypto.Decrypt(account.Credentials)
+			respAccount = currentAccount
+			adaptor.Init(ch, currentAccount)
+			currentCreds, err = crypto.Decrypt(currentAccount.Credentials)
+			if err != nil {
+				log.Printf("decrypt error on retry %d: %v", retry, err)
+				currentAccount = r.retryNext(ch, currentAccount)
+				if currentAccount == nil {
+					break
+				}
+				respAccount = currentAccount
+				adaptor.Init(ch, currentAccount)
+			}
 			continue
 		}
 
 		// Success
-		respBody = make([]byte, len(upResp.Body()))
-		copy(respBody, upResp.Body())
+		respBody = copyBody(upResp)
 		statusCode = upResp.StatusCode()
-		upResp.Header.VisitAll(func(k, v []byte) { respHeaders.SetBytesKV(k, v) })
+		copyHeaders(upResp, &respHeaders)
 		fasthttp.ReleaseResponse(upResp)
-		respAccount = account
+		respAccount = currentAccount
 		break
 	}
 
-	if respBody == nil || respAccount == nil {
+	if respBody == nil {
 		if r.billing != nil {
-			r.billing.Refund(token.ID.String(), estimatedTokens)
+			r.billing.Refund(token.ID.String(), estTokens)
 		}
 		ctx.Error(`{"error":"all retries exhausted"}`, fasthttp.StatusServiceUnavailable)
 		return
 	}
 
-	// 11. Convert response format if needed
-	respBody, err = adaptor.ConvertResponse(respBody, req.Stream || forceStreamActive)
-	if err != nil {
-		log.Printf("convert response error: %v", err)
+	if statusCode >= 400 {
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start)
+		return
 	}
 
-	// 11a. Force stream: convert buffered stream back to non-stream
-	if forceStreamActive {
-		respBody = StreamToNonStream(respBody)
-	}
+	// Response format conversion deferred to Task 7
 
-	// 12. Forward response
 	ctx.SetStatusCode(statusCode)
 	respHeaders.VisitAll(func(key, value []byte) {
 		ctx.Response.Header.SetBytesKV(key, value)
 	})
+	ctx.SetBody(respBody)
 
-	// Use req.Stream (original client intent) for response format,
-	// NOT forceStreamActive — force stream is upstream-only.
-	if req.Stream {
-		ctx.Response.Header.Set("Content-Type", "text/event-stream")
-		ctx.Response.Header.Set("Cache-Control", "no-cache")
-		ctx.Response.Header.Set("Connection", "keep-alive")
-		ctx.Response.Header.Set("X-Accel-Buffering", "no")
-		lastData := extractLastSSEData(respBody)
-		if pt, ct, err := adaptor.ParseStreamUsage(lastData); err == nil && pt > 0 {
-			go r.writeLog(token.ID, targetChannel.ID, respAccount.ID, req.Model, true, pt, ct, start)
-			if r.billing != nil {
-				go r.billing.Settle(token.ID.String(), pt, ct, req.Model)
-			}
-		}
-		ctx.SetBody(respBody)
-	} else {
-		// Non-stream response (includes forceStreamActive path after conversion)
-		ctx.SetBody(respBody)
-		// Parse usage: try non-stream format first, fall back to stream format for forceStream
-		if pt, ct, err := adaptor.ParseUsage(respBody); err == nil && pt > 0 {
-			go r.writeLog(token.ID, targetChannel.ID, respAccount.ID, req.Model, false, pt, ct, start)
-			if r.billing != nil {
-				go r.billing.Settle(token.ID.String(), pt, ct, req.Model)
-			}
-		} else if forceStreamActive {
-			// Usage is embedded in the converted non-stream body from StreamToNonStream
-			var respMap map[string]interface{}
-			if json.Unmarshal(respBody, &respMap) == nil {
-				if u, ok := respMap["usage"].(map[string]interface{}); ok {
-					pt := int(safeFloat(u["prompt_tokens"]))
-					ct := int(safeFloat(u["completion_tokens"]))
-					if pt > 0 || ct > 0 {
-						go r.writeLog(token.ID, targetChannel.ID, respAccount.ID, req.Model, false, pt, ct, start)
-						if r.billing != nil {
-							go r.billing.Settle(token.ID.String(), pt, ct, req.Model)
-						}
-					}
+	r.settleAndRefund(token.ID.String(), respBody, adaptor, estTokens, model)
+	pt, ct := parseNonStreamUsage(respBody)
+	go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode)
+}
+
+// --- Helpers ---
+
+func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
+	// Try affinity cache first
+	if chID := r.affinity.Get(tokenID, model); chID != "" {
+		var ch db.Channel
+		if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
+			if modelInList(model, ch.Models) {
+				if acc, adaptor, creds, err := r.pickAccount(ch); err == nil {
+					return &ch, acc, adaptor, creds, nil
 				}
 			}
 		}
 	}
 
-	// 13. Record affinity on success
-	if targetChannel.AffinityTTL > 0 {
-		r.affinity.Set(token.ID.String(), req.Model, targetChannel.ID.String(), targetChannel.AffinityTTL)
+	// Priority-based selection
+	var channels []db.Channel
+	if err := r.db.Where("enabled = true AND deleted_at IS NULL").Order("priority DESC").Find(&channels).Error; err != nil {
+		return nil, nil, nil, "", err
 	}
-}
-
-func safeFloat(v interface{}) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	default:
-		return 0
-	}
-}
-
-// extractLastSSEData finds the last "data: " line (that isn't [DONE]) from buffered SSE body.
-func extractLastSSEData(body []byte) []byte {
-	var lastData []byte
-	lines := bytes.Split(body, []byte("\n"))
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			data := bytes.TrimPrefix(line, []byte("data: "))
-			if !bytes.Equal(data, []byte("[DONE]")) {
-				lastData = data
+	for i := range channels {
+		if modelInList(model, channels[i].Models) {
+			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+				return &channels[i], acc, adaptor, creds, nil
 			}
 		}
 	}
-	return lastData
+	return nil, nil, nil, "", errNoChannel
+}
+
+var errNoChannel = fmt.Errorf("no available channel for model")
+
+func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, string, error) {
+	adaptor := getAdaptor(ch.Type)
+	if adaptor == nil {
+		return nil, nil, "", fmt.Errorf("unsupported channel type")
+	}
+	pool, ok := r.pools.GetPool(ch.ID.String())
+	if !ok {
+		return nil, nil, "", fmt.Errorf("channel pool not initialized")
+	}
+	account, ok := pool.Pick()
+	if !ok {
+		return nil, nil, "", fmt.Errorf("no available account")
+	}
+	creds, err := crypto.Decrypt(account.Credentials)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("decrypt error")
+	}
+	return account, adaptor, creds, nil
+}
+
+func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
+	if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+		pool.Cooldown(acc.ID.String(), 5*time.Minute)
+	}
+	r.affinity.EvictChannel(ch.ID.String())
+}
+
+func (r *Relayer) retryNext(ch *db.Channel, failed *db.Account) *db.Account {
+	r.cooldownAndEvict(ch, failed)
+	pool, _ := r.pools.GetPool(ch.ID.String())
+	return r.pickNext(ch, pool)
+}
+
+func (r *Relayer) pickNext(ch *db.Channel, pool *AccountPool) *db.Account {
+	if pool == nil {
+		return nil
+	}
+	acc, ok := pool.Pick()
+	if !ok {
+		return nil
+	}
+	return acc
+}
+
+func poolFromChannel(pm *PoolManager, ch *db.Channel) *AccountPool {
+	p, _ := pm.GetPool(ch.ID.String())
+	return p
+}
+
+func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string) {
+	if r.billing != nil {
+		r.billing.Refund(tokenID, estTokens)
+	}
+	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, fasthttp.StatusInternalServerError)
+}
+
+func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time) {
+	if r.billing != nil {
+		r.billing.Refund(tokenID, estTokens)
+	}
+	ctx.SetStatusCode(statusCode)
+	ctx.SetBody(respBody)
+	go r.writeLog(tokenID, ch.ID, acc.ID, model, isStream, 0, 0, start, statusCode)
+}
+
+func injectStreamTrue(body []byte) []byte {
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(body, &bodyMap); err != nil {
+		return body
+	}
+	bodyMap["stream"] = true
+	result, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+func copyBody(resp *fasthttp.Response) []byte {
+	b := resp.Body()
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
+func copyHeaders(resp *fasthttp.Response, dst *fasthttp.ResponseHeader) {
+	resp.Header.VisitAll(func(k, v []byte) { dst.SetBytesKV(k, v) })
+}
+
+func parseNonStreamUsage(respBody []byte) (int, int) {
+	var resp struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(respBody, &resp) == nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
+		return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+	}
+	return 0, 0
 }
 
 func extractBearerToken(ctx *fasthttp.RequestCtx) string {
@@ -350,7 +506,7 @@ func extractBearerToken(ctx *fasthttp.RequestCtx) string {
 	return ""
 }
 
-func getAdaptor(channelType string) types.Adaptor {
+func getAdaptor(channelType string) provider.Adaptor {
 	switch channelType {
 	case "openai":
 		return &openai.OpenAIAdaptor{}
@@ -372,7 +528,7 @@ func modelInList(model, list string) bool {
 	return false
 }
 
-func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time) {
+func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int) {
 	logEntry := db.Log{
 		TokenID:          toUUID(tokenID),
 		ChannelID:        toUUID(channelID),
@@ -383,7 +539,7 @@ func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model stri
 		CompletionTokens: ct,
 		TotalTokens:      pt + ct,
 		LatencyMs:        int(time.Since(start).Milliseconds()),
-		StatusCode:       200,
+		StatusCode:       statusCode,
 	}
 	if err := r.db.Create(&logEntry).Error; err != nil {
 		log.Printf("write log error: %v", err)
@@ -395,4 +551,23 @@ func toUUID(v interface{}) [16]byte {
 		return id
 	}
 	return [16]byte{}
+}
+
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	// Strip surrounding quotes
+	if len(b) >= 2 {
+		return string(b[1 : len(b)-1])
+	}
+	return s
+}
+
+func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) {
+	if r.billing == nil {
+		return
+	}
+	go r.billing.Refund(tokenID, estTokens)
+	if pt, ct, err := adaptor.ParseUsage(respBody); err == nil && (pt > 0 || ct > 0) {
+		go r.billing.Settle(tokenID, pt, ct, model)
+	}
 }
