@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/db"
@@ -26,12 +27,16 @@ var streamingClient = &fasthttp.Client{
 	StreamResponseBody: true,
 }
 
+// maxResponseSize limits how much data we buffer from upstream (100 MB).
+const maxResponseSize = 100 * 1024 * 1024
+
 type Relayer struct {
-	db        *gorm.DB
-	pools     *PoolManager
-	billing   *BillingService
-	affinity  *AffinityCache
+	db          *gorm.DB
+	pools       *PoolManager
+	billing     *BillingService
+	affinity    *AffinityCache
 	concLimiter *ConcurrencyLimiter
+	chCache     *channelCache
 }
 
 func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int) *Relayer {
@@ -41,6 +46,7 @@ func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, 
 		billing:     billing,
 		affinity:    affinity,
 		concLimiter: NewConcurrencyLimiter(concLimit),
+		chCache:     newChannelCache(database, 30*time.Second),
 	}
 }
 
@@ -81,15 +87,37 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 2. Concurrency check
+	// 2. IP whitelist check
+	if token.IPWhitelist != "" {
+		clientIP := ctx.RemoteIP().String()
+		allowed := false
+		for _, ip := range strings.Split(token.IPWhitelist, ",") {
+			if strings.TrimSpace(ip) == clientIP {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
+			return
+		}
+	}
+
+	// 3. Concurrency check
 	tokenID := token.ID.String()
 	if !r.concLimiter.Acquire(tokenID) {
 		ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
 		return
 	}
-	defer r.concLimiter.Release(tokenID)
-
-	// 3. Billing check
+	// Concurrency slot is released:
+	//   - streaming: deferred inside the streaming goroutine (after stream completes)
+	//   - non-streaming & early returns: deferred below (fires when HandleRelay returns)
+	streaming := false
+	defer func() {
+		if !streaming {
+			r.concLimiter.Release(tokenID)
+		}
+	}()
 	if r.billing != nil {
 		if err := r.billing.CheckLimit(token.ID.String()); err != nil {
 			ctx.Error(`{"error":"rate limit exceeded"}`, 429)
@@ -104,7 +132,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	// 3. Parse request
+	// 5. Parse request
 	var req relayRequest
 	body := ctx.PostBody()
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -116,24 +144,27 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 4. Find channel + account
+	// 6. Find channel + account
 	targetChannel, account, adaptor, creds, err := r.resolveChannelAndAccount(token.ID.String(), req.Model)
 	if err != nil {
 		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
 	}
 
-	// 5. Pre-consume billing
+	// 7. Pre-consume billing
 	estimatedTokens := req.MaxTokens
 	if estimatedTokens == 0 {
 		estimatedTokens = 1000
 	}
 	if r.billing != nil {
-		_ = r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens)
+		if err := r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens); err != nil {
+			log.Printf("billing pre-consume error for token %s: %v", token.ID.String(), err)
+		}
 	}
 
-	// 6. Build upstream request
+	// 8. Build upstream request
 	adaptor.Init(targetChannel, account)
+	adaptor.SetRequestParams(req.Model, req.Stream)
 	upstreamURL, err := adaptor.GetRequestURL(path)
 	if err != nil {
 		if r.billing != nil {
@@ -174,17 +205,20 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// 7. Dispatch
+	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
+		streaming = true // goroutine handles Release
 		r.handleStreaming(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
 	} else if forceStreamActive {
+		streaming = true
 		r.handleForceStream(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
 	} else {
+		streaming = true // handleBuffered manages its own concurrency release
 		r.handleBuffered(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
 	}
 
-	// 8. Record affinity
-	if targetChannel.AffinityTTL > 0 {
+	// 10. Record affinity (for non-streaming paths; streaming sets affinity inside goroutine on success)
+	if !req.Stream && targetChannel.AffinityTTL > 0 && ctx.Response.StatusCode() < 400 {
 		r.affinity.Set(token.ID.String(), req.Model, targetChannel.ID.String(), targetChannel.AffinityTTL)
 	}
 }
@@ -244,20 +278,28 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("stream goroutine panic: %v", rec)
+			}
+		}()
 		defer fasthttp.ReleaseRequest(upReq)
 		defer fasthttp.ReleaseResponse(upResp)
+		defer r.concLimiter.Release(token.ID.String())
 
 		result := streamAndForward(upResp.BodyStream(), reader, tracker, convertLine)
 		if result.err != nil {
 			log.Printf("stream forward error: %v", result.err)
+		} else {
+			// Record affinity only on successful stream completion
+			if ch.AffinityTTL > 0 {
+				r.affinity.Set(token.ID.String(), model, ch.ID.String(), ch.AffinityTTL)
+			}
 		}
 		pt, ct := tracker.Result()
 		go r.writeLog(token.ID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode)
 		if r.billing != nil {
-			go r.billing.Refund(token.ID.String(), estTokens)
-			if pt > 0 || ct > 0 {
-				go r.billing.Settle(token.ID.String(), pt, ct, model)
-			}
+			go r.billing.RefundAndSettle(token.ID.String(), estTokens, pt, ct, model)
 		}
 	}()
 }
@@ -292,15 +334,15 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 		return
 	}
 
-	// Buffer entire stream
-	respBody, err := io.ReadAll(upResp.BodyStream())
+	// Buffer entire stream (bounded by maxResponseSize)
+	respBody, err := io.ReadAll(io.LimitReader(upResp.BodyStream(), int64(maxResponseSize)))
 	if err != nil {
 		log.Printf("force stream read error: %v", err)
 		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error")
 		return
 	}
 
-	// TODO: Response format conversion (requires reverse converters, upstreamFormat -> clientFormat)
+	// TODO: StreamToNonStream only handles OpenAI SSE format; non-OpenAI upstreams will produce empty responses
 	// SSE -> non-stream JSON
 	respBody = StreamToNonStream(respBody)
 
@@ -310,12 +352,49 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 
 	pt, ct := parseNonStreamUsage(respBody)
 	go r.writeLog(token.ID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode)
+	r.concLimiter.Release(token.ID.String())
 	if r.billing != nil {
-		go r.billing.Refund(token.ID.String(), estTokens)
-		if pt > 0 || ct > 0 {
-			go r.billing.Settle(token.ID.String(), pt, ct, model)
-		}
+		go r.billing.RefundAndSettle(token.ID.String(), estTokens, pt, ct, model)
 	}
+}
+
+// --- Channel cache ---
+
+type channelCache struct {
+	mu       sync.RWMutex
+	channels []db.Channel
+	expiry   time.Time
+	ttl      time.Duration
+	db       *gorm.DB
+}
+
+func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
+	return &channelCache{db: database, ttl: ttl}
+}
+
+func (c *channelCache) get() []db.Channel {
+	c.mu.RLock()
+	if time.Now().Before(c.expiry) && c.channels != nil {
+		result := c.channels
+		c.mu.RUnlock()
+		return result
+	}
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Double-check after acquiring write lock
+	if time.Now().Before(c.expiry) && c.channels != nil {
+		return c.channels
+	}
+
+	var channels []db.Channel
+	if err := c.db.Where("enabled = true AND deleted_at IS NULL").Order("priority DESC").Find(&channels).Error; err != nil {
+		return nil
+	}
+	c.channels = channels
+	c.expiry = time.Now().Add(c.ttl)
+	return channels
 }
 
 // handleBuffered: standard buffered request with retry.
@@ -374,6 +453,11 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 				}
 				respAccount = currentAccount
 				adaptor.Init(ch, currentAccount)
+				currentCreds, err = EnsureValidCredentials(currentAccount, r.db)
+				if err != nil {
+					log.Printf("decrypt error on replacement retry %d: %v", retry, err)
+					break
+				}
 			}
 			continue
 		}
@@ -388,6 +472,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 	}
 
 	if respBody == nil {
+		r.concLimiter.Release(token.ID.String())
 		if r.billing != nil {
 			r.billing.Refund(token.ID.String(), estTokens)
 		}
@@ -428,11 +513,8 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 		}
 	}
 
-	// Priority-based selection
-	var channels []db.Channel
-	if err := r.db.Where("enabled = true AND deleted_at IS NULL").Order("priority DESC").Find(&channels).Error; err != nil {
-		return nil, nil, nil, "", err
-	}
+	// Priority-based selection (with caching)
+	channels := r.chCache.get()
 	for i := range channels {
 		if modelInList(model, channels[i].Models) {
 			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
@@ -495,6 +577,7 @@ func poolFromChannel(pm *PoolManager, ch *db.Channel) *AccountPool {
 }
 
 func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string) {
+	r.concLimiter.Release(tokenID)
 	if r.billing != nil {
 		r.billing.Refund(tokenID, estTokens)
 	}
@@ -502,6 +585,7 @@ func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTo
 }
 
 func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time) {
+	r.concLimiter.Release(tokenID)
 	if r.billing != nil {
 		r.billing.Refund(tokenID, estTokens)
 	}
@@ -530,8 +614,21 @@ func copyBody(resp *fasthttp.Response) []byte {
 	return out
 }
 
+// hopByHopHeaders should not be forwarded between proxy hops.
+var hopByHopHeaders = map[string]struct{}{
+	"Transfer-Encoding": {},
+	"Connection":        {},
+	"Keep-Alive":        {},
+	"Upgrade":           {},
+}
+
 func copyHeaders(resp *fasthttp.Response, dst *fasthttp.ResponseHeader) {
-	resp.Header.VisitAll(func(k, v []byte) { dst.SetBytesKV(k, v) })
+	resp.Header.VisitAll(func(k, v []byte) {
+		if _, skip := hopByHopHeaders[string(k)]; skip {
+			return
+		}
+		dst.SetBytesKV(k, v)
+	})
 }
 
 func parseNonStreamUsage(respBody []byte) (int, int) {
@@ -596,8 +693,14 @@ func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model stri
 }
 
 func toUUID(v interface{}) uuid.UUID {
-	if id, ok := v.(uuid.UUID); ok {
+	switch id := v.(type) {
+	case uuid.UUID:
 		return id
+	case string:
+		parsed, err := uuid.Parse(id)
+		if err == nil {
+			return parsed
+		}
 	}
 	return uuid.UUID{}
 }
@@ -612,11 +715,15 @@ func jsonEscape(s string) string {
 }
 
 func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) {
+	r.concLimiter.Release(tokenID)
 	if r.billing == nil {
 		return
 	}
-	go r.billing.Refund(tokenID, estTokens)
-	if pt, ct, err := adaptor.ParseUsage(respBody); err == nil && (pt > 0 || ct > 0) {
-		go r.billing.Settle(tokenID, pt, ct, model)
+	pt, ct := 0, 0
+	if adaptor != nil && len(respBody) > 0 {
+		if p, c, err := adaptor.ParseUsage(respBody); err == nil {
+			pt, ct = p, c
+		}
 	}
+	go r.billing.RefundAndSettle(tokenID, estTokens, pt, ct, model)
 }

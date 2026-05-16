@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/auth"
@@ -16,14 +17,18 @@ import (
 // Handler is the main admin handler that holds shared state and provides
 // authentication, setup, login, and dashboard endpoints.
 type Handler struct {
-	db      *gorm.DB
-	cfg     *config.Config
-	cfgPath string
+	db             *gorm.DB
+	cfg            *config.Config
+	cfgPath        string
+	RefreshPool    func(channelID string) // refresh pool for a channel after CRUD
+	RemovePool     func(channelID string) // remove pool when channel is deleted/disabled
+	setupMu   sync.Mutex
+	setupDone bool
 }
 
 // NewHandler creates a new admin Handler.
-func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string) *Handler {
-	return &Handler{db: database, cfg: cfg, cfgPath: cfgPath}
+func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string, refreshPool func(channelID string), removePool func(channelID string)) *Handler {
+	return &Handler{db: database, cfg: cfg, cfgPath: cfgPath, RefreshPool: refreshPool, RemovePool: removePool}
 }
 
 // jsonResponse writes a success JSON response.
@@ -75,16 +80,22 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if req.Username != h.cfg.Security.AdminUsername {
-		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid credentials")
-		return
+	// Always run bcrypt comparison to avoid timing leaks
+	matchedPassword := false
+	if req.Username == h.cfg.Security.AdminUsername {
+		if h.cfg.Security.AdminPasswordHash == "" {
+			h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(h.cfg.Security.AdminPasswordHash), []byte(req.Password)) == nil {
+			matchedPassword = true
+		}
+	} else {
+		// Constant-time dummy comparison to prevent timing leak
+		dummyHash := "$2a$10$000000000000000000000uGYAyOEPv8VQ8H1Vw8BrSbxWJvOXqWK"
+		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password))
 	}
-
-	if h.cfg.Security.AdminPasswordHash == "" {
-		h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
-		return
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(h.cfg.Security.AdminPasswordHash), []byte(req.Password)); err != nil {
+	if !matchedPassword {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -99,23 +110,40 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 }
 
 // RequireAuth verifies the Bearer JWT in the Authorization header.
+// Returns (authenticated bool, username string).
 func (h *Handler) RequireAuth(ctx *fasthttp.RequestCtx) bool {
+	_, ok := h.RequireAuthWithUser(ctx)
+	return ok
+}
+
+// RequireAuthWithUser verifies the Bearer JWT and returns the username.
+func (h *Handler) RequireAuthWithUser(ctx *fasthttp.RequestCtx) (string, bool) {
 	authHeader := string(ctx.Request.Header.Peek("Authorization"))
 	if len(authHeader) < 7 || authHeader[:7] != "Bearer " {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
-		return false
+		return "", false
 	}
 	tokenStr := authHeader[7:]
-	claims, err := auth.ParseToken(tokenStr, h.cfg.Security.JWTSecret)
+	claims, err := auth.ParseToken(h.cfg.Security.JWTSecret, tokenStr)
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
-		return false
+		return "", false
 	}
 	if claims.Type != auth.TokenTypeAdmin {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
-		return false
+		return "", false
 	}
-	return true
+	return claims.Username, true
+}
+
+// getAdminUser extracts the admin username from the context.
+func (h *Handler) getAdminUser(ctx *fasthttp.RequestCtx) string {
+	if v := ctx.UserValue("admin_user"); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return "admin"
 }
 
 // HandleInitStatus returns whether the system has been initialized.
@@ -127,8 +155,16 @@ func (h *Handler) HandleInitStatus(ctx *fasthttp.RequestCtx) {
 
 // HandleSetup performs the initial admin setup (username + password).
 func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
-	// Already initialized — reject
+	// Fast path: already initialized at config level
 	if h.cfg.Initialized() {
+		h.jsonError(ctx, fasthttp.StatusForbidden, "already initialized")
+		return
+	}
+
+	h.setupMu.Lock()
+	defer h.setupMu.Unlock()
+
+	if h.setupDone {
 		h.jsonError(ctx, fasthttp.StatusForbidden, "already initialized")
 		return
 	}
@@ -165,6 +201,9 @@ func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save config failed")
 		return
 	}
+
+	// Mark as done — subsequent calls will be rejected
+	h.setupDone = true
 
 	// Auto-login: generate JWT
 	token, err := auth.GenerateToken(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, 24*time.Hour)

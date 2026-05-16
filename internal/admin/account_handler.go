@@ -62,13 +62,17 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		Name:        req.Name,
 		Credentials: encrypted,
 		Weight:      req.Weight,
-		Enabled:     req.Enabled,
+		Enabled:     true,
 	}
 	acc.ID = uuid.New()
 	if err := h.db.Create(&acc).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
+	if h.RefreshPool != nil {
+		h.RefreshPool(acc.ChannelID.String())
+	}
+	auditCreate(h.db, "account", acc.ID, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, acc)
 }
 
@@ -89,6 +93,7 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
+	originalChannelID := existing.ChannelID
 	updates := map[string]interface{}{}
 	if req.Name != "" {
 		updates["name"] = req.Name
@@ -104,8 +109,12 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		}
 		updates["credentials"] = encrypted
 	}
-	updates["weight"] = req.Weight
-	updates["enabled"] = req.Enabled
+	if req.Weight != nil {
+		updates["weight"] = *req.Weight
+	}
+	if req.Enabled != nil {
+		updates["enabled"] = *req.Enabled
+	}
 	if req.CooldownUntil != nil {
 		updates["cooldown_until"] = req.CooldownUntil
 	} else {
@@ -117,6 +126,16 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	if h.RefreshPool != nil {
+		if originalChannelID != existing.ChannelID {
+			// Channel changed: refresh both old and new channel pools
+			h.RefreshPool(originalChannelID.String())
+			h.RefreshPool(existing.ChannelID.String())
+		} else {
+			h.RefreshPool(existing.ChannelID.String())
+		}
+	}
+	auditUpdate(h.db, "account", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -128,9 +147,22 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	now := time.Now()
-	if err := h.db.Model(&db.Account{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now).Error; err != nil {
+	result := h.db.Model(&db.Account{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now)
+	if result.Error != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "delete failed")
 		return
 	}
+	if result.RowsAffected == 0 {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
+		return
+	}
+	if h.RefreshPool != nil {
+		// Find the channel this account belonged to so we can refresh its pool
+		var acc db.Account
+		if h.db.Unscoped().Where("id = ?", id).First(&acc).Error == nil {
+			h.RefreshPool(acc.ChannelID.String())
+		}
+	}
+	auditDelete(h.db, "account", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

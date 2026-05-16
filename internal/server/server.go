@@ -9,6 +9,7 @@ import (
 	"github.com/AutoCONFIG/cli-relay/internal/admin"
 	"github.com/AutoCONFIG/cli-relay/internal/auth"
 	"github.com/AutoCONFIG/cli-relay/internal/config"
+	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/relay"
 	"github.com/AutoCONFIG/cli-relay/internal/user"
 	"github.com/valyala/fasthttp"
@@ -35,7 +36,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		pools:        pools,
 		billing:      billing,
 		relayer:      relay.NewRelayer(database, pools, billing, relay.NewAffinityCache(), cfg.Server.ConcurrencyLimit),
-		adminHandler: admin.NewHandler(database, cfg, cfgPath),
+		adminHandler: admin.NewHandler(database, cfg, cfgPath, makeRefreshPool(database, pools), makeRemovePool(pools)),
 		userHandler:  user.NewHandler(userSvc),
 	}
 	s.setupRoutes()
@@ -139,24 +140,43 @@ func (s *Server) setupRoutes() {
 }
 
 // handleAdminAuth wraps an admin handler with CORS + JWT auth check.
+// Sets the admin username in the context for audit logging.
 func (s *Server) handleAdminAuth(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		// CORS
-		ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
+		// CORS — admin panel is same-origin, no wildcard
 		ctx.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		ctx.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if string(ctx.Method()) == "OPTIONS" {
 			ctx.SetStatusCode(204)
 			return
 		}
-		if !s.adminHandler.RequireAuth(ctx) {
+		username, ok := s.adminHandler.RequireAuthWithUser(ctx)
+		if !ok {
 			return
 		}
+		ctx.SetUserValue("admin_user", username)
 		next(ctx)
 	}
 }
 
 // Helper functions
+
+// makeRefreshPool returns a callback that reloads accounts for a channel from DB and updates the pool.
+func makeRefreshPool(database *gorm.DB, pools *relay.PoolManager) func(channelID string) {
+	return func(channelID string) {
+		var accounts []*db.Account
+		database.Where("channel_id = ? AND enabled = true AND deleted_at IS NULL", channelID).Find(&accounts)
+		pools.SetPool(channelID, relay.NewAccountPool(accounts))
+	}
+}
+
+// makeRemovePool returns a callback that removes a channel's pool.
+func makeRemovePool(pools *relay.PoolManager) func(channelID string) {
+	return func(channelID string) {
+		pools.RemovePool(channelID)
+	}
+}
+
 func jsonResponse(ctx *fasthttp.RequestCtx, status int, data interface{}) {
 	ctx.SetContentType("application/json")
 	ctx.SetStatusCode(status)

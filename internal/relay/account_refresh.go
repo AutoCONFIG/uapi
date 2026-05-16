@@ -10,6 +10,7 @@ import (
 	"github.com/AutoCONFIG/cli-relay/internal/crypto"
 	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"gorm.io/gorm"
+	"log"
 )
 
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
@@ -62,6 +63,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	go func() {
 		newCreds, encErr := crypto.Encrypt(result.AccessToken)
 		if encErr != nil {
+			log.Printf("failed to encrypt refreshed credentials for account %s: %v", account.ID, encErr)
 			return
 		}
 		updates := map[string]interface{}{
@@ -74,7 +76,9 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 				updates["refresh_token"] = newRefresh
 			}
 		}
-		database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates)
+		if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
+			log.Printf("failed to update refreshed credentials for account %s: %v", account.ID, err)
+		}
 	}()
 
 	return result.AccessToken, nil

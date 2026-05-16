@@ -15,6 +15,10 @@ type OpenAIAdaptor struct {
 	account *db.Account
 }
 
+func (a *OpenAIAdaptor) SetRequestParams(model string, stream bool) {
+	// No-op: OpenAI does not need model/stream in URL
+}
+
 func (a *OpenAIAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account

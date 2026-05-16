@@ -55,6 +55,10 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
+	if req.Status != nil && *req.Status != "active" && *req.Status != "disabled" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid status: must be 'active' or 'disabled'")
+		return
+	}
 	var existing db.User
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
@@ -77,6 +81,7 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	auditUpdate(h.db, "user", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -93,9 +98,15 @@ func (h *Handler) DeleteUser(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	now := time.Now()
-	if err := h.db.Model(&db.User{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now).Error; err != nil {
+	result := h.db.Model(&db.User{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now)
+	if result.Error != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "delete failed")
 		return
 	}
+	if result.RowsAffected == 0 {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
+		return
+	}
+	auditDelete(h.db, "user", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

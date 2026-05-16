@@ -204,7 +204,10 @@ func (h *Handler) GetUsageLogs(ctx *fasthttp.RequestCtx) {
 	if page == 0 {
 		page = 1
 	}
-	if limit == 0 {
+	if limit > 100 {
+		limit = 100
+	}
+	if limit < 1 {
 		limit = 20
 	}
 

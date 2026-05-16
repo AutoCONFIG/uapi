@@ -65,6 +65,7 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
+	auditCreate(h.db, "plan", p.ID, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, p)
 }
 
@@ -113,6 +114,7 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	auditUpdate(h.db, "plan", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -124,9 +126,15 @@ func (h *Handler) deletePlan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	now := time.Now()
-	if err := h.db.Model(&db.Plan{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now).Error; err != nil {
+	result := h.db.Model(&db.Plan{}).Where("id = ? AND deleted_at IS NULL", id).Update("deleted_at", now)
+	if result.Error != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "delete failed")
 		return
 	}
+	if result.RowsAffected == 0 {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
+		return
+	}
+	auditDelete(h.db, "plan", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

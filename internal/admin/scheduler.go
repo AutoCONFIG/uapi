@@ -8,6 +8,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// CleanupOldLogs deletes logs older than retentionDays.
+func CleanupOldLogs(database *gorm.DB, retentionDays int) error {
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	return database.Where("created_at < ?", cutoff).Delete(&db.Log{}).Error
+}
+
 // StartLogCleanup runs periodic log cleanup.
 func StartLogCleanup(database *gorm.DB, retentionDays int) {
 	go func() {

@@ -48,8 +48,8 @@ type UpdateAccountRequest struct {
 	ChannelID     uuid.UUID  `json:"channel_id"`
 	Name          string     `json:"name"`
 	Credentials   string     `json:"credentials"`
-	Weight        int        `json:"weight"`
-	Enabled       bool       `json:"enabled"`
+	Weight        *int       `json:"weight"`
+	Enabled       *bool      `json:"enabled"`
 	CooldownUntil *time.Time `json:"cooldown_until"`
 }
 

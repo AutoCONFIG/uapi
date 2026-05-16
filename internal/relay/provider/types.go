@@ -85,6 +85,7 @@ type InternalUsage struct {
 
 type Adaptor interface {
 	Init(channel *db.Channel, account *db.Account)
+	SetRequestParams(model string, stream bool)
 	GetRequestURL(path string) (string, error)
 	SetupRequestHeader(req *fasthttp.Request, credentials string) error
 	ToInternal(body []byte) (*InternalRequest, error)

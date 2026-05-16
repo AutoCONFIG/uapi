@@ -113,3 +113,9 @@ func (pm *PoolManager) GetPool(channelID string) (*AccountPool, bool) {
 	p, ok := pm.pools[channelID]
 	return p, ok
 }
+
+func (pm *PoolManager) RemovePool(channelID string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	delete(pm.pools, channelID)
+}

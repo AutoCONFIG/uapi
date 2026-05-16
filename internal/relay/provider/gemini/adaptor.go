@@ -16,8 +16,13 @@ type GeminiAdaptor struct {
 	channel     *db.Channel
 	account     *db.Account
 	model       string
-	stream      bool
+	isStream    bool
 	streamState *geminiStreamState
+}
+
+func (a *GeminiAdaptor) SetRequestParams(model string, stream bool) {
+	a.model = model
+	a.isStream = stream
 }
 
 func (a *GeminiAdaptor) Init(channel *db.Channel, account *db.Account) {
@@ -39,7 +44,7 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	base := strings.TrimRight(a.channel.Endpoint, "/")
 	action := "generateContent"
 	suffix := ""
-	if a.stream {
+	if a.isStream {
 		action = "streamGenerateContent"
 		suffix = "?alt=sse"
 	}
@@ -61,7 +66,7 @@ func (a *GeminiAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
 	// Store model and stream for URL construction
 	a.model = req.Model
-	a.stream = req.Stream
+	a.isStream = req.Stream
 	return internalToGemini(req)
 }
 
@@ -261,6 +266,8 @@ func toInt(v interface{}) int {
 
 func randomHex(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }

@@ -3,6 +3,7 @@ package user
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ func NewService(database *gorm.DB, jwtSecret string, jwtExpiry time.Duration, ma
 
 func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
 	// Validate email format
-	if !strings.Contains(req.Email, "@") {
+	if _, err := mail.ParseAddress(req.Email); err != nil {
 		return nil, errors.New("invalid email format")
 	}
 
@@ -37,38 +38,50 @@ func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
 		return nil, errors.New("password must be at least 6 characters")
 	}
 
-	// Check email uniqueness
-	var count int64
-	s.db.Model(&db.User{}).Where("email = ?", req.Email).Count(&count)
-	if count > 0 {
-		return nil, errors.New("email already registered")
-	}
-
-	// Check username uniqueness
-	s.db.Model(&db.User{}).Where("username = ?", req.Username).Count(&count)
-	if count > 0 {
-		return nil, errors.New("username already taken")
-	}
-
-	// Hash password
+	// Hash password (do this outside the transaction since it's CPU-bound)
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	// Create user
-	user := db.User{
-		Email:        req.Email,
-		Username:     req.Username,
-		PasswordHash: string(hash),
-		Status:       "active",
-	}
-	if err := s.db.Create(&user).Error; err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
+	var newUser db.User
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// Check email uniqueness within transaction
+		var count int64
+		tx.Model(&db.User{}).Where("email = ? AND deleted_at IS NULL", req.Email).Count(&count)
+		if count > 0 {
+			return errors.New("email already registered")
+		}
+
+		// Check username uniqueness within transaction
+		tx.Model(&db.User{}).Where("username = ? AND deleted_at IS NULL", req.Username).Count(&count)
+		if count > 0 {
+			return errors.New("username already taken")
+		}
+
+		// Create user
+		newUser = db.User{
+			Email:        req.Email,
+			Username:     req.Username,
+			PasswordHash: string(hash),
+			Status:       "active",
+		}
+		if err := tx.Create(&newUser).Error; err != nil {
+			// Fallback: catch DB unique constraint violation from concurrent race
+			if strings.Contains(err.Error(), "UNIQUE constraint") ||
+				strings.Contains(err.Error(), "duplicate key") {
+				return errors.New("email or username already registered")
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// Generate JWT
-	token, err := s.generateUserToken(user.ID.String(), user.Username)
+	token, err := s.generateUserToken(newUser.ID.String(), newUser.Username)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +130,7 @@ func (s *Service) RefreshToken(tokenStr string) (*LoginResponse, error) {
 
 func (s *Service) GetProfile(userID string) (*ProfileResponse, error) {
 	var user db.User
-	if err := s.db.Where("id = ?", userID).First(&user).Error; err != nil {
+	if err := s.db.Where("id = ? AND deleted_at IS NULL", userID).First(&user).Error; err != nil {
 		return nil, errors.New("user not found")
 	}
 	return &ProfileResponse{
@@ -132,7 +145,7 @@ func (s *Service) GetProfile(userID string) (*ProfileResponse, error) {
 
 func (s *Service) UpdatePassword(userID string, req *UpdatePasswordRequest) error {
 	var user db.User
-	if err := s.db.Where("id = ?", userID).First(&user).Error; err != nil {
+	if err := s.db.Where("id = ? AND deleted_at IS NULL AND status = 'active'", userID).First(&user).Error; err != nil {
 		return errors.New("user not found")
 	}
 
@@ -150,7 +163,7 @@ func (s *Service) UpdatePassword(userID string, req *UpdatePasswordRequest) erro
 
 func (s *Service) UpdateEmail(userID string, req *UpdateEmailRequest) error {
 	var user db.User
-	if err := s.db.Where("id = ?", userID).First(&user).Error; err != nil {
+	if err := s.db.Where("id = ? AND deleted_at IS NULL AND status = 'active'", userID).First(&user).Error; err != nil {
 		return errors.New("user not found")
 	}
 
@@ -158,14 +171,16 @@ func (s *Service) UpdateEmail(userID string, req *UpdateEmailRequest) error {
 		return errors.New("incorrect password")
 	}
 
-	// Check email uniqueness
-	var count int64
-	s.db.Model(&db.User{}).Where("email = ?", req.Email).Count(&count)
-	if count > 0 {
-		return errors.New("email already in use")
-	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// Check email uniqueness within transaction to prevent TOCTOU race
+		var count int64
+		tx.Model(&db.User{}).Where("email = ? AND deleted_at IS NULL", req.Email).Count(&count)
+		if count > 0 {
+			return errors.New("email already in use")
+		}
 
-	return s.db.Model(&user).Update("email", req.Email).Error
+		return tx.Model(&user).Update("email", req.Email).Error
+	})
 }
 
 func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
@@ -188,27 +203,26 @@ func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
 }
 
 func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse, error) {
-	// Enforce max keys per user
-	var keyCount int64
-	s.db.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
-	if keyCount >= int64(s.maxKeysPerUser) {
-		return nil, errors.New("maximum number of API keys reached")
+	var token db.Token
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var keyCount int64
+		tx.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
+		if keyCount >= int64(s.maxKeysPerUser) {
+			return errors.New("maximum number of API keys reached")
+		}
+		keyUUID := uuid.New().String()
+		key := "sk-relay-" + strings.ReplaceAll(keyUUID, "-", "")
+		token = db.Token{
+			UserID:  userID,
+			Name:    req.Name,
+			Key:     key,
+			Enabled: true,
+		}
+		return tx.Create(&token).Error
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	// Generate key: sk-relay- + UUID without dashes
-	keyUUID := uuid.New().String()
-	key := "sk-relay-" + strings.ReplaceAll(keyUUID, "-", "")
-
-	token := db.Token{
-		UserID:  userID,
-		Name:    req.Name,
-		Key:     key,
-		Enabled: true,
-	}
-	if err := s.db.Create(&token).Error; err != nil {
-		return nil, fmt.Errorf("create key: %w", err)
-	}
-
 	return &KeyResponse{
 		ID:        token.ID.String(),
 		Name:      token.Name,
@@ -221,7 +235,7 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 func (s *Service) DeleteKey(userID, keyID string) error {
 	// Verify ownership
 	var token db.Token
-	if err := s.db.Where("id = ? AND user_id = ?", keyID, userID).First(&token).Error; err != nil {
+	if err := s.db.Where("id = ? AND user_id = ? AND deleted_at IS NULL", keyID, userID).First(&token).Error; err != nil {
 		return errors.New("key not found")
 	}
 
@@ -271,7 +285,7 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (map[string]inter
 
 func (s *Service) ListPlans() ([]map[string]interface{}, error) {
 	var plans []db.Plan
-	if err := s.db.Where("enabled = ?", true).Find(&plans).Error; err != nil {
+	if err := s.db.Where("enabled = ? AND deleted_at IS NULL", true).Find(&plans).Error; err != nil {
 		return nil, err
 	}
 
@@ -288,13 +302,15 @@ func (s *Service) ListPlans() ([]map[string]interface{}, error) {
 
 func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) {
 	var tokenPlan db.TokenPlan
-	if err := s.db.Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ?", userID).
+	if err := s.db.Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
 		First(&tokenPlan).Error; err != nil {
 		return nil, errors.New("no active subscription")
 	}
 
 	var plan db.Plan
-	s.db.Where("id = ?", tokenPlan.PlanID).First(&plan)
+	if err := s.db.Where("id = ? AND enabled = ? AND deleted_at IS NULL", tokenPlan.PlanID, true).First(&plan).Error; err != nil {
+		return nil, errors.New("plan not found")
+	}
 
 	return &SubscriptionResponse{
 		PlanID:   tokenPlan.PlanID.String(),
@@ -305,23 +321,35 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 }
 
 func (s *Service) Subscribe(userID, planID string) error {
-	// Find a token to attach subscription to (use the first one)
-	var token db.Token
-	if err := s.db.Where("user_id = ?", userID).First(&token).Error; err != nil {
-		return errors.New("no API key found")
-	}
-
 	// Verify plan exists
 	var plan db.Plan
-	if err := s.db.Where("id = ? AND enabled = ?", planID, true).First(&plan).Error; err != nil {
+	if err := s.db.Where("id = ? AND enabled = ? AND deleted_at IS NULL", planID, true).First(&plan).Error; err != nil {
 		return errors.New("plan not found")
 	}
 
-	tokenPlan := db.TokenPlan{
-		TokenID: token.ID,
-		PlanID:  plan.ID,
-	}
-	return s.db.Create(&tokenPlan).Error
+	// Wrap existence check and create in a transaction to prevent race
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var existingCount int64
+		tx.Model(&db.TokenPlan{}).
+			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
+			Count(&existingCount)
+		if existingCount > 0 {
+			return errors.New("already subscribed to a plan")
+		}
+
+		// Find a token to attach subscription to (use the first one)
+		var token db.Token
+		if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID).First(&token).Error; err != nil {
+			return errors.New("no API key found")
+		}
+
+		tokenPlan := db.TokenPlan{
+			TokenID: token.ID,
+			PlanID:  plan.ID,
+		}
+		return tx.Create(&tokenPlan).Error
+	})
+	return err
 }
 
 func (s *Service) RedeemCode(userID, code string) (int64, error) {
@@ -336,12 +364,14 @@ func (s *Service) RedeemCode(userID, code string) (int64, error) {
 		redeemCode.UsedBy = &userID
 		redeemCode.UsedAt = &now
 		redeemCode.Status = "used"
-		return tx.Save(&redeemCode).Error
+		if err := tx.Save(&redeemCode).Error; err != nil {
+			return err
+		}
+		return tx.Model(&db.User{}).Where("id = ?", userID).Update("balance", gorm.Expr("balance + ?", redeemCode.Value)).Error
 	})
 	if err != nil {
 		return 0, err
 	}
-	s.db.Model(&db.User{}).Where("id = ?", userID).Update("balance", gorm.Expr("balance + ?", redeemCode.Value))
 	return redeemCode.Value, nil
 }
 
@@ -355,9 +385,10 @@ func (s *Service) parseTokenAllowExpired(tokenStr string) (string, string, error
 	claims, err := auth.ParseToken(s.jwtSecret, tokenStr)
 	if err != nil {
 		if errors.Is(err, auth.ErrExpiredToken) {
-			// Expired is OK for refresh — extract from raw claims
-			parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-			token, _, parseErr := parser.ParseUnverified(tokenStr, &auth.Claims{})
+			// Expired is OK for refresh — verify signature but skip expiration check
+			token, parseErr := jwt.ParseWithClaims(tokenStr, &auth.Claims{}, func(t *jwt.Token) (interface{}, error) {
+				return []byte(s.jwtSecret), nil
+			}, jwt.WithoutClaimsValidation())
 			if parseErr != nil {
 				return "", "", parseErr
 			}

@@ -18,6 +18,10 @@ type AnthropicAdaptor struct {
 	streamState *anthropicStreamState
 }
 
+func (a *AnthropicAdaptor) SetRequestParams(model string, stream bool) {
+	// No-op: Anthropic does not need model/stream in URL
+}
+
 func (a *AnthropicAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account

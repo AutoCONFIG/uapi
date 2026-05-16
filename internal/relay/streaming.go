@@ -64,6 +64,7 @@ func streamAndForward(
 	tracker *streamTracker,
 	convertLine func([]byte) []byte,
 ) streamResult {
+	defer reader.Done()
 	closer, needClose := bodyStream.(io.Closer)
 	if needClose {
 		defer closer.Close()
@@ -116,12 +117,10 @@ func streamAndForward(
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("SSE scanner error: %v", err)
-		reader.Done()
 		return streamResult{err: err}
 	}
 
 	reader.SendDone()
-	reader.Done()
 
 	pt, ct := tracker.Result()
 	return streamResult{promptTokens: pt, completionTokens: ct}
