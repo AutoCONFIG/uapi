@@ -6,10 +6,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/crypto"
 	"github.com/AutoCONFIG/cli-relay/internal/db"
+	"github.com/AutoCONFIG/cli-relay/internal/relay/provider/openai"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
@@ -50,6 +52,13 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		"refresh_token": {refreshToken},
 		"client_id":     {account.ClientID},
 	}
+	if account.ClientSecret != "" {
+		clientSecret, err := crypto.Decrypt(account.ClientSecret)
+		if err != nil {
+			return "", fmt.Errorf("decrypt client secret: %w", err)
+		}
+		data.Set("client_secret", clientSecret)
+	}
 
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).PostForm(account.TokenURL, data)
 	if err != nil {
@@ -60,6 +69,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	var result struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		Error        string `json:"error"`
 	}
@@ -71,9 +81,19 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	}
 
 	// Async update database — fire and forget
+	credential := result.AccessToken
+	if result.IDToken != "" && strings.Contains(account.TokenURL, "auth.openai.com") {
+		if exchanged, err := openai.ExchangeForAPIKey(account.TokenURL, result.IDToken, account.ClientID); err == nil && exchanged != "" {
+			credential = exchanged
+		}
+	}
+
 	go func() {
 		newExpiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
-		newCreds, encErr := crypto.Encrypt(result.AccessToken)
+		if result.ExpiresIn <= 0 {
+			newExpiry = time.Now().Add(8 * 24 * time.Hour)
+		}
+		newCreds, encErr := crypto.Encrypt(credential)
 		if encErr != nil {
 			log.Printf("failed to encrypt refreshed credentials for account %s: %v", account.ID, encErr)
 			return
@@ -97,5 +117,5 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		account.TokenExpiry = &newExpiry
 	}()
 
-	return result.AccessToken, nil
+	return credential, nil
 }

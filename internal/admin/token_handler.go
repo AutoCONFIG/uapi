@@ -56,6 +56,9 @@ func (h *Handler) createToken(ctx *fasthttp.RequestCtx) {
 		Key:         req.Key,
 		Enabled:     true,
 		IPWhitelist: req.IPWhitelist,
+		ExpiresAt:   req.ExpiresAt,
+		Models:      req.Models,
+		Permissions: req.Permissions,
 		Unlimited:   req.Unlimited,
 	}
 	t.ID = uuid.New()
@@ -93,6 +96,15 @@ func (h *Handler) updateToken(ctx *fasthttp.RequestCtx) {
 	}
 	if req.IPWhitelist != nil {
 		updates["ip_whitelist"] = *req.IPWhitelist
+	}
+	if req.ExpiresAt != nil {
+		updates["expires_at"] = req.ExpiresAt
+	}
+	if req.Models != nil {
+		updates["models"] = *req.Models
+	}
+	if req.Permissions != nil {
+		updates["permissions"] = *req.Permissions
 	}
 	if req.Unlimited != nil {
 		updates["unlimited"] = *req.Unlimited

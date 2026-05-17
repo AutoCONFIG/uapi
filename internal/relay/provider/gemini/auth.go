@@ -58,13 +58,16 @@ func BuildAuthURL(clientID, redirectURI, codeChallenge, state string) string {
 }
 
 // ExchangeCode exchanges authorization code for tokens
-func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*TokenResponse, error) {
+func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, clientSecret string) (*TokenResponse, error) {
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {codeVerifier},
 		"client_id":     {clientID},
+	}
+	if clientSecret != "" {
+		data.Set("client_secret", clientSecret)
 	}
 	resp, err := http.PostForm(tokenURL, data)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
+
 // streamingClient is configured for real-time streaming:
 // no timeouts, streaming body response enabled.
 var streamingClient = &fasthttp.Client{
@@ -86,6 +87,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		ctx.Error(`{"error":"invalid token"}`, fasthttp.StatusUnauthorized)
 		return
 	}
+	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+		ctx.Error(`{"error":"token expired"}`, fasthttp.StatusUnauthorized)
+		return
+	}
 
 	// 2. IP whitelist check
 	if token.IPWhitelist != "" {
@@ -141,6 +146,14 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Model == "" {
 		ctx.Error(`{"error":"model is required"}`, fasthttp.StatusBadRequest)
+		return
+	}
+	if token.Models != "" && !modelInList(req.Model, token.Models) {
+		ctx.Error(`{"error":"model not allowed for token"}`, fasthttp.StatusForbidden)
+		return
+	}
+	if token.Permissions != "" && !permissionInList(permissionForFormat(clientFormat), token.Permissions) {
+		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return
 	}
 
@@ -792,6 +805,28 @@ func getAdaptor(channelType string) provider.Adaptor {
 func modelInList(model, list string) bool {
 	for _, m := range strings.Split(list, ",") {
 		if strings.TrimSpace(m) == model {
+			return true
+		}
+	}
+	return false
+}
+
+func permissionForFormat(format provider.Format) string {
+	switch format {
+	case provider.FormatAnthropic:
+		return "messages"
+	case provider.FormatGemini:
+		return "gemini"
+	case provider.FormatOpenAIResp:
+		return "responses"
+	default:
+		return "chat"
+	}
+}
+
+func permissionInList(permission, list string) bool {
+	for _, item := range strings.Split(list, ",") {
+		if strings.TrimSpace(item) == permission {
 			return true
 		}
 	}

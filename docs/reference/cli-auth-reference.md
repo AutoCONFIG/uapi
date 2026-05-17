@@ -1,6 +1,9 @@
 # CLI Auth 认证流程参考
 
-本文档记录三个 AI CLI 工具的认证流程细节，作为 cli-relay 项目实现的参考。
+本文档记录上游 AI CLI 工具的认证流程细节，作为 UAPI 项目 OAuth 集成的参考。
+
+> 注意：Codex 和 Gemini 的 OAuth 已有代码骨架（`internal/relay/provider/openai/auth.go`、
+> `internal/relay/provider/gemini/auth.go`）。Kilocode 仅为参考，当前无集成计划。
 
 ---
 

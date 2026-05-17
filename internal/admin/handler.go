@@ -17,18 +17,24 @@ import (
 // Handler is the main admin handler that holds shared state and provides
 // authentication, setup, login, and dashboard endpoints.
 type Handler struct {
-	db             *gorm.DB
-	cfg            *config.Config
-	cfgPath        string
-	RefreshPool    func(channelID string) // refresh pool for a channel after CRUD
-	RemovePool     func(channelID string) // remove pool when channel is deleted/disabled
-	setupMu   sync.Mutex
-	setupDone bool
+	db            *gorm.DB
+	cfg           *config.Config
+	cfgPath       string
+	RefreshPool   func(channelID string) // refresh pool for a channel after CRUD
+	RemovePool    func(channelID string) // remove pool when channel is deleted/disabled
+	setupMu       sync.Mutex
+	setupDone     bool
+	oauthMu       sync.Mutex
+	oauthSessions map[string]*oauthSession
 }
 
 // NewHandler creates a new admin Handler.
 func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string, refreshPool func(channelID string), removePool func(channelID string)) *Handler {
-	return &Handler{db: database, cfg: cfg, cfgPath: cfgPath, RefreshPool: refreshPool, RemovePool: removePool}
+	return &Handler{
+		db: database, cfg: cfg, cfgPath: cfgPath,
+		RefreshPool: refreshPool, RemovePool: removePool,
+		oauthSessions: make(map[string]*oauthSession),
+	}
 }
 
 // jsonResponse writes a success JSON response.

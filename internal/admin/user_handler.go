@@ -7,6 +7,7 @@ import (
 	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ListUsers returns a paginated list of users.
@@ -59,6 +60,10 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid status: must be 'active' or 'disabled'")
 		return
 	}
+	if req.NewPassword != nil && len(*req.NewPassword) < 8 {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "new_password must be at least 8 characters")
+		return
+	}
 	var existing db.User
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
@@ -70,6 +75,14 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Balance != nil {
 		updates["balance"] = *req.Balance
+	}
+	if req.NewPassword != nil {
+		hash, err := bcrypt.GenerateFromPassword([]byte(*req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			h.jsonError(ctx, fasthttp.StatusInternalServerError, "password hash failed")
+			return
+		}
+		updates["password_hash"] = string(hash)
 	}
 	if len(updates) == 0 {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")

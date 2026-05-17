@@ -32,6 +32,45 @@ type UpdateChannelRequest struct {
 	AffinityTTL *int    `json:"affinity_ttl,omitempty"`
 }
 
+// StartOAuthRequest asks the backend to create a provider authorization URL.
+type StartOAuthRequest struct {
+	ChannelID    uuid.UUID `json:"channel_id"`
+	Provider     string    `json:"provider"`
+	AccountName  string    `json:"account_name"`
+	ClientID     string    `json:"client_id"`
+	ClientSecret string    `json:"client_secret"`
+	TokenURL     string    `json:"token_url"`
+}
+
+// OAuthAuthURLResponse is returned after creating an OAuth onboarding session.
+type OAuthAuthURLResponse struct {
+	AuthURL     string    `json:"auth_url"`
+	State       string    `json:"state"`
+	RedirectURI string    `json:"redirect_uri"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// OAuthStatusResponse describes a pending, completed, failed, or bound OAuth session.
+type OAuthStatusResponse struct {
+	State          string     `json:"state"`
+	Provider       string     `json:"provider"`
+	ChannelID      uuid.UUID  `json:"channel_id"`
+	Status         string     `json:"status"`
+	ReadyToBind    bool       `json:"ready_to_bind"`
+	Error          string     `json:"error,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	BoundAccountID *uuid.UUID `json:"bound_account_id,omitempty"`
+}
+
+// BindOAuthAccountRequest creates a channel account from a completed OAuth session.
+type BindOAuthAccountRequest struct {
+	State       string `json:"state"`
+	AccountName string `json:"account_name"`
+	Weight      int    `json:"weight"`
+	Enabled     *bool  `json:"enabled"`
+}
+
 // --- Account DTOs ---
 
 // CreateAccountRequest is the request DTO for creating an account.
@@ -57,19 +96,25 @@ type UpdateAccountRequest struct {
 
 // CreateTokenRequest is the request DTO for creating a token.
 type CreateTokenRequest struct {
-	Name        string `json:"name"`
-	Key         string `json:"key"`
-	Enabled     bool   `json:"enabled"`
-	IPWhitelist string `json:"ip_whitelist"`
-	Unlimited   bool   `json:"unlimited"`
+	Name        string     `json:"name"`
+	Key         string     `json:"key"`
+	Enabled     bool       `json:"enabled"`
+	IPWhitelist string     `json:"ip_whitelist"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	Models      string     `json:"models"`
+	Permissions string     `json:"permissions"`
+	Unlimited   bool       `json:"unlimited"`
 }
 
 // UpdateTokenRequest is the request DTO for updating a token.
 type UpdateTokenRequest struct {
-	Name        *string `json:"name,omitempty"`
-	Key         *string `json:"key,omitempty"`
-	IPWhitelist *string `json:"ip_whitelist,omitempty"`
-	Unlimited   *bool   `json:"unlimited,omitempty"`
+	Name        *string    `json:"name,omitempty"`
+	Key         *string    `json:"key,omitempty"`
+	IPWhitelist *string    `json:"ip_whitelist,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Models      *string    `json:"models,omitempty"`
+	Permissions *string    `json:"permissions,omitempty"`
+	Unlimited   *bool      `json:"unlimited,omitempty"`
 }
 
 // --- Plan DTOs ---
@@ -100,8 +145,9 @@ type UpdatePlanRequest struct {
 
 // UpdateUserRequest is the request DTO for updating a user.
 type UpdateUserRequest struct {
-	Status  *string `json:"status,omitempty"`
-	Balance *int64  `json:"balance,omitempty"`
+	Status      *string `json:"status,omitempty"`
+	Balance     *int64  `json:"balance,omitempty"`
+	NewPassword *string `json:"new_password,omitempty"`
 }
 
 // --- Dashboard DTO ---

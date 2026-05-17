@@ -86,11 +86,11 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*
 // ExchangeForAPIKey uses id_token to get an API key (Codex-specific flow)
 func ExchangeForAPIKey(tokenURL, idToken, clientID string) (string, error) {
 	data := url.Values{
-		"grant_type":            {"urn:ietf:params:oauth:grant-type:token-exchange"},
-		"subject_token":         {idToken},
-		"subject_token_type":    {"urn:ietf:params:oauth:token-type:id_token"},
-		"client_id":             {clientID},
-		"requested_token_type":  {"urn:ai21:token-type:api-key"},
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {idToken},
+		"subject_token_type": {"urn:ietf:params:oauth:token-type:id_token"},
+		"client_id":          {clientID},
+		"requested_token":    {"openai-api-key"},
 	}
 	resp, err := http.PostForm(tokenURL, data)
 	if err != nil {

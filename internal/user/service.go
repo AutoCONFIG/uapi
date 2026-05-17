@@ -144,6 +144,10 @@ func (s *Service) GetProfile(userID string) (*ProfileResponse, error) {
 }
 
 func (s *Service) UpdatePassword(userID string, req *UpdatePasswordRequest) error {
+	if len(req.NewPassword) < 8 {
+		return errors.New("new password must be at least 8 characters")
+	}
+
 	var user db.User
 	if err := s.db.Where("id = ? AND deleted_at IS NULL AND status = 'active'", userID).First(&user).Error; err != nil {
 		return errors.New("user not found")
@@ -197,19 +201,31 @@ func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
 	keys := make([]KeyResponse, len(tokens))
 	for i, t := range tokens {
 		keys[i] = KeyResponse{
-			ID:        t.ID.String(),
-			Name:      t.Name,
-			Key:       t.Key,
-			Enabled:   t.Enabled,
-			CreatedAt: t.CreatedAt.Format(time.RFC3339),
+			ID:          t.ID.String(),
+			Name:        t.Name,
+			Key:         t.Key,
+			Enabled:     t.Enabled,
+			IPWhitelist: t.IPWhitelist,
+			ExpiresAt:   formatOptionalTime(t.ExpiresAt),
+			Models:      t.Models,
+			Permissions: t.Permissions,
+			CreatedAt:   t.CreatedAt.Format(time.RFC3339),
 		}
 	}
 	return keys, nil
 }
 
 func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+	expiresAt, err := parseOptionalTime(req.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
 	var token db.Token
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var keyCount int64
 		tx.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
 		if keyCount >= int64(s.maxKeysPerUser) {
@@ -218,10 +234,14 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 		keyUUID := uuid.New().String()
 		key := "sk-relay-" + strings.ReplaceAll(keyUUID, "-", "")
 		token = db.Token{
-			UserID:  userID,
-			Name:    req.Name,
-			Key:     key,
-			Enabled: true,
+			UserID:      userID,
+			Name:        name,
+			Key:         key,
+			Enabled:     true,
+			IPWhitelist: normalizeCSV(req.IPWhitelist),
+			ExpiresAt:   expiresAt,
+			Models:      normalizeCSV(req.Models),
+			Permissions: normalizeCSV(req.Permissions),
 		}
 		return tx.Create(&token).Error
 	})
@@ -229,11 +249,15 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 		return nil, err
 	}
 	return &KeyResponse{
-		ID:        token.ID.String(),
-		Name:      token.Name,
-		Key:       token.Key,
-		Enabled:   token.Enabled,
-		CreatedAt: token.CreatedAt.Format(time.RFC3339),
+		ID:          token.ID.String(),
+		Name:        token.Name,
+		Key:         token.Key,
+		Enabled:     token.Enabled,
+		IPWhitelist: token.IPWhitelist,
+		ExpiresAt:   formatOptionalTime(token.ExpiresAt),
+		Models:      token.Models,
+		Permissions: token.Permissions,
+		CreatedAt:   token.CreatedAt.Format(time.RFC3339),
 	}, nil
 }
 
@@ -244,28 +268,108 @@ func (s *Service) DeleteKey(userID, keyID string) error {
 		return errors.New("key not found")
 	}
 
-	// Soft delete
-	return s.db.Delete(&token).Error
+	return s.db.Model(&token).Update("deleted_at", time.Now()).Error
 }
 
-func (s *Service) GetUsage(userID string) (map[string]interface{}, error) {
-	// Aggregate usage from logs joined with user's tokens
-	var results []map[string]interface{}
+func parseOptionalTime(value *string) (*time.Time, error) {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*value))
+	if err != nil {
+		return nil, errors.New("expires_at must be RFC3339")
+	}
+	if !parsed.After(time.Now()) {
+		return nil, errors.New("expires_at must be in the future")
+	}
+	return &parsed, nil
+}
+
+func formatOptionalTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.Format(time.RFC3339)
+	return &formatted
+}
+
+func normalizeCSV(value string) string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, ",")
+}
+
+func (s *Service) GetUsage(userID string) (*UsageSummaryResponse, error) {
+	var totals struct {
+		TotalRequests    int64
+		FailedRequests   int64
+		TotalTokens      int64
+		PromptTokens     int64
+		CompletionTokens int64
+	}
 	err := s.db.Model(&db.Log{}).
-		Select("SUM(total_tokens) as total_tokens, SUM(prompt_tokens) as prompt_tokens, SUM(completion_tokens) as completion_tokens").
+		Select(`COUNT(*) as total_requests,
+			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) as failed_requests,
+			COALESCE(SUM(total_tokens), 0) as total_tokens,
+			COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) as completion_tokens`).
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
-		Scan(&results).Error
+		Scan(&totals).Error
 	if err != nil {
 		return nil, err
 	}
 
-	if len(results) == 0 {
-		return map[string]interface{}{"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}, nil
+	var byModel []UsageModelPoint
+	if err := s.db.Model(&db.Log{}).
+		Select("model, COUNT(*) as requests, COALESCE(SUM(total_tokens), 0) as total_tokens").
+		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
+		Group("model").
+		Order("total_tokens DESC").
+		Limit(12).
+		Scan(&byModel).Error; err != nil {
+		return nil, err
 	}
-	return results[0], nil
+
+	var daily []UsageDailyPoint
+	if err := s.db.Model(&db.Log{}).
+		Select("TO_CHAR(DATE_TRUNC('day', logs.created_at), 'YYYY-MM-DD') as date, COUNT(*) as requests, COALESCE(SUM(total_tokens), 0) as total_tokens").
+		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
+		Where("logs.created_at >= ?", time.Now().AddDate(0, 0, -6)).
+		Group("DATE_TRUNC('day', logs.created_at)").
+		Order("date ASC").
+		Scan(&daily).Error; err != nil {
+		return nil, err
+	}
+
+	successRate := 1.0
+	if totals.TotalRequests > 0 {
+		successRate = float64(totals.TotalRequests-totals.FailedRequests) / float64(totals.TotalRequests)
+	}
+	return &UsageSummaryResponse{
+		TotalRequests:    totals.TotalRequests,
+		FailedRequests:   totals.FailedRequests,
+		SuccessRate:      successRate,
+		TotalTokens:      totals.TotalTokens,
+		PromptTokens:     totals.PromptTokens,
+		CompletionTokens: totals.CompletionTokens,
+		ByModel:          byModel,
+		Daily:            daily,
+	}, nil
 }
 
-func (s *Service) GetUsageLogs(userID string, page, limit int) (map[string]interface{}, error) {
+func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsResponse, error) {
 	offset := (page - 1) * limit
 
 	var total int64
@@ -280,12 +384,22 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (map[string]inter
 		Order("created_at DESC").
 		Find(&logs)
 
-	return map[string]interface{}{
-		"total": total,
-		"page":  page,
-		"limit": limit,
-		"logs":  logs,
-	}, nil
+	items := make([]UsageLogItem, len(logs))
+	for i, log := range logs {
+		items[i] = UsageLogItem{
+			ID:               log.ID,
+			CreatedAt:        log.CreatedAt.Format(time.RFC3339),
+			Model:            log.Model,
+			IsStream:         log.IsStream,
+			PromptTokens:     log.PromptTokens,
+			CompletionTokens: log.CompletionTokens,
+			TotalTokens:      log.TotalTokens,
+			LatencyMs:        log.LatencyMs,
+			StatusCode:       log.StatusCode,
+			ErrorMessage:     log.ErrorMessage,
+		}
+	}
+	return &UsageLogsResponse{Total: total, Page: page, Limit: limit, Logs: items}, nil
 }
 
 func (s *Service) ListPlans() ([]map[string]interface{}, error) {

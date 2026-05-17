@@ -90,9 +90,13 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/admin/login", s.adminHandler.HandleLogin)
 	r.GET("/api/admin/init-status", s.adminHandler.HandleInitStatus)
 	r.POST("/api/admin/setup", s.adminHandler.HandleSetup)
+	r.GET("/api/admin/channels/oauth/callback", s.adminHandler.OAuthCallback)
 
 	// Admin CRUD (JWT checked inside handleAdminAuth + individual handlers)
 	r.GET("/api/admin/dashboard", s.handleAdminAuth(s.adminHandler.HandleDashboard))
+	r.POST("/api/admin/channels/oauth/auth-url", s.handleAdminAuth(s.adminHandler.StartOAuth))
+	r.GET("/api/admin/channels/oauth/status", s.handleAdminAuth(s.adminHandler.OAuthStatus))
+	r.POST("/api/admin/channels/oauth/bind", s.handleAdminAuth(s.adminHandler.BindOAuthAccount))
 	r.GET("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.POST("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.PUT("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))

@@ -18,6 +18,7 @@ type Account struct {
 	RefreshToken  string     `gorm:"type:text" json:"-"`     // AES encrypted (for oauth_token)
 	TokenExpiry   *time.Time `json:"token_expiry,omitempty"` // access_token expiry
 	ClientID      string     `gorm:"type:text" json:"-"`     // OAuth client ID
+	ClientSecret  string     `gorm:"type:text" json:"-"`     // AES encrypted OAuth client secret
 	TokenURL      string     `gorm:"type:text" json:"-"`     // OAuth token endpoint
 }
 
