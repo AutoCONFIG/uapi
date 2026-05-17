@@ -299,6 +299,14 @@ type RedeemCode struct {
 
 其他模型（Channel, Plan, TokenPlan, Log, AuditLog）参见 `internal/db/` 对应文件。
 
+### Usage 响应类型 (`internal/user/dto.go`)
+
+`GET /api/user/usage` 返回 `UsageSummaryResponse`，包含总请求、失败请求、
+成功率、prompt/completion/total token、按模型聚合和最近 7 天趋势。
+
+`GET /api/user/usage/logs` 返回 `UsageLogsResponse`，包含分页字段和
+`UsageLogItem[]`，每条日志都有模型、stream 标记、token 明细、延迟和状态码。
+
 ## 6. OAuth 凭证自动刷新
 
 参考 upstream 中 Codex CLI 和 Gemini CLI 的 OAuth 实现，relay 支持用 OAuth token 而非静态 API Key 作为上游凭证。

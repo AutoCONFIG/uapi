@@ -218,6 +218,8 @@ ANY    /v1beta/*               # Gemini generateContent
   disallowed endpoint scopes.
 - `internal/user/service.go`: `CreateKeyRequest` accepts advanced key fields and
   returns them from key listing/creation responses.
+- `internal/user/dto.go` and `internal/user/service.go`: Usage endpoints return
+  typed summary/log payloads instead of generic maps.
 - `internal/admin/user_handler.go`: Admins can reset user password via `new_password`
   (min 8 chars, bcrypt hashed).
 - `internal/relay/account_refresh.go`: OpenAI OAuth refresh can re-run the Codex
@@ -237,16 +239,15 @@ ANY    /v1beta/*               # Gemini generateContent
   completed sessions into channel credentials.
 - `web/app/keys/page.tsx`: User key creation includes IP whitelist, expiry, model
   restriction, and scoped endpoint permissions.
+- `web/app/usage/page.tsx`: Usage charts and logs consume typed
+  `UsageSummary`/`UsageLogs` API responses with static preview fallback.
 - `web/lib/api.ts`: Admin channel OAuth helpers are available as
   `adminApi.startChannelOAuth`, `adminApi.channelOAuthStatus`, and
   `adminApi.bindChannelOAuth`.
 
 ## Known Remaining Gaps
 
-Do not pretend these are done:
-
-- **Usage endpoint types**: Usage endpoints return generic maps, which limits
-  strongly typed charts.
+No known gaps remain from the original 2026-05-17 handoff list.
 
 ## Commands
 

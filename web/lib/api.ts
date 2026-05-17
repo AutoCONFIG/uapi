@@ -10,6 +10,8 @@ import type {
   PaginatedResponse,
   Plan,
   Profile,
+  UsageLogs,
+  UsageSummary,
   User,
 } from "@/types/api";
 
@@ -59,9 +61,9 @@ export const userApi = {
     permissions?: string;
   }) => request<ApiKey>("/api/user/keys", { method: "POST", token, body }),
   deleteKey: (token: string, keyID: string) => request<void>(`/api/user/keys/${keyID}`, { method: "DELETE", token }),
-  usage: (token: string) => request<Record<string, unknown>>("/api/user/usage", { token }),
+  usage: (token: string) => request<UsageSummary>("/api/user/usage", { token }),
   usageLogs: (token: string, page = 1, limit = 20) =>
-    request<Record<string, unknown>>(`/api/user/usage/logs?page=${page}&limit=${limit}`, { token }),
+    request<UsageLogs>(`/api/user/usage/logs?page=${page}&limit=${limit}`, { token }),
   plans: (token: string) => request<Plan[]>("/api/user/plans", { token }),
   subscribe: (token: string, planID: string) =>
     request<void>(`/api/user/subscription/${planID}`, { method: "POST", token }),

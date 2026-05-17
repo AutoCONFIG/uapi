@@ -311,24 +311,65 @@ func normalizeCSV(value string) string {
 	return strings.Join(out, ",")
 }
 
-func (s *Service) GetUsage(userID string) (map[string]interface{}, error) {
-	// Aggregate usage from logs joined with user's tokens
-	var results []map[string]interface{}
+func (s *Service) GetUsage(userID string) (*UsageSummaryResponse, error) {
+	var totals struct {
+		TotalRequests    int64
+		FailedRequests   int64
+		TotalTokens      int64
+		PromptTokens     int64
+		CompletionTokens int64
+	}
 	err := s.db.Model(&db.Log{}).
-		Select("SUM(total_tokens) as total_tokens, SUM(prompt_tokens) as prompt_tokens, SUM(completion_tokens) as completion_tokens").
+		Select(`COUNT(*) as total_requests,
+			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) as failed_requests,
+			COALESCE(SUM(total_tokens), 0) as total_tokens,
+			COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) as completion_tokens`).
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
-		Scan(&results).Error
+		Scan(&totals).Error
 	if err != nil {
 		return nil, err
 	}
 
-	if len(results) == 0 {
-		return map[string]interface{}{"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}, nil
+	var byModel []UsageModelPoint
+	if err := s.db.Model(&db.Log{}).
+		Select("model, COUNT(*) as requests, COALESCE(SUM(total_tokens), 0) as total_tokens").
+		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
+		Group("model").
+		Order("total_tokens DESC").
+		Limit(12).
+		Scan(&byModel).Error; err != nil {
+		return nil, err
 	}
-	return results[0], nil
+
+	var daily []UsageDailyPoint
+	if err := s.db.Model(&db.Log{}).
+		Select("TO_CHAR(DATE_TRUNC('day', logs.created_at), 'YYYY-MM-DD') as date, COUNT(*) as requests, COALESCE(SUM(total_tokens), 0) as total_tokens").
+		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
+		Where("logs.created_at >= ?", time.Now().AddDate(0, 0, -6)).
+		Group("DATE_TRUNC('day', logs.created_at)").
+		Order("date ASC").
+		Scan(&daily).Error; err != nil {
+		return nil, err
+	}
+
+	successRate := 1.0
+	if totals.TotalRequests > 0 {
+		successRate = float64(totals.TotalRequests-totals.FailedRequests) / float64(totals.TotalRequests)
+	}
+	return &UsageSummaryResponse{
+		TotalRequests:    totals.TotalRequests,
+		FailedRequests:   totals.FailedRequests,
+		SuccessRate:      successRate,
+		TotalTokens:      totals.TotalTokens,
+		PromptTokens:     totals.PromptTokens,
+		CompletionTokens: totals.CompletionTokens,
+		ByModel:          byModel,
+		Daily:            daily,
+	}, nil
 }
 
-func (s *Service) GetUsageLogs(userID string, page, limit int) (map[string]interface{}, error) {
+func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsResponse, error) {
 	offset := (page - 1) * limit
 
 	var total int64
@@ -343,12 +384,22 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (map[string]inter
 		Order("created_at DESC").
 		Find(&logs)
 
-	return map[string]interface{}{
-		"total": total,
-		"page":  page,
-		"limit": limit,
-		"logs":  logs,
-	}, nil
+	items := make([]UsageLogItem, len(logs))
+	for i, log := range logs {
+		items[i] = UsageLogItem{
+			ID:               log.ID,
+			CreatedAt:        log.CreatedAt.Format(time.RFC3339),
+			Model:            log.Model,
+			IsStream:         log.IsStream,
+			PromptTokens:     log.PromptTokens,
+			CompletionTokens: log.CompletionTokens,
+			TotalTokens:      log.TotalTokens,
+			LatencyMs:        log.LatencyMs,
+			StatusCode:       log.StatusCode,
+			ErrorMessage:     log.ErrorMessage,
+		}
+	}
+	return &UsageLogsResponse{Total: total, Page: page, Limit: limit, Logs: items}, nil
 }
 
 func (s *Service) ListPlans() ([]map[string]interface{}, error) {

@@ -24,9 +24,6 @@ The client currently follows the backend routes implemented in `internal/server/
 
 ## Backend Requests To Track
 
-- API Key creation only accepts `name`; IP whitelist, expiry, model limits, and scoped keys
-  need backend fields before the UI can persist them.
-- OAuth account onboarding UI is present on the channel page. It needs admin endpoints for
-  auth URL creation, callback status, and account binding before it can perform real auth.
-- Usage endpoints return generic maps today; typed response contracts would make charts and
-  filters safer.
+The original backend placeholders for channel OAuth onboarding, advanced user API
+key fields, and typed usage responses have been implemented. See
+`docs/current/handoff.md` for the current verification checklist.

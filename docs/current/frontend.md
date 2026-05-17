@@ -62,9 +62,10 @@ The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at
 `models`, and `permissions`. Permissions map to relay entry points: `chat`,
 `responses`, `messages`, and `gemini`.
 
+The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
+`/api/user/usage` and `/api/user/usage/logs`, while preserving static preview
+fallback rows when the API server is unavailable.
+
 ## Known Backend Gaps
 
-These are intentional frontend placeholders until backend endpoints exist:
-
-- Typed usage payloads. Usage endpoints currently return generic maps, which limits
-  chart safety.
+No frontend placeholder is currently waiting on the original known backend gap list.

@@ -40,6 +40,49 @@ export type ApiKey = {
   created_at: string;
 };
 
+export type UsageModelPoint = {
+  model: string;
+  requests: number;
+  total_tokens: number;
+};
+
+export type UsageDailyPoint = {
+  date: string;
+  requests: number;
+  total_tokens: number;
+};
+
+export type UsageSummary = {
+  total_requests: number;
+  failed_requests: number;
+  success_rate: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  by_model: UsageModelPoint[];
+  daily: UsageDailyPoint[];
+};
+
+export type UsageLogItem = {
+  id: number;
+  created_at: string;
+  model: string;
+  is_stream: boolean;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  latency_ms: number;
+  status_code: number;
+  error_message?: string;
+};
+
+export type UsageLogs = {
+  total: number;
+  page: number;
+  limit: number;
+  logs: UsageLogItem[];
+};
+
 export type Plan = {
   id: string;
   name: string;

@@ -59,6 +59,49 @@ type KeyResponse struct {
 	CreatedAt   string  `json:"created_at"`
 }
 
+type UsageSummaryResponse struct {
+	TotalRequests    int64             `json:"total_requests"`
+	FailedRequests   int64             `json:"failed_requests"`
+	SuccessRate      float64           `json:"success_rate"`
+	TotalTokens      int64             `json:"total_tokens"`
+	PromptTokens     int64             `json:"prompt_tokens"`
+	CompletionTokens int64             `json:"completion_tokens"`
+	ByModel          []UsageModelPoint `json:"by_model"`
+	Daily            []UsageDailyPoint `json:"daily"`
+}
+
+type UsageModelPoint struct {
+	Model       string `json:"model"`
+	Requests    int64  `json:"requests"`
+	TotalTokens int64  `json:"total_tokens"`
+}
+
+type UsageDailyPoint struct {
+	Date        string `json:"date"`
+	Requests    int64  `json:"requests"`
+	TotalTokens int64  `json:"total_tokens"`
+}
+
+type UsageLogItem struct {
+	ID               int64  `json:"id"`
+	CreatedAt        string `json:"created_at"`
+	Model            string `json:"model"`
+	IsStream         bool   `json:"is_stream"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	LatencyMs        int    `json:"latency_ms"`
+	StatusCode       int    `json:"status_code"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+}
+
+type UsageLogsResponse struct {
+	Total int64          `json:"total"`
+	Page  int            `json:"page"`
+	Limit int            `json:"limit"`
+	Logs  []UsageLogItem `json:"logs"`
+}
+
 type SubscriptionResponse struct {
 	PlanID   string `json:"plan_id"`
 	PlanName string `json:"plan_name"`
