@@ -9,3 +9,4 @@ config.yaml
 *.db-wal
 *.db-shm
 AGENTS.md
+.vscode/

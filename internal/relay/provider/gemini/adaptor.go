@@ -53,7 +53,12 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	}
 
 	// Set API key AFTER SetRequestURI so it's not overwritten
-	req.URI().QueryArgs().Set("key", provider.ExtractCredentialKey(credentials))
+	credential := provider.ExtractCredentialKey(credentials)
+	if a.account != nil && a.account.CredType == "oauth_token" {
+		req.Header.Set("Authorization", "Bearer "+credential)
+		return nil
+	}
+	req.URI().QueryArgs().Set("key", credential)
 	return nil
 }
 
@@ -76,7 +81,6 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 func (a *GeminiAdaptor) ConvertStreamLine(line []byte) []byte {
 	return a.streamState.convertLine(line, a.model)
 }
-
 
 func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }
 

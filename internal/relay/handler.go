@@ -94,11 +94,20 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	// 2. IP whitelist check
 	if token.IPWhitelist != "" {
-		clientIP := ctx.RemoteIP().String()
 		allowed := false
-		for _, ip := range strings.Split(token.IPWhitelist, ",") {
-			if strings.TrimSpace(ip) == clientIP {
-				allowed = true
+		clientIPs := clientIPCandidates(ctx)
+		for _, allowedIP := range strings.Split(token.IPWhitelist, ",") {
+			allowedIP = strings.TrimSpace(allowedIP)
+			if allowedIP == "" {
+				continue
+			}
+			for _, clientIP := range clientIPs {
+				if allowedIP == clientIP {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
 				break
 			}
 		}
@@ -787,6 +796,20 @@ func extractBearerToken(ctx *fasthttp.RequestCtx) string {
 		return auth[7:]
 	}
 	return ""
+}
+
+func clientIPCandidates(ctx *fasthttp.RequestCtx) []string {
+	candidates := []string{ctx.RemoteIP().String()}
+	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
+		candidates = append(candidates, xRealIP)
+	}
+	if forwardedFor := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Forwarded-For"))); forwardedFor != "" {
+		firstHop := strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
+		if firstHop != "" {
+			candidates = append(candidates, firstHop)
+		}
+	}
+	return candidates
 }
 
 func getAdaptor(channelType string) provider.Adaptor {

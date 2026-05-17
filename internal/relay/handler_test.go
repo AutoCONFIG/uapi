@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider"
+	"github.com/valyala/fasthttp"
 )
 
 func TestNormalizeErrorResponse_OpenAIFormat(t *testing.T) {
@@ -93,5 +94,22 @@ func TestStripProviderInfo(t *testing.T) {
 		if result != tt.expected {
 			t.Errorf("stripProviderInfo(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
+	}
+}
+
+func TestClientIPCandidatesIncludesProxyHeaders(t *testing.T) {
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.Set("X-Real-IP", "203.0.113.10")
+	ctx.Request.Header.Set("X-Forwarded-For", "198.51.100.8, 10.0.0.2")
+
+	got := clientIPCandidates(&ctx)
+	if len(got) < 3 {
+		t.Fatalf("expected remote IP plus proxy headers, got %#v", got)
+	}
+	if got[1] != "203.0.113.10" {
+		t.Fatalf("X-Real-IP candidate mismatch: %#v", got)
+	}
+	if got[2] != "198.51.100.8" {
+		t.Fatalf("X-Forwarded-For first-hop candidate mismatch: %#v", got)
 	}
 }
