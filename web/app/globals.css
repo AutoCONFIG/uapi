@@ -429,6 +429,13 @@ tr:last-child td {
   font-size: 13px;
 }
 
+.form-success {
+  margin: -2px 0 12px;
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 650;
+}
+
 
 .chart-bars {
   display: grid;

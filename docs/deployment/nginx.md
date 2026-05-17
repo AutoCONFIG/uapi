@@ -57,6 +57,9 @@ server {
 
 ## OAuth Callback Flow
 
+> **Note:** OAuth onboarding is not yet implemented (see known gaps in `docs/current/handoff.md`).
+> The `X-Forwarded-Proto` header below will be required once OAuth endpoints are active.
+
 When using browser-based OAuth login from a remote client:
 
 1. User initiates login via Web UI or API.
@@ -89,7 +92,7 @@ After=network.target
 Type=simple
 User=uapi
 WorkingDirectory=/opt/uapi
-ExecStart=/opt/uapi/bin/uapi -config /opt/uapi/config.yaml
+ExecStart=/opt/uapi/bin/cli-relay -config /opt/uapi/config.yaml
 Restart=on-failure
 RestartSec=5
 

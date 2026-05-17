@@ -44,6 +44,10 @@ export const userApi = {
     request<LoginResponse>("/api/user/login", { method: "POST", body }),
   refresh: (token: string) => request<LoginResponse>("/api/user/refresh", { method: "POST", body: { token } }),
   profile: (token: string) => request<Profile>("/api/user/profile", { token }),
+  updatePassword: (token: string, body: { old_password: string; new_password: string }) =>
+    request<void>("/api/user/password", { method: "POST", token, body }),
+  updateEmail: (token: string, body: { password: string; email: string }) =>
+    request<void>("/api/user/email", { method: "POST", token, body }),
   keys: (token: string) => request<ApiKey[]>("/api/user/keys", { token }),
   createKey: (token: string, name: string) => request<ApiKey>("/api/user/keys", { method: "POST", token, body: { name } }),
   deleteKey: (token: string, keyID: string) => request<void>(`/api/user/keys/${keyID}`, { method: "DELETE", token }),
