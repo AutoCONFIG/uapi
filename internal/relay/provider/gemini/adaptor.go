@@ -77,7 +77,15 @@ func (a *GeminiAdaptor) ConvertStreamLine(line []byte) []byte {
 	return a.streamState.convertLine(line, a.model)
 }
 
+
 func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }
+
+// CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
+// back to Gemini SSE format for clients requesting Gemini format.
+func (a *GeminiAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
+	state := newGeminiReverseState()
+	return state.convertReverseLine
+}
 
 // --- Usage parsing ---
 
@@ -124,106 +132,15 @@ func (a *GeminiAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 func init() {
 	provider.RegisterToInternal(provider.FormatGemini, geminiToInternal)
 	provider.RegisterFromInternal(provider.FormatGemini, internalToGemini)
+	provider.RegisterToResponseInternal(provider.FormatGemini, geminiResponseToInternal)
+	provider.RegisterFromResponseInternal(provider.FormatGemini, internalToGeminiResponse)
 }
 
 // Verify interface compliance at compile time.
 var _ provider.Adaptor = (*GeminiAdaptor)(nil)
 
-// --- Response helpers ---
-
-func convertGeminiResponse(respBody []byte, model string) []byte {
-	var resp map[string]interface{}
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return respBody
-	}
-
-	// Extract from candidates
-	candidates, _ := resp["candidates"].([]interface{})
-	var content string
-	var toolCalls []interface{}
-	var finishReason string
-
-	if len(candidates) > 0 {
-		cand, _ := candidates[0].(map[string]interface{})
-		if fr, ok := cand["finishReason"].(string); ok {
-			finishReason = mapGeminiFinishReason(fr)
-		}
-		if cont, ok := cand["content"].(map[string]interface{}); ok {
-			parts, _ := cont["parts"].([]interface{})
-			for _, partRaw := range parts {
-				part, ok := partRaw.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if text, ok := part["text"].(string); ok {
-					content += text
-				}
-				if fc, ok := part["functionCall"].(map[string]interface{}); ok {
-					name, _ := fc["name"].(string)
-					args := "{}"
-					if a, err := json.Marshal(fc["args"]); err == nil {
-						args = string(a)
-					}
-					toolCalls = append(toolCalls, map[string]interface{}{
-						"index": len(toolCalls),
-						"id":    "call_" + randomHex(12),
-						"type":  "function",
-						"function": map[string]interface{}{
-							"name":      name,
-							"arguments": args,
-						},
-					})
-				}
-			}
-		}
-	}
-
-	if finishReason == "" {
-		finishReason = "stop"
-	}
-
-	msg := map[string]interface{}{
-		"role":    "assistant",
-		"content": content,
-	}
-	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
-		finishReason = "tool_calls"
-	}
-
-	// Usage
-	usage := map[string]interface{}{
-		"prompt_tokens":     0,
-		"completion_tokens": 0,
-		"total_tokens":      0,
-	}
-	if um, ok := resp["usageMetadata"].(map[string]interface{}); ok {
-		pt := toInt(um["promptTokenCount"])
-		ct := toInt(um["candidatesTokenCount"])
-		usage = map[string]interface{}{
-			"prompt_tokens":     pt,
-			"completion_tokens": ct,
-			"total_tokens":      pt + ct,
-		}
-	}
-
-	chatResp := map[string]interface{}{
-		"id":      "chatcmpl-gemini",
-		"object":  "chat.completion",
-		"created": 0,
-		"model":   model,
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index":         0,
-				"message":       msg,
-				"finish_reason": finishReason,
-			},
-		},
-		"usage": usage,
-	}
-
-	b, _ := json.Marshal(chatResp)
-	return b
+func (a *GeminiAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
+	return convertGeminiSSEBuffer(sseBody)
 }
 
 func mapGeminiFinishReason(reason string) string {

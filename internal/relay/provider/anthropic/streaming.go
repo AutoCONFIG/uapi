@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -189,4 +190,263 @@ func buildOpenAIChunk(id, model string, delta map[string]interface{}, finishReas
 	}
 	b, _ := json.Marshal(chunk)
 	return []byte("data: " + string(b) + "\n\n")
+}
+
+// --- Reverse SSE conversion: OpenAI SSE → Anthropic SSE ---
+
+// anthropicReverseState tracks state for converting OpenAI SSE chunks back to Anthropic SSE events.
+type anthropicReverseState struct {
+	started  bool
+	model    string
+	msgID    string
+	blockIdx int
+}
+
+func newAnthropicReverseState() *anthropicReverseState {
+	return &anthropicReverseState{
+		msgID: fmt.Sprintf("msg_%s", randomAnthropicHex(24)),
+	}
+}
+
+// convertReverseLine converts a single OpenAI SSE data line to Anthropic SSE events.
+// It returns one or more SSE events (possibly multi-line), or nil to skip the line.
+func (s *anthropicReverseState) convertReverseLine(line []byte) []byte {
+	lineStr := strings.TrimSpace(string(line))
+
+	// Pass through non-data lines
+	if !strings.HasPrefix(lineStr, "data: ") {
+		return nil
+	}
+	data := strings.TrimPrefix(lineStr, "data: ")
+	if data == "[DONE]" {
+		return []byte("data: [DONE]\n\n")
+	}
+
+	var chunk struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index        int                    `json:"index"`
+			Delta        map[string]interface{} `json:"delta"`
+			FinishReason *string                `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		return nil
+	}
+
+	if chunk.Model != "" {
+		s.model = chunk.Model
+	}
+	if chunk.ID != "" {
+		s.msgID = chunk.ID
+	}
+
+	if len(chunk.Choices) == 0 {
+		return nil
+	}
+
+	choice := chunk.Choices[0]
+	var result []byte
+
+	// Emit message_start + content_block_start on first content chunk
+	if !s.started {
+		s.started = true
+		result = append(result, s.buildMessageStart()...)
+		result = append(result, s.buildContentBlockStart("text", 0)...)
+		s.blockIdx = 0
+	}
+
+	// Handle tool_calls in delta
+	if tcs, ok := choice.Delta["tool_calls"].([]interface{}); ok && len(tcs) > 0 {
+		for _, tcRaw := range tcs {
+			tc, ok := tcRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// If tool call has a name, it's a new tool_use block start
+			if fn, ok := tc["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok && name != "" {
+					// Close previous text block
+					if s.blockIdx == 0 {
+						result = append(result, s.buildContentBlockStop(s.blockIdx)...)
+						s.blockIdx++
+					}
+					id, _ := tc["id"].(string)
+					if id == "" {
+						id = fmt.Sprintf("toolu_%s", randomAnthropicHex(24))
+					}
+					result = append(result, s.buildToolUseBlockStart(s.blockIdx, id, name)...)
+				}
+				// Tool call arguments delta
+				if args, ok := fn["arguments"].(string); ok && args != "" {
+					result = append(result, s.buildInputJSONDelta(s.blockIdx, args)...)
+				}
+			}
+		}
+		// Check finish
+		if choice.FinishReason != nil {
+			result = append(result, s.buildContentBlockStop(s.blockIdx)...)
+			result = append(result, s.buildMessageDelta(*choice.FinishReason, chunk.Usage)...)
+		}
+		if len(result) > 0 {
+			return result
+		}
+		return nil
+	}
+
+	// Handle content delta
+	if content, ok := choice.Delta["content"].(string); ok && content != "" {
+		result = append(result, s.buildTextDelta(s.blockIdx, content)...)
+	}
+
+	// Handle role-only delta (first chunk, already handled by message_start)
+	if len(choice.Delta) == 0 || (len(choice.Delta) == 1 && choice.Delta["role"] != nil) {
+		if choice.FinishReason == nil && len(result) == 0 {
+			return nil
+		}
+	}
+
+	// Handle finish
+	if choice.FinishReason != nil {
+		result = append(result, s.buildContentBlockStop(s.blockIdx)...)
+		result = append(result, s.buildMessageDelta(*choice.FinishReason, chunk.Usage)...)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func (s *anthropicReverseState) buildMessageStart() []byte {
+	event := map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":      s.msgID,
+			"type":    "message",
+			"role":    "assistant",
+			"content": []interface{}{},
+			"model":   s.model,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: message_start\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildContentBlockStart(blockType string, idx int) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_start",
+		"index": idx,
+		"content_block": map[string]interface{}{
+			"type": blockType,
+			"text": "",
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: content_block_start\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildToolUseBlockStart(idx int, id, name string) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_start",
+		"index": idx,
+		"content_block": map[string]interface{}{
+			"type":  "tool_use",
+			"id":    id,
+			"name":  name,
+			"input": map[string]interface{}{},
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: content_block_start\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildTextDelta(idx int, text string) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": idx,
+		"delta": map[string]interface{}{
+			"type": "text_delta",
+			"text": text,
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: content_block_delta\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildInputJSONDelta(idx int, partialJSON string) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": idx,
+		"delta": map[string]interface{}{
+			"type":         "input_json_delta",
+			"partial_json": partialJSON,
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: content_block_delta\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildContentBlockStop(idx int) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": idx,
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: content_block_stop\ndata: " + string(b) + "\n\n")
+}
+
+func (s *anthropicReverseState) buildMessageDelta(finishReason string, usage *struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}) []byte {
+	stopReason := mapFinishReasonFromOpenAI(finishReason)
+	outputTokens := 0
+	if usage != nil {
+		outputTokens = usage.CompletionTokens
+	}
+	event := map[string]interface{}{
+		"type": "message_delta",
+		"delta": map[string]interface{}{
+			"stop_reason": stopReason,
+		},
+		"usage": map[string]interface{}{
+			"output_tokens": outputTokens,
+		},
+	}
+	b, _ := json.Marshal(event)
+	return []byte("event: message_delta\ndata: " + string(b) + "\n\nevent: message_stop\ndata: {}\n\n")
+}
+
+// mapFinishReasonFromOpenAI maps OpenAI finish reasons back to Anthropic stop_reason.
+func mapFinishReasonFromOpenAI(reason string) string {
+	switch reason {
+	case "stop":
+		return "end_turn"
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	default:
+		return "end_turn"
+	}
+}
+
+// randomAnthropicHex generates a random hex string for IDs.
+func randomAnthropicHex(n int) string {
+	b := make([]byte, n)
+	// Use crypto/rand for uniqueness
+	if _, err := cryptoRandRead(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
+	return hexEncodeToString(b)
 }

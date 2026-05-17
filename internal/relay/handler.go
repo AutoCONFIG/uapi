@@ -208,13 +208,13 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
-		r.handleStreaming(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+		r.handleStreaming(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens)
 	} else if forceStreamActive {
 		streaming = true
-		r.handleForceStream(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+		r.handleForceStream(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens)
 	} else {
 		streaming = true // handleBuffered manages its own concurrency release
-		r.handleBuffered(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, start, estimatedTokens)
+		r.handleBuffered(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens)
 	}
 
 	// 10. Record affinity (for non-streaming paths; streaming sets affinity inside goroutine on success)
@@ -224,7 +224,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
-func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -254,7 +254,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 		copy(bodyCopy, respBody)
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat)
 		return
 	}
 
@@ -271,9 +271,15 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 	tracker := newStreamTracker(adaptor)
 
 	// Determine if we need line conversion (Anthropic/Gemini need format conversion)
-	var convertLine func([]byte) []byte
+	var inputConvert func([]byte) []byte
 	if adaptor.GetChannelType() != "openai" {
-		convertLine = adaptor.ConvertStreamLine
+		inputConvert = adaptor.ConvertStreamLine
+	}
+
+	// Determine if we need reverse conversion (client expects non-OpenAI SSE format)
+	var outputConvert func([]byte) []byte
+	if clientFormat != provider.FormatOpenAIChat && clientFormat != provider.FormatOpenAIResp {
+		outputConvert = adaptor.CreateReverseStreamConverter()
 	}
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
@@ -288,7 +294,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 		defer fasthttp.ReleaseResponse(upResp)
 		defer r.concLimiter.Release(token.ID.String())
 
-		result := streamAndForward(upResp.BodyStream(), reader, tracker, convertLine)
+		result := streamAndForward(upResp.BodyStream(), reader, tracker, inputConvert, outputConvert)
 		if result.err != nil {
 			log.Printf("stream forward error: %v", result.err)
 		} else {
@@ -306,7 +312,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(upReq)
@@ -331,7 +337,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 		respBody := upResp.Body()
 		bodyCopy := make([]byte, len(respBody))
 		copy(bodyCopy, respBody)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat)
 		return
 	}
 
@@ -343,15 +349,30 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 		return
 	}
 
-	// TODO: StreamToNonStream only handles OpenAI SSE format; non-OpenAI upstreams will produce empty responses
-	// SSE -> non-stream JSON
+	// Convert upstream SSE to OpenAI SSE format if needed (required for StreamToNonStream)
+	if adaptor.GetChannelType() != "openai" {
+		respBody = adaptor.ConvertSSEBuffer(respBody)
+	}
+
+	// SSE -> non-stream JSON (produces OpenAI Chat format)
 	respBody = StreamToNonStream(respBody)
+
+	// Parse usage from OpenAI JSON BEFORE client-format conversion
+	pt, ct := parseNonStreamUsage(respBody)
+
+	// Convert from OpenAI JSON to client format if needed
+	if clientFormat != provider.FormatOpenAIChat {
+		if converted, err := provider.ConvertResponse(provider.FormatOpenAIChat, clientFormat, respBody); err != nil {
+			log.Printf("response conversion error: %v", err)
+		} else {
+			respBody = converted
+		}
+	}
 
 	ctx.SetStatusCode(statusCode)
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 
-	pt, ct := parseNonStreamUsage(respBody)
 	go r.writeLog(token.ID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode)
 	r.concLimiter.Release(token.ID.String())
 	if r.billing != nil {
@@ -399,7 +420,7 @@ func (c *channelCache) get() []db.Channel {
 }
 
 // handleBuffered: standard buffered request with retry.
-func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int) {
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int) {
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
@@ -482,11 +503,21 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 	}
 
 	if statusCode >= 400 {
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start, clientFormat)
 		return
 	}
 
-	// TODO: Response format conversion (requires reverse converters, upstreamFormat -> clientFormat)
+	// Parse usage from upstream-format response BEFORE conversion
+	pt, ct := r.settleAndRefund(token.ID.String(), respBody, adaptor, estTokens, model)
+
+	// Response format conversion
+	if clientFormat != upstreamFormat {
+		if converted, err := provider.ConvertResponse(upstreamFormat, clientFormat, respBody); err != nil {
+			log.Printf("response conversion error: %v", err)
+		} else {
+			respBody = converted
+		}
+	}
 
 	ctx.SetStatusCode(statusCode)
 	respHeaders.VisitAll(func(key, value []byte) {
@@ -494,8 +525,6 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 	})
 	ctx.SetBody(respBody)
 
-	r.settleAndRefund(token.ID.String(), respBody, adaptor, estTokens, model)
-	pt, ct := parseNonStreamUsage(respBody)
 	go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode)
 }
 
@@ -585,13 +614,107 @@ func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTo
 	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, fasthttp.StatusInternalServerError)
 }
 
-func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time) {
+// normalizeErrorResponse converts an upstream error body into the client's expected format.
+func normalizeErrorResponse(respBody []byte, clientFormat provider.Format) []byte {
+	// Try OpenAI/Anthropic style first: {"error": {"message": "..."}}
+	var openaiStyle struct {
+		Error *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+		Message string `json:"message"` // Gemini style top-level message
+		Detail  string `json:"detail"`  // some providers
+	}
+
+	errMsg := "upstream error"
+	if json.Unmarshal(respBody, &openaiStyle) == nil {
+		if openaiStyle.Error != nil && openaiStyle.Error.Message != "" {
+			errMsg = openaiStyle.Error.Message
+		} else if openaiStyle.Message != "" {
+			errMsg = openaiStyle.Message
+		} else if openaiStyle.Detail != "" {
+			errMsg = openaiStyle.Detail
+		}
+	}
+
+	// If the message is still the default, try Gemini nested error: {"error": {"message": "...", "status": "..."}}
+	if errMsg == "upstream error" {
+		var geminiStyle struct {
+			Error struct {
+				Message string `json:"message"`
+				Code    int    `json:"code"`
+				Status  string `json:"status"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &geminiStyle) == nil && geminiStyle.Error.Message != "" {
+			errMsg = geminiStyle.Error.Message
+		}
+	}
+
+	errMsg = stripProviderInfo(errMsg)
+
+	switch clientFormat {
+	case provider.FormatAnthropic:
+		return formatAnthropicError(errMsg)
+	case provider.FormatGemini:
+		return formatGeminiError(errMsg)
+	default: // OpenAI Chat / Responses
+		return formatOpenAIError(errMsg)
+	}
+}
+
+func stripProviderInfo(msg string) string {
+	// Remove common provider-specific prefixes/identifiers that leak upstream info
+	// e.g. "org-xxx:", "req_xxx:", model paths like "/v1/models/xxx"
+	for _, prefix := range []string{"org-", "req_"} {
+		if strings.HasPrefix(msg, prefix) {
+			msg = msg[len(prefix):]
+		}
+	}
+	return msg
+}
+
+func formatOpenAIError(msg string) []byte {
+	result, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": msg,
+			"type":    "relay_error",
+		},
+	})
+	return result
+}
+
+func formatAnthropicError(msg string) []byte {
+	result, _ := json.Marshal(map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    "api_error",
+			"message": msg,
+		},
+	})
+	return result
+}
+
+func formatGeminiError(msg string) []byte {
+	result, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    500,
+			"message": msg,
+			"status":  "INTERNAL",
+		},
+	})
+	return result
+}
+
+func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format) {
 	r.concLimiter.Release(tokenID)
 	if r.billing != nil {
 		r.billing.Refund(tokenID, estTokens)
 	}
 	ctx.SetStatusCode(statusCode)
-	ctx.SetBody(respBody)
+	normalizedBody := normalizeErrorResponse(respBody, clientFormat)
+	ctx.SetBody(normalizedBody)
 	go r.writeLog(tokenID, ch.ID, acc.ID, model, isStream, 0, 0, start, statusCode)
 }
 
@@ -715,10 +838,10 @@ func jsonEscape(s string) string {
 	return s
 }
 
-func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) {
+func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int) {
 	r.concLimiter.Release(tokenID)
 	if r.billing == nil {
-		return
+		return 0, 0
 	}
 	pt, ct := 0, 0
 	if adaptor != nil && len(respBody) > 0 {
@@ -727,4 +850,5 @@ func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provi
 		}
 	}
 	go r.billing.RefundAndSettle(tokenID, estTokens, pt, ct, model)
+	return pt, ct
 }

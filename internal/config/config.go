@@ -104,6 +104,12 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
+	// Guard: MaxBodySizeMB <= 0 rejects all POST requests, default to 100
+	if cfg.Server.MaxBodySizeMB <= 0 {
+		cfg.Server.MaxBodySizeMB = 100
+	}
+
 	return cfg, nil
 }
 

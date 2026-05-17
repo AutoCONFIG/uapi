@@ -62,7 +62,8 @@ func streamAndForward(
 	bodyStream io.Reader,
 	reader *SSEStreamReader,
 	tracker *streamTracker,
-	convertLine func([]byte) []byte,
+	inputConvert func([]byte) []byte,
+	outputConvert func([]byte) []byte,
 ) streamResult {
 	defer reader.Done()
 	closer, needClose := bodyStream.(io.Closer)
@@ -84,16 +85,25 @@ func streamAndForward(
 			continue
 		}
 
-		// Convert line format if adaptor requires it
+		// Stage 1: upstream SSE → OpenAI SSE
 		var forwardLine []byte
-		if convertLine != nil {
-			converted := convertLine(line)
+		if inputConvert != nil {
+			converted := inputConvert(line)
 			if converted == nil {
 				continue // skip lines the converter filters out
 			}
 			forwardLine = converted
 		} else {
 			forwardLine = append([]byte(lineStr), '\n', '\n')
+		}
+
+		// Stage 2: OpenAI SSE → client format SSE (if needed)
+		if outputConvert != nil {
+			converted := outputConvert(forwardLine)
+			if converted == nil {
+				continue
+			}
+			forwardLine = converted
 		}
 
 		// Forward to client

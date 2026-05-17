@@ -90,11 +90,23 @@ func (a *OpenAIAdaptor) ConvertStreamLine(line []byte) []byte {
 	return line
 }
 
+// ConvertSSEBuffer passes the SSE buffer through (already OpenAI SSE format).
+func (a *OpenAIAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
+	return sseBody
+}
+
+// CreateReverseStreamConverter returns nil — no reverse conversion needed for OpenAI.
+func (a *OpenAIAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
+	return nil
+}
+
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
 
 func init() {
 	provider.RegisterToInternal(provider.FormatOpenAIChat, openaiChatToInternal)
 	provider.RegisterFromInternal(provider.FormatOpenAIChat, internalToOpenAIChat)
+	provider.RegisterToResponseInternal(provider.FormatOpenAIChat, openaiResponseToInternal)
+	provider.RegisterFromResponseInternal(provider.FormatOpenAIChat, internalToOpenAIResponse)
 	// Responses API uses the same input format as Chat (OpenAI messages)
 	// but outputs in Responses format when channel APIFormat == "responses"
 	provider.RegisterToInternal(provider.FormatOpenAIResp, openaiChatToInternal)

@@ -91,6 +91,8 @@ type Adaptor interface {
 	ToInternal(body []byte) (*InternalRequest, error)
 	FromInternal(req *InternalRequest) ([]byte, error)
 	ConvertStreamLine(line []byte) []byte
+	ConvertSSEBuffer(sseBody []byte) []byte
+	CreateReverseStreamConverter() func([]byte) []byte
 	ParseUsage(respBody []byte) (promptTokens, completionTokens int, err error)
 	ParseStreamUsage(lastChunk []byte) (promptTokens, completionTokens int, err error)
 	GetChannelType() string

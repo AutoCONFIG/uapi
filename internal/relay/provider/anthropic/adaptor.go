@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/AutoCONFIG/cli-relay/internal/db"
 	"github.com/AutoCONFIG/cli-relay/internal/relay/provider"
@@ -60,7 +59,18 @@ func (a *AnthropicAdaptor) ConvertStreamLine(line []byte) []byte {
 	return a.streamState.convertLine(line)
 }
 
+func (a *AnthropicAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
+	return convertAnthropicSSEBuffer(sseBody)
+}
+
 func (a *AnthropicAdaptor) GetChannelType() string { return "anthropic" }
+
+// CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
+// back to Anthropic SSE events for clients requesting Anthropic format.
+func (a *AnthropicAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
+	state := newAnthropicReverseState()
+	return state.convertReverseLine
+}
 
 // --- Usage parsing ---
 
@@ -112,129 +122,26 @@ func (a *AnthropicAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) 
 func init() {
 	provider.RegisterToInternal(provider.FormatAnthropic, anthropicToInternal)
 	provider.RegisterFromInternal(provider.FormatAnthropic, internalToAnthropic)
+	provider.RegisterToResponseInternal(provider.FormatAnthropic, anthropicResponseToInternal)
+	provider.RegisterFromResponseInternal(provider.FormatAnthropic, internalToAnthropicResponse)
 }
 
 // Verify interface compliance at compile time.
 var _ provider.Adaptor = (*AnthropicAdaptor)(nil)
 
-// --- Response helpers (retained from original) ---
-
-func convertAnthropicResponse(respBody []byte) []byte {
-	var resp map[string]interface{}
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return respBody
-	}
-
-	msgID, _ := resp["id"].(string)
-	model, _ := resp["model"].(string)
-	stopReason, _ := resp["stop_reason"].(string)
-
-	// Convert content blocks to OpenAI message
-	content, toolCalls := convertContentBlocks(resp["content"])
-
-	finishReason := mapFinishReason(stopReason)
-
-	msg := map[string]interface{}{
-		"role":    "assistant",
-		"content": content,
-	}
-	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
-	}
-
-	usage := convertUsage(resp["usage"])
-
-	chatResp := map[string]interface{}{
-		"id":      msgID,
-		"object":  "chat.completion",
-		"model":   model,
-		"created": time.Now().Unix(),
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index":         0,
-				"message":       msg,
-				"finish_reason": finishReason,
-			},
-		},
-		"usage": usage,
-	}
-
-	b, _ := json.Marshal(chatResp)
-	return b
-}
-
-func convertContentBlocks(contentRaw interface{}) (interface{}, []interface{}) {
-	blocks, ok := contentRaw.([]interface{})
-	if !ok {
-		return nil, nil
-	}
-
-	var textParts []string
-	var toolCalls []interface{}
-
-	for _, blockRaw := range blocks {
-		block, ok := blockRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		blockType, _ := block["type"].(string)
-
-		switch blockType {
-		case "text":
-			if text, ok := block["text"].(string); ok {
-				textParts = append(textParts, text)
-			}
-		case "tool_use":
-			id, _ := block["id"].(string)
-			name, _ := block["name"].(string)
-			args := "{}"
-			if a, err := json.Marshal(block["input"]); err == nil {
-				args = string(a)
-			}
-			toolCalls = append(toolCalls, map[string]interface{}{
-				"index": len(toolCalls),
-				"id":    id,
-				"type":  "function",
-				"function": map[string]interface{}{
-					"name":      name,
-					"arguments": args,
-				},
-			})
-		}
-	}
-
-	content := strings.Join(textParts, "")
-	if content == "" && len(toolCalls) == 0 {
-		content = ""
-	}
-	return content, toolCalls
-}
-
-func convertUsage(usageRaw interface{}) map[string]interface{} {
-	if usageRaw == nil {
-		return map[string]interface{}{
-			"prompt_tokens":     0,
-			"completion_tokens": 0,
-			"total_tokens":      0,
-		}
-	}
-	usage, ok := usageRaw.(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{
-			"prompt_tokens":     0,
-			"completion_tokens": 0,
-			"total_tokens":      0,
-		}
-	}
-	input := toInt(usage["input_tokens"])
-	output := toInt(usage["output_tokens"])
-	return map[string]interface{}{
-		"prompt_tokens":     input,
-		"completion_tokens": output,
-		"total_tokens":      input + output,
+// toInt converts an interface{} (float64, int, etc.) to int.
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
 	}
 }
 
+// mapFinishReason maps Anthropic stop_reason to OpenAI finish_reason (used by streaming).
 func mapFinishReason(reason string) string {
 	switch reason {
 	case "end_turn":
@@ -247,16 +154,5 @@ func mapFinishReason(reason string) string {
 		return "stop"
 	default:
 		return "stop"
-	}
-}
-
-func toInt(v interface{}) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	default:
-		return 0
 	}
 }

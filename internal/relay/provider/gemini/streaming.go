@@ -211,3 +211,156 @@ func convertGeminiSSEBuffer(sseBody []byte) []byte {
 	}
 	return sseBody
 }
+
+// --- Reverse SSE conversion: OpenAI SSE → Gemini SSE ---
+
+// geminiReverseState tracks state for converting OpenAI SSE chunks back to Gemini format.
+type geminiReverseState struct {
+	model string
+}
+
+func newGeminiReverseState() *geminiReverseState {
+	return &geminiReverseState{}
+}
+
+// convertReverseLine converts a single OpenAI SSE data line to Gemini SSE format.
+// Gemini streaming uses data-only SSE lines with JSON payloads containing candidates.
+func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
+	lineStr := strings.TrimSpace(string(line))
+
+	if !strings.HasPrefix(lineStr, "data: ") {
+		return nil
+	}
+	data := strings.TrimPrefix(lineStr, "data: ")
+	if data == "[DONE]" {
+		return []byte("data: [DONE]\n\n")
+	}
+
+	var chunk struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Index        int                    `json:"index"`
+			Delta        map[string]interface{} `json:"delta"`
+			FinishReason *string                `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		return nil
+	}
+
+	if chunk.Model != "" {
+		s.model = chunk.Model
+	}
+
+	if len(chunk.Choices) == 0 {
+		// Usage-only chunk
+		if chunk.Usage != nil {
+			return s.buildUsageChunk(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+		return nil
+	}
+
+	choice := chunk.Choices[0]
+	var result []byte
+
+	// Build Gemini candidate
+	parts := []interface{}{}
+
+	// Text content
+	if content, ok := choice.Delta["content"].(string); ok && content != "" {
+		parts = append(parts, map[string]interface{}{
+			"text": content,
+		})
+	}
+
+	// Tool calls → functionCall parts
+	if tcs, ok := choice.Delta["tool_calls"].([]interface{}); ok {
+		for _, tcRaw := range tcs {
+			tc, ok := tcRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			fn, _ := tc["function"].(map[string]interface{})
+			if fn == nil {
+				continue
+			}
+			name, _ := fn["name"].(string)
+			argsStr, _ := fn["arguments"].(string)
+			args := map[string]interface{}{}
+			if argsStr != "" {
+				_ = json.Unmarshal([]byte(argsStr), &args)
+			}
+			parts = append(parts, map[string]interface{}{
+				"functionCall": map[string]interface{}{
+					"name": name,
+					"args": args,
+				},
+			})
+		}
+	}
+
+	// Role-only delta (skip, Gemini doesn't need it)
+	if len(parts) == 0 {
+		if choice.FinishReason == nil && chunk.Usage == nil {
+			return nil
+		}
+	}
+
+	candidate := map[string]interface{}{
+		"content": map[string]interface{}{
+			"parts": parts,
+			"role":  "model",
+		},
+	}
+
+	if choice.FinishReason != nil {
+		candidate["finishReason"] = mapOpenAIFinishReasonToGemini(*choice.FinishReason)
+	}
+
+	gemChunk := map[string]interface{}{
+		"candidates": []interface{}{candidate},
+	}
+
+	// Include usage in the final chunk
+	if chunk.Usage != nil {
+		gemChunk["usageMetadata"] = map[string]interface{}{
+			"promptTokenCount":     chunk.Usage.PromptTokens,
+			"candidatesTokenCount": chunk.Usage.CompletionTokens,
+			"totalTokenCount":      chunk.Usage.PromptTokens + chunk.Usage.CompletionTokens,
+		}
+	}
+
+	b, _ := json.Marshal(gemChunk)
+	result = append(result, []byte("data: "+string(b)+"\n\n")...)
+	return result
+}
+
+func (s *geminiReverseState) buildUsageChunk(pt, ct int) []byte {
+	chunk := map[string]interface{}{
+		"usageMetadata": map[string]interface{}{
+			"promptTokenCount":     pt,
+			"candidatesTokenCount": ct,
+			"totalTokenCount":      pt + ct,
+		},
+	}
+	b, _ := json.Marshal(chunk)
+	return []byte("data: " + string(b) + "\n\n")
+}
+
+// mapOpenAIFinishReasonToGemini maps OpenAI finish reasons to Gemini finish reasons.
+func mapOpenAIFinishReasonToGemini(reason string) string {
+	switch reason {
+	case "stop":
+		return "STOP"
+	case "length":
+		return "MAX_TOKENS"
+	case "content_filter":
+		return "SAFETY"
+	default:
+		return "STOP"
+	}
+}

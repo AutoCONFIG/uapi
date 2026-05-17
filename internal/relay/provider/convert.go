@@ -31,3 +31,35 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	}
 	return fromInternal(internal)
 }
+
+// --- Response conversion (upstream → InternalResponse → client) ---
+
+var toResponseInternal = map[Format]func([]byte) (*InternalResponse, error){}
+var fromResponseInternal = map[Format]func(*InternalResponse) ([]byte, error){}
+
+func RegisterToResponseInternal(format Format, converter func([]byte) (*InternalResponse, error)) {
+	toResponseInternal[format] = converter
+}
+
+func RegisterFromResponseInternal(format Format, converter func(*InternalResponse) ([]byte, error)) {
+	fromResponseInternal[format] = converter
+}
+
+func ConvertResponse(upstreamFormat, clientFormat Format, body []byte) ([]byte, error) {
+	if upstreamFormat == clientFormat {
+		return body, nil
+	}
+	toResp, ok := toResponseInternal[upstreamFormat]
+	if !ok {
+		return nil, fmt.Errorf("no response ToInternal converter for format: %s", upstreamFormat)
+	}
+	internal, err := toResp(body)
+	if err != nil {
+		return nil, fmt.Errorf("response ToInternal conversion failed: %w", err)
+	}
+	fromResp, ok := fromResponseInternal[clientFormat]
+	if !ok {
+		return nil, fmt.Errorf("no response FromInternal converter for format: %s", clientFormat)
+	}
+	return fromResp(internal)
+}

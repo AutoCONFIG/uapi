@@ -117,8 +117,6 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 	}
 	if req.CooldownUntil != nil {
 		updates["cooldown_until"] = req.CooldownUntil
-	} else {
-		updates["cooldown_until"] = nil
 	}
 	updates["updated_at"] = time.Now()
 	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {

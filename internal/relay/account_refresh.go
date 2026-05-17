@@ -51,7 +51,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		"client_id":     {account.ClientID},
 	}
 
-	resp, err := http.PostForm(account.TokenURL, data)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).PostForm(account.TokenURL, data)
 	if err != nil {
 		return "", fmt.Errorf("refresh request failed: %w", err)
 	}
@@ -92,7 +92,8 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 			log.Printf("failed to update refreshed credentials for account %s: %v", account.ID, err)
 			return
 		}
-		// Update in-memory expiry so we don't re-trigger refresh on every request
+		// Update in-memory state so subsequent requests use the new credentials
+		account.Credentials = newCreds
 		account.TokenExpiry = &newExpiry
 	}()
 
