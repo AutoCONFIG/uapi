@@ -1,5 +1,7 @@
 # UAPI Frontend Notes
 
+For a concise current-state handoff, read `docs/uapi-handoff.md` first.
+
 UAPI is the public-facing name for the frontend product. It is short for
 Unified API / Your API and is presented as a unified AI API gateway.
 
