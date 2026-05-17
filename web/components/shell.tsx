@@ -82,7 +82,7 @@ function Sidebar({ variant }: { variant: AppShellVariant }) {
   return (
     <aside className="sidebar">
       <Link className="brand" href={homeHref}>
-        <span>{variant === "admin" ? "管理后台" : "控制台"}</span>
+        <span>UAPI</span>
       </Link>
       {variant === "admin" ? (
         <NavGroup label="Admin" items={adminNav} pathname={pathname} />

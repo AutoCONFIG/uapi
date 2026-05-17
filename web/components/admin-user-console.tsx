@@ -5,6 +5,7 @@ import { Ban, KeyRound, Search, Trash2, Undo2 } from "lucide-react";
 import { StatusBadge } from "@/components/shell";
 
 type UserRow = {
+  id: string;
   email: string;
   status: string;
   balance: string;

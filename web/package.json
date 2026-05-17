@@ -1,5 +1,5 @@
 {
-  "name": "cli-relay-web",
+  "name": "uapi-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {

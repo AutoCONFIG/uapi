@@ -1,4 +1,15 @@
-import type { ApiEnvelope, ApiKey, Dashboard, LoginResponse, PaginatedResponse, Plan, Profile } from "@/types/api";
+import type {
+  Account,
+  ApiEnvelope,
+  ApiKey,
+  Channel,
+  Dashboard,
+  LoginResponse,
+  PaginatedResponse,
+  Plan,
+  Profile,
+  User,
+} from "@/types/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -51,9 +62,39 @@ export const adminApi = {
   initStatus: () => request<{ initialized: boolean }>("/api/admin/init-status"),
   setup: (body: { username: string; password: string }) => request<void>("/api/admin/setup", { method: "POST", body }),
   dashboard: (token: string) => request<Dashboard>("/api/admin/dashboard", { token }),
-  channels: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/channels", { token }),
-  accounts: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/accounts", { token }),
-  users: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/users", { token }),
+  channels: (token: string, page = 1, limit = 20) =>
+    request<PaginatedResponse<Channel>>(`/api/admin/channels?page=${page}&limit=${limit}`, { token }),
+  createChannel: (token: string, body: {
+    name: string;
+    type: string;
+    endpoint: string;
+    models?: string;
+    priority?: number;
+    api_format?: string;
+    force_stream?: boolean;
+    affinity_ttl?: number;
+  }) => request<Channel>("/api/admin/channels", { method: "POST", token, body }),
+  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "endpoint" | "models" | "priority" | "api_format" | "force_stream" | "affinity_ttl">>) =>
+    request<Channel>(`/api/admin/channels?id=${id}`, { method: "PUT", token, body }),
+  deleteChannel: (token: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/admin/channels?id=${id}`, { method: "DELETE", token }),
+  accounts: (token: string, page = 1, limit = 20) =>
+    request<PaginatedResponse<Account>>(`/api/admin/accounts?page=${page}&limit=${limit}`, { token }),
+  createAccount: (token: string, body: { channel_id: string; name: string; credentials: string; weight: number; enabled: boolean }) =>
+    request<Account>("/api/admin/accounts", { method: "POST", token, body }),
+  updateAccount: (token: string, id: string, body: Partial<{ channel_id: string; name: string; credentials: string; weight: number; enabled: boolean; cooldown_until: string }>) =>
+    request<Account>(`/api/admin/accounts?id=${id}`, { method: "PUT", token, body }),
+  deleteAccount: (token: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/admin/accounts?id=${id}`, { method: "DELETE", token }),
+  users: (token: string, page = 1, limit = 20, status?: "active" | "disabled") => {
+    const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (status) query.set("status", status);
+    return request<PaginatedResponse<User>>(`/api/admin/users?${query.toString()}`, { token });
+  },
+  updateUser: (token: string, id: string, body: Partial<Pick<User, "status" | "balance">>) =>
+    request<User>(`/api/admin/users?id=${id}`, { method: "PUT", token, body }),
+  deleteUser: (token: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/admin/users?id=${id}`, { method: "DELETE", token }),
   tokens: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/tokens", { token }),
   plans: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/plans", { token }),
   logs: (token: string) => request<PaginatedResponse<unknown>>("/api/admin/logs", { token }),

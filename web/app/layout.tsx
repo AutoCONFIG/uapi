@@ -3,8 +3,8 @@ import type React from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "API Console",
-  description: "AI API relay platform dashboard",
+  title: "UAPI",
+  description: "Your Unified AI API Gateway",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

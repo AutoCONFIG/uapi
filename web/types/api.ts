@@ -6,7 +6,7 @@ export type ApiEnvelope<T> = {
 
 export type LoginResponse = {
   token: string;
-  expires_at: number;
+  expires_at?: number;
 };
 
 export type Profile = {
@@ -16,6 +16,16 @@ export type Profile = {
   status: string;
   balance: number;
   created_at: string;
+};
+
+export type User = {
+  id: string;
+  email: string;
+  username: string;
+  status: "active" | "disabled";
+  balance: number;
+  created_at: string;
+  updated_at?: string;
 };
 
 export type ApiKey = {
@@ -32,6 +42,34 @@ export type Plan = {
   type: string;
   token_quota: number;
   enabled: boolean;
+};
+
+export type Channel = {
+  id: string;
+  name: string;
+  type: string;
+  endpoint: string;
+  enabled: boolean;
+  models: string;
+  priority: number;
+  api_format: string;
+  force_stream: boolean;
+  affinity_ttl: number;
+  created_at: string;
+  updated_at?: string;
+};
+
+export type Account = {
+  id: string;
+  channel_id: string;
+  name: string;
+  cred_type: "api_key" | "oauth_token";
+  weight: number;
+  enabled: boolean;
+  cooldown_until?: string;
+  token_expiry?: string;
+  created_at: string;
+  updated_at?: string;
 };
 
 export type Dashboard = {

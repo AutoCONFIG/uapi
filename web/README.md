@@ -1,7 +1,9 @@
-# CLI Relay Web
+# UAPI Web
 
-Frontend for the CLI Relay v3 API relay platform. This app is intentionally
+Frontend for UAPI, the unified AI API gateway. This app is intentionally
 kept in `web/` and should not require backend code changes for UI iteration.
+
+See `docs/uapi-frontend.md` for current product and backend alignment notes.
 
 ## Stack
 
@@ -26,6 +28,8 @@ confirmed.
 
 ## Backend Requests To Track
 
+- Admin user management supports status and delete on the backend. Random password reset
+  needs a backend endpoint before it can persist.
 - API Key creation only accepts `name`; IP whitelist, expiry, model limits, and scoped keys
   need backend fields before the UI can persist them.
 - OAuth account onboarding UI is present on the channel page. It needs admin endpoints for

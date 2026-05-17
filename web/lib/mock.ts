@@ -33,9 +33,9 @@ export const channels = [
 ];
 
 export const users = [
-  { email: "team@northstar.dev", status: "active", balance: "8.42M", keys: 3, joined: "2026-05-12" },
-  { email: "ops@acme.io", status: "active", balance: "31.0M", keys: 8, joined: "2026-05-09" },
-  { email: "trial@example.com", status: "disabled", balance: "0", keys: 1, joined: "2026-05-02" },
+  { id: "usr_01", email: "team@northstar.dev", status: "active", balance: "8.42M", keys: 3, joined: "2026-05-12" },
+  { id: "usr_02", email: "ops@acme.io", status: "active", balance: "31.0M", keys: 8, joined: "2026-05-09" },
+  { id: "usr_03", email: "trial@example.com", status: "disabled", balance: "0", keys: 1, joined: "2026-05-02" },
 ];
 
 export const accounts = [

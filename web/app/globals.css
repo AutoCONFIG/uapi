@@ -279,6 +279,11 @@ h3 {
   font-weight: 650;
 }
 
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .btn svg {
   width: 16px;
   height: 16px;
@@ -416,6 +421,12 @@ tr:last-child td {
 
 .auth-links a {
   color: var(--primary-dark);
+}
+
+.form-error {
+  margin: -2px 0 12px;
+  color: var(--red);
+  font-size: 13px;
 }
 
 
