@@ -20,12 +20,16 @@ func NewConcurrencyLimiter(limit int) *ConcurrencyLimiter {
 
 // Acquire reserves a slot for the given key. Returns false if at capacity.
 func (cl *ConcurrencyLimiter) Acquire(key string) bool {
+	return cl.AcquireWithLimit(key, cl.limit)
+}
+
+func (cl *ConcurrencyLimiter) AcquireWithLimit(key string, limit int) bool {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
-	if cl.limit <= 0 {
+	if limit <= 0 {
 		return true
 	}
-	if cl.counts[key] >= cl.limit {
+	if cl.counts[key] >= limit {
 		return false
 	}
 	cl.counts[key]++

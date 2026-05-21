@@ -1,0 +1,37 @@
+server:
+  mode: "gateway"
+  host: "0.0.0.0"
+  port: 8080
+  max_body_size_mb: 50
+  concurrency_limit: 0
+
+database:
+  host: "postgres"
+  port: 5432
+  user: "uapi"
+  password: "uapi_dev"
+  dbname: "uapi"
+  sslmode: "disable"
+
+security:
+  jwt_secret: "change-me-to-a-random-string-at-least-32-chars"
+  encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  admin_username: "admin"
+  admin_password_hash: ""
+
+gateway:
+  gateway_id: "default"
+  cache_ttl: "5s"
+  internal_secret: "change-me-to-a-random-internal-gateway-secret"
+  require_internal: false
+  control_url: ""
+  relay_node_id: ""
+  config_pull_interval: "5s"
+
+logging:
+  level: "info"
+  retention_days: 180
+
+user:
+  jwt_expiry: "24h"
+  max_keys_per_user: 5

@@ -13,10 +13,16 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("parse gemini response: %w", err)
 	}
+	if wrapped, ok := resp["response"].(map[string]interface{}); ok {
+		resp = wrapped
+	}
 
 	ir := &provider.InternalResponse{
 		ID:    "gemini-" + provider.RandomHex(16),
-		Model: "", // Gemini doesn't echo model in response
+		Model: "gemini",
+	}
+	if modelVersion, ok := resp["modelVersion"].(string); ok && modelVersion != "" {
+		ir.Model = modelVersion
 	}
 
 	// Parse candidates
@@ -26,6 +32,9 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 		ir.Choices = []provider.InternalChoice{
 			{
 				Index: 0,
+				Message: provider.InternalMessage{
+					Role: "assistant",
+				},
 			},
 		}
 
@@ -77,6 +86,10 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 	return ir, nil
 }
 
+func geminiCodeAssistResponseToInternal(body []byte) (*provider.InternalResponse, error) {
+	return geminiResponseToInternal(body)
+}
+
 // internalToGeminiResponse serializes an InternalResponse into Gemini generateContent response format.
 func internalToGeminiResponse(resp *provider.InternalResponse) ([]byte, error) {
 	// Build candidates
@@ -126,7 +139,7 @@ func internalToGeminiResponse(resp *provider.InternalResponse) ([]byte, error) {
 	}
 
 	result := map[string]interface{}{
-		"candidates":   []interface{}{cand},
+		"candidates":    []interface{}{cand},
 		"usageMetadata": usage,
 	}
 
@@ -150,4 +163,3 @@ func mapInternalFinishReason(reason string) string {
 		return "STOP"
 	}
 }
-

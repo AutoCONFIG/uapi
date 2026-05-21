@@ -2,8 +2,8 @@ package relay
 
 import (
 	"bufio"
+	"github.com/AutoCONFIG/uapi/internal/logger"
 	"io"
-	"log"
 	"strings"
 	"sync"
 )
@@ -126,7 +126,7 @@ func streamAndForward(
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("SSE scanner error: %v", err)
+		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
 		return streamResult{err: err}
 	}
 

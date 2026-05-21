@@ -420,9 +420,11 @@ func (s *Service) ListPlans() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, len(plans))
 	for i, p := range plans {
 		result[i] = map[string]interface{}{
-			"id":   p.ID.String(),
-			"name": p.Name,
-			"type": p.Type,
+			"id":           p.ID.String(),
+			"name":         p.Name,
+			"type":         p.Type,
+			"token_quota":  p.TokenQuota,
+			"enabled":      p.Enabled,
 		}
 	}
 	return result, nil

@@ -36,7 +36,15 @@ func (a *AnthropicAdaptor) GetRequestURL(path string) (string, error) {
 }
 
 func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {
-	req.Header.Set("x-api-key", provider.ExtractCredentialKey(credentials))
+	credential := provider.ExtractCredentialKey(credentials)
+	if a.account != nil && a.account.CredType == "oauth_token" {
+		req.Header.Set("Authorization", "Bearer "+credential)
+		req.Header.Set("anthropic-beta", OAuthBetaHeader)
+		req.Header.Set("x-app", "cli")
+		req.Header.Set("User-Agent", ClaudeCodeUserAgent)
+	} else {
+		req.Header.Set("x-api-key", credential)
+	}
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
 	return nil

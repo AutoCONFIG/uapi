@@ -1,6 +1,5 @@
 import { AdminUserConsole } from "@/components/admin-user-console";
 import { AppShell, PageHead } from "@/components/shell";
-import { users } from "@/lib/mock";
 
 export default function UsersPage() {
   return (
@@ -8,9 +7,9 @@ export default function UsersPage() {
       <PageHead
         eyebrow="Admin / Users"
         title="用户管理"
-        description="封禁、删除用户，或为用户随机生成新密码。管理员自用应创建普通账号。"
+        description="管理用户状态、余额和密码重置。"
       />
-      <AdminUserConsole initialUsers={users} />
+      <AdminUserConsole initialUsers={[]} />
     </AppShell>
   );
 }

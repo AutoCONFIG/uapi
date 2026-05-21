@@ -1,0 +1,16 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uapi-relay
+    restart: unless-stopped
+    volumes:
+      - ./config.relay.yaml:/app/config.yaml:ro
+    expose:
+      - "8081"
+
+networks:
+  default:
+    name: uapi-net
+    external: true

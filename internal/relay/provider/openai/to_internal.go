@@ -95,6 +95,112 @@ func openaiChatToInternal(body []byte) (*provider.InternalRequest, error) {
 	return ir, nil
 }
 
+func responsesToInternal(body []byte) (*provider.InternalRequest, error) {
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("parse openai responses request: %w", err)
+	}
+	ir := &provider.InternalRequest{Metadata: make(map[string]interface{})}
+	ir.Model, _ = req["model"].(string)
+	if s, ok := req["stream"].(bool); ok {
+		ir.Stream = s
+	}
+	if v, ok := req["max_output_tokens"].(float64); ok && v > 0 {
+		tokens := int(v)
+		ir.MaxTokens = &tokens
+	} else if v, ok := req["max_tokens"].(float64); ok && v > 0 {
+		tokens := int(v)
+		ir.MaxTokens = &tokens
+	}
+	if v, ok := req["temperature"].(float64); ok {
+		ir.Temperature = &v
+	}
+	if v, ok := req["top_p"].(float64); ok {
+		ir.TopP = &v
+	}
+	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
+		ir.Messages = append(ir.Messages, provider.InternalMessage{
+			Role:    "system",
+			Content: []provider.InternalContentPart{{Type: "text", Text: instructions}},
+		})
+	}
+	ir.Messages = append(ir.Messages, parseResponsesInput(req["input"])...)
+	return ir, nil
+}
+
+func parseResponsesInput(input interface{}) []provider.InternalMessage {
+	switch v := input.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []provider.InternalMessage{{Role: "user", Content: []provider.InternalContentPart{{Type: "text", Text: v}}}}
+	case []interface{}:
+		out := make([]provider.InternalMessage, 0, len(v))
+		for _, item := range v {
+			switch msg := item.(type) {
+			case string:
+				if msg != "" {
+					out = append(out, provider.InternalMessage{Role: "user", Content: []provider.InternalContentPart{{Type: "text", Text: msg}}})
+				}
+			case map[string]interface{}:
+				out = append(out, parseResponsesMessage(msg))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func parseResponsesMessage(msg map[string]interface{}) provider.InternalMessage {
+	role, _ := msg["role"].(string)
+	if role == "" {
+		role = "user"
+	}
+	return provider.InternalMessage{
+		Role:    role,
+		Content: parseResponsesContent(msg["content"]),
+	}
+}
+
+func parseResponsesContent(content interface{}) []provider.InternalContentPart {
+	switch c := content.(type) {
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []provider.InternalContentPart{{Type: "text", Text: c}}
+	case []interface{}:
+		var parts []provider.InternalContentPart
+		for _, item := range c {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			typ, _ := m["type"].(string)
+			switch typ {
+			case "input_text", "output_text", "text":
+				if text, _ := m["text"].(string); text != "" {
+					parts = append(parts, provider.InternalContentPart{Type: "text", Text: text})
+				}
+			case "input_image", "image_url":
+				if imageURL, ok := m["image_url"].(string); ok && imageURL != "" {
+					parts = append(parts, provider.InternalContentPart{Type: "image_url", ImageURL: &imageURL})
+				} else if imageURL, ok := m["image_url"].(map[string]interface{}); ok {
+					url, _ := imageURL["url"].(string)
+					if url != "" {
+						parts = append(parts, provider.InternalContentPart{Type: "image_url", ImageURL: &url})
+					}
+				}
+			}
+		}
+		return parts
+	default:
+		return nil
+	}
+}
+
 // parseOpenAIMessage converts a single OpenAI message object to InternalMessage.
 func parseOpenAIMessage(msg map[string]interface{}) provider.InternalMessage {
 	im := provider.InternalMessage{}

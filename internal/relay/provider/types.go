@@ -17,6 +17,7 @@ const (
 	FormatOpenAIResp Format = "openai_responses"
 	FormatAnthropic  Format = "anthropic"
 	FormatGemini     Format = "gemini"
+	FormatGeminiCode Format = "gemini_code"
 )
 
 type InternalRequest struct {

@@ -72,6 +72,9 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 	if h.RefreshPool != nil {
 		h.RefreshPool(acc.ChannelID.String())
 	}
+	if h.OAuthIdle != nil {
+		h.OAuthIdle.ScheduleAccount(&acc)
+	}
 	auditCreate(h.db, "account", acc.ID, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, acc)
 }
@@ -123,7 +126,10 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
 		return
 	}
-	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
+		return
+	}
 	if h.RefreshPool != nil {
 		if originalChannelID != existing.ChannelID {
 			// Channel changed: refresh both old and new channel pools
@@ -132,6 +138,9 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		} else {
 			h.RefreshPool(existing.ChannelID.String())
 		}
+	}
+	if h.OAuthIdle != nil {
+		h.OAuthIdle.ScheduleAccount(&existing)
 	}
 	auditUpdate(h.db, "account", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
@@ -153,6 +162,9 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 	if result.RowsAffected == 0 {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
+	}
+	if h.OAuthIdle != nil {
+		h.OAuthIdle.CancelAccount(id)
 	}
 	if h.RefreshPool != nil {
 		// Find the channel this account belonged to so we can refresh its pool

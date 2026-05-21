@@ -53,12 +53,14 @@ func (r *SSEStreamReader) Send(event []byte) bool {
 		r.mu.Unlock()
 		return false
 	}
-	r.mu.Unlock()
-
+	// Hold lock while sending to prevent Close() from closing closeCh
+	// between our closed check and the select statement.
 	select {
 	case r.eventCh <- event:
+		r.mu.Unlock()
 		return true
 	case <-r.closeCh:
+		r.mu.Unlock()
 		return false
 	}
 }

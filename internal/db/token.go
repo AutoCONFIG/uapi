@@ -1,6 +1,10 @@
 package db
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type Token struct {
 	Base
@@ -13,6 +17,7 @@ type Token struct {
 	Models      string     `gorm:"type:text" json:"models"`
 	Permissions string     `gorm:"type:text" json:"permissions"`
 	Unlimited   bool       `gorm:"default:false" json:"unlimited"`
+	PolicyID    *uuid.UUID `gorm:"type:uuid;index" json:"policy_id,omitempty"`
 }
 
 func (Token) TableName() string { return "tokens" }

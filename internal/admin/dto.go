@@ -12,6 +12,7 @@ import (
 type CreateChannelRequest struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
+	Group       string `json:"group"`
 	Endpoint    string `json:"endpoint"`
 	Models      string `json:"models"`
 	Priority    int    `json:"priority"`
@@ -24,12 +25,14 @@ type CreateChannelRequest struct {
 type UpdateChannelRequest struct {
 	Name        *string `json:"name,omitempty"`
 	Type        *string `json:"type,omitempty"`
+	Group       *string `json:"group,omitempty"`
 	Endpoint    *string `json:"endpoint,omitempty"`
 	Models      *string `json:"models,omitempty"`
 	Priority    *int    `json:"priority,omitempty"`
 	APIFormat   *string `json:"api_format,omitempty"`
 	ForceStream *bool   `json:"force_stream,omitempty"`
 	AffinityTTL *int    `json:"affinity_ttl,omitempty"`
+	Enabled     *bool   `json:"enabled,omitempty"`
 }
 
 // StartOAuthRequest asks the backend to create a provider authorization URL.
@@ -40,6 +43,7 @@ type StartOAuthRequest struct {
 	ClientID     string    `json:"client_id"`
 	ClientSecret string    `json:"client_secret"`
 	TokenURL     string    `json:"token_url"`
+	Mode         string    `json:"mode"`
 }
 
 // OAuthAuthURLResponse is returned after creating an OAuth onboarding session.
@@ -47,7 +51,17 @@ type OAuthAuthURLResponse struct {
 	AuthURL     string    `json:"auth_url"`
 	State       string    `json:"state"`
 	RedirectURI string    `json:"redirect_uri"`
+	Mode        string    `json:"mode"`
+	UserCode    string    `json:"user_code,omitempty"`
 	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// CompleteOAuthRequest completes a manual OAuth flow from a copied callback URL.
+type CompleteOAuthRequest struct {
+	State       string `json:"state"`
+	CallbackURL string `json:"callback_url"`
+	Code        string `json:"code"`
+	OAuthJSON   string `json:"oauth_json"`
 }
 
 // OAuthStatusResponse describes a pending, completed, failed, or bound OAuth session.
@@ -104,17 +118,40 @@ type CreateTokenRequest struct {
 	Models      string     `json:"models"`
 	Permissions string     `json:"permissions"`
 	Unlimited   bool       `json:"unlimited"`
+	PolicyID    *uuid.UUID `json:"policy_id"`
 }
 
 // UpdateTokenRequest is the request DTO for updating a token.
 type UpdateTokenRequest struct {
 	Name        *string    `json:"name,omitempty"`
-	Key         *string    `json:"key,omitempty"`
 	IPWhitelist *string    `json:"ip_whitelist,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	Models      *string    `json:"models,omitempty"`
 	Permissions *string    `json:"permissions,omitempty"`
 	Unlimited   *bool      `json:"unlimited,omitempty"`
+	PolicyID    *uuid.UUID `json:"policy_id,omitempty"`
+}
+
+// --- Access Policy DTOs ---
+
+type CreateAccessPolicyRequest struct {
+	Name           string `json:"name"`
+	AllowedModels  string `json:"allowed_models"`
+	MaxConcurrency int    `json:"max_concurrency"`
+	HourlyLimit    int    `json:"hourly_limit"`
+	WeeklyLimit    int    `json:"weekly_limit"`
+	MonthlyLimit   int    `json:"monthly_limit"`
+	Enabled        *bool  `json:"enabled"`
+}
+
+type UpdateAccessPolicyRequest struct {
+	Name           *string `json:"name,omitempty"`
+	AllowedModels  *string `json:"allowed_models,omitempty"`
+	MaxConcurrency *int    `json:"max_concurrency,omitempty"`
+	HourlyLimit    *int    `json:"hourly_limit,omitempty"`
+	WeeklyLimit    *int    `json:"weekly_limit,omitempty"`
+	MonthlyLimit   *int    `json:"monthly_limit,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
 }
 
 // --- Plan DTOs ---
@@ -148,6 +185,46 @@ type UpdateUserRequest struct {
 	Status      *string `json:"status,omitempty"`
 	Balance     *int64  `json:"balance,omitempty"`
 	NewPassword *string `json:"new_password,omitempty"`
+}
+
+// --- Relay Node DTOs ---
+
+type CreateRelayNodeRequest struct {
+	Name           string `json:"name"`
+	BaseURL        string `json:"base_url"`
+	Region         string `json:"region"`
+	EgressIP       string `json:"egress_ip"`
+	Weight         int    `json:"weight"`
+	MaxConcurrency int    `json:"max_concurrency"`
+	Status         string `json:"status"`
+	HealthStatus   string `json:"health_status"`
+}
+
+type UpdateRelayNodeRequest struct {
+	Name           *string `json:"name,omitempty"`
+	BaseURL        *string `json:"base_url,omitempty"`
+	Region         *string `json:"region,omitempty"`
+	EgressIP       *string `json:"egress_ip,omitempty"`
+	Weight         *int    `json:"weight,omitempty"`
+	MaxConcurrency *int    `json:"max_concurrency,omitempty"`
+	Status         *string `json:"status,omitempty"`
+	HealthStatus   *string `json:"health_status,omitempty"`
+}
+
+// --- Node Account Binding DTOs ---
+
+type CreateNodeAccountRequest struct {
+	RelayNodeID uuid.UUID `json:"relay_node_id"`
+	AccountID   uuid.UUID `json:"account_id"`
+	Weight      int       `json:"weight"`
+	Enabled     *bool     `json:"enabled"`
+}
+
+type UpdateNodeAccountRequest struct {
+	RelayNodeID *uuid.UUID `json:"relay_node_id,omitempty"`
+	AccountID   *uuid.UUID `json:"account_id,omitempty"`
+	Weight      *int       `json:"weight,omitempty"`
+	Enabled     *bool      `json:"enabled,omitempty"`
 }
 
 // --- Dashboard DTO ---

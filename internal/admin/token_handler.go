@@ -60,6 +60,7 @@ func (h *Handler) createToken(ctx *fasthttp.RequestCtx) {
 		Models:      req.Models,
 		Permissions: req.Permissions,
 		Unlimited:   req.Unlimited,
+		PolicyID:    req.PolicyID,
 	}
 	t.ID = uuid.New()
 	if err := h.db.Create(&t).Error; err != nil {
@@ -91,9 +92,6 @@ func (h *Handler) updateToken(ctx *fasthttp.RequestCtx) {
 	if req.Name != nil {
 		updates["name"] = *req.Name
 	}
-	if req.Key != nil {
-		updates["key"] = *req.Key
-	}
 	if req.IPWhitelist != nil {
 		updates["ip_whitelist"] = *req.IPWhitelist
 	}
@@ -109,12 +107,18 @@ func (h *Handler) updateToken(ctx *fasthttp.RequestCtx) {
 	if req.Unlimited != nil {
 		updates["unlimited"] = *req.Unlimited
 	}
+	if req.PolicyID != nil {
+		updates["policy_id"] = *req.PolicyID
+	}
 	updates["updated_at"] = time.Now()
 	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
 		return
 	}
-	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
+		return
+	}
 	auditUpdate(h.db, "token", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
 }

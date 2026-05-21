@@ -32,6 +32,28 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	return fromInternal(internal)
 }
 
+func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte, adaptor Adaptor) ([]byte, error) {
+	if clientFormat == upstreamFormat {
+		return body, nil
+	}
+	toInternal, ok := toInternalConverters[clientFormat]
+	if !ok {
+		return nil, fmt.Errorf("no ToInternal converter for format: %s", clientFormat)
+	}
+	internal, err := toInternal(body)
+	if err != nil {
+		return nil, fmt.Errorf("ToInternal conversion failed: %w", err)
+	}
+	if adaptor == nil {
+		fromInternal, ok := fromInternalConverters[upstreamFormat]
+		if !ok {
+			return nil, fmt.Errorf("no FromInternal converter for format: %s", upstreamFormat)
+		}
+		return fromInternal(internal)
+	}
+	return adaptor.FromInternal(internal)
+}
+
 // --- Response conversion (upstream → InternalResponse → client) ---
 
 var toResponseInternal = map[Format]func([]byte) (*InternalResponse, error){}

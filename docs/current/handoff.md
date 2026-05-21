@@ -22,8 +22,41 @@ working state so the next agent can continue without extra user briefing.
 
 - `docs/README.md` is the documentation index.
 - `docs/current/` is the source of truth for active implementation work.
+- `docs/current/gateway-relay.md` is the current source of truth for Gateway/Relay control-plane architecture.
+- `docs/current/code-channels.md` is the current source of truth for CodeX,
+  Gemini Code, Claude Code, and standard provider API alignment.
+- Runtime logging is documented in `docs/current/platform-design.md`; backend
+  logs are structured JSON from `internal/logger`, controlled by
+  `logging.level` in config. Current local development config uses `debug`;
+  production should normally use `info` or `warn`.
+- Code channel model presets and provider quota/usage metadata display are
+  documented in `docs/current/code-channels.md`; the old
+  `docs/reference/cli-auth-reference.md` is only a pointer to avoid stale auth
+  guidance.
 - `docs/deployment/` contains deployment and operations notes.
 - `docs/reference/` contains background reference material only.
+
+## Current Channel State
+
+- Admin channels are grouped by `channels.channel_group`; missing values become
+  `default`, displayed as `默认渠道`.
+- The channel page uses a narrow group rail, tile grid, and drawer-based channel
+  editing/credential management.
+- Channel provider family remains `channels.type`: `openai`, `gemini`,
+  `anthropic`.
+- Protocol/client variant is `channels.api_format`: `standard`, `responses`,
+  `codex`, `gemini_code`, or `claude_code`.
+- OAuth accounts store encrypted refresh tokens plus JSON `accounts.metadata`
+  for provider account/project/plan fields.
+- OAuth lifecycle follows upstream client behavior on use. UAPI adds expiry-driven
+  idle maintenance only for Claude Code and Gemini Code, because their normal
+  local client paths do not have a standalone long-idle keep-alive loop. Each
+  enabled Claude/Gemini OAuth account gets a timer based on provider
+  `token_expiry`, with stable jitter between 60 and 5 minutes before expiry;
+  CodeX keeps Codex's own expired-token/8-day refresh rule.
+- Code channel behavior must be checked against the local upstream official
+  client sources listed in `docs/current/code-channels.md` before changing auth,
+  refresh, metadata, or request-shaping logic.
 
 ## Frontend
 
@@ -48,8 +81,9 @@ Main routes:
 
 - Auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
-- Admin console: `/admin/dashboard`, `/admin/channels`, `/admin/users`,
-  `/admin/tokens`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`
+- Admin console: `/admin/dashboard`, `/admin/access-policies`, `/admin/relay-nodes`, `/admin/channels`,
+  `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
+  `/admin/audit-logs`
 - `/admin/accounts` is a compatibility page only. Accounts are conceptually folded
   into channels.
 
@@ -84,8 +118,10 @@ internal/
 ├── auth/
 │   ├── jwt.go                 # JWT generate/verify (dual: admin + user)
 │   └── middleware.go           # JWT auth middleware
-├── relay/                     # Core relay engine
-│   ├── handler.go             # Dispatch logic
+├── gateway/                   # Gateway request auth, node scheduling, reverse proxy
+├── internalauth/              # Gateway/Relay HMAC signing
+├── relay/                     # Core relay execution engine
+│   ├── handler.go             # Dispatch/execution logic
 │   ├── handler_test.go        # Handler tests
 │   ├── account_refresh.go    # OAuth token auto-refresh
 │   ├── pool.go                # Weighted round-robin pool
@@ -180,6 +216,9 @@ POST   /api/admin/login
 GET    /api/admin/init-status
 POST   /api/admin/setup
 GET    /api/admin/dashboard
+CRUD   /api/admin/access-policies
+CRUD   /api/admin/relay-nodes
+CRUD   /api/admin/node-accounts
 CRUD   /api/admin/channels
 POST   /api/admin/channels/oauth/auth-url
 GET    /api/admin/channels/oauth/callback
@@ -195,14 +234,28 @@ GET    /api/admin/logs
 GET    /api/admin/audit-logs
 ```
 
-### Relay API (API Key auth, performance-critical path)
+### Gateway / Relay API (Gateway auth + scheduling, Relay execution)
 
 ```
 ANY    /v1/chat/completions    # OpenAI Chat Completions
 ANY    /v1/responses           # OpenAI Responses API
+GET    /v1/models              # 当前 API Key 可用模型列表
 ANY    /v1/messages            # Anthropic Messages
 ANY    /v1beta/*               # Gemini generateContent
 ```
+
+
+## Gateway / Relay Direction
+
+The current target is single Gateway as the control authority and one or more Relay
+execution nodes. Frontend/admin users manage Gateway only. Gateway owns users,
+API keys, access policies, channels, accounts, Relay nodes, account-node bindings,
+scheduling, and billing. Relay nodes should become execution-only workers that
+accept Gateway-signed requests, execute the selected channel/account, and report
+usage back to Gateway. Remote Relay nodes do not require PostgreSQL or Redis; they
+pull assigned runtime config into process memory and keep the request hot path
+database-free. See `docs/current/gateway-relay.md` before changing relay or
+gateway behavior.
 
 ## Backend Changes on This Branch
 
@@ -213,8 +266,8 @@ ANY    /v1beta/*               # Gemini generateContent
 - `internal/db/account.go`: OAuth accounts can store an encrypted `client_secret`
   for providers that require it during refresh.
 - `internal/db/token.go`: User API keys support `ip_whitelist`, `expires_at`,
-  `models`, and `permissions`; relay rejects expired keys, disallowed models, and
-  disallowed endpoint scopes.
+  `models`, `permissions`, and optional `policy_id`; Gateway enforces policy
+  limits before scheduling relay execution.
 - `internal/user/service.go`: `CreateKeyRequest` accepts advanced key fields and
   returns them from key listing/creation responses.
 - `internal/user/dto.go` and `internal/user/service.go`: Usage endpoints return
@@ -223,6 +276,11 @@ ANY    /v1beta/*               # Gemini generateContent
   (min 8 chars, bcrypt hashed).
 - `internal/relay/account_refresh.go`: OpenAI OAuth refresh can re-run the Codex
   token-exchange flow when an `id_token` is returned.
+- `internal/logger/logger.go`: Global leveled JSON logger for app, gateway,
+  relay, WebSocket, billing, credential refresh, and scheduler diagnostics.
+- `internal/relay/handler.go`: Upstream failures now persist a parsed
+  `error_message` into request logs; Gemini Code 4xx/5xx logs include upstream
+  model, project, enabled credit types, and a compact response body in stdout.
 - `internal/user/service.go`: Password change validates length; API key deletion
   uses `deleted_at` soft-delete instead of GORM hard delete.
 
@@ -243,10 +301,23 @@ ANY    /v1beta/*               # Gemini generateContent
 - `web/lib/api.ts`: Admin channel OAuth helpers are available as
   `adminApi.startChannelOAuth`, `adminApi.channelOAuthStatus`, and
   `adminApi.bindChannelOAuth`.
+- `web/app/admin/access-policies/page.tsx`: Access Policy management is available
+  for model limits, fixed-window request limits, and max concurrency.
+- `web/app/admin/relay-nodes/page.tsx`: Relay node management is available for
+  node address, region, egress IP, weight, max concurrency, status, and
+  account-node bindings.
 
 ## Known Remaining Gaps
 
-No known gaps remain from the original 2026-05-17 handoff list.
+Gateway/Relay architecture is now implemented for the current production target:
+single Gateway/control plane plus one or more execution-only Relay nodes. The
+implemented path includes account-to-node bindings, Gateway scheduling of
+`relay_node + channel + account`, Relay config pull into memory, HMAC-only Relay
+execution, and usage-event settlement by `request_id`.
+
+Remaining hardening items are intentionally deferred: node-specific credential
+encryption and a durable retry queue for usage events when a remote Relay cannot
+reach Gateway after a request completes.
 
 ## Commands
 

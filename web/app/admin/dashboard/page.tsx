@@ -1,49 +1,102 @@
-import { RefreshCw } from "lucide-react";
+"use client";
+
+import { useEffect, useState } from "react";
+import { KeyRound, Network, Route, SlidersHorizontal, Users } from "lucide-react";
 import { AppShell, MetricCard, PageHead, StatusBadge } from "@/components/shell";
-import { channels, requests } from "@/lib/mock";
+import { adminApi } from "@/lib/api";
+import type { Channel, Dashboard } from "@/types/api";
 
 export default function AdminDashboardPage() {
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) { setLoading(false); return; }
+    Promise.all([
+      adminApi.dashboard(token).catch(() => null),
+      adminApi.channels(token).then(r => r.items).catch(() => []),
+    ]).then(([d, ch]) => {
+      if (d) setDashboard(d);
+      setChannels(ch);
+      setLoading(false);
+    });
+  }, []);
+
+  function formatNumber(n: number): string {
+    if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + "B";
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+    return String(n);
+  }
+
   return (
     <AppShell title="管理员后台" variant="admin">
       <PageHead
         eyebrow="Admin"
         title="平台运营总览"
-        description="集中查看中转流量、渠道健康、账号池和错误率。管理端和用户端共用同一视觉系统，但信息密度更高。"
-        action={<button className="btn"><RefreshCw /> 刷新池</button>}
+        description="集中查看中转流量、渠道健康、账号池和错误率。"
       />
       <div className="grid grid-4">
-        <MetricCard label="总请求" value="12.8M" foot="all time" />
-        <MetricCard label="总 Token" value="1.94B" foot="billable usage" tone="green" />
-        <MetricCard label="活跃渠道" value="9" foot="3 providers" tone="green" />
-        <MetricCard label="活跃凭证" value="42" foot="inside channels" />
+        <MetricCard label="总请求" value={dashboard ? formatNumber(dashboard.total_requests) : "—"} foot="all time" />
+        <MetricCard label="总 Token" value={dashboard ? formatNumber(dashboard.total_tokens) : "—"} foot="billable usage" tone="green" />
+        <MetricCard label="活跃渠道" value={dashboard ? String(dashboard.active_channels) : "—"} foot="providers" tone="green" />
+        <MetricCard label="活跃凭证" value={dashboard ? String(dashboard.active_accounts) : "—"} foot="inside channels" />
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <section className="card">
           <div className="card-pad">
             <h2>渠道健康</h2>
-            <p className="muted" style={{ margin: 0 }}>按渠道类型和错误率观察当前可用性。</p>
+            <p className="muted" style={{ margin: 0 }}>按渠道类型和可用性观察当前状态。</p>
           </div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>渠道</th><th>类型</th><th>状态</th><th>账号</th><th>错误率</th></tr></thead>
-              <tbody>{channels.map((row) => (
-                <tr key={row.name}><td>{row.name}</td><td>{row.type}</td><td><StatusBadge value={row.status} /></td><td>{row.accounts}</td><td>{row.error}</td></tr>
-              ))}</tbody>
+              <thead><tr><th>渠道</th><th>类型</th><th>状态</th><th>Endpoint</th><th>权重</th></tr></thead>
+              <tbody>
+                {channels.length > 0 ? channels.map((ch) => (
+                  <tr key={ch.id}>
+                    <td>{ch.name}</td>
+                    <td>{ch.type}</td>
+                    <td><StatusBadge value={ch.enabled ? "enabled" : "disabled"} /></td>
+                    <td className="muted" style={{ fontSize: 12 }}>{ch.endpoint}</td>
+                    <td>{ch.priority}</td>
+                  </tr>
+                )) : (
+                  <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                    {loading ? "加载中…" : "暂无渠道数据"}
+                  </td></tr>
+                )}
+              </tbody>
             </table>
           </div>
         </section>
         <section className="card">
           <div className="card-pad">
-            <h2>最近异常</h2>
-            <p className="muted" style={{ margin: 0 }}>快速判断是用户限流、上游错误还是账号池冷却。</p>
+            <h2>快捷操作</h2>
+            <p className="muted" style={{ margin: 0 }}>按常用配置顺序进入控制台。</p>
           </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>延迟</th></tr></thead>
-              <tbody>{requests.map((row) => (
-                <tr key={`${row.time}-admin`}><td>{row.time}</td><td>{row.model}</td><td><StatusBadge value={row.status} /></td><td>{row.latency}</td></tr>
-              ))}</tbody>
-            </table>
+          <div className="quick-grid">
+            <a className="quick-card" href="/admin/access-policies">
+              <SlidersHorizontal />
+              <span><strong>访问策略</strong>限制模型、配额和并发</span>
+            </a>
+            <a className="quick-card" href="/admin/channels">
+              <Route />
+              <span><strong>渠道账号</strong>维护上游和凭证池</span>
+            </a>
+            <a className="quick-card" href="/admin/relay-nodes">
+              <Network />
+              <span><strong>转发节点</strong>配置节点权重和账号绑定</span>
+            </a>
+            <a className="quick-card" href="/admin/tokens">
+              <KeyRound />
+              <span><strong>平台令牌</strong>创建和绑定策略</span>
+            </a>
+            <a className="quick-card" href="/admin/users">
+              <Users />
+              <span><strong>用户管理</strong>处理状态和密码</span>
+            </a>
           </div>
         </section>
       </div>

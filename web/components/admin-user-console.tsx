@@ -70,15 +70,13 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     if (token && isUUID(row.id)) {
       try {
         await adminApi.deleteUser(token, row.id);
+        setUsers((current) => current.filter((user) => user.id !== row.id));
+        if (passwordResult?.email === row.email) {
+          setPasswordResult(null);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "删除用户失败");
-        return;
       }
-    }
-
-    setUsers((current) => current.filter((user) => user.id !== row.id));
-    if (passwordResult?.email === row.email) {
-      setPasswordResult(null);
     }
   }
 
@@ -87,16 +85,16 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     const password = generatePassword();
     setError("");
 
-    if (token && isUUID(row.id)) {
-      try {
-        await adminApi.updateUser(token, row.id, { new_password: password });
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "重置密码失败");
-        return;
-      }
+    if (!token || !isUUID(row.id)) {
+      setError("认证无效");
+      return;
     }
-
-    setPasswordResult({ email: row.email, password });
+    try {
+      await adminApi.updateUser(token, row.id, { new_password: password });
+      setPasswordResult({ email: row.email, password });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重置密码失败");
+    }
   }
 
   return (

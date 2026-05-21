@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -24,6 +25,14 @@ func (h *Handler) HandleChannels(ctx *fasthttp.RequestCtx) {
 	default:
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func normalizeChannelGroup(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	return value
 }
 
 func (h *Handler) listChannels(ctx *fasthttp.RequestCtx) {
@@ -54,6 +63,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 	ch := db.Channel{
 		Name:        req.Name,
 		Type:        req.Type,
+		Group:       normalizeChannelGroup(req.Group),
 		Endpoint:    req.Endpoint,
 		Models:      req.Models,
 		Priority:    req.Priority,
@@ -98,6 +108,9 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.Type != nil {
 		updates["type"] = *req.Type
 	}
+	if req.Group != nil {
+		updates["channel_group"] = normalizeChannelGroup(*req.Group)
+	}
 	if req.Endpoint != nil {
 		updates["endpoint"] = *req.Endpoint
 	}
@@ -116,12 +129,18 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.AffinityTTL != nil {
 		updates["affinity_ttl"] = *req.AffinityTTL
 	}
+	if req.Enabled != nil {
+		updates["enabled"] = *req.Enabled
+	}
 	updates["updated_at"] = time.Now()
 	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
 		return
 	}
-	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
+		return
+	}
 	if h.RefreshPool != nil {
 		h.RefreshPool(existing.ID.String())
 	}

@@ -31,6 +31,9 @@ func (a *GeminiAdaptor) Init(channel *db.Channel, account *db.Account) {
 
 func (a *GeminiAdaptor) GetRequestURL(path string) (string, error) {
 	base := strings.TrimRight(a.channel.Endpoint, "/")
+	if a.channel.APIFormat == "gemini_code" {
+		return codeAssistBase(base) + "/v1internal:generateContent", nil
+	}
 	// URL will be rewritten in SetupRequestHeader after model is known
 	return base + "/placeholder", nil
 }
@@ -40,6 +43,19 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 
 	// Build Gemini API URL
 	base := strings.TrimRight(a.channel.Endpoint, "/")
+	if a.channel.APIFormat == "gemini_code" {
+		action := "generateContent"
+		suffix := ""
+		if a.isStream {
+			action = "streamGenerateContent"
+			suffix = "?alt=sse"
+		}
+		req.SetRequestURI(codeAssistBase(base) + "/v1internal:" + action + suffix)
+		credential := provider.ExtractCredentialKey(credentials)
+		req.Header.Set("Authorization", "Bearer "+credential)
+		req.Header.Set("User-Agent", "GeminiCLI/unknown/"+resolveCodeAssistModel(a.model)+" (linux; amd64; cli)")
+		return nil
+	}
 	action := "generateContent"
 	suffix := ""
 	if a.isStream {
@@ -70,6 +86,9 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 	// Store model and stream for URL construction
 	a.model = req.Model
 	a.isStream = req.Stream
+	if a.channel.APIFormat == "gemini_code" {
+		return internalToGeminiCodeAssistWithAccount(req, a.account)
+	}
 	return internalToGemini(req)
 }
 
@@ -77,6 +96,9 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 
 // ConvertStreamLine converts a single Gemini SSE/JSON line to OpenAI SSE format.
 func (a *GeminiAdaptor) ConvertStreamLine(line []byte) []byte {
+	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
+		return a.streamState.convertLine(unwrapCodeAssistSSELine(line), a.model)
+	}
 	return a.streamState.convertLine(line, a.model)
 }
 
@@ -94,6 +116,12 @@ func (a *GeminiAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
 // ParseUsage parses non-streaming Gemini response usage.
 func (a *GeminiAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	var resp struct {
+		Response struct {
+			UsageMetadata struct {
+				PromptTokenCount     int `json:"promptTokenCount"`
+				CandidatesTokenCount int `json:"candidatesTokenCount"`
+			} `json:"usageMetadata"`
+		} `json:"response"`
 		UsageMetadata struct {
 			PromptTokenCount     int `json:"promptTokenCount"`
 			CandidatesTokenCount int `json:"candidatesTokenCount"`
@@ -101,6 +129,9 @@ func (a *GeminiAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return 0, 0, fmt.Errorf("parse gemini response: %w", err)
+	}
+	if resp.Response.UsageMetadata.PromptTokenCount > 0 || resp.Response.UsageMetadata.CandidatesTokenCount > 0 {
+		return resp.Response.UsageMetadata.PromptTokenCount, resp.Response.UsageMetadata.CandidatesTokenCount, nil
 	}
 	return resp.UsageMetadata.PromptTokenCount, resp.UsageMetadata.CandidatesTokenCount, nil
 }
@@ -136,12 +167,18 @@ func init() {
 	provider.RegisterFromInternal(provider.FormatGemini, internalToGemini)
 	provider.RegisterToResponseInternal(provider.FormatGemini, geminiResponseToInternal)
 	provider.RegisterFromResponseInternal(provider.FormatGemini, internalToGeminiResponse)
+	provider.RegisterToInternal(provider.FormatGeminiCode, geminiToInternal)
+	provider.RegisterFromInternal(provider.FormatGeminiCode, internalToGeminiCodeAssist)
+	provider.RegisterToResponseInternal(provider.FormatGeminiCode, geminiCodeAssistResponseToInternal)
 }
 
 // Verify interface compliance at compile time.
 var _ provider.Adaptor = (*GeminiAdaptor)(nil)
 
 func (a *GeminiAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
+	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
+		return convertGeminiSSEBuffer(unwrapCodeAssistSSEBuffer(sseBody))
+	}
 	return convertGeminiSSEBuffer(sseBody)
 }
 
@@ -160,3 +197,42 @@ func mapGeminiFinishReason(reason string) string {
 	}
 }
 
+func codeAssistBase(base string) string {
+	if base == "" || strings.Contains(base, "generativelanguage.googleapis.com") {
+		return "https://cloudcode-pa.googleapis.com"
+	}
+	return strings.TrimRight(base, "/")
+}
+
+func unwrapCodeAssistSSELine(line []byte) []byte {
+	const prefix = "data:"
+	text := string(line)
+	if !strings.HasPrefix(text, prefix) {
+		return line
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+	if payload == "" || payload == "[DONE]" {
+		return line
+	}
+	var wrapper map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &wrapper); err != nil {
+		return line
+	}
+	resp, ok := wrapper["response"]
+	if !ok {
+		return line
+	}
+	respBody, err := json.Marshal(resp)
+	if err != nil {
+		return line
+	}
+	return []byte("data: " + string(respBody))
+}
+
+func unwrapCodeAssistSSEBuffer(sseBody []byte) []byte {
+	lines := strings.Split(string(sseBody), "\n")
+	for i, line := range lines {
+		lines[i] = string(unwrapCodeAssistSSELine([]byte(line)))
+	}
+	return []byte(strings.Join(lines, "\n"))
+}

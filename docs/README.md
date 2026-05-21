@@ -20,6 +20,10 @@ the specific current document that matches the task.
   backend API alignment.
 - [current/platform-design.md](current/platform-design.md): platform design,
   architecture, data models, and relay engine.
+- [current/gateway-relay.md](current/gateway-relay.md): current Gateway/Relay
+  control-plane architecture and implementation status.
+- [current/code-channels.md](current/code-channels.md): CodeX, Gemini Code,
+  Claude Code, and standard provider API source alignment.
 
 ## Maintenance Rules
 

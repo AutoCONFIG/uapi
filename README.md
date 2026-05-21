@@ -12,8 +12,9 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 - **API Key 管理** — 用户自助创建密钥，支持 IP 白名单、过期时间、模型限制和端点权限
 - **用量计费** — 预扣费 / 结算 / 退款，按 token 精确计量
 - **管理后台** — 渠道管理、账号管理、用户管理、套餐管理、操作审计
+- **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
 - **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
-- **OAuth 接入** — 支持 OpenAI / Gemini OAuth 授权流程，自动刷新 Token
+- **Code 客户端接入** — 支持 CodeX、Gemini Code、Claude Code 的 OAuth 登录、账号元数据同步和自动刷新
 - **流式转发** — SSE 流式响应透明转发，支持流式转非流式
 
 ## 快速开始
@@ -39,6 +40,35 @@ make build
 ./bin/uapi -config config.yaml
 ```
 
+### Docker Compose 部署
+
+默认单机部署，运行 PostgreSQL、Gateway/API、本机 Relay 和前端。只有前端 `80` 端口暴露到宿主机，数据库、Gateway 内部端口和本机 Relay 都不对外暴露：
+
+```bash
+cp config.example.yaml config.yaml
+docker compose up -d --build
+```
+
+同一台机器模拟 Gateway/Relay 分离：
+
+```bash
+cp config.gateway.example.yaml config.gateway.yaml
+docker compose -f docker-compose.gateway.yaml up -d --build
+
+cp config.relay.example.yaml config.relay.yaml
+# 在后台创建 Relay Node，base_url 填 http://relay:8081
+# 把节点 ID 写入 config.relay.yaml 的 gateway.relay_node_id
+docker compose -f docker-compose.relay.yaml up -d --build
+```
+
+远端机器运行 Relay，不需要 PostgreSQL/Redis；此时 Relay 需要对 Gateway 可达：
+
+```bash
+cp config.relay.example.yaml config.relay.yaml
+# 编辑 gateway.control_url、gateway.relay_node_id、internal_secret、encryption_key
+docker compose -f docker-compose.relay.remote.yaml up -d --build
+```
+
 ### 启动前端
 
 ```bash
@@ -59,7 +89,8 @@ npm --prefix web run serve:static
 cmd/uapi/          程序入口
 internal/
   server/          HTTP 服务器 & 路由
-  relay/           核心中继引擎 (调度、计费、流式)
+  gateway/         Gateway 鉴权、策略、节点调度、反向代理
+  relay/           Relay 执行引擎 (格式转换、上游转发、流式)
     provider/      上游适配器 (OpenAI / Anthropic / Gemini)
   admin/           管理后台 API
   user/            用户系统 API
@@ -86,13 +117,13 @@ docs/              项目文档
 
 ## 部署
 
-参见 [docs/deployment/nginx.md](docs/deployment/nginx.md) 了解 Nginx 反向代理和 Systemd 部署配置。
-
-Docker Compose 一键部署：
+推荐优先使用 Docker Compose：
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
+
+架构细节见 [docs/current/gateway-relay.md](docs/current/gateway-relay.md)。Nginx/Systemd 方式见 [docs/deployment/nginx.md](docs/deployment/nginx.md)。
 
 ## 文档
 
@@ -100,6 +131,7 @@ docker compose up -d
 - [项目交接文档](docs/current/handoff.md)
 - [前端文档](docs/current/frontend.md)
 - [平台设计](docs/current/platform-design.md)
+- [Code 渠道对齐](docs/current/code-channels.md)
 
 ## License
 

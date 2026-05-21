@@ -1,0 +1,23 @@
+server:
+  mode: "relay"
+  host: "0.0.0.0"
+  port: 8081
+  max_body_size_mb: 50
+  concurrency_limit: 0
+
+security:
+  jwt_secret: "unused-on-relay"
+  encryption_key: "dfa1711b417df040a30dbdbb5bba57f7434ebd806e974384f932ff0cab0d4bde"
+
+gateway:
+  gateway_id: "local-relay"
+  cache_ttl: "5s"
+  internal_secret: "qpCq2k/eaDV1NiIDrjx9APVrIXEYcxUFFAcv9oUftGI="
+  require_internal: true
+  control_url: "http://uapi:8080"
+  relay_node_id: "3489d7b2-6ffe-4cfc-b2bb-7d3622789116"
+  config_pull_interval: "5s"
+
+logging:
+  level: "info"
+  retention_days: 180

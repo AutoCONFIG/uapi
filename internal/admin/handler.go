@@ -23,6 +23,7 @@ type Handler struct {
 	cfgPath       string
 	RefreshPool   func(channelID string) // refresh pool for a channel after CRUD
 	RemovePool    func(channelID string) // remove pool when channel is deleted/disabled
+	OAuthIdle     *OAuthIdleMaintainer
 	setupMu       sync.Mutex
 	setupDone     bool
 	oauthMu       sync.Mutex
@@ -79,7 +80,7 @@ func (h *Handler) parsePagination(ctx *fasthttp.RequestCtx) (page, limit int) {
 // HandleLogin authenticates the admin and returns a JWT token.
 func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 	var req struct {
-		Username string `json:"username"`
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
@@ -89,7 +90,7 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 
 	// Always run bcrypt comparison to avoid timing leaks
 	matchedPassword := false
-	if subtle.ConstantTimeCompare([]byte(req.Username), []byte(h.cfg.Security.AdminUsername)) == 1 {
+	if subtle.ConstantTimeCompare([]byte(req.Email), []byte(h.cfg.Security.AdminUsername)) == 1 {
 		if h.cfg.Security.AdminPasswordHash == "" {
 			h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
 			return
@@ -177,15 +178,15 @@ func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 	}
 
 	var req struct {
-		Username string `json:"username"`
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.Username == "" || req.Password == "" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "username and password are required")
+	if req.Email == "" || req.Password == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "email and password are required")
 		return
 	}
 	if len(req.Password) < 8 {
@@ -200,7 +201,7 @@ func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Update in-memory config
-	h.cfg.Security.AdminUsername = req.Username
+	h.cfg.Security.AdminUsername = req.Email
 	h.cfg.Security.AdminPasswordHash = string(hash)
 
 	// Persist to config file

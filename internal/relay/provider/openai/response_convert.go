@@ -191,3 +191,49 @@ func internalToOpenAIResponse(resp *provider.InternalResponse) ([]byte, error) {
 
 	return json.Marshal(oai)
 }
+
+func internalToResponsesResponse(resp *provider.InternalResponse) ([]byte, error) {
+	output := make([]interface{}, 0, len(resp.Choices))
+	for _, ch := range resp.Choices {
+		content := make([]interface{}, 0, len(ch.Message.Content))
+		for _, part := range ch.Message.Content {
+			switch part.Type {
+			case "text":
+				content = append(content, map[string]interface{}{
+					"type": "output_text",
+					"text": part.Text,
+				})
+			case "image_url":
+				if part.ImageURL != nil {
+					content = append(content, map[string]interface{}{
+						"type":      "output_image",
+						"image_url": *part.ImageURL,
+					})
+				}
+			}
+		}
+		output = append(output, map[string]interface{}{
+			"id":      "msg_" + provider.RandomHex(8),
+			"type":    "message",
+			"status":  "completed",
+			"role":    "assistant",
+			"content": content,
+		})
+	}
+	result := map[string]interface{}{
+		"id":      resp.ID,
+		"object":  "response",
+		"created": 0,
+		"model":   resp.Model,
+		"output":  output,
+		"usage": map[string]interface{}{
+			"input_tokens":  resp.Usage.PromptTokens,
+			"output_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":  resp.Usage.PromptTokens + resp.Usage.CompletionTokens,
+		},
+	}
+	if len(resp.Choices) > 0 {
+		result["status"] = "completed"
+	}
+	return json.Marshal(result)
+}

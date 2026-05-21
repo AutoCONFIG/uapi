@@ -17,11 +17,9 @@ type AffinityCache struct {
 }
 
 func NewAffinityCache() *AffinityCache {
-	ac := &AffinityCache{
+	return &AffinityCache{
 		entries: make(map[string]affinityEntry),
 	}
-	go ac.cleanup()
-	return ac
 }
 
 func (ac *AffinityCache) key(tokenID, model string) string {
@@ -40,11 +38,18 @@ func (ac *AffinityCache) Get(tokenID, model string) string {
 	}
 	if time.Now().After(e.expiresAt) {
 		ac.mu.RUnlock()
-		// Lazy delete: upgrade to write lock
+		// Lazy delete: upgrade to write lock, double-check in case Set refreshed
 		ac.mu.Lock()
-		delete(ac.entries, k)
+		fresh, stillExists := ac.entries[k]
+		if !stillExists || time.Now().After(fresh.expiresAt) {
+			delete(ac.entries, k)
+			ac.mu.Unlock()
+			return ""
+		}
+		// Entry was refreshed between our RUnlock and Lock
+		channelID := fresh.channelID
 		ac.mu.Unlock()
-		return ""
+		return channelID
 	}
 	ac.mu.RUnlock()
 	return e.channelID
@@ -74,18 +79,5 @@ func (ac *AffinityCache) EvictChannel(channelID string) {
 	}
 }
 
-// cleanup runs every 60 seconds to purge expired entries.
-func (ac *AffinityCache) cleanup() {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		ac.mu.Lock()
-		now := time.Now()
-		for k, v := range ac.entries {
-			if now.After(v.expiresAt) {
-				delete(ac.entries, k)
-			}
-		}
-		ac.mu.Unlock()
-	}
-}
+// Close is kept for server lifecycle symmetry. Expired entries are removed lazily on access.
+func (ac *AffinityCache) Close() {}

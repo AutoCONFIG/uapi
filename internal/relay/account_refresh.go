@@ -1,9 +1,10 @@
 package relay
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
@@ -22,6 +26,13 @@ var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 // refreshGroup deduplicates concurrent OAuth refresh calls for the same account.
 var refreshGroup singleflight.Group
 
+const (
+	defaultOAuthRefreshSkew = 2 * time.Minute
+	claudeOAuthRefreshSkew  = 5 * time.Minute
+	geminiOAuthRefreshSkew  = 5 * time.Minute
+	codexRefreshInterval    = 8 * 24 * time.Hour
+)
+
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
 // Returns the decrypted credential string ready for API use.
 func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, error) {
@@ -29,8 +40,7 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 		return crypto.Decrypt(account.Credentials)
 	}
 
-	// OAuth token — check expiry
-	if account.TokenExpiry != nil && time.Now().After(*account.TokenExpiry) {
+	if shouldRefreshOAuthCredentials(account) {
 		accountID := account.ID.String()
 		v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
 			return refreshOAuthToken(account, database)
@@ -41,13 +51,88 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 		return v.(string), nil
 	}
 
+	if isGoogleOAuthTokenURL(account.TokenURL) && shouldSyncGeminiCodeSetup(account.Metadata) {
+		credential, err := crypto.Decrypt(account.Credentials)
+		if err != nil {
+			return "", err
+		}
+		if metadata, err := gemini.FetchCodeAssistMetadata(credential, geminiProjectID(account.Metadata)); err == nil {
+			account.Metadata = metadata
+			if database != nil {
+				if updateErr := database.Model(&db.Account{}).Where("id = ?", account.ID).Update("metadata", metadata).Error; updateErr != nil {
+					logger.Warnf("relay.oauth", "persist gemini code setup metadata failed", logger.F("account_id", account.ID.String()), logger.Err(updateErr))
+				}
+			}
+		} else {
+			logger.Warnf("relay.oauth", "sync gemini code setup metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		}
+	}
+	if err := ensureOAuthAccountReady(account); err != nil {
+		return "", err
+	}
 	return crypto.Decrypt(account.Credentials)
+}
+
+// RefreshOAuthCredentials forces an OAuth refresh and metadata sync for scheduler-driven maintenance.
+func RefreshOAuthCredentials(account *db.Account, database *gorm.DB) (string, error) {
+	if account.CredType != "oauth_token" {
+		return "", fmt.Errorf("account %s is not an oauth account", account.ID)
+	}
+	accountID := account.ID.String()
+	v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
+		return refreshOAuthToken(account, database)
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(string), nil
+}
+
+func IsIdleRefreshProvider(tokenURL string) bool {
+	return isAnthropicOAuthTokenURL(tokenURL) || isGoogleOAuthTokenURL(tokenURL)
+}
+
+func shouldRefreshOAuthCredentials(account *db.Account) bool {
+	now := time.Now()
+	switch {
+	case isOpenAIOAuthTokenURL(account.TokenURL):
+		if account.TokenExpiry != nil && !account.TokenExpiry.After(now) {
+			return true
+		}
+		if lastRefresh, ok := oauthLastRefresh(account.Metadata); ok {
+			return lastRefresh.Before(now.Add(-codexRefreshInterval))
+		}
+		return account.TokenExpiry == nil
+	case isAnthropicOAuthTokenURL(account.TokenURL):
+		return account.TokenExpiry != nil && now.Add(claudeOAuthRefreshSkew).After(*account.TokenExpiry)
+	case isGoogleOAuthTokenURL(account.TokenURL):
+		return account.TokenExpiry != nil && now.Add(geminiOAuthRefreshSkew).After(*account.TokenExpiry)
+	default:
+		return account.TokenExpiry != nil && now.Add(defaultOAuthRefreshSkew).After(*account.TokenExpiry)
+	}
+}
+
+func oauthLastRefresh(metadata map[string]interface{}) (time.Time, bool) {
+	if metadata == nil {
+		return time.Time{}, false
+	}
+	for _, key := range []string{"oauth_last_refresh_at", "last_synced_at"} {
+		if value, ok := metadata[key].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	refreshToken, err := crypto.Decrypt(account.RefreshToken)
 	if err != nil {
 		return "", fmt.Errorf("decrypt refresh token: %w", err)
+	}
+	if strings.TrimSpace(refreshToken) == "" {
+		return "", fmt.Errorf("oauth account %s has no refresh token", account.ID)
 	}
 
 	data := url.Values{
@@ -63,11 +148,50 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		data.Set("client_secret", clientSecret)
 	}
 
-	resp, err := oauthHTTPClient.PostForm(account.TokenURL, data)
+	var resp *http.Response
+	if isAnthropicOAuthTokenURL(account.TokenURL) {
+		payload := map[string]interface{}{
+			"grant_type":    "refresh_token",
+			"refresh_token": refreshToken,
+			"client_id":     account.ClientID,
+			"scope":         anthropic.ClaudeAIRefreshScope,
+		}
+		body, _ := json.Marshal(payload)
+		req, reqErr := http.NewRequest(http.MethodPost, account.TokenURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = oauthHTTPClient.Do(req)
+	} else if isOpenAIOAuthTokenURL(account.TokenURL) {
+		payload := map[string]interface{}{
+			"grant_type":    "refresh_token",
+			"refresh_token": refreshToken,
+			"client_id":     account.ClientID,
+		}
+		body, _ := json.Marshal(payload)
+		req, reqErr := http.NewRequest(http.MethodPost, account.TokenURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("originator", openai.CodexOriginator)
+		req.Header.Set("User-Agent", openai.CodexUserAgent)
+		resp, err = oauthHTTPClient.Do(req)
+	} else {
+		resp, err = oauthHTTPClient.PostForm(account.TokenURL, data)
+	}
 	if err != nil {
 		return "", fmt.Errorf("refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read refresh response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("refresh failed: status %d: %s", resp.StatusCode, compactOAuthBody(respBody))
+	}
 
 	var result struct {
 		AccessToken  string `json:"access_token"`
@@ -75,50 +199,200 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		IDToken      string `json:"id_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		Error        string `json:"error"`
+		Scope        string `json:"scope"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", fmt.Errorf("decode refresh response: %w", err)
 	}
 	if result.Error != "" {
 		return "", fmt.Errorf("refresh failed: %s", result.Error)
 	}
+	if result.AccessToken == "" && result.IDToken == "" {
+		return "", fmt.Errorf("refresh response missing access token")
+	}
 
-	// Async update database — fire and forget
 	credential := result.AccessToken
 	if result.IDToken != "" && strings.Contains(account.TokenURL, "auth.openai.com") {
+		if metadata, err := openai.ParseIDTokenMetadata(result.IDToken); err == nil {
+			if account.Metadata == nil {
+				account.Metadata = map[string]interface{}{}
+			}
+			for key, value := range metadata {
+				account.Metadata[key] = value
+			}
+		}
+		if usage, err := openai.FetchCodexUsage(result.AccessToken, openAIAccountID(account.Metadata), openAIFedRAMP(account.Metadata)); err == nil {
+			if account.Metadata == nil {
+				account.Metadata = map[string]interface{}{}
+			}
+			account.Metadata["codex_usage"] = usage
+		}
 		if exchanged, err := openai.ExchangeForAPIKey(account.TokenURL, result.IDToken, account.ClientID); err == nil && exchanged != "" {
 			credential = exchanged
 		}
 	}
+	if account.Metadata == nil {
+		account.Metadata = map[string]interface{}{}
+	}
+	account.Metadata["oauth_last_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
 
-	go func() {
-		newExpiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
-		if result.ExpiresIn <= 0 {
-			newExpiry = time.Now().Add(8 * 24 * time.Hour)
-		}
-		newCreds, encErr := crypto.Encrypt(credential)
+	if database == nil {
+		return credential, nil
+	}
+	newExpiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+	if result.ExpiresIn <= 0 {
+		newExpiry = time.Now().Add(8 * 24 * time.Hour)
+	}
+	newCreds, encErr := crypto.Encrypt(credential)
+	if encErr != nil {
+		return "", fmt.Errorf("encrypt refreshed credentials: %w", encErr)
+	}
+	updates := map[string]interface{}{
+		"credentials":  newCreds,
+		"token_expiry": newExpiry,
+	}
+	account.Credentials = newCreds
+	account.TokenExpiry = &newExpiry
+	if result.RefreshToken != "" {
+		newRefresh, encErr := crypto.Encrypt(result.RefreshToken)
 		if encErr != nil {
-			log.Printf("failed to encrypt refreshed credentials for account %s: %v", account.ID, encErr)
-			return
+			logger.Warnf("relay.oauth", "encrypt refreshed refresh token failed", logger.F("account_id", account.ID.String()), logger.Err(encErr))
+		} else {
+			updates["refresh_token"] = newRefresh
+			account.RefreshToken = newRefresh
 		}
-		updates := map[string]interface{}{
-			"credentials":  newCreds,
-			"token_expiry": newExpiry,
+	}
+	if isAnthropicOAuthTokenURL(account.TokenURL) {
+		scopes := strings.Fields(result.Scope)
+		if len(scopes) == 0 {
+			scopes = strings.Fields(anthropic.ClaudeAIRefreshScope)
 		}
-		if result.RefreshToken != "" {
-			newRefresh, encErr := crypto.Encrypt(result.RefreshToken)
-			if encErr == nil {
-				updates["refresh_token"] = newRefresh
-			}
+		if metadata, err := anthropic.FetchAccountMetadata(credential, scopes); err == nil {
+			updates["metadata"] = metadata
+			account.Metadata = metadata
+		} else {
+			logger.Warnf("relay.oauth", "sync anthropic oauth metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		}
-		if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
-			log.Printf("failed to update refreshed credentials for account %s: %v", account.ID, err)
-			return
+	} else if isOpenAIOAuthTokenURL(account.TokenURL) && account.Metadata != nil {
+		updates["metadata"] = account.Metadata
+	} else if isGoogleOAuthTokenURL(account.TokenURL) {
+		projectID := geminiProjectID(account.Metadata)
+		if metadata, err := gemini.FetchCodeAssistMetadata(credential, projectID); err == nil {
+			updates["metadata"] = metadata
+			account.Metadata = metadata
+		} else {
+			logger.Warnf("relay.oauth", "sync gemini code metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		}
-		// Update in-memory state so subsequent requests use the new credentials
-		account.Credentials = newCreds
-		account.TokenExpiry = &newExpiry
-	}()
+	}
+	if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
+		logger.Warnf("relay.oauth", "persist refreshed credentials failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+	}
 
 	return credential, nil
+}
+
+func shouldSyncGeminiCodeSetup(metadata map[string]interface{}) bool {
+	if metadata == nil {
+		return true
+	}
+	status, _ := metadata["setup_status"].(string)
+	if status == "validation_required" || status == "onboard_pending" || status == "onboard_failed" {
+		return true
+	}
+	if status == "ready" {
+		return geminiProjectID(metadata) == ""
+	}
+	_, hasLoadCodeAssist := metadata["load_code_assist"]
+	return !hasLoadCodeAssist
+}
+
+func ensureOAuthAccountReady(account *db.Account) error {
+	if account == nil || account.CredType != "oauth_token" || !isGoogleOAuthTokenURL(account.TokenURL) || account.Metadata == nil {
+		return nil
+	}
+	if status, _ := account.Metadata["setup_status"].(string); status == "validation_required" {
+		if validation, ok := account.Metadata["validation"].(map[string]interface{}); ok {
+			if link, _ := validation["validation_url"].(string); link != "" {
+				return fmt.Errorf("gemini code account validation required: %s", link)
+			}
+		}
+		return fmt.Errorf("gemini code account validation required")
+	}
+	return nil
+}
+
+func geminiProjectID(metadata map[string]interface{}) string {
+	if metadata == nil {
+		return ""
+	}
+	if project, ok := metadata["project_id"].(string); ok {
+		return project
+	}
+	if loadRes, ok := metadata["load_code_assist"].(map[string]interface{}); ok {
+		if project, ok := loadRes["cloudaicompanionProject"].(string); ok {
+			return project
+		}
+		if project, ok := loadRes["cloudaicompanionProject"].(map[string]interface{}); ok {
+			if id, ok := project["id"].(string); ok {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func openAIAccountID(metadata map[string]interface{}) string {
+	if metadata == nil {
+		return ""
+	}
+	if accountID, ok := metadata["chatgpt_account_id"].(string); ok {
+		return accountID
+	}
+	return ""
+}
+
+func openAIFedRAMP(metadata map[string]interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	if fedramp, ok := metadata["chatgpt_account_is_fedramp"].(bool); ok {
+		return fedramp
+	}
+	return false
+}
+
+func isAnthropicOAuthTokenURL(tokenURL string) bool {
+	parsed, err := url.Parse(tokenURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "platform.claude.com")
+}
+
+func isOpenAIOAuthTokenURL(tokenURL string) bool {
+	parsed, err := url.Parse(tokenURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "auth.openai.com")
+}
+
+func isGoogleOAuthTokenURL(tokenURL string) bool {
+	parsed, err := url.Parse(tokenURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "oauth2.googleapis.com")
+}
+
+func compactOAuthBody(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return "empty response"
+	}
+	if len(text) > 300 {
+		return text[:300] + "..."
+	}
+	return text
 }

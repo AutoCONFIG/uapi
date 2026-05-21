@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/google/uuid"
 )
 
 type WeightedAccount struct {
@@ -18,6 +19,7 @@ type AccountPool struct {
 	mu          sync.RWMutex
 	accounts    []WeightedAccount
 	totalWeight int
+	closed      bool // set by Close to prevent cooldown goroutines from acting on removed pools
 }
 
 func NewAccountPool(accounts []*db.Account) *AccountPool {
@@ -86,6 +88,9 @@ func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
 			time.AfterFunc(duration, func() {
 				p.mu.Lock()
 				defer p.mu.Unlock()
+				if p.closed {
+					return // pool has been removed, skip cooldown restore
+				}
 				for j := range p.accounts {
 					if p.accounts[j].Account.ID.String() == cooldownID {
 						p.accounts[j].Weight = cooldownWeight
@@ -127,5 +132,27 @@ func (pm *PoolManager) GetPool(channelID string) (*AccountPool, bool) {
 func (pm *PoolManager) RemovePool(channelID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	if p, ok := pm.pools[channelID]; ok {
+		p.Close()
+	}
 	delete(pm.pools, channelID)
+}
+
+func (pm *PoolManager) Snapshot() map[uuid.UUID]*AccountPool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	out := make(map[uuid.UUID]*AccountPool, len(pm.pools))
+	for channelID, pool := range pm.pools {
+		if id, err := uuid.Parse(channelID); err == nil {
+			out[id] = pool
+		}
+	}
+	return out
+}
+
+// Close marks the pool as closed so pending cooldown goroutines will no-op.
+func (p *AccountPool) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
 }

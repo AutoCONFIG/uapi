@@ -2,16 +2,18 @@ package main
 
 import (
 	"flag"
-	"log"
+	"os"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/admin"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay"
 	"github.com/AutoCONFIG/uapi/internal/server"
 	"github.com/AutoCONFIG/uapi/internal/user"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -20,45 +22,55 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		panic(err)
 	}
+	logger.Configure(cfg.Logging.Level)
+	log := logger.Component("main")
 
 	if err := crypto.Init(cfg.Security.EncryptionKey); err != nil {
-		log.Fatalf("init crypto: %v", err)
+		log.Error("init crypto failed", logger.Err(err))
+		os.Exit(1)
 	}
-
-	database, err := db.Init(cfg.Database.DSN())
-	if err != nil {
-		log.Fatalf("init database: %v", err)
-	}
-	log.Println("database connected")
 
 	pools := relay.NewPoolManager()
-	billing := relay.NewBillingService(database)
+	var database *gorm.DB
+	var billing *relay.BillingService
+	var userSvc *user.Service
 
-	// Load account pools from DB
-	if err := admin.InitPools(database, func(channelID string, accounts []*db.Account) {
-		pools.SetPool(channelID, relay.NewAccountPool(accounts))
-	}); err != nil {
-		log.Printf("warning: init pools: %v", err)
-	}
-	log.Println("account pools loaded")
-
-	// Start background log cleanup
-	admin.StartLogCleanup(database, cfg.Logging.RetentionDays)
-
-	// Initialize user service
-	jwtExpiry := 24 * time.Hour
-	if cfg.User.JWTExpiry != "" {
-		if d, err := time.ParseDuration(cfg.User.JWTExpiry); err == nil {
-			jwtExpiry = d
+	if cfg.Server.Mode != "relay" {
+		var err error
+		database, err = db.Init(cfg.Database.DSN())
+		if err != nil {
+			log.Error("init database failed", logger.Err(err))
+			os.Exit(1)
 		}
+		log.Info("database connected")
+
+		billing = relay.NewBillingService(database)
+
+		// Load account pools from DB for local/all-in-one relay fallback.
+		if err := admin.InitPools(database, func(channelID string, accounts []*db.Account) {
+			pools.SetPool(channelID, relay.NewAccountPool(accounts))
+		}); err != nil {
+			log.Warn("init pools failed", logger.Err(err))
+		}
+		log.Info("account pools loaded")
+
+		admin.StartLogCleanup(database, cfg.Logging.RetentionDays)
+
+		jwtExpiry := 24 * time.Hour
+		if cfg.User.JWTExpiry != "" {
+			if d, err := time.ParseDuration(cfg.User.JWTExpiry); err == nil {
+				jwtExpiry = d
+			}
+		}
+		userSvc = user.NewService(database, cfg.Security.JWTSecret, jwtExpiry, cfg.User.MaxKeysPerUser)
 	}
-	userSvc := user.NewService(database, cfg.Security.JWTSecret, jwtExpiry, cfg.User.MaxKeysPerUser)
 
 	srv := server.New(cfg, database, pools, billing, userSvc, *configPath)
-	log.Println("uapi ready")
+	log.Info("uapi ready")
 	if err := srv.Start(); err != nil {
-		log.Fatalf("server error: %v", err)
+		log.Error("server error", logger.Err(err))
+		os.Exit(1)
 	}
 }

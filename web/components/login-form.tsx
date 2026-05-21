@@ -19,32 +19,40 @@ export function LoginForm() {
     const email = String(data.get("email") ?? "").trim().toLowerCase();
     const password = String(data.get("password") ?? "");
 
+    const adminLike = email.startsWith("admin@");
+
+    if (adminLike) {
+      try {
+        const adminLogin = await adminApi.login({ email, password });
+        window.localStorage.setItem("uapi.admin.token", adminLogin.token);
+        router.push("/admin/dashboard");
+        return;
+      } catch {
+        // Fall through to user login for non-standard admin emails.
+      }
+    }
+
     try {
       const userLogin = await userApi.login({ email, password });
       window.localStorage.setItem("uapi.user.token", userLogin.token);
       router.push("/overview");
       return;
     } catch {
-      // Admin auth is a separate backend endpoint today. Use the email prefix as username.
+      // Not a user account.
     }
 
-    try {
-      const username = email.includes("@") ? email.split("@")[0] : email;
-      const adminLogin = await adminApi.login({ username, password });
-      window.localStorage.setItem("uapi.admin.token", adminLogin.token);
-      router.push("/admin/dashboard");
-      return;
-    } catch {
-      // Static preview fallback while the Go API server is not running.
+    if (!adminLike) {
+      try {
+        const adminLogin = await adminApi.login({ email, password });
+        window.localStorage.setItem("uapi.admin.token", adminLogin.token);
+        router.push("/admin/dashboard");
+        return;
+      } catch {
+        // Both user and admin login failed.
+      }
     }
 
-    if (email === "user@example.com" && password === "user123456") {
-      router.push("/overview");
-    } else if ((email === "admin@example.com" || email === "admin") && password === "admin123") {
-      router.push("/admin/dashboard");
-    } else {
-      setError("邮箱或密码不正确");
-    }
+    setError("邮箱或密码不正确");
     setLoading(false);
   }
 

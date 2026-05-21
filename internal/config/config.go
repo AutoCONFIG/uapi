@@ -14,12 +14,14 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
 	Security SecurityConfig `yaml:"security"`
+	Gateway  GatewayConfig  `yaml:"gateway"`
 	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	User     UserConfig     `yaml:"user"`
 }
 
 type ServerConfig struct {
+	Mode             string `yaml:"mode"`
 	Host             string `yaml:"host"`
 	Port             int    `yaml:"port"`
 	MaxBodySizeMB    int    `yaml:"max_body_size_mb"`
@@ -49,12 +51,34 @@ type SecurityConfig struct {
 	AdminPasswordHash string `yaml:"admin_password_hash,omitempty"`
 }
 
+type GatewayConfig struct {
+	InternalSecret     string `yaml:"internal_secret"`
+	CacheTTL           string `yaml:"cache_ttl"`
+	GatewayID          string `yaml:"gateway_id"`
+	RequireInternal    bool   `yaml:"require_internal"`
+	ControlURL         string `yaml:"control_url"`
+	RelayNodeID        string `yaml:"relay_node_id"`
+	ConfigPullInterval string `yaml:"config_pull_interval"`
+}
+
 type BillingConfig struct {
+}
+
+type WSServerConfig struct {
+	Host                     string   `yaml:"host"`
+	Port                     int      `yaml:"port"`
+	PoolIdleTimeoutSeconds   int      `yaml:"pool_idle_timeout_seconds"`
+	PoolMaxConnLifetime      int      `yaml:"pool_max_conn_lifetime"`
+	PoolMaxTotalConns        int      `yaml:"pool_max_total_conns"`
+	PoolMaxIdlePerKey        int      `yaml:"pool_max_idle_per_key"`
+	StreamIdleTimeoutSeconds int      `yaml:"stream_idle_timeout_seconds"`
+	MaxConnections           int      `yaml:"max_connections"`
+	AllowedOrigins           []string `yaml:"allowed_origins"`
 }
 
 type UserConfig struct {
 	JWTExpiry      string `yaml:"jwt_expiry"`        // default "24h"
-	MaxKeysPerUser int    `yaml:"max_keys_per_user"`  // default 5
+	MaxKeysPerUser int    `yaml:"max_keys_per_user"` // default 5
 }
 
 type LoggingConfig struct {
@@ -79,6 +103,9 @@ func Load(path string) (*Config, error) {
 			if err := generateSecrets(&cfg.Security); err != nil {
 				return nil, fmt.Errorf("generate secrets: %w", err)
 			}
+			if err := generateGatewaySecret(&cfg.Gateway); err != nil {
+				return nil, fmt.Errorf("generate gateway secret: %w", err)
+			}
 			if err := Save(cfg, path); err != nil {
 				return nil, fmt.Errorf("write auto-generated config: %w", err)
 			}
@@ -92,9 +119,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Auto-generate missing secrets
-	if cfg.Security.JWTSecret == "" || cfg.Security.EncryptionKey == "" {
+	if cfg.Security.JWTSecret == "" || cfg.Security.EncryptionKey == "" || cfg.Gateway.InternalSecret == "" {
 		if err := generateSecrets(&cfg.Security); err != nil {
 			return nil, fmt.Errorf("generate secrets: %w", err)
+		}
+		if err := generateGatewaySecret(&cfg.Gateway); err != nil {
+			return nil, fmt.Errorf("generate gateway secret: %w", err)
 		}
 		if err := Save(cfg, path); err != nil {
 			return nil, fmt.Errorf("write config with generated secrets: %w", err)
@@ -125,8 +155,14 @@ func Save(cfg *Config, path string) error {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
+			Mode:          "all",
 			Port:          8080,
 			MaxBodySizeMB: 100,
+		},
+		Gateway: GatewayConfig{
+			CacheTTL:           "5s",
+			GatewayID:          "default",
+			ConfigPullInterval: "5s",
 		},
 		Database: DatabaseConfig{
 			Port:    5432,
@@ -163,9 +199,50 @@ func generateSecrets(sec *SecurityConfig) error {
 	return nil
 }
 
+func generateGatewaySecret(gw *GatewayConfig) error {
+	if gw.InternalSecret == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		gw.InternalSecret = base64.RawStdEncoding.EncodeToString(b)
+	}
+	return nil
+}
+
 func (c *Config) validate() error {
+	switch c.Server.Mode {
+	case "", "all":
+		c.Server.Mode = "all"
+	case "gateway", "relay":
+	default:
+		return fmt.Errorf("server.mode must be one of all, gateway, relay")
+	}
 	if len(c.Security.EncryptionKey) != 64 {
 		return fmt.Errorf("security.encryption_key must be 64 hex characters (32 bytes)")
+	}
+	if c.Gateway.InternalSecret == "" {
+		return fmt.Errorf("gateway.internal_secret must be set")
+	}
+	if c.Gateway.CacheTTL == "" {
+		c.Gateway.CacheTTL = "5s"
+	}
+	if c.Gateway.GatewayID == "" {
+		c.Gateway.GatewayID = "default"
+	}
+	if c.Gateway.ConfigPullInterval == "" {
+		c.Gateway.ConfigPullInterval = "5s"
+	}
+	if c.Server.Mode == "relay" {
+		if !c.Gateway.RequireInternal {
+			return fmt.Errorf("gateway.require_internal must be true when server.mode is relay")
+		}
+		if c.Gateway.ControlURL == "" {
+			return fmt.Errorf("gateway.control_url must be set when server.mode is relay")
+		}
+		if c.Gateway.RelayNodeID == "" {
+			return fmt.Errorf("gateway.relay_node_id must be set when server.mode is relay")
+		}
 	}
 	return nil
 }

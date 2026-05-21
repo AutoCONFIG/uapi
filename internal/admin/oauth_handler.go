@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	internalcrypto "github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/google/uuid"
@@ -34,6 +38,7 @@ type oauthSession struct {
 	Credential     string
 	RefreshToken   string
 	Expiry         *time.Time
+	Metadata       map[string]interface{}
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
 	BoundAccountID *uuid.UUID
@@ -59,8 +64,12 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	if provider == "" {
 		provider = strings.ToLower(channel.Type)
 	}
-	if provider != "openai" && provider != "gemini" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth is supported for openai and gemini channels")
+	if provider != "openai" && provider != "gemini" && provider != "anthropic" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth is supported for openai, gemini and anthropic channels")
+		return
+	}
+	if provider != strings.ToLower(channel.Type) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth provider must match channel type")
 		return
 	}
 
@@ -76,20 +85,68 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	}
 
 	clientID := strings.TrimSpace(req.ClientID)
+	clientSecret := strings.TrimSpace(req.ClientSecret)
 	tokenURL := strings.TrimSpace(req.TokenURL)
 	if clientID == "" {
 		clientID = defaultOAuthClientID(provider)
 	}
+	if clientSecret == "" {
+		clientSecret = defaultOAuthClientSecret(provider)
+	}
 	if tokenURL == "" {
 		tokenURL = defaultOAuthTokenURL(provider)
 	}
+
+	if provider == "openai" && strings.EqualFold(req.Mode, "device") {
+		device, err := openai.StartDeviceAuth(clientID)
+		if err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
+			return
+		}
+		session := &oauthSession{
+			State: state, Provider: provider, ChannelID: req.ChannelID,
+			AccountName: strings.TrimSpace(req.AccountName),
+			ClientID:    clientID, ClientSecret: clientSecret,
+			TokenURL: tokenURL, RedirectURI: openai.DeviceRedirectURI,
+			Status: "pending", CreatedAt: time.Now(),
+		}
+		h.oauthMu.Lock()
+		h.pruneOAuthSessionsLocked()
+		h.oauthSessions[state] = session
+		h.oauthMu.Unlock()
+
+		go h.pollOpenAIDeviceOAuth(state, device.DeviceAuthID, device.UserCode, device.Interval)
+		h.jsonResponse(ctx, 200, OAuthAuthURLResponse{
+			AuthURL:     openai.DeviceAuthURL,
+			State:       state,
+			RedirectURI: openai.DeviceRedirectURI,
+			Mode:        "device",
+			UserCode:    device.UserCode,
+			ExpiresAt:   session.CreatedAt.Add(oauthSessionTTL),
+		})
+		return
+	}
+
 	redirectURI := h.oauthRedirectURI(ctx)
+	mode := "browser"
+	if provider == "openai" {
+		redirectURI = openai.DefaultRedirectURI
+		mode = "manual_callback"
+	} else if provider == "gemini" {
+		redirectURI = gemini.DefaultRedirectURI
+		verifier = ""
+		challenge = ""
+		mode = "manual_callback"
+	} else if provider == "anthropic" {
+		redirectURI = anthropic.DefaultRedirectURI
+		mode = "manual_callback"
+	}
 	authURL := buildProviderAuthURL(provider, clientID, redirectURI, challenge, state)
 
 	session := &oauthSession{
 		State: state, Provider: provider, ChannelID: req.ChannelID,
 		AccountName: strings.TrimSpace(req.AccountName),
-		ClientID:    clientID, ClientSecret: strings.TrimSpace(req.ClientSecret),
+		ClientID:    clientID, ClientSecret: clientSecret,
 		TokenURL: tokenURL, RedirectURI: redirectURI, CodeVerifier: verifier,
 		Status: "pending", CreatedAt: time.Now(),
 	}
@@ -98,12 +155,248 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	h.oauthSessions[state] = session
 	h.oauthMu.Unlock()
 
+	logger.Infof("admin.oauth", "oauth session started", logger.F("provider", provider), logger.F("channel_id", req.ChannelID.String()), logger.F("mode", mode))
 	h.jsonResponse(ctx, 200, OAuthAuthURLResponse{
 		AuthURL:     authURL,
 		State:       state,
 		RedirectURI: redirectURI,
+		Mode:        mode,
 		ExpiresAt:   session.CreatedAt.Add(oauthSessionTTL),
 	})
+}
+
+func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
+	var req CompleteOAuthRequest
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
+		return
+	}
+	state := strings.TrimSpace(req.State)
+	code := strings.TrimSpace(req.Code)
+	providerErr := ""
+	var imported *oauthJSONImport
+	if strings.TrimSpace(req.OAuthJSON) != "" {
+		parsed, err := parseOAuthJSON(req.OAuthJSON)
+		if err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, err.Error())
+			return
+		}
+		imported = parsed
+		if state == "" {
+			state = imported.State
+		}
+		if code == "" {
+			code = imported.Code
+		}
+		providerErr = imported.Error
+	}
+	if req.CallbackURL != "" {
+		parsed, err := url.Parse(strings.TrimSpace(req.CallbackURL))
+		if err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid callback_url")
+			return
+		}
+		values := parsed.Query()
+		if code == "" {
+			code = values.Get("code")
+		}
+		if state == "" {
+			state = values.Get("state")
+		}
+		providerErr = values.Get("error")
+	}
+	if state == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "state is required")
+		return
+	}
+	session := h.getOAuthSession(state)
+	if session == nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "oauth session not found")
+		return
+	}
+	if imported != nil {
+		h.applyOAuthJSONImport(state, imported)
+		session = h.getOAuthSession(state)
+		if imported.AccessToken != "" || imported.APIKey != "" || imported.IDToken != "" {
+			credential := imported.AccessToken
+			if imported.APIKey != "" {
+				credential = imported.APIKey
+			}
+			if credential == "" && imported.IDToken != "" && session.Provider == "openai" {
+				exchanged, err := openai.ExchangeForAPIKey(session.TokenURL, imported.IDToken, session.ClientID)
+				if err != nil {
+					h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+					h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
+					return
+				}
+				credential = exchanged
+			}
+			metadata := importedMetadata(imported)
+			if imported.IDToken != "" && session.Provider == "openai" {
+				if parsed, err := openai.ParseIDTokenMetadata(imported.IDToken); err == nil {
+					metadata = mergeMetadata(metadata, parsed)
+				}
+			}
+			h.completeOAuthSession(state, credential, imported.RefreshToken, imported.Expiry, metadata, "")
+			logger.Infof("admin.oauth", "oauth json import completed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("has_refresh_token", imported.RefreshToken != ""), logger.F("has_expiry", imported.Expiry != nil))
+			h.jsonResponse(ctx, 200, h.oauthStatusDTO(h.getOAuthSession(state)))
+			return
+		}
+	}
+	if providerErr != "" {
+		h.completeOAuthSession(state, "", "", nil, nil, providerErr)
+		h.jsonError(ctx, fasthttp.StatusBadRequest, providerErr)
+		return
+	}
+	if code == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "authorization code is required")
+		return
+	}
+	credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, code)
+	if err != nil {
+		h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+		logger.Warnf("admin.oauth", "oauth code exchange failed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.Err(err))
+		h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
+		return
+	}
+	h.completeOAuthSession(state, credential, refreshToken, expiry, metadata, "")
+	logger.Infof("admin.oauth", "oauth code exchange completed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("has_refresh_token", refreshToken != ""), logger.F("has_expiry", expiry != nil))
+	h.jsonResponse(ctx, 200, h.oauthStatusDTO(h.getOAuthSession(state)))
+}
+
+type oauthJSONImport struct {
+	State        string
+	Code         string
+	CallbackURL  string
+	Error        string
+	RedirectURI  string
+	CodeVerifier string
+	ClientID     string
+	ClientSecret string
+	TokenURL     string
+	AccessToken  string
+	IDToken      string
+	APIKey       string
+	RefreshToken string
+	Scope        string
+	TokenType    string
+	Expiry       *time.Time
+}
+
+func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &data); err != nil {
+		return nil, fmt.Errorf("invalid oauth_json")
+	}
+	imp := &oauthJSONImport{
+		State:        jsonString(data, "state", "oauth_state"),
+		Code:         jsonString(data, "code", "authorization_code", "auth_code"),
+		CallbackURL:  jsonString(data, "callback_url", "redirect_url", "url"),
+		Error:        jsonString(data, "error", "error_description"),
+		RedirectURI:  jsonString(data, "redirect_uri"),
+		CodeVerifier: jsonString(data, "code_verifier", "verifier"),
+		ClientID:     jsonString(data, "client_id"),
+		ClientSecret: jsonString(data, "client_secret"),
+		TokenURL:     jsonString(data, "token_url"),
+		AccessToken:  jsonString(data, "access_token", "token"),
+		IDToken:      jsonString(data, "id_token"),
+		APIKey:       jsonString(data, "api_key", "key"),
+		RefreshToken: jsonString(data, "refresh_token"),
+		Scope:        jsonString(data, "scope"),
+		TokenType:    jsonString(data, "token_type"),
+		Expiry:       jsonExpiry(data),
+	}
+	if imp.CallbackURL != "" {
+		if parsed, err := url.Parse(imp.CallbackURL); err == nil {
+			values := parsed.Query()
+			if imp.Code == "" {
+				imp.Code = values.Get("code")
+			}
+			if imp.State == "" {
+				imp.State = values.Get("state")
+			}
+			if imp.Error == "" {
+				imp.Error = values.Get("error")
+			}
+		}
+	}
+	return imp, nil
+}
+
+func (h *Handler) applyOAuthJSONImport(state string, imp *oauthJSONImport) {
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	current := h.oauthSessions[state]
+	if current == nil {
+		return
+	}
+	if imp.RedirectURI != "" {
+		current.RedirectURI = imp.RedirectURI
+	}
+	if imp.CodeVerifier != "" {
+		current.CodeVerifier = imp.CodeVerifier
+	}
+	if imp.ClientID != "" {
+		current.ClientID = imp.ClientID
+	}
+	if imp.ClientSecret != "" {
+		current.ClientSecret = imp.ClientSecret
+	}
+	if imp.TokenURL != "" {
+		current.TokenURL = imp.TokenURL
+	}
+}
+
+func jsonString(data map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := data[key]; ok {
+			switch value := v.(type) {
+			case string:
+				if strings.TrimSpace(value) != "" {
+					return strings.TrimSpace(value)
+				}
+			case float64:
+				return strconv.FormatFloat(value, 'f', -1, 64)
+			}
+		}
+	}
+	return ""
+}
+
+func jsonExpiry(data map[string]interface{}) *time.Time {
+	for _, key := range []string{"token_expiry", "expires_at", "expiry", "expiry_date", "expires_in"} {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		switch value := v.(type) {
+		case string:
+			if value == "" {
+				continue
+			}
+			if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+				return expiryFromNumber(key, n)
+			}
+			if t, err := time.Parse(time.RFC3339, value); err == nil {
+				return &t
+			}
+		case float64:
+			return expiryFromNumber(key, int64(value))
+		}
+	}
+	return nil
+}
+
+func expiryFromNumber(key string, n int64) *time.Time {
+	var t time.Time
+	if key == "expires_in" {
+		t = time.Now().Add(time.Duration(n) * time.Second)
+	} else if n > 10_000_000_000 {
+		t = time.UnixMilli(n)
+	} else {
+		t = time.Unix(n, 0)
+	}
+	return &t
 }
 
 func (h *Handler) OAuthCallback(ctx *fasthttp.RequestCtx) {
@@ -121,23 +414,23 @@ func (h *Handler) OAuthCallback(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if providerErr != "" {
-		h.completeOAuthSession(state, "", "", nil, providerErr)
+		h.completeOAuthSession(state, "", "", nil, nil, providerErr)
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadRequest, "OAuth provider returned an error")
 		return
 	}
 	if code == "" {
-		h.completeOAuthSession(state, "", "", nil, "authorization code is missing")
+		h.completeOAuthSession(state, "", "", nil, nil, "authorization code is missing")
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadRequest, "Authorization code is missing")
 		return
 	}
 
-	credential, refreshToken, expiry, err := exchangeOAuthCode(session, code)
+	credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, code)
 	if err != nil {
-		h.completeOAuthSession(state, "", "", nil, err.Error())
+		h.completeOAuthSession(state, "", "", nil, nil, err.Error())
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadGateway, "OAuth token exchange failed")
 		return
 	}
-	h.completeOAuthSession(state, credential, refreshToken, expiry, "")
+	h.completeOAuthSession(state, credential, refreshToken, expiry, metadata, "")
 	h.writeOAuthCallbackPage(ctx, fasthttp.StatusOK, "OAuth authorization completed. You can return to UAPI and bind the account.")
 }
 
@@ -172,6 +465,14 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 	}
 	if session.Status != "completed" {
 		h.jsonError(ctx, fasthttp.StatusConflict, "oauth session is not completed")
+		return
+	}
+	if session.Credential == "" {
+		h.jsonError(ctx, fasthttp.StatusConflict, "oauth session has no credential")
+		return
+	}
+	if session.RefreshToken == "" {
+		h.jsonError(ctx, fasthttp.StatusConflict, "oauth session has no refresh token")
 		return
 	}
 	if session.BoundAccountID != nil {
@@ -220,6 +521,20 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 		RefreshToken: encryptedRefresh, TokenExpiry: session.Expiry,
 		ClientID: session.ClientID, ClientSecret: encryptedClientSecret,
 		TokenURL: session.TokenURL,
+		Metadata: session.Metadata,
+	}
+	if session.Provider == "anthropic" {
+		if metadata, err := anthropic.FetchAccountMetadata(session.Credential, strings.Fields(anthropic.DefaultScope)); err == nil {
+			account.Metadata = mergeMetadata(account.Metadata, metadata)
+		} else {
+			logger.Warnf("admin.oauth", "anthropic metadata sync failed", logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
+		}
+	} else if session.Provider == "gemini" {
+		if metadata, err := gemini.FetchCodeAssistMetadata(session.Credential, geminiProjectID(account.Metadata)); err == nil {
+			account.Metadata = mergeMetadata(account.Metadata, metadata)
+		} else {
+			logger.Warnf("admin.oauth", "gemini code metadata sync failed", logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
+		}
 	}
 	account.ID = uuid.New()
 	if err := h.db.Create(&account).Error; err != nil {
@@ -237,7 +552,11 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 	if h.RefreshPool != nil {
 		h.RefreshPool(account.ChannelID.String())
 	}
+	if h.OAuthIdle != nil {
+		h.OAuthIdle.ScheduleAccount(&account)
+	}
 	auditCreate(h.db, "account", account.ID, h.getAdminUser(ctx))
+	logger.Infof("admin.oauth", "oauth account bound", logger.F("provider", session.Provider), logger.F("channel_id", account.ChannelID.String()), logger.F("account_id", account.ID.String()), logger.F("enabled", account.Enabled))
 	h.jsonResponse(ctx, 200, account)
 }
 
@@ -269,7 +588,7 @@ func (h *Handler) getOAuthSession(state string) *oauthSession {
 	return &copy
 }
 
-func (h *Handler) completeOAuthSession(state, credential, refreshToken string, expiry *time.Time, errMsg string) {
+func (h *Handler) completeOAuthSession(state, credential, refreshToken string, expiry *time.Time, metadata map[string]interface{}, errMsg string) {
 	h.oauthMu.Lock()
 	defer h.oauthMu.Unlock()
 	session := h.oauthSessions[state]
@@ -287,7 +606,47 @@ func (h *Handler) completeOAuthSession(state, credential, refreshToken string, e
 	session.Credential = credential
 	session.RefreshToken = refreshToken
 	session.Expiry = expiry
+	session.Metadata = metadata
 	session.Error = ""
+}
+
+func (h *Handler) pollOpenAIDeviceOAuth(state, deviceAuthID, userCode string, interval int) {
+	if interval <= 0 {
+		interval = 5
+	}
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+	deadline := time.NewTimer(oauthSessionTTL)
+	defer deadline.Stop()
+
+	for {
+		select {
+		case <-deadline.C:
+			h.completeOAuthSession(state, "", "", nil, nil, "device authorization expired")
+			return
+		case <-ticker.C:
+			session := h.getOAuthSession(state)
+			if session == nil || session.Status != "pending" {
+				return
+			}
+			deviceToken, ready, err := openai.PollDeviceToken(deviceAuthID, userCode)
+			if err != nil {
+				h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+				return
+			}
+			if !ready {
+				continue
+			}
+			session.CodeVerifier = deviceToken.CodeVerifier
+			credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, deviceToken.AuthorizationCode)
+			if err != nil {
+				h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+				return
+			}
+			h.completeOAuthSession(state, credential, refreshToken, expiry, metadata, "")
+			return
+		}
+	}
 }
 
 func (h *Handler) pruneOAuthSessionsLocked() {
@@ -331,6 +690,12 @@ func oauthPKCE(provider string) (verifier, challenge string, err error) {
 			return "", "", err
 		}
 		return verifier, gemini.GenerateCodeChallenge(verifier), nil
+	case "anthropic":
+		verifier, err = anthropic.GenerateCodeVerifier()
+		if err != nil {
+			return "", "", err
+		}
+		return verifier, anthropic.GenerateCodeChallenge(verifier), nil
 	default:
 		return "", "", fmt.Errorf("unsupported provider")
 	}
@@ -340,6 +705,9 @@ func buildProviderAuthURL(provider, clientID, redirectURI, challenge, state stri
 	if provider == "gemini" {
 		return gemini.BuildAuthURL(clientID, redirectURI, challenge, state)
 	}
+	if provider == "anthropic" {
+		return anthropic.BuildAuthURL(clientID, redirectURI, challenge, state)
+	}
 	return openai.BuildAuthURL(clientID, redirectURI, challenge, state)
 }
 
@@ -347,24 +715,48 @@ func defaultOAuthClientID(provider string) string {
 	if provider == "gemini" {
 		return gemini.DefaultClientID
 	}
+	if provider == "anthropic" {
+		return anthropic.DefaultClientID
+	}
 	return openai.DefaultClientID
+}
+
+func defaultOAuthClientSecret(provider string) string {
+	if provider == "gemini" {
+		return gemini.DefaultClientSecret
+	}
+	return ""
 }
 
 func defaultOAuthTokenURL(provider string) string {
 	if provider == "gemini" {
 		return gemini.DefaultTokenURL
 	}
+	if provider == "anthropic" {
+		return anthropic.DefaultTokenURL
+	}
 	return openai.DefaultTokenURL
 }
 
-func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshToken string, expiry *time.Time, err error) {
+func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshToken string, expiry *time.Time, metadata map[string]interface{}, err error) {
 	switch session.Provider {
 	case "openai":
 		tokens, err := openai.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID)
 		if err != nil {
-			return "", "", nil, err
+			return "", "", nil, nil, err
 		}
 		credential = tokens.AccessToken
+		if tokens.IDToken != "" {
+			if parsed, err := openai.ParseIDTokenMetadata(tokens.IDToken); err == nil {
+				metadata = parsed
+			}
+		}
+		if usage, err := openai.FetchCodexUsage(tokens.AccessToken, openAIAccountID(metadata), openAIFedRAMP(metadata)); err == nil {
+			if metadata == nil {
+				metadata = map[string]interface{}{}
+			}
+			metadata["codex_usage"] = usage
+		}
 		if tokens.IDToken != "" {
 			if exchanged, err := openai.ExchangeForAPIKey(session.TokenURL, tokens.IDToken, session.ClientID); err == nil && exchanged != "" {
 				credential = exchanged
@@ -374,20 +766,112 @@ func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshT
 		if tokens.ExpiresIn > 0 {
 			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
 		}
-		return credential, tokens.RefreshToken, &exp, nil
+		return credential, tokens.RefreshToken, &exp, metadata, nil
 	case "gemini":
 		tokens, err := gemini.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID, session.ClientSecret)
 		if err != nil {
-			return "", "", nil, err
+			return "", "", nil, nil, err
 		}
 		exp := time.Now().Add(time.Hour)
 		if tokens.ExpiresIn > 0 {
 			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
 		}
-		return tokens.AccessToken, tokens.RefreshToken, &exp, nil
+		if parsed, err := gemini.FetchCodeAssistMetadata(tokens.AccessToken, ""); err == nil {
+			metadata = parsed
+		}
+		return tokens.AccessToken, tokens.RefreshToken, &exp, metadata, nil
+	case "anthropic":
+		tokens, err := anthropic.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID, session.State)
+		if err != nil {
+			return "", "", nil, nil, err
+		}
+		exp := time.Now().Add(time.Hour)
+		if tokens.ExpiresIn > 0 {
+			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
+		}
+		if parsed, err := anthropic.FetchAccountMetadata(tokens.AccessToken, strings.Fields(tokens.Scope)); err == nil {
+			metadata = parsed
+		}
+		return tokens.AccessToken, tokens.RefreshToken, &exp, metadata, nil
 	default:
-		return "", "", nil, fmt.Errorf("unsupported provider")
+		return "", "", nil, nil, fmt.Errorf("unsupported provider")
 	}
+}
+
+func geminiProjectID(metadata map[string]interface{}) string {
+	if metadata == nil {
+		return ""
+	}
+	if project, ok := metadata["project_id"].(string); ok {
+		return project
+	}
+	if loadRes, ok := metadata["load_code_assist"].(map[string]interface{}); ok {
+		if project, ok := loadRes["cloudaicompanionProject"].(string); ok {
+			return project
+		}
+		if project, ok := loadRes["cloudaicompanionProject"].(map[string]interface{}); ok {
+			if id, ok := project["id"].(string); ok {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func openAIAccountID(metadata map[string]interface{}) string {
+	if metadata == nil {
+		return ""
+	}
+	if accountID, ok := metadata["chatgpt_account_id"].(string); ok {
+		return accountID
+	}
+	return ""
+}
+
+func openAIFedRAMP(metadata map[string]interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	if fedramp, ok := metadata["chatgpt_account_is_fedramp"].(bool); ok {
+		return fedramp
+	}
+	return false
+}
+
+func importedMetadata(imp *oauthJSONImport) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"oauth_imported_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if imp == nil {
+		return metadata
+	}
+	if imp.Scope != "" {
+		metadata["oauth_scope"] = imp.Scope
+	}
+	if imp.TokenType != "" {
+		metadata["oauth_token_type"] = imp.TokenType
+	}
+	if imp.IDToken != "" {
+		metadata["oauth_has_id_token"] = true
+	}
+	if imp.Expiry != nil {
+		metadata["oauth_expiry"] = imp.Expiry.UTC().Format(time.RFC3339)
+	}
+	return metadata
+}
+
+func mergeMetadata(base, overlay map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	merged := map[string]interface{}{}
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
 }
 
 func randomURLToken(size int) (string, error) {

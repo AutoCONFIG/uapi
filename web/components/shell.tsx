@@ -6,12 +6,15 @@ import type React from "react";
 import {
   Activity,
   BarChart3,
+  Blocks,
   FileText,
   Gauge,
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Network,
   Package,
+  SlidersHorizontal,
   Route,
   Settings,
   Shield,
@@ -36,6 +39,8 @@ const userNav: NavItem[] = [
 
 const adminNav: NavItem[] = [
   { href: "/admin/dashboard", label: "管理总览", icon: Gauge },
+  { href: "/admin/access-policies", label: "访问策略", icon: SlidersHorizontal },
+  { href: "/admin/relay-nodes", label: "转发节点", icon: Network },
   { href: "/admin/channels", label: "渠道", icon: Route },
   { href: "/admin/users", label: "用户", icon: Users },
   { href: "/admin/tokens", label: "令牌", icon: Shield },
@@ -63,10 +68,15 @@ export function AppShell({
           <div className="topbar-title">{title}</div>
           <div className="topbar-actions">
             <span className="badge green">
-              <Activity size={14} /> All systems normal
+              <Activity size={14} /> 系统正常
             </span>
-            <Link className="btn" href="/login" title="退出">
-              <LogOut /> Logout
+            <Link className="btn" href="/login" title="退出" onClick={() => {
+            if (typeof window !== "undefined") {
+              window.localStorage.removeItem("uapi.admin.token");
+              window.localStorage.removeItem("uapi.user.token");
+            }
+          }}>
+              <LogOut /> 退出
             </Link>
           </div>
         </header>
@@ -82,6 +92,7 @@ function Sidebar({ variant }: { variant: AppShellVariant }) {
   return (
     <aside className="sidebar">
       <Link className="brand" href={homeHref}>
+        <span className="brand-mark"><Blocks size={18} /></span>
         <span>UAPI</span>
       </Link>
       {variant === "admin" ? (
@@ -124,12 +135,12 @@ export function PageHead({
 }) {
   return (
     <div className="page-head">
-      <div>
+      <div className="page-title-block">
         <p className="eyebrow">{eyebrow}</p>
         <h1>{title}</h1>
         <p className="lede">{description}</p>
       </div>
-      {action}
+      {action ? <div className="page-actions">{action}</div> : null}
     </div>
   );
 }
@@ -155,6 +166,20 @@ export function StatusBadge({ value }: { value: string }) {
   return <span className={`badge ${tone}`}>{value}</span>;
 }
 
-export function ToolbarButton({ children }: { children: React.ReactNode }) {
-  return <button className="btn primary">{children}</button>;
+export function EmptyState({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="empty-state">
+      <strong>{title}</strong>
+      {description ? <p>{description}</p> : null}
+      {action ? <div>{action}</div> : null}
+    </div>
+  );
 }

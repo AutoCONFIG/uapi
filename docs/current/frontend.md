@@ -14,8 +14,9 @@ Primary surfaces:
 
 - Public auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
-- Admin console: `/admin/dashboard`, `/admin/channels`, `/admin/users`,
-  `/admin/tokens`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`
+- Admin console: `/admin/dashboard`, `/admin/access-policies`, `/admin/relay-nodes`, `/admin/channels`,
+  `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
+  `/admin/audit-logs`
 
 The user console does not expose admin navigation. The admin console does not expose
 user self-service navigation. Admins who want to use the API should create a normal
@@ -32,9 +33,9 @@ The frontend calls the implemented backend routes:
   `/api/user/password`, `/api/user/email`
 - Admin auth/setup: `/api/admin/login`, `/api/admin/init-status`,
   `/api/admin/setup`
-- Admin CRUD: `/api/admin/channels`, `/api/admin/accounts`, `/api/admin/users`,
-  `/api/admin/tokens`, `/api/admin/plans`, `/api/admin/logs`,
-  `/api/admin/audit-logs`
+- Admin CRUD: `/api/admin/access-policies`, `/api/admin/relay-nodes`, `/api/admin/channels`,
+  `/api/admin/accounts`, `/api/admin/users`, `/api/admin/tokens`,
+  `/api/admin/plans`, `/api/admin/logs`, `/api/admin/audit-logs`
 - Admin channel OAuth: `POST /api/admin/channels/oauth/auth-url`,
   `GET /api/admin/channels/oauth/status`, and
   `POST /api/admin/channels/oauth/bind`. Provider callbacks return to
@@ -53,10 +54,21 @@ API keys, and OAuth credentials are represented as credentials within a channel 
 than as a separate primary navigation item. The old `/admin/accounts` route remains as
 a compatibility page only.
 
-The `/admin/channels` modal can create a channel and start OAuth onboarding for
-OpenAI/Codex or Gemini. The backend returns a provider authorization URL, the UI
-polls callback status by `state`, and a completed session is bound as an
-`oauth_token` account inside the channel.
+The `/admin/channels` page groups channels by `channel_group`. The left rail
+shows groups and the right side shows channel tiles; clicking a tile opens a
+drawer for channel edits and credentials. The stored `default` group is displayed
+as `默认渠道`.
+
+The channel drawer and create drawer support three provider families:
+OpenAI, Gemini, and Claude. Each family has normal API-key configuration; OpenAI
+also exposes the `standard` Chat and `responses` API format switch. Code login
+buttons create CodeX, Gemini Code, or Claude Code OAuth channels. The backend
+returns a provider authorization URL, the UI polls callback status by `state`
+where possible, and a completed session is bound as an `oauth_token` account
+inside the channel. OAuth account metadata is shown in the credential list when
+available. Code channel presets pre-fill model allow-lists from the local
+upstream client source trees, and the credential list displays provider quota or
+credit metadata when the backend has synced it.
 
 The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at`,
 `models`, and `permissions`. Permissions map to relay entry points: `chat`,
@@ -65,6 +77,16 @@ The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at
 The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
 `/api/user/usage` and `/api/user/usage/logs`, while preserving static preview
 fallback rows when the API server is unavailable.
+
+
+## Gateway Management Surface
+
+The frontend manages Gateway/Control Plane state. It does not manage Relay nodes
+directly as independent authorities. Relay nodes are execution workers configured
+through Gateway. The `/admin/relay-nodes` page is the current management surface
+for node address, region, egress IP, weight, max concurrency, and status. Future
+Gateway work should add access policies and account-to-node bindings here rather
+than adding separate Relay administration.
 
 ## Known Backend Gaps
 

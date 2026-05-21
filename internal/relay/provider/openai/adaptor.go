@@ -26,7 +26,10 @@ func (a *OpenAIAdaptor) Init(channel *db.Channel, account *db.Account) {
 
 func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 	base := strings.TrimRight(a.channel.Endpoint, "/")
-	if a.channel.APIFormat == "responses" {
+	if strings.HasPrefix(path, "/v1/images/") {
+		return base + path, nil
+	}
+	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
 		// Map /v1/chat/completions → /v1/responses
 		if strings.HasSuffix(path, "/chat/completions") {
 			return base + "/v1/responses", nil
@@ -48,7 +51,7 @@ func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 }
 
 func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	if a.channel.APIFormat == "responses" {
+	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
 		// Convert InternalRequest to OpenAI Responses API format
 		return internalToResponses(req)
 	}
@@ -107,8 +110,7 @@ func init() {
 	provider.RegisterFromInternal(provider.FormatOpenAIChat, internalToOpenAIChat)
 	provider.RegisterToResponseInternal(provider.FormatOpenAIChat, openaiResponseToInternal)
 	provider.RegisterFromResponseInternal(provider.FormatOpenAIChat, internalToOpenAIResponse)
-	// Responses API uses the same input format as Chat (OpenAI messages)
-	// but outputs in Responses format when channel APIFormat == "responses"
-	provider.RegisterToInternal(provider.FormatOpenAIResp, openaiChatToInternal)
+	provider.RegisterToInternal(provider.FormatOpenAIResp, responsesToInternal)
 	provider.RegisterFromInternal(provider.FormatOpenAIResp, internalToResponses)
+	provider.RegisterFromResponseInternal(provider.FormatOpenAIResp, internalToResponsesResponse)
 }

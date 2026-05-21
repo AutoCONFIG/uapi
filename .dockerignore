@@ -1,0 +1,11 @@
+upstream/
+web/node_modules/
+web/.next/
+web/out/
+.git/
+*.swp
+*.swo
+*~
+.env
+.vscode/
+AGENTS.md

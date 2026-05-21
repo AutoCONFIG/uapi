@@ -93,7 +93,10 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
 		return
 	}
-	h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing)
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
+		return
+	}
 	auditUpdate(h.db, "user", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
 }

@@ -19,7 +19,7 @@ type Base struct {
 
 var AllModels = []interface{}{
 	&Channel{}, &Account{}, &Token{}, &Plan{}, &TokenPlan{}, &Log{}, &AuditLog{},
-	&User{}, &RedeemCode{},
+	&User{}, &RedeemCode{}, &RelayNode{}, &NodeAccount{}, &AccessPolicy{}, &PolicyUsageWindow{}, &UsageEvent{},
 }
 
 func Init(dsn string) (*gorm.DB, error) {

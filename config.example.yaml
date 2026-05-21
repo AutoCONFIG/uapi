@@ -1,7 +1,9 @@
 server:
+  mode: "all" # all=Gateway+本机Relay；gateway=仅控制层；relay=仅转发节点
   host: "0.0.0.0"
   port: 8080
   max_body_size_mb: 50
+  concurrency_limit: 0
 
 database:
   host: "localhost"
@@ -16,6 +18,15 @@ security:
   encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   admin_username: "admin"
   admin_password_hash: ""  # 留空则首次启动自动生成
+
+gateway:
+  gateway_id: "default"
+  cache_ttl: "5s"
+  internal_secret: "change-me-to-a-random-internal-gateway-secret"
+  require_internal: false  # 远端 relay 节点建议设为 true，只接受 Gateway 签名请求
+  control_url: ""          # Relay 节点回报 Gateway/拉配置时填写，例如 http://gateway:8080
+  relay_node_id: ""        # Relay 节点自身 ID，在管理后台创建节点后获得
+  config_pull_interval: "5s"
 
 billing:
   default_plan_id: ""

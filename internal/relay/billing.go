@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/logger"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -47,9 +48,18 @@ func (b *BillingService) CheckLimit(tokenID string) error {
 }
 
 func (b *BillingService) checkCountLimit(tp *db.TokenPlan, plan *db.Plan) error {
-	limits := parseMap(plan.Limits)
-	usage := parseMap(tp.WindowUsage)
-	resets := parseMap(tp.WindowResetAt)
+	limits, err := parseMap(plan.Limits)
+	if err != nil {
+		return fmt.Errorf("parse limits: %w", err)
+	}
+	usage, err := parseMap(tp.WindowUsage)
+	if err != nil {
+		return fmt.Errorf("parse usage: %w", err)
+	}
+	resets, err := parseMap(tp.WindowResetAt)
+	if err != nil {
+		return fmt.Errorf("parse resets: %w", err)
+	}
 	now := time.Now()
 
 	for window, maxCount := range limits {
@@ -101,7 +111,10 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		}
 		var plan db.Plan
 		if err := tx.First(&plan, "id = ? AND enabled = true AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
-			return nil
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // no plan = unlimited
+			}
+			return err
 		}
 		switch plan.Type {
 		case "count_based":
@@ -114,9 +127,18 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 }
 
 func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan) error {
-	usage := parseMap(tp.WindowUsage)
-	resets := parseMap(tp.WindowResetAt)
-	limits := parseMap(plan.Limits)
+	usage, err := parseMap(tp.WindowUsage)
+	if err != nil {
+		return fmt.Errorf("parse usage: %w", err)
+	}
+	resets, err := parseMap(tp.WindowResetAt)
+	if err != nil {
+		return fmt.Errorf("parse resets: %w", err)
+	}
+	limits, err := parseMap(plan.Limits)
+	if err != nil {
+		return fmt.Errorf("parse limits: %w", err)
+	}
 	now := time.Now()
 
 	for window, maxCount := range limits {
@@ -155,8 +177,14 @@ func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, pl
 		}
 	}
 
-	usageJSON, _ := json.Marshal(usage)
-	resetsJSON, _ := json.Marshal(resets)
+	usageJSON, err := json.Marshal(usage)
+	if err != nil {
+		return fmt.Errorf("marshal usage: %w", err)
+	}
+	resetsJSON, err := json.Marshal(resets)
+	if err != nil {
+		return fmt.Errorf("marshal resets: %w", err)
+	}
 	return tx.Model(tp).Updates(map[string]interface{}{
 		"window_usage":    string(usageJSON),
 		"window_reset_at": string(resetsJSON),
@@ -171,55 +199,59 @@ func (b *BillingService) preConsumeTokensTx(tx *gorm.DB, tp *db.TokenPlan, amoun
 // This prevents the race where Refund runs after Settle, undoing legitimate billing.
 func (b *BillingService) RefundAndSettle(tokenID string, estTokens int, promptTokens, completionTokens int, model string) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
-		var tp db.TokenPlan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("token_id = ?", tokenID).
-			First(&tp).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // no plan = nothing to settle
-			}
-			return err
-		}
+		return RefundAndSettleTx(tx, tokenID, estTokens, promptTokens, completionTokens, model)
+	})
+}
 
-		var plan db.Plan
-		if err := tx.First(&plan, "id = ? AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// Plan deleted mid-request — best-effort refund of estimate
-				tx.Model(&tp).Where("token_id = ?", tokenID).
-					Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens))
-				return nil
-			}
-			return err
+func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens, completionTokens int, model string) error {
+	var tp db.TokenPlan
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("token_id = ?", tokenID).
+		First(&tp).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // no plan = nothing to settle
 		}
+		return err
+	}
 
-		// 1. Refund the pre-consumed estimate (only for token_based plans).
-		// For count_based plans, the PreConsume increment IS the final usage — it must NOT be refunded.
-		if plan.Type != "count_based" {
-			if err := tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error; err != nil {
-				return err
-			}
-		}
-
-		// 2. Settle actual usage
-		if plan.Type == "count_based" {
+	var plan db.Plan
+	if err := tx.First(&plan, "id = ? AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Plan deleted mid-request — best-effort refund of estimate
+			tx.Model(&tp).Where("token_id = ?", tokenID).
+				Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens))
 			return nil
 		}
+		return err
+	}
 
-		// token_based: record actual cost
-		ratios := parseMap(plan.ModelRatios)
-		ratio := 1.0
-		if r, ok := ratios[model]; ok {
-			if f, ok := toFloat(r); ok {
-				ratio = f
-			}
+	// Refund the pre-consumed estimate only for token-based plans.
+	if plan.Type != "count_based" {
+		if err := tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error; err != nil {
+			return err
 		}
+	}
 
-		actual := int(float64(promptTokens) + float64(completionTokens)*ratio)
-		if actual > 0 {
-			return tx.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", actual)).Error
-		}
+	if plan.Type == "count_based" {
 		return nil
-	})
+	}
+
+	ratios, err := parseMap(plan.ModelRatios)
+	if err != nil {
+		return fmt.Errorf("parse model ratios: %w", err)
+	}
+	ratio := 1.0
+	if r, ok := ratios[model]; ok {
+		if f, ok := toFloat(r); ok {
+			ratio = f
+		}
+	}
+
+	actual := int(float64(promptTokens) + float64(completionTokens)*ratio)
+	if actual > 0 {
+		return tx.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", actual)).Error
+	}
+	return nil
 }
 
 // Refund returns pre-consumed tokens on failure or after actual usage is settled.
@@ -243,31 +275,12 @@ func (b *BillingService) Refund(tokenID string, amount int) error {
 
 		switch plan.Type {
 		case "count_based":
-			return b.decrementCountUsageTx(tx, &tp, &plan, 1)
+			// count_based plans: PreConsume is the final usage - no refund needed.
+			return nil
 		default:
 			return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
 		}
 	})
-}
-
-func (b *BillingService) decrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan, amount int) error {
-	usage := parseMap(tp.WindowUsage)
-	limits := parseMap(plan.Limits)
-
-	for window := range limits {
-		if _, ok := usage[window]; !ok {
-			continue
-		}
-		if f, ok := toFloat(usage[window]); ok {
-			usage[window] = f - float64(amount)
-			if f-float64(amount) < 0 {
-				usage[window] = float64(0)
-			}
-		}
-	}
-
-	usageJSON, _ := json.Marshal(usage)
-	return tx.Model(tp).Update("window_usage", string(usageJSON)).Error
 }
 
 // CheckUserBalance verifies the user has a positive balance. Returns error if insufficient.
@@ -283,10 +296,12 @@ func (b *BillingService) CheckUserBalance(userID string, tokenID string) error {
 
 	// If the specific token has an active plan, skip balance check — plan quotas are enforced separately
 	var planCount int64
-	b.db.Model(&db.TokenPlan{}).
+	if err := b.db.Model(&db.TokenPlan{}).
 		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
 		Where("token_plans.token_id = ?", tokenID).
-		Count(&planCount)
+		Count(&planCount).Error; err != nil {
+		return fmt.Errorf("check plan: %w", err)
+	}
 	if planCount > 0 {
 		return nil
 	}
@@ -299,13 +314,15 @@ func (b *BillingService) CheckUserBalance(userID string, tokenID string) error {
 
 // Helper functions
 
-func parseMap(jsonStr string) map[string]interface{} {
+func parseMap(jsonStr string) (map[string]interface{}, error) {
 	var result map[string]interface{}
-	json.Unmarshal([]byte(jsonStr), &result)
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return nil, err
+	}
 	if result == nil {
 		result = make(map[string]interface{})
 	}
-	return result
+	return result, nil
 }
 
 func toFloat(v interface{}) (float64, bool) {
@@ -335,7 +352,12 @@ func parseWindowDuration(window string) time.Duration {
 		return time.Duration(val) * 24 * time.Hour
 	case "w":
 		return time.Duration(val) * 7 * 24 * time.Hour
+	case "m":
+		return time.Duration(val) * time.Minute
 	default:
+		if unit == "" || val <= 0 {
+			logger.Warnf("relay.billing", "invalid window duration defaulting to 1h", logger.F("window", window))
+		}
 		return time.Hour
 	}
 }
