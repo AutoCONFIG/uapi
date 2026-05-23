@@ -13,18 +13,6 @@ Downloaded on 2026-05-23.
 
 ## Structure
 
-- `official/`: original official indexes, full exports, or specifications.
 - `docs/`: documentation pages organized by upstream URL path.
 - `endpoints/`: OpenAPI path extracts for OpenAI API categories.
-- `raw/`: exact Gemini URL-derived raw file set.
 - `html-fallback/`: official Anthropic rendered pages for indexed URLs absent from `llms-full.txt`.
-
-## Counts
-
-- OpenAI official docs per category: 143 pages
-- OpenAI Chat Completions endpoint files: 3
-- OpenAI Responses endpoint files: 6
-- Gemini API docs/raw files: 168/168
-- Anthropic indexed URLs represented: 1541/1541 (`1406` Markdown, `135` HTML fallback, `0` unavailable)
-
-Run `./verify.py` from this directory to validate.
