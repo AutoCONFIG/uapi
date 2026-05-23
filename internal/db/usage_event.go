@@ -10,6 +10,7 @@ type UsageEvent struct {
 	ID               uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	RequestID        string    `gorm:"size:100;uniqueIndex;not null" json:"request_id"`
 	TokenID          uuid.UUID `gorm:"type:uuid;index;not null" json:"token_id"`
+	TokenPlanID      uuid.UUID `gorm:"type:uuid;index" json:"token_plan_id"`
 	ChannelID        uuid.UUID `gorm:"type:uuid;index;not null" json:"channel_id"`
 	AccountID        uuid.UUID `gorm:"type:uuid;index;not null" json:"account_id"`
 	Model            string    `gorm:"size:100;index" json:"model"`

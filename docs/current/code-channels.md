@@ -1,6 +1,6 @@
 # Code Channel Source Alignment
 
-This document is the active source of truth for CodeX, Gemini Code, and Claude
+This document is the active source of truth for Codex, Gemini Code, and Claude
 Code channel behavior. These channels must be implemented from the local
 official client source trees first; public API docs are used only to normalize
 the standard non-Code API formats.
@@ -9,33 +9,29 @@ the standard non-Code API formats.
 
 - `channels.type` is the provider family: `openai`, `gemini`, or `anthropic`.
 - `channels.api_format` selects the transport variant:
-  - `codex`: CodeX login and OpenAI Responses-style model requests.
+  - `codex`: Codex login and OpenAI Responses-style model requests.
   - `gemini_code`: Gemini Code login and Code Assist API requests.
-  - `claude_code`: Claude Code login and Anthropic Messages requests with
+  - `claude_code`: Claude Code login and Anthropic Messages API requests with
     Claude Code OAuth headers.
   - `responses`: standard OpenAI Responses API.
-  - `standard`: OpenAI Chat Completions, Gemini generateContent, or Anthropic
-    Messages depending on `channels.type`.
+  - `standard`: OpenAI Chat Completions API, Gemini generateContent API, or
+    Anthropic Messages API depending on `channels.type`.
 - `channels.channel_group` stores UI grouping. Missing or empty group values are
   normalized to `default`; the UI displays this as `默认渠道`.
 - OAuth/API credentials are stored as `accounts` under a channel. OAuth accounts
   keep encrypted refresh tokens and structured `metadata` with plan/account
   details synced from the provider flow when available.
 - OAuth credentials refresh on use, matching the upstream client lifecycle.
-  CodeX follows Codex's on-use proactive rule: refresh when the access token is
+  Codex follows the official client's on-use proactive rule: refresh when the access token is
   expired or when the last refresh is older than 8 days. Claude Code and Gemini
-  Code do not have a general long-idle keep-alive in their normal local client
-  paths, so UAPI adds a service-side safety net for those two only. The safety
-  net is expiry-driven rather than poll-driven: on startup and after OAuth
-  account changes, UAPI schedules one timer per enabled Claude/Gemini OAuth
-  account from the provider-supplied `token_expiry`. The timer fires in a stable
-  per-account jitter window between 60 and 5 minutes before expiry. It performs
-  provider refresh plus metadata/quota sync only; it does not simulate a model
-  request.
+  Code refresh when the provider token is near expiry. The gateway process also
+  schedules conservative idle maintenance for Claude Code and Gemini Code
+  accounts so rarely used accounts do not expire silently; Codex keeps the official client's
+  on-use proactive refresh rule.
 - Admin channel creation pre-fills Code channel model allow-lists from the local
   upstream model source files. Operators can still edit the list per channel.
 
-## OpenAI / CodeX
+## OpenAI / Codex
 
 Local source of truth:
 
@@ -62,8 +58,16 @@ Implemented alignment:
   `GET https://chatgpt.com/backend-api/api/codex/usage` with Codex backend
   auth headers, matching the local backend-client usage path. When available,
   the response is stored as `metadata.codex_usage`.
-- CodeX upstream requests are routed through the OpenAI Responses converter.
-- CodeX channel model presets are sourced from
+- Codex upstream requests are routed through the OpenAI Responses converter.
+- Code channels are OAuth credential channels. Admin API-key credential creation
+  is rejected for `codex`, `gemini_code`, and `claude_code` channels so regular
+  API Base URL/API Key channels cannot be accidentally routed through Code
+  protocol adaptors. Updating `credentials` directly is also rejected for Code
+  channel accounts; token changes must go through the OAuth refresh/import
+  paths so refresh tokens, expiry, metadata, and provider lifecycle stay
+  consistent. Moving OAuth accounts across Code channel families is rejected
+  unless the account's OAuth token URL matches the target provider.
+- Codex channel model presets are sourced from
   `upstream/codex/codex-rs/models-manager/models.json` and currently include
   `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, and
   `gpt-image-2`.
@@ -99,7 +103,8 @@ Implemented alignment:
 - OAuth refresh uses Google's token endpoint with the stored client secret.
 - Gemini CLI relies on Google OAuth's `getAccessToken()` path to refresh when
   needed; it does not run a standalone long-idle keep-alive loop for Code Assist.
-  UAPI's idle maintenance covers this server-side deployment gap for Gemini Code.
+  UAPI refreshes on use and also runs conservative server-side expiry-driven
+  idle maintenance for Gemini Code accounts.
 - Gemini Code requests do not call the public Gemini API directly. They call
   Code Assist:
   - `POST https://cloudcode-pa.googleapis.com/v1internal:generateContent`
@@ -134,7 +139,7 @@ Standard Gemini API reference:
 - Gemini generateContent API: `https://ai.google.dev/api/generate-content`
 - Gemini Models API: `https://ai.google.dev/api/models`
 
-## Anthropic / Claude Code
+## Anthropic Messages API / Claude Code
 
 Local source of truth:
 
@@ -157,8 +162,9 @@ Implemented alignment:
   `org:create_api_key`.
 - Claude Code checks refresh on API-client creation and treats tokens expiring
   within 5 minutes as expired. It does not run a standalone long-idle keep-alive
-  loop for the normal local client path. UAPI's idle maintenance covers this
-  server-side deployment gap for Claude Code.
+  loop for the normal local client path. UAPI refreshes on use and also runs
+  conservative server-side expiry-driven idle maintenance for Claude Code
+  accounts.
 - OAuth account metadata sync fetches profile, roles, and first-token-date data
   from the Claude Code OAuth endpoints and stores subscription/rate-limit/billing
   fields on the account.

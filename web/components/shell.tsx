@@ -14,7 +14,6 @@ import {
   LogOut,
   Network,
   Package,
-  SlidersHorizontal,
   Route,
   Settings,
   Shield,
@@ -39,7 +38,6 @@ const userNav: NavItem[] = [
 
 const adminNav: NavItem[] = [
   { href: "/admin/dashboard", label: "管理总览", icon: Gauge },
-  { href: "/admin/access-policies", label: "访问策略", icon: SlidersHorizontal },
   { href: "/admin/relay-nodes", label: "转发节点", icon: Network },
   { href: "/admin/channels", label: "渠道", icon: Route },
   { href: "/admin/users", label: "用户", icon: Users },

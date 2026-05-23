@@ -1,0 +1,121 @@
+openapi: 3.1.0
+info:
+  title: OpenAI API
+  description: The OpenAI REST API. Please see https://platform.openai.com/docs/api-reference
+    for more details.
+  version: 2.3.0
+  termsOfService: https://openai.com/policies/terms-of-use
+  contact:
+    name: OpenAI Support
+    url: https://help.openai.com/
+  license:
+    name: MIT
+    url: https://github.com/openai/openai-openapi/blob/master/LICENSE
+servers:
+- url: https://api.openai.com/v1
+path: /responses/compact
+paths:
+  /responses/compact:
+    post:
+      summary: 'Compact a conversation. Returns a compacted response object.
+
+
+        Learn when and how to compact long-running conversations in the [conversation
+        state guide](/docs/guides/conversation-state#managing-the-context-window).
+        For ZDR-compatible compaction details, see [Compaction (advanced)](/docs/guides/conversation-state#compaction-advanced).'
+      operationId: Compactconversation
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompactResponseMethodPublicBody'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CompactResponseMethodPublicBody'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompactResource'
+      x-oaiMeta:
+        name: Compact a response
+        group: responses
+        examples:
+          request:
+            curl: "curl -X POST https://api.openai.com/v1/responses/compact \\\n \
+              \   -H \"Content-Type: application/json\" \\\n    -H \"Authorization:\
+              \ Bearer $OPENAI_API_KEY\" \\\n    -d '{\n      \"model\": \"gpt-5.1-codex-max\"\
+              ,\n      \"input\": [\n        {\n          \"role\": \"user\",\n  \
+              \        \"content\": \"Create a simple landing page for a dog petting\
+              \ café.\"\n        },\n        {\n          \"id\": \"msg_001\",\n \
+              \         \"type\": \"message\",\n          \"status\": \"completed\"\
+              ,\n          \"content\": [\n            {\n              \"type\":\
+              \ \"output_text\",\n              \"annotations\": [],\n           \
+              \   \"logprobs\": [],\n              \"text\": \"Below is a single file,\
+              \ ready-to-use landing page for a dog petting café:...\"\n         \
+              \   }\n          ],\n          \"role\": \"assistant\"\n        }\n\
+              \      ]\n    }'\n"
+            javascript: "import OpenAI from \"openai\";\n\nconst openai = new OpenAI();\n\
+              \n// Compact the previous response if you are running out of tokens\n\
+              const compactedResponse = await openai.responses.compact({\n  model:\
+              \ \"gpt-5.1-codex-max\",\n  input: [\n    {\n      role: \"user\",\n\
+              \      content: \"Create a simple landing page for a dog petting café.\"\
+              ,\n    },\n    // All items returned from previous requests are included\
+              \ here, like reasoning, message, function call, etc.\n    {\n      id:\
+              \ \"msg_030d085c0b53e67e0069332e3a72d4819c96c6f2c4adc15d33\",\n    \
+              \  type: \"message\",\n      status: \"completed\",\n      content:\
+              \ [\n        {\n          type: \"output_text\",\n          annotations:\
+              \ [],\n          logprobs: [],\n          text: \"Below is a single\
+              \ file, ready-to-use landing page for a dog petting café:...\",\n  \
+              \      },\n      ],\n      role: \"assistant\",\n    },\n  ],\n});\n\
+              \n// Pass the compactedResponse.output as input to the next request\n\
+              console.log(compactedResponse);\n"
+            python: "import os\nfrom openai import OpenAI\n\nclient = OpenAI(\n  \
+              \  api_key=os.environ.get(\"OPENAI_API_KEY\"),  # This is the default\
+              \ and can be omitted\n)\ncompacted_response = client.responses.compact(\n\
+              \    model=\"gpt-5.4\",\n)\nprint(compacted_response.id)"
+            node.js: "import OpenAI from 'openai';\n\nconst client = new OpenAI({\n\
+              \  apiKey: process.env['OPENAI_API_KEY'], // This is the default and\
+              \ can be omitted\n});\n\nconst compactedResponse = await client.responses.compact({\
+              \ model: 'gpt-5.4' });\n\nconsole.log(compactedResponse.id);"
+            go: "package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\n\t\"github.com/openai/openai-go\"\
+              \n\t\"github.com/openai/openai-go/option\"\n\t\"github.com/openai/openai-go/responses\"\
+              \n)\n\nfunc main() {\n\tclient := openai.NewClient(\n\t\toption.WithAPIKey(\"\
+              My API Key\"),\n\t)\n\tcompactedResponse, err := client.Responses.Compact(context.TODO(),\
+              \ responses.ResponseCompactParams{\n\t\tModel: responses.ResponseCompactParamsModelGPT5_4,\n\
+              \t})\n\tif err != nil {\n\t\tpanic(err.Error())\n\t}\n\tfmt.Printf(\"\
+              %+v\\n\", compactedResponse.ID)\n}\n"
+            java: "package com.openai.example;\n\nimport com.openai.client.OpenAIClient;\n\
+              import com.openai.client.okhttp.OpenAIOkHttpClient;\nimport com.openai.models.responses.CompactedResponse;\n\
+              import com.openai.models.responses.ResponseCompactParams;\n\npublic\
+              \ final class Main {\n    private Main() {}\n\n    public static void\
+              \ main(String[] args) {\n        OpenAIClient client = OpenAIOkHttpClient.fromEnv();\n\
+              \n        ResponseCompactParams params = ResponseCompactParams.builder()\n\
+              \            .model(ResponseCompactParams.Model.GPT_5_4)\n         \
+              \   .build();\n        CompactedResponse compactedResponse = client.responses().compact(params);\n\
+              \    }\n}"
+            ruby: 'require "openai"
+
+
+              openai = OpenAI::Client.new(api_key: "My API Key")
+
+
+              compacted_response = openai.responses.compact(model: :"gpt-5.4")
+
+
+              puts(compacted_response)'
+          response: "{\n  \"id\": \"resp_001\",\n  \"object\": \"response.compaction\"\
+            ,\n  \"created_at\": 1764967971,\n  \"output\": [\n    {\n      \"id\"\
+            : \"msg_000\",\n      \"type\": \"message\",\n      \"status\": \"completed\"\
+            ,\n      \"content\": [\n        {\n          \"type\": \"input_text\"\
+            ,\n          \"text\": \"Create a simple landing page for a dog petting\
+            \ cafe.\"\n        }\n      ],\n      \"role\": \"user\"\n    },\n   \
+            \ {\n      \"id\": \"cmp_001\",\n      \"type\": \"compaction\",\n   \
+            \   \"encrypted_content\": \"gAAAAABpM0Yj-...=\"\n    }\n  ],\n  \"usage\"\
+            : {\n    \"input_tokens\": 139,\n    \"input_tokens_details\": {\n   \
+            \   \"cached_tokens\": 0\n    },\n    \"output_tokens\": 438,\n    \"\
+            output_tokens_details\": {\n      \"reasoning_tokens\": 64\n    },\n \
+            \   \"total_tokens\": 577\n  }\n}\n"

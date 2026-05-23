@@ -16,6 +16,9 @@ type GeminiAdaptor struct {
 	model       string
 	isStream    bool
 	streamState *geminiStreamState
+	// Cache token tracking
+	lastCacheCreationInputTokens int
+	lastCacheReadInputTokens     int
 }
 
 func (a *GeminiAdaptor) SetRequestParams(model string, stream bool) {
@@ -53,7 +56,7 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 		req.SetRequestURI(codeAssistBase(base) + "/v1internal:" + action + suffix)
 		credential := provider.ExtractCredentialKey(credentials)
 		req.Header.Set("Authorization", "Bearer "+credential)
-		req.Header.Set("User-Agent", "GeminiCLI/unknown/"+resolveCodeAssistModel(a.model)+" (linux; amd64; cli)")
+		req.Header.Set("User-Agent", GeminiCLIUserAgent(resolveCodeAssistModel(a.model)))
 		return nil
 	}
 	action := "generateContent"
@@ -107,8 +110,7 @@ func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }
 // CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
 // back to Gemini SSE format for clients requesting Gemini format.
 func (a *GeminiAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	state := newGeminiReverseState()
-	return state.convertReverseLine
+	return NewReverseStreamConverter()
 }
 
 // --- Usage parsing ---
@@ -118,22 +120,39 @@ func (a *GeminiAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	var resp struct {
 		Response struct {
 			UsageMetadata struct {
-				PromptTokenCount     int `json:"promptTokenCount"`
-				CandidatesTokenCount int `json:"candidatesTokenCount"`
+				PromptTokenCount        int `json:"promptTokenCount"`
+				CandidatesTokenCount    int `json:"candidatesTokenCount"`
+				CachedContentTokenCount int `json:"cachedContentTokenCount"`
 			} `json:"usageMetadata"`
 		} `json:"response"`
 		UsageMetadata struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			PromptTokenCount        int `json:"promptTokenCount"`
+			CandidatesTokenCount    int `json:"candidatesTokenCount"`
+			CachedContentTokenCount int `json:"cachedContentTokenCount"`
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return 0, 0, fmt.Errorf("parse gemini response: %w", err)
 	}
 	if resp.Response.UsageMetadata.PromptTokenCount > 0 || resp.Response.UsageMetadata.CandidatesTokenCount > 0 {
+		a.lastCacheReadInputTokens = resp.Response.UsageMetadata.CachedContentTokenCount
 		return resp.Response.UsageMetadata.PromptTokenCount, resp.Response.UsageMetadata.CandidatesTokenCount, nil
 	}
+	a.lastCacheReadInputTokens = resp.UsageMetadata.CachedContentTokenCount
 	return resp.UsageMetadata.PromptTokenCount, resp.UsageMetadata.CandidatesTokenCount, nil
+}
+
+// ParseUsageFull returns full usage including cache tokens.
+func (a *GeminiAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage, error) {
+	pt, ct, err := a.ParseUsage(respBody)
+	if err != nil {
+		return provider.InternalUsage{}, err
+	}
+	return provider.InternalUsage{
+		PromptTokens:         pt,
+		CompletionTokens:     ct,
+		CacheReadInputTokens: a.lastCacheReadInputTokens,
+	}, nil
 }
 
 // ParseStreamUsage parses the last chunk for usage data.
@@ -145,21 +164,22 @@ func (a *GeminiAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 			CompletionTokens int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(lastChunk, &resp) == nil && resp.Usage.PromptTokens > 0 {
+	if err := json.Unmarshal(lastChunk, &resp); err == nil && resp.Usage.PromptTokens > 0 {
 		return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, nil
 	}
 
 	// Try raw Gemini format
 	var gemResp struct {
 		UsageMetadata struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			PromptTokenCount        int `json:"promptTokenCount"`
+			CandidatesTokenCount    int `json:"candidatesTokenCount"`
+			CachedContentTokenCount int `json:"cachedContentTokenCount"`
 		} `json:"usageMetadata"`
 	}
-	if json.Unmarshal(lastChunk, &gemResp) == nil {
+	if err := json.Unmarshal(lastChunk, &gemResp); err == nil {
 		return gemResp.UsageMetadata.PromptTokenCount, gemResp.UsageMetadata.CandidatesTokenCount, nil
 	}
-	return 0, 0, nil
+	return 0, 0, fmt.Errorf("parse gemini stream usage: no recognized format")
 }
 
 func init() {
@@ -193,7 +213,7 @@ func mapGeminiFinishReason(reason string) string {
 	case "RECITATION":
 		return "content_filter"
 	default:
-		return "stop"
+		return "content_filter"
 	}
 }
 
@@ -215,14 +235,14 @@ func unwrapCodeAssistSSELine(line []byte) []byte {
 		return line
 	}
 	var wrapper map[string]interface{}
-	if err := json.Unmarshal([]byte(payload), &wrapper); err != nil {
+	if err := provider.DecodeJSONUseNumber([]byte(payload), &wrapper); err != nil {
 		return line
 	}
 	resp, ok := wrapper["response"]
 	if !ok {
 		return line
 	}
-	respBody, err := json.Marshal(resp)
+	respBody, err := json.Marshal(map[string]interface{}{"response": resp})
 	if err != nil {
 		return line
 	}
@@ -230,9 +250,21 @@ func unwrapCodeAssistSSELine(line []byte) []byte {
 }
 
 func unwrapCodeAssistSSEBuffer(sseBody []byte) []byte {
-	lines := strings.Split(string(sseBody), "\n")
-	for i, line := range lines {
-		lines[i] = string(unwrapCodeAssistSSELine([]byte(line)))
+	events := splitGeminiSSEEvents(sseBody)
+	if len(events) == 0 {
+		return sseBody
 	}
-	return []byte(strings.Join(lines, "\n"))
+	var out []byte
+	for _, event := range events {
+		normalized := normalizeGeminiSSEEvent(event)
+		unwrapped := unwrapCodeAssistSSELine(normalized)
+		if !strings.HasSuffix(string(unwrapped), "\n\n") {
+			unwrapped = append(unwrapped, '\n', '\n')
+		}
+		out = append(out, unwrapped...)
+	}
+	if len(out) == 0 {
+		return sseBody
+	}
+	return out
 }

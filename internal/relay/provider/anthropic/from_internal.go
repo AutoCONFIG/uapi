@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 )
@@ -26,6 +28,15 @@ func internalToAnthropic(req *provider.InternalRequest) ([]byte, error) {
 	if req.TopP != nil {
 		anthReq["top_p"] = *req.TopP
 	}
+	if req.TopK != nil && *req.TopK > 0 {
+		anthReq["top_k"] = *req.TopK
+	}
+	if req.Thinking != nil {
+		anthReq["thinking"] = req.Thinking
+	}
+	if req.ParallelToolCalls != nil {
+		anthReq["parallel_tool_calls"] = *req.ParallelToolCalls
+	}
 	if len(req.StopWords) > 0 {
 		anthReq["stop_sequences"] = req.StopWords
 	}
@@ -40,9 +51,27 @@ func internalToAnthropic(req *provider.InternalRequest) ([]byte, error) {
 			// Extract to top-level system field
 			for _, part := range im.Content {
 				if part.Type == "text" {
-					systemParts = append(systemParts, map[string]interface{}{
+					block := map[string]interface{}{
 						"type": "text",
 						"text": part.Text,
+					}
+					// Include Extra (cache_control etc) if present
+					if part.Extra != nil {
+						for k, v := range part.Extra {
+							block[k] = v
+						}
+					}
+					systemParts = append(systemParts, block)
+				} else {
+					return nil, fmt.Errorf("anthropic system content part type %q cannot be converted", part.Type)
+				}
+			}
+			// Handle reasoning/thinking content in system messages
+			for _, rc := range im.ReasoningContent {
+				if rc.Type == "thinking" || rc.Type == "reasoning" {
+					systemParts = append(systemParts, map[string]interface{}{
+						"type":     "thinking",
+						"thinking": rc.Text,
 					})
 				}
 			}
@@ -50,10 +79,18 @@ func internalToAnthropic(req *provider.InternalRequest) ([]byte, error) {
 			// Tool result → tool_result content block in user message
 			anthropicMsgs = append(anthropicMsgs, buildAnthropicToolResult(im))
 		case "assistant":
-			anthropicMsgs = append(anthropicMsgs, buildAnthropicAssistantMessage(im))
+			msg, err := buildAnthropicAssistantMessage(im)
+			if err != nil {
+				return nil, err
+			}
+			anthropicMsgs = append(anthropicMsgs, msg)
 		default:
 			// user message — convert content format
-			anthropicMsgs = append(anthropicMsgs, buildAnthropicUserMessage(im))
+			msg, err := buildAnthropicUserMessage(im)
+			if err != nil {
+				return nil, err
+			}
+			anthropicMsgs = append(anthropicMsgs, msg)
 		}
 	}
 
@@ -83,6 +120,13 @@ func internalToAnthropic(req *provider.InternalRequest) ([]byte, error) {
 		anthReq["tool_choice"] = buildAnthropicToolChoice(req.ToolChoice)
 	}
 
+	// Merge ExtraParams for same-protocol passthrough
+	for k, v := range req.ExtraParams {
+		if _, exists := anthReq[k]; !exists {
+			anthReq[k] = v
+		}
+	}
+
 	return json.Marshal(anthReq)
 }
 
@@ -91,39 +135,49 @@ func buildAnthropicToolResult(im provider.InternalMessage) map[string]interface{
 	var contentBlocks []interface{}
 	if im.ToolResult != nil {
 		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type":       "text",
-			"text":       im.ToolResult.Content,
+			"type": "text",
+			"text": im.ToolResult.Content,
 		})
 	}
 
+	result := map[string]interface{}{
+		"type":        "tool_result",
+		"tool_use_id": im.ToolResult.ToolCallID,
+		"content":     contentBlocks,
+	}
+	if im.ToolResult.IsError {
+		result["is_error"] = true
+	}
+
 	return map[string]interface{}{
-		"role": "user",
-		"content": []interface{}{
-			map[string]interface{}{
-				"type":       "tool_result",
-				"tool_use_id": im.ToolResult.ToolCallID,
-				"content":    contentBlocks,
-			},
-		},
+		"role":    "user",
+		"content": []interface{}{result},
 	}
 }
 
 // buildAnthropicAssistantMessage converts an InternalMessage with assistant role to Anthropic format.
-func buildAnthropicAssistantMessage(im provider.InternalMessage) map[string]interface{} {
+func buildAnthropicAssistantMessage(im provider.InternalMessage) (map[string]interface{}, error) {
 	if len(im.ToolCalls) == 0 {
 		// Simple text message
-		text := contentToText(im.Content)
+		text, err := contentToText(im.Content)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]interface{}{
 			"role":    "assistant",
 			"content": text,
-		}
+		}, nil
 	}
 
 	// Assistant with tool_calls → multiple content blocks
 	var blocks []interface{}
 
 	// Add text content if present
-	if text := contentToText(im.Content); text != "" {
+	text, err := contentToText(im.Content)
+	if err != nil {
+		return nil, err
+	}
+	if text != "" {
 		blocks = append(blocks, map[string]interface{}{
 			"type": "text",
 			"text": text,
@@ -132,37 +186,47 @@ func buildAnthropicAssistantMessage(im provider.InternalMessage) map[string]inte
 
 	// Add tool_use blocks
 	for _, itc := range im.ToolCalls {
-		args := json.RawMessage(itc.Arguments)
+		args := itc.Arguments
+		if args == "" || !json.Valid([]byte(args)) {
+			if args == "" {
+				args = "{}"
+			} else {
+				return nil, fmt.Errorf("anthropic tool call arguments must be valid JSON")
+			}
+		}
 		blocks = append(blocks, map[string]interface{}{
 			"type":  "tool_use",
 			"id":    itc.ID,
 			"name":  itc.Name,
-			"input": args,
+			"input": json.RawMessage(args),
 		})
 	}
 
 	return map[string]interface{}{
 		"role":    "assistant",
 		"content": blocks,
-	}
+	}, nil
 }
 
 // buildAnthropicUserMessage converts an InternalMessage with user role to Anthropic format.
-func buildAnthropicUserMessage(im provider.InternalMessage) map[string]interface{} {
-	content := buildAnthropicContent(im.Content)
+func buildAnthropicUserMessage(im provider.InternalMessage) (map[string]interface{}, error) {
+	content, err := buildAnthropicContent(im.Content)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
 		"role":    "user",
 		"content": content,
-	}
+	}, nil
 }
 
 // buildAnthropicContent converts InternalContentPart slice to Anthropic content format.
-func buildAnthropicContent(parts []provider.InternalContentPart) interface{} {
+func buildAnthropicContent(parts []provider.InternalContentPart) (interface{}, error) {
 	if len(parts) == 0 {
-		return ""
+		return "", nil
 	}
 	if len(parts) == 1 && parts[0].Type == "text" && parts[0].ImageURL == nil {
-		return parts[0].Text
+		return parts[0].Text, nil
 	}
 
 	var blocks []interface{}
@@ -175,6 +239,20 @@ func buildAnthropicContent(parts []provider.InternalContentPart) interface{} {
 			})
 		case "image_url":
 			if part.ImageURL != nil {
+				if strings.HasPrefix(*part.ImageURL, "data:") {
+					mime, data, ok := parseDataURL(*part.ImageURL)
+					if ok {
+						blocks = append(blocks, map[string]interface{}{
+							"type": "image",
+							"source": map[string]interface{}{
+								"type":       "base64",
+								"media_type": mime,
+								"data":       data,
+							},
+						})
+						continue
+					}
+				}
 				blocks = append(blocks, map[string]interface{}{
 					"type": "image",
 					"source": map[string]interface{}{
@@ -184,16 +262,26 @@ func buildAnthropicContent(parts []provider.InternalContentPart) interface{} {
 				})
 			}
 		default:
-			blocks = append(blocks, map[string]interface{}{
-				"type": part.Type,
-				"text": part.Text,
-			})
+			return nil, fmt.Errorf("anthropic content part type %q cannot be converted", part.Type)
 		}
 	}
 	if len(blocks) == 0 {
-		return ""
+		return "", nil
 	}
-	return blocks
+	return blocks, nil
+}
+
+func parseDataURL(url string) (mime string, data string, ok bool) {
+	rest := strings.TrimPrefix(url, "data:")
+	parts := strings.SplitN(rest, ",", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	mime = strings.TrimSuffix(parts[0], ";base64")
+	if mime == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return mime, parts[1], true
 }
 
 // buildAnthropicToolChoice converts InternalToolChoice to Anthropic tool_choice format.
@@ -216,11 +304,13 @@ func buildAnthropicToolChoice(tc *provider.InternalToolChoice) interface{} {
 }
 
 // contentToText extracts plain text from content parts.
-func contentToText(parts []provider.InternalContentPart) string {
+func contentToText(parts []provider.InternalContentPart) (string, error) {
+	var b strings.Builder
 	for _, part := range parts {
-		if part.Type == "text" {
-			return part.Text
+		if part.Type != "text" {
+			return "", fmt.Errorf("anthropic content part type %q cannot be converted to plain text", part.Type)
 		}
+		b.WriteString(part.Text)
 	}
-	return ""
+	return b.String(), nil
 }

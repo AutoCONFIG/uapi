@@ -2,7 +2,9 @@ package gemini
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
@@ -10,28 +12,53 @@ import (
 
 // internalToGemini converts InternalRequest to Gemini API JSON.
 func internalToGemini(req *provider.InternalRequest) ([]byte, error) {
+	if err := rejectUnsupportedGeminiInputs(req); err != nil {
+		return nil, err
+	}
 	gemReq := make(map[string]interface{})
 
 	// Convert messages → contents
 	var systemInstruction interface{}
 	var contents []interface{}
+	toolNamesByID := map[string]string{}
 
 	for _, im := range req.Messages {
 		switch im.Role {
 		case "system":
 			// System → systemInstruction
-			parts := contentToGeminiParts(im.Content)
+			parts, err := contentToGeminiParts(im.Content)
+			if err != nil {
+				return nil, err
+			}
 			if len(parts) > 0 {
 				systemInstruction = map[string]interface{}{"parts": parts}
 			}
 		case "tool":
 			// Tool result → functionResponse part
+			if im.ToolResult != nil && im.ToolResult.Name == "" {
+				if name := toolNamesByID[im.ToolResult.ToolCallID]; name != "" {
+					im.ToolResult.Name = name
+				}
+			}
 			contents = append(contents, buildGeminiToolResult(im))
 		case "assistant":
-			contents = append(contents, buildGeminiAssistantMessage(im)...)
+			for _, tc := range im.ToolCalls {
+				if tc.ID != "" && tc.Name != "" {
+					toolNamesByID[tc.ID] = tc.Name
+				}
+			}
+			msgs, err := buildGeminiAssistantMessage(im)
+			if err != nil {
+				return nil, err
+			}
+			contents = append(contents, msgs...)
 		default:
 			// user
-			contents = append(contents, buildGeminiUserMessage(im))
+			msg, err := buildGeminiUserMessage(im)
+			if err != nil {
+				return nil, err
+			}
+			contents = append(contents, msg)
 		}
 	}
 
@@ -51,6 +78,12 @@ func internalToGemini(req *provider.InternalRequest) ([]byte, error) {
 	if req.TopP != nil {
 		genConfig["topP"] = *req.TopP
 	}
+	if req.TopK != nil && *req.TopK > 0 {
+		genConfig["topK"] = *req.TopK
+	}
+	if req.CandidateCount != nil && *req.CandidateCount > 0 {
+		genConfig["candidateCount"] = *req.CandidateCount
+	}
 	if len(req.StopWords) > 0 {
 		// Convert []string to []interface{}
 		stopSeqs := make([]interface{}, len(req.StopWords))
@@ -61,6 +94,16 @@ func internalToGemini(req *provider.InternalRequest) ([]byte, error) {
 	}
 	if len(genConfig) > 0 {
 		gemReq["generationConfig"] = genConfig
+	}
+
+	// SafetySettings
+	if req.SafetySettings != nil {
+		gemReq["safetySettings"] = req.SafetySettings
+	}
+
+	// Provider
+	if req.Provider != "" {
+		gemReq["provider"] = req.Provider
 	}
 
 	// Convert tools
@@ -88,7 +131,42 @@ func internalToGemini(req *provider.InternalRequest) ([]byte, error) {
 		gemReq["toolConfig"] = buildGeminiToolConfig(req.ToolChoice)
 	}
 
+	// Merge ExtraParams back into output for lossless round-tripping
+	if len(req.ExtraParams) > 0 {
+		for key, val := range req.ExtraParams {
+			// Handle generationConfig.* prefixed keys: merge back into generationConfig
+			if strings.HasPrefix(key, "generationConfig.") {
+				gcKey := strings.TrimPrefix(key, "generationConfig.")
+				var gc map[string]interface{}
+				if existing, exists := gemReq["generationConfig"]; exists {
+					gc, _ = existing.(map[string]interface{})
+				}
+				if gc == nil {
+					gc = make(map[string]interface{})
+				}
+				gc[gcKey] = val
+				gemReq["generationConfig"] = gc
+			} else {
+				// Direct field — do not overwrite explicitly set fields
+				if _, exists := gemReq[key]; !exists {
+					gemReq[key] = val
+				}
+			}
+		}
+	}
+
 	return json.Marshal(gemReq)
+}
+
+func rejectUnsupportedGeminiInputs(req *provider.InternalRequest) error {
+	for _, msg := range req.Messages {
+		for _, part := range msg.Content {
+			if part.Type == "image_url" && part.ImageURL != nil && !strings.HasPrefix(*part.ImageURL, "data:") {
+				return fmt.Errorf("gemini conversion only supports data URL image inputs; uploaded Gemini file URIs must be sent through the Gemini API format directly")
+			}
+		}
+	}
+	return nil
 }
 
 func internalToGeminiCodeAssist(req *provider.InternalRequest) ([]byte, error) {
@@ -104,12 +182,12 @@ func internalToGeminiCodeAssistWithAccount(req *provider.InternalRequest, accoun
 		return nil, err
 	}
 	var vertexReq map[string]interface{}
-	if err := json.Unmarshal(gemBody, &vertexReq); err != nil {
+	if err := provider.DecodeJSONUseNumber(gemBody, &vertexReq); err != nil {
 		return nil, err
 	}
 	body := map[string]interface{}{
 		"model":          model,
-		"user_prompt_id": "uapi-" + provider.RandomHex(12),
+		"user_prompt_id": provider.RandomHex(16),
 		"request":        vertexReq,
 	}
 	if projectID := codeAssistProjectID(account); projectID != "" {
@@ -193,16 +271,19 @@ func codeAssistProjectID(account *db.Account) string {
 }
 
 // buildGeminiUserMessage converts an InternalMessage with user role to Gemini format.
-func buildGeminiUserMessage(im provider.InternalMessage) map[string]interface{} {
-	parts := contentToGeminiParts(im.Content)
+func buildGeminiUserMessage(im provider.InternalMessage) (map[string]interface{}, error) {
+	parts, err := contentToGeminiParts(im.Content)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
 		"role":  "user",
 		"parts": parts,
-	}
+	}, nil
 }
 
 // buildGeminiAssistantMessage converts an InternalMessage with assistant role to Gemini format.
-func buildGeminiAssistantMessage(im provider.InternalMessage) []interface{} {
+func buildGeminiAssistantMessage(im provider.InternalMessage) ([]interface{}, error) {
 	if len(im.ToolCalls) > 0 {
 		var parts []interface{}
 		// Add text if present
@@ -213,9 +294,12 @@ func buildGeminiAssistantMessage(im provider.InternalMessage) []interface{} {
 		}
 		// Add functionCall parts
 		for _, itc := range im.ToolCalls {
-			args := map[string]interface{}{}
-			if itc.Arguments != "" && itc.Arguments != "{}" {
-				json.Unmarshal([]byte(itc.Arguments), &args)
+			var args json.RawMessage = []byte("{}")
+			if itc.Arguments != "" {
+				if !json.Valid([]byte(itc.Arguments)) {
+					return nil, fmt.Errorf("gemini tool call arguments must be valid JSON")
+				}
+				args = json.RawMessage(itc.Arguments)
 			}
 			parts = append(parts, map[string]interface{}{
 				"functionCall": map[string]interface{}{
@@ -229,16 +313,19 @@ func buildGeminiAssistantMessage(im provider.InternalMessage) []interface{} {
 				"role":  "model",
 				"parts": parts,
 			},
-		}
+		}, nil
 	}
 
-	parts := contentToGeminiParts(im.Content)
+	parts, err := contentToGeminiParts(im.Content)
+	if err != nil {
+		return nil, err
+	}
 	return []interface{}{
 		map[string]interface{}{
 			"role":  "model",
 			"parts": parts,
 		},
-	}
+	}, nil
 }
 
 // buildGeminiToolResult converts an InternalMessage with tool role to Gemini format.
@@ -250,6 +337,9 @@ func buildGeminiToolResult(im provider.InternalMessage) map[string]interface{} {
 		name = im.ToolResult.Name
 		content = im.ToolResult.Content
 		toolCallID = im.ToolResult.ToolCallID
+	}
+	if name == "" {
+		name = toolCallID
 	}
 
 	var parts []interface{}
@@ -276,9 +366,9 @@ func buildGeminiToolResult(im provider.InternalMessage) map[string]interface{} {
 }
 
 // contentToGeminiParts converts InternalContentPart slice to Gemini parts format.
-func contentToGeminiParts(parts []provider.InternalContentPart) []interface{} {
+func contentToGeminiParts(parts []provider.InternalContentPart) ([]interface{}, error) {
 	if len(parts) == 0 {
-		return []interface{}{map[string]interface{}{"text": ""}}
+		return []interface{}{map[string]interface{}{"text": ""}}, nil
 	}
 
 	var result []interface{}
@@ -288,20 +378,42 @@ func contentToGeminiParts(parts []provider.InternalContentPart) []interface{} {
 			result = append(result, map[string]interface{}{"text": part.Text})
 		case "image_url":
 			if part.ImageURL != nil {
-				result = append(result, map[string]interface{}{
-					"image_url": map[string]interface{}{
-						"url": *part.ImageURL,
-					},
-				})
+				if strings.HasPrefix(*part.ImageURL, "data:") {
+					mime, data, ok := parseDataURL(*part.ImageURL)
+					if ok {
+						result = append(result, map[string]interface{}{
+							"inlineData": map[string]interface{}{
+								"mimeType": mime,
+								"data":     data,
+							},
+						})
+						continue
+					}
+				}
 			}
 		default:
-			result = append(result, map[string]interface{}{"text": part.Text})
+			return nil, fmt.Errorf("gemini content part type %q cannot be converted", part.Type)
 		}
 	}
 	if len(result) == 0 {
-		return []interface{}{map[string]interface{}{"text": ""}}
+		return []interface{}{map[string]interface{}{"text": ""}}, nil
 	}
-	return result
+	return result, nil
+}
+
+func parseDataURL(url string) (mime string, data string, ok bool) {
+	rest := strings.TrimPrefix(url, "data:")
+	parts := strings.SplitN(rest, ",", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	meta := parts[0]
+	data = parts[1]
+	mime = strings.TrimSuffix(meta, ";base64")
+	if mime == "" || data == "" {
+		return "", "", false
+	}
+	return mime, data, true
 }
 
 // buildGeminiToolConfig converts InternalToolChoice to Gemini toolConfig format.

@@ -31,9 +31,10 @@ var streamingClient = &fasthttp.Client{
 
 // bufferedClient is for non-streaming upstream requests with reasonable timeouts.
 var bufferedClient = &fasthttp.Client{
-	ReadTimeout:     120 * time.Second,
-	WriteTimeout:    30 * time.Second,
-	MaxConnDuration: 180 * time.Second,
+	ReadTimeout:         120 * time.Second,
+	WriteTimeout:        30 * time.Second,
+	MaxConnDuration:     180 * time.Second,
+	MaxResponseBodySize: maxResponseSize,
 }
 
 // maxResponseSize limits how much data we buffer from upstream (100 MB).
@@ -49,14 +50,33 @@ type Relayer struct {
 	internalSecret  string
 	requireInternal bool
 	controlURL      string
+	trustedProxies  []string
 	runtimeMu       sync.RWMutex
 	runtimeVersion  int64
 	runtimeChannels map[uuid.UUID]db.Channel
 	runtimeAccounts map[uuid.UUID]db.Account
 }
 
-func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int, internalSecret string, requireInternal bool, controlURL string) *Relayer {
-	return &Relayer{
+type RelayerOption func(*Relayer)
+
+// WithConcurrencyLimiter sets an existing ConcurrencyLimiter to share
+// (useful when running in "all" mode to share the limiter with Gateway).
+func WithConcurrencyLimiter(limiter *ConcurrencyLimiter) RelayerOption {
+	return func(r *Relayer) {
+		r.concLimiter = limiter
+	}
+}
+
+// WithTrustedProxies sets the list of trusted proxy IPs that are allowed
+// to set X-Forwarded-For / X-Real-IP headers.
+func WithTrustedProxies(proxies []string) RelayerOption {
+	return func(r *Relayer) {
+		r.trustedProxies = proxies
+	}
+}
+
+func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int, internalSecret string, requireInternal bool, controlURL string, opts ...RelayerOption) *Relayer {
+	r := &Relayer{
 		db:              database,
 		pools:           pools,
 		billing:         billing,
@@ -69,6 +89,10 @@ func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, 
 		runtimeChannels: make(map[uuid.UUID]db.Channel),
 		runtimeAccounts: make(map[uuid.UUID]db.Account),
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 type RuntimeConfig struct {
@@ -80,19 +104,20 @@ type RuntimeConfig struct {
 }
 
 type RuntimeAccount struct {
-	ID            uuid.UUID  `json:"id"`
-	ChannelID     uuid.UUID  `json:"channel_id"`
-	Name          string     `json:"name"`
-	Credentials   string     `json:"credentials"`
-	CredType      string     `json:"cred_type"`
-	Weight        int        `json:"weight"`
-	Enabled       bool       `json:"enabled"`
-	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
-	RefreshToken  string     `json:"refresh_token"`
-	TokenExpiry   *time.Time `json:"token_expiry,omitempty"`
-	ClientID      string     `json:"client_id"`
-	ClientSecret  string     `json:"client_secret"`
-	TokenURL      string     `json:"token_url"`
+	ID            uuid.UUID              `json:"id"`
+	ChannelID     uuid.UUID              `json:"channel_id"`
+	Name          string                 `json:"name"`
+	Credentials   string                 `json:"credentials"`
+	CredType      string                 `json:"cred_type"`
+	Weight        int                    `json:"weight"`
+	Enabled       bool                   `json:"enabled"`
+	CooldownUntil *time.Time             `json:"cooldown_until,omitempty"`
+	RefreshToken  string                 `json:"refresh_token"`
+	TokenExpiry   *time.Time             `json:"token_expiry,omitempty"`
+	ClientID      string                 `json:"client_id"`
+	ClientSecret  string                 `json:"client_secret"`
+	TokenURL      string                 `json:"token_url"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
 func (r *Relayer) StartConfigPuller(nodeID string, interval time.Duration) {
@@ -103,16 +128,29 @@ func (r *Relayer) StartConfigPuller(nodeID string, interval time.Duration) {
 		interval = 5 * time.Second
 	}
 	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		next := time.Duration(0)
+		maxInterval := 60 * time.Second
 		for {
-			r.pullRuntimeConfig(nodeID)
-			<-ticker.C
+			if next > 0 {
+				time.Sleep(next)
+			}
+			if r.pullRuntimeConfig(nodeID) {
+				next = interval
+			} else {
+				if next < interval {
+					next = interval
+				} else {
+					next *= 2
+					if next > maxInterval {
+						next = maxInterval
+					}
+				}
+			}
 		}
 	}()
 }
 
-func (r *Relayer) pullRuntimeConfig(nodeID string) {
+func (r *Relayer) pullRuntimeConfig(nodeID string) bool {
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
@@ -122,11 +160,11 @@ func (r *Relayer) pullRuntimeConfig(nodeID string) {
 	req.Header.Set("X-UAPI-Internal-Secret", r.internalSecret)
 	if err := bufferedClient.DoTimeout(req, resp, 10*time.Second); err != nil {
 		logger.Warnf("relay.config", "pull failed", logger.Err(err))
-		return
+		return false
 	}
 	if resp.StatusCode() >= 300 {
 		logger.Warnf("relay.config", "pull rejected", logger.F("status", resp.StatusCode()))
-		return
+		return false
 	}
 	var envelope struct {
 		Code    int           `json:"code"`
@@ -135,19 +173,25 @@ func (r *Relayer) pullRuntimeConfig(nodeID string) {
 	}
 	if err := json.Unmarshal(resp.Body(), &envelope); err != nil {
 		logger.Warnf("relay.config", "decode failed", logger.Err(err))
-		return
+		return false
 	}
 	if envelope.Code != 0 {
 		logger.Warnf("relay.config", "gateway returned error", logger.F("message", envelope.Message))
-		return
+		return false
 	}
 	r.ApplyRuntimeConfig(envelope.Data)
+	return true
 }
 
 type relayRequest struct {
-	Model     string `json:"model"`
-	Stream    bool   `json:"stream"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
+	Model               string `json:"model"`
+	Stream              bool   `json:"stream"`
+	MaxTokens           int    `json:"max_tokens,omitempty"`
+	MaxOutputTokens     int    `json:"max_output_tokens,omitempty"`
+	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
+	GenerationConfig    struct {
+		MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	} `json:"generationConfig,omitempty"`
 }
 
 func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
@@ -158,17 +202,17 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var clientFormat provider.Format
 	switch {
 	case strings.HasPrefix(path, "/v1/chat/completions"):
-		clientFormat = provider.FormatOpenAIChat
+		clientFormat = provider.FormatOpenAIChatCompletions
 	case strings.HasPrefix(path, "/v1/responses"):
-		clientFormat = provider.FormatOpenAIResp
+		clientFormat = provider.FormatOpenAIResponses
 	case strings.HasPrefix(path, "/v1/messages"):
 		clientFormat = provider.FormatAnthropic
 	case strings.HasPrefix(path, "/v1beta/"):
 		clientFormat = provider.FormatGemini
 	case strings.HasPrefix(path, "/v1/images/"):
-		clientFormat = provider.FormatOpenAIResp
+		clientFormat = provider.FormatOpenAIResponses
 	default:
-		clientFormat = provider.FormatOpenAIChat // backward compat
+		clientFormat = provider.FormatOpenAIChatCompletions // backward compat
 	}
 
 	var token db.Token
@@ -202,7 +246,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 
 		// 2. IP whitelist check
-		if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist) {
+		if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, r.trustedProxies) {
 			ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 			return
 		}
@@ -210,6 +254,23 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	// 3. Concurrency check
 	tokenID := token.ID.String()
+	var claims *internalauth.Claims
+	if gatewayAuthenticated {
+		claims = &internalClaims
+	}
+	earlyEstimatedTokens := internalClaims.EstimatedTokens
+	if earlyEstimatedTokens <= 0 {
+		earlyEstimatedTokens = 1000
+	}
+	finishGatewayEarlyFailure := func(model string, status int) {
+		if claims == nil || claims.RequestID == "" || !internalClaims.Precharged {
+			return
+		}
+		if model == "" {
+			model = internalClaims.Model
+		}
+		go r.finishFailureUsage(claims, token.ID, internalClaims.ChannelID, internalClaims.AccountID, model, false, start, status, earlyEstimatedTokens)
+	}
 	if !gatewayAuthenticated {
 		if !r.concLimiter.Acquire(tokenID) {
 			ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
@@ -242,23 +303,30 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 5. Parse request
 	var req relayRequest
 	body := ctx.PostBody()
-	if err := json.Unmarshal(body, &req); err != nil {
-		ctx.Error(`{"error":"invalid request body"}`, fasthttp.StatusBadRequest)
-		return
-	}
-	req.Model = modelFromRequestPath(path, req.Model)
-	if req.Model == "" && strings.HasPrefix(path, "/v1/images/") {
+	isImageRequest := strings.HasPrefix(path, "/v1/images/")
+	if isImageRequest {
 		req.Model = modelFromImageRequest(ctx)
-	}
-	if req.Model == "" && strings.HasPrefix(path, "/v1/images/") {
-		req.Model = "gpt-image-1"
+		if req.Model == "" {
+			req.Model = "gpt-image-1"
+		}
+	} else {
+		if err := json.Unmarshal(body, &req); err != nil {
+			finishGatewayEarlyFailure("", fasthttp.StatusBadRequest)
+			ctx.Error(`{"error":"invalid request body"}`, fasthttp.StatusBadRequest)
+			return
+		}
+		req.Model = modelFromRequestPath(path, req.Model)
+		if strings.Contains(path, ":streamGenerateContent") {
+			req.Stream = true
+		}
 	}
 	if req.Model == "" {
+		finishGatewayEarlyFailure("", fasthttp.StatusBadRequest)
 		ctx.Error(`{"error":"model is required"}`, fasthttp.StatusBadRequest)
 		return
 	}
-	body = injectModelIfMissing(body, req.Model)
 	if gatewayAuthenticated && internalClaims.Model != req.Model {
+		finishGatewayEarlyFailure(req.Model, fasthttp.StatusUnauthorized)
 		ctx.Error(`{"error":"gateway model mismatch"}`, fasthttp.StatusUnauthorized)
 		return
 	}
@@ -266,7 +334,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		ctx.Error(`{"error":"model not allowed for token"}`, fasthttp.StatusForbidden)
 		return
 	}
-	if !gatewayAuthenticated && token.Permissions != "" && !permissionInList(permissionForFormat(clientFormat), token.Permissions) {
+	permission := permissionForRequest(path, clientFormat)
+	if !gatewayAuthenticated && token.Permissions != "" && !permissionInList(permission, token.Permissions) {
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return
 	}
@@ -283,6 +352,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccount(token.ID.String(), req.Model)
 	}
 	if err != nil {
+		finishGatewayEarlyFailure(req.Model, fasthttp.StatusNotFound)
 		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
 	}
@@ -290,44 +360,38 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 7. Pre-consume billing
 	estimatedTokens := req.MaxTokens
 	if estimatedTokens == 0 {
+		estimatedTokens = req.MaxOutputTokens
+	}
+	if estimatedTokens == 0 {
+		estimatedTokens = req.MaxCompletionTokens
+	}
+	if estimatedTokens == 0 {
+		estimatedTokens = req.GenerationConfig.MaxOutputTokens
+	}
+	if estimatedTokens == 0 {
 		estimatedTokens = 1000
 	}
 	if gatewayAuthenticated && internalClaims.EstimatedTokens > 0 {
 		estimatedTokens = internalClaims.EstimatedTokens
 	}
+	tokenPlanID := toUUID(internalClaims.TokenPlanID)
 	if r.billing != nil && (!gatewayAuthenticated || !internalClaims.Precharged) {
-		if err := r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens); err != nil {
+		planID, err := r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens)
+		if err != nil {
 			logger.Warnf("relay.billing", "pre-consume failed", logger.F("token_id", token.ID.String()), logger.Err(err))
+			ctx.Error(`{"error":"pre-consume failed"}`, fasthttp.StatusTooManyRequests)
+			return
 		}
+		tokenPlanID = planID
 	}
-	var claims *internalauth.Claims
-	if gatewayAuthenticated {
-		claims = &internalClaims
-	}
-
-	// 8. Build upstream request
-	adaptor.Init(targetChannel, account)
-	adaptor.SetRequestParams(req.Model, req.Stream)
-	upstreamURL, err := adaptor.GetRequestURL(path)
-	if err != nil {
-		go r.finishFailureUsage(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens)
-		ctx.Error(`{"error":"build url failed"}`, fasthttp.StatusInternalServerError)
-		return
-	}
-
-	forceStreamActive := targetChannel.ForceStream && !req.Stream
-	if forceStreamActive {
-		body = injectStreamTrue(body)
-	}
-
 	// Determine upstream format from channel type
 	var upstreamFormat provider.Format
 	switch targetChannel.Type {
 	case "openai":
 		if targetChannel.APIFormat == "responses" || targetChannel.APIFormat == "codex" {
-			upstreamFormat = provider.FormatOpenAIResp
+			upstreamFormat = provider.FormatOpenAIResponses
 		} else {
-			upstreamFormat = provider.FormatOpenAIChat
+			upstreamFormat = provider.FormatOpenAIChatCompletions
 		}
 	case "anthropic":
 		upstreamFormat = provider.FormatAnthropic
@@ -338,7 +402,29 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			upstreamFormat = provider.FormatGemini
 		}
 	default:
-		upstreamFormat = provider.FormatOpenAIChat
+		upstreamFormat = provider.FormatOpenAIChatCompletions
+	}
+
+	sameFormat := clientFormat == upstreamFormat
+	rawGeminiSameFormat := sameFormat && clientFormat == provider.FormatGemini
+	if !rawGeminiSameFormat {
+		body = injectModelIfMissing(body, req.Model)
+	}
+
+	forceStreamActive := targetChannel.ForceStream && !req.Stream
+	effectiveStream := req.Stream || forceStreamActive
+	if effectiveStream && (!sameFormat || forceStreamActive) && !rawGeminiSameFormat {
+		body = injectStreamTrue(body)
+	}
+
+	// 8. Build upstream request
+	adaptor.Init(targetChannel, account)
+	adaptor.SetRequestParams(req.Model, effectiveStream)
+	upstreamURL, err := adaptor.GetRequestURL(path)
+	if err != nil {
+		go r.finishFailureUsageWithError(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens, "build url failed", tokenPlanID)
+		ctx.Error(`{"error":"build url failed"}`, fasthttp.StatusInternalServerError)
+		return
 	}
 
 	logger.Debugf("relay.route", "request routed",
@@ -356,28 +442,33 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		logger.F("gateway_authenticated", gatewayAuthenticated),
 	)
 
-	if strings.HasPrefix(path, "/v1/images/") {
-		r.handleImageRequest(ctx, token, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, start, estimatedTokens, claims)
+	if isImageRequest {
+		streaming = true // image handler owns concurrency release on all paths
+		r.handleImageRequest(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, start, estimatedTokens, claims)
 		return
 	}
 
-	convertedBody, err := provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
-	if err != nil {
-		go r.finishFailureUsage(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens)
-		ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
-		return
+	convertedBody := body
+	if !sameFormat {
+		var err error
+		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
+		if err != nil {
+			go r.finishFailureUsageWithError(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), tokenPlanID)
+			ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
+			return
+		}
 	}
 
 	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
-		r.handleStreaming(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
 	} else if forceStreamActive {
 		streaming = true
-		r.handleForceStream(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
 	} else {
 		streaming = true // handleBuffered manages its own concurrency release
-		r.handleBuffered(ctx, token, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, clientFormat, upstreamFormat, start, estimatedTokens, claims)
 	}
 
 	// 10. Record affinity for non-streaming paths (handleBuffered + handleForceStream are synchronous)
@@ -387,7 +478,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
-func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -397,7 +488,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
-		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
@@ -406,18 +497,16 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 		logger.Warnf("relay.upstream", "streaming request failed", logger.Err(err))
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
-		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
 	statusCode := upResp.StatusCode()
 	if statusCode >= 400 {
-		respBody := upResp.Body()
-		bodyCopy := make([]byte, len(respBody))
-		copy(bodyCopy, respBody)
+		bodyCopy := readUpstreamErrorBody(upResp)
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
 		return
 	}
 
@@ -433,17 +522,25 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 
 	tracker := newStreamTracker(adaptor)
 
-	// Determine if we need line conversion (Anthropic/Gemini need format conversion)
 	var inputConvert func([]byte) []byte
-	if adaptor.GetChannelType() != "openai" {
-		inputConvert = adaptor.ConvertStreamLine
+	if clientFormat == upstreamFormat {
+		inputConvert = nil
+	} else if upstreamFormat != provider.FormatOpenAIChatCompletions {
+		if upstreamFormat == provider.FormatOpenAIResponses {
+			inputConvert = openai.NewResponsesToChatStreamConverter()
+		} else {
+			inputConvert = adaptor.ConvertStreamLine
+		}
 	}
 
-	// Determine if we need reverse conversion (client expects non-OpenAI SSE format)
 	var outputConvert func([]byte) []byte
-	if clientFormat != provider.FormatOpenAIChat && clientFormat != provider.FormatOpenAIResp {
-		outputConvert = adaptor.CreateReverseStreamConverter()
+	if clientFormat != upstreamFormat {
+		outputConvert = reverseStreamConverterForClient(clientFormat, upstreamFormat)
 	}
+	if outputConvert == nil && clientFormat == provider.FormatOpenAIChatCompletions && clientFormat != upstreamFormat {
+		outputConvert = openai.NewChatStreamNormalizer()
+	}
+	sendDone := clientFormat == provider.FormatOpenAIChatCompletions
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
 	go func() {
@@ -451,24 +548,45 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 			if rec := recover(); rec != nil {
 				logger.Default().Panic("relay.stream", "stream goroutine panic", rec)
 				if r.billing != nil {
-					go r.billing.Refund(token.ID.String(), estTokens)
+					go r.billing.DBTransactionRefund(token.ID.String(), tokenPlanID, estTokens)
 				}
 			}
 		}()
 		defer fasthttp.ReleaseRequest(upReq)
 		defer fasthttp.ReleaseResponse(upResp)
-		defer r.concLimiter.Release(token.ID.String())
+		defer r.releaseLocalConcurrency(token.ID.String(), claims)
 
-		result := streamAndForward(upResp.BodyStream(), reader, tracker, inputConvert, outputConvert)
+		result := streamAndForward(upResp.BodyStream(), reader, tracker, inputConvert, outputConvert, sendDone)
 		if result.err != nil {
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
-		} else {
+			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), tokenPlanID)
+			return
+		}
+		if result.failed {
+			logger.Warnf("relay.stream", "upstream stream reported failure")
+			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", tokenPlanID)
+			return
+		}
+		if !result.finalized {
+			logger.Warnf("relay.stream", "stream ended without terminal event")
+			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", tokenPlanID)
+			return
+		}
+		{
 			// Record affinity only on successful stream completion
 			if ch.AffinityTTL > 0 {
 				r.affinity.Set(token.ID.String(), model, ch.ID.String(), ch.AffinityTTL)
 			}
 		}
-		pt, ct := tracker.Result()
+		pt, ct, parseFailed := tracker.Result()
+		if parseFailed {
+			logger.Component("relay.billing").Warn("ParseStreamUsage had errors during streaming, token counts may be inaccurate",
+				logger.F("token_id", token.ID.String()),
+				logger.F("model", model),
+				logger.F("prompt_tokens", pt),
+				logger.F("completion_tokens", ct),
+			)
+		}
 		logger.Debugf("relay.stream", "stream request completed",
 			logger.F("token_id", token.ID.String()),
 			logger.F("channel_id", ch.ID.String()),
@@ -479,17 +597,16 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, ch *
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
-		go r.finishUsage(claims, token.ID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens)
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens)
 	}()
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			logger.Default().Panic("relay.stream", "force stream panic", rec)
-			r.refundAndError(ctx, token.ID.String(), estTokens, "internal error", claims, ch, acc, model, start)
-			r.concLimiter.Release(token.ID.String())
+			r.refundAndError(ctx, token.ID.String(), estTokens, "internal error", claims, ch, acc, model, start, tokenPlanID)
 		}
 	}()
 
@@ -502,25 +619,20 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 	upReq.Header.SetMethodBytes([]byte("POST"))
 	upReq.SetBody(body)
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
-		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start)
-		r.concLimiter.Release(token.ID.String())
+		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
 	if err := streamingClient.Do(upReq, upResp); err != nil {
 		logger.Warnf("relay.upstream", "force stream request failed", logger.Err(err))
-		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start)
-		r.concLimiter.Release(token.ID.String())
+		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
 	statusCode := upResp.StatusCode()
 	if statusCode >= 400 {
-		respBody := upResp.Body()
-		bodyCopy := make([]byte, len(respBody))
-		copy(bodyCopy, respBody)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims)
-		r.concLimiter.Release(token.ID.String())
+		bodyCopy := readUpstreamErrorBody(upResp)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
 		return
 	}
 
@@ -528,26 +640,39 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 	respBody, err := io.ReadAll(io.LimitReader(upResp.BodyStream(), int64(maxResponseSize)))
 	if err != nil {
 		logger.Warnf("relay.upstream", "force stream read failed", logger.Err(err))
-		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start)
-		r.concLimiter.Release(token.ID.String())
+		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
-	// Convert upstream SSE to OpenAI SSE format if needed (required for StreamToNonStream)
-	if adaptor.GetChannelType() != "openai" {
+	// Convert upstream SSE to OpenAI Chat Completions API SSE format before StreamToNonStream.
+	if upstreamFormat == provider.FormatOpenAIResponses {
+		convert := openai.NewResponsesToChatStreamConverter()
+		respBody = convertSSEBufferWithConverter(respBody, convert)
+	} else if upstreamFormat != provider.FormatOpenAIChatCompletions {
 		respBody = adaptor.ConvertSSEBuffer(respBody)
 	}
 
-	// SSE -> non-stream JSON (produces OpenAI Chat format)
-	respBody = StreamToNonStream(respBody)
+	// SSE -> non-stream JSON (produces OpenAI Chat Completions API format)
+	var complete bool
+	respBody, complete = StreamToNonStreamChecked(respBody)
+	if isOpenAIErrorResponse(respBody) {
+		r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, respBody, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
+		return
+	}
+	if !complete {
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "stream ended without terminal event", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+		return
+	}
 
 	// Parse usage from OpenAI JSON BEFORE client-format conversion
 	pt, ct := parseNonStreamUsage(respBody)
 
 	// Convert from OpenAI JSON to client format if needed
-	if clientFormat != provider.FormatOpenAIChat {
-		if converted, err := provider.ConvertResponse(provider.FormatOpenAIChat, clientFormat, respBody); err != nil {
+	if clientFormat != provider.FormatOpenAIChatCompletions {
+		if converted, err := provider.ConvertResponse(provider.FormatOpenAIChatCompletions, clientFormat, respBody); err != nil {
 			logger.Warnf("relay.convert", "response conversion failed", logger.Err(err))
+			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+			return
 		} else {
 			respBody = converted
 		}
@@ -567,8 +692,8 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, ch
 		logger.F("completion_tokens", ct),
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
-	go r.finishUsage(claims, token.ID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens)
-	r.concLimiter.Release(token.ID.String())
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens)
+	r.releaseLocalConcurrency(token.ID.String(), claims)
 }
 
 // --- Channel cache ---
@@ -585,9 +710,9 @@ func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
 	return &channelCache{db: database, ttl: ttl}
 }
 
-func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int, claims *internalauth.Claims) {
 	if ch.Type != "openai" {
-		r.refundAndError(ctx, token.ID.String(), estTokens, "image generation is only available on OpenAI-compatible image channels", claims, ch, acc, model, start)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "image generation is only available on OpenAI-compatible image channels", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 	upReq := fasthttp.AcquireRequest()
@@ -602,26 +727,26 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, c
 		upReq.Header.SetBytesV("Content-Type", contentType)
 	}
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
-		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 	if err := bufferedClient.Do(upReq, upResp); err != nil {
 		logger.Warnf("relay.images", "upstream image request failed", logger.Err(err))
-		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start)
+		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 	statusCode := upResp.StatusCode()
 	respBody := copyBody(upResp)
 	if statusCode >= 400 {
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, provider.FormatOpenAIResp, claims)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, provider.FormatOpenAIResponses, claims, tokenPlanID)
 		return
 	}
 	copyHeaders(upResp, &ctx.Response.Header)
 	ctx.SetStatusCode(statusCode)
 	ctx.SetBody(respBody)
-	r.concLimiter.Release(token.ID.String())
+	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.images", "image request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
-	go r.finishUsage(claims, token.ID, ch.ID, acc.ID, model, false, 0, 0, start, statusCode, estTokens)
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens)
 }
 
 func (c *channelCache) get() []db.Channel {
@@ -651,7 +776,7 @@ func (c *channelCache) get() []db.Channel {
 }
 
 // handleBuffered: standard buffered request with retry.
-func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
@@ -669,7 +794,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 		if err := adaptor.SetupRequestHeader(upReq, currentCreds); err != nil {
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
-			r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, currentAccount, model, start)
+			r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, currentAccount, model, start, tokenPlanID)
 			return
 		}
 
@@ -725,8 +850,8 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 	}
 
 	if respBody == nil {
-		r.concLimiter.Release(token.ID.String())
-		go r.finishFailureUsage(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens)
+		r.releaseLocalConcurrency(token.ID.String(), claims)
+		go r.finishFailureUsageWithError(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", tokenPlanID)
 		ctx.Error(`{"error":"all retries exhausted"}`, fasthttp.StatusServiceUnavailable)
 		return
 	}
@@ -745,28 +870,34 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 			}
 		}
 		if statusCode >= 400 {
-			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start, clientFormat, claims)
+			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start, clientFormat, claims, tokenPlanID)
 			return
 		}
 	}
 
-	// Parse usage from upstream-format response BEFORE conversion
-	pt, ct := 0, 0
-	if claims != nil && claims.RequestID != "" {
-		if parsedPT, parsedCT, err := adaptor.ParseUsage(respBody); err == nil {
-			pt, ct = parsedPT, parsedCT
-		}
-	} else {
-		pt, ct = r.settleAndRefund(token.ID.String(), respBody, adaptor, estTokens, model)
-	}
+	upstreamRespBody := respBody
 
-	// Response format conversion
-	if clientFormat != upstreamFormat {
+	// Response format normalization/conversion. Same-format buffered responses
+	// keep the upstream standard JSON intact to preserve provider-native fields.
+	if upstreamFormat != clientFormat {
 		if converted, err := provider.ConvertResponse(upstreamFormat, clientFormat, respBody); err != nil {
 			logger.Warnf("relay.convert", "response conversion failed", logger.Err(err))
+			r.finishFailedBuffered(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, respAccount, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+			ctx.Error(`{"error":"response conversion failed"}`, fasthttp.StatusBadGateway)
+			return
 		} else {
 			respBody = converted
 		}
+	}
+
+	// Parse usage from upstream-format response after conversion succeeds.
+	pt, ct := 0, 0
+	if claims != nil && claims.RequestID != "" {
+		if parsedPT, parsedCT, err := adaptor.ParseUsage(upstreamRespBody); err == nil {
+			pt, ct = parsedPT, parsedCT
+		}
+	} else {
+		pt, ct = r.settleAndRefund(token.ID.String(), tokenPlanID, upstreamRespBody, adaptor, estTokens, model)
 	}
 
 	ctx.SetStatusCode(statusCode)
@@ -786,7 +917,10 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, ch *d
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
 	if claims != nil && claims.RequestID != "" {
-		go r.finishUsage(claims, token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens)
+		// Gateway-authenticated requests did not acquire the Relay-local
+		// concurrency limiter; Gateway owns that slot and releases it when this
+		// response completes.
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens)
 	} else {
 		go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode)
 	}
@@ -808,6 +942,7 @@ func logGeminiCodeUpstreamError(ch *db.Channel, acc *db.Account, statusCode int,
 func compactLogBody(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	text = strings.Join(strings.Fields(text), " ")
+	text = redactLogSecrets(text)
 	if text == "" {
 		return "empty response"
 	}
@@ -815,6 +950,112 @@ func compactLogBody(body []byte) string {
 		return text[:1200] + "..."
 	}
 	return text
+}
+
+func redactLogSecrets(text string) string {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key", "apikey", "key"} {
+		lowerKey := strings.ToLower(key)
+		searchFrom := 0
+		for searchFrom < len(text) {
+			lower := strings.ToLower(text[searchFrom:])
+			idx := strings.Index(lower, lowerKey)
+			if idx < 0 {
+				break
+			}
+			idx += searchFrom // re-anchor to full string
+
+			sepIdx := -1
+			for i := idx + len(key); i < len(text); i++ {
+				if text[i] == ' ' || text[i] == '\t' || text[i] == '"' || text[i] == '\'' {
+					continue
+				}
+				if text[i] == ':' || text[i] == '=' || text[i] == '&' {
+					sepIdx = i
+				}
+				break
+			}
+			if sepIdx < 0 {
+				searchFrom = idx + 1
+				continue
+			}
+			start := sepIdx + 1
+			for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '"' || text[start] == '\'') {
+				start++
+			}
+			end := start
+			for end < len(text) && text[end] != ',' && text[end] != '}' && text[end] != '"' && text[end] != '\'' && text[end] != '&' {
+				end++
+			}
+			if end <= start {
+				searchFrom = idx + 1
+				continue
+			}
+			if strings.HasPrefix(text[start:], "[redacted]") {
+				// Already redacted; skip past this occurrence
+				searchFrom = end
+				continue
+			}
+			text = text[:start] + "[redacted]" + text[end:]
+			searchFrom = start + len("[redacted]")
+		}
+	}
+	return text
+}
+
+func readUpstreamErrorBody(resp *fasthttp.Response) []byte {
+	if stream := resp.BodyStream(); stream != nil {
+		body, err := io.ReadAll(io.LimitReader(stream, maxResponseSize))
+		if closer, ok := stream.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err == nil {
+			return body
+		}
+		logger.Warnf("relay.upstream", "read streaming error body failed", logger.Err(err))
+	}
+	body := resp.Body()
+	bodyCopy := make([]byte, len(body))
+	copy(bodyCopy, body)
+	return bodyCopy
+}
+
+func convertSSEBufferWithConverter(sseBody []byte, convert func([]byte) []byte) []byte {
+	if convert == nil {
+		return sseBody
+	}
+	lines := strings.Split(string(sseBody), "\n")
+	var out []byte
+	var event []byte
+	flush := func() {
+		if len(event) == 0 {
+			return
+		}
+		if len(event) < 2 || string(event[len(event)-2:]) != "\n\n" {
+			event = append(event, '\n')
+		}
+		normalized := normalizeSSEEventForConverterWithEvent(event)
+		event = nil
+		if len(normalized) == 0 {
+			return
+		}
+		if converted := convert(normalized); converted != nil {
+			out = append(out, converted...)
+		}
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			flush()
+			continue
+		}
+		event = append(event, []byte(line)...)
+		event = append(event, '\n')
+	}
+	flush()
+	if len(out) > 0 && !strings.Contains(string(out), "data: [DONE]") {
+		out = append(out, []byte("data: [DONE]\n\n")...)
+	}
+	return out
 }
 
 func (r *Relayer) retryGeminiCodeFallback(ctx *fasthttp.RequestCtx, adaptor provider.Adaptor, url string, body []byte, creds string, headers *fasthttp.ResponseHeader) ([]byte, int, bool) {
@@ -877,7 +1118,7 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 		if chID := r.affinity.Get(tokenID, model); chID != "" {
 			var ch db.Channel
 			if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
-				if modelInList(model, ch.Models) {
+				if channelSupportsModel(ch, model) {
 					if acc, adaptor, creds, err := r.pickAccount(ch); err == nil {
 						return &ch, acc, adaptor, creds, nil
 					}
@@ -894,7 +1135,7 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 		}
 		r.runtimeMu.RUnlock()
 		for i := range channels {
-			if modelInList(model, channels[i].Models) {
+			if channelSupportsModel(channels[i], model) {
 				if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
 					return &channels[i], acc, adaptor, creds, nil
 				}
@@ -906,7 +1147,7 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 	// Priority-based selection (with caching)
 	channels := r.chCache.get()
 	for i := range channels {
-		if modelInList(model, channels[i].Models) {
+		if channelSupportsModel(channels[i], model) {
 			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
 				return &channels[i], acc, adaptor, creds, nil
 			}
@@ -927,7 +1168,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 		return nil, nil, nil, "", fmt.Errorf("invalid selected account")
 	}
 	if ch, acc, ok := r.runtimeSelected(chUUID, accUUID); ok {
-		if !modelInList(model, ch.Models) {
+		if !channelSupportsModel(*ch, model) {
 			return nil, nil, nil, "", fmt.Errorf("selected channel does not support model")
 		}
 		adaptor := getAdaptor(ch.Type)
@@ -947,7 +1188,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 	if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chUUID).First(&ch).Error; err != nil {
 		return nil, nil, nil, "", fmt.Errorf("selected channel not available")
 	}
-	if !modelInList(model, ch.Models) {
+	if !channelSupportsModel(ch, model) {
 		return nil, nil, nil, "", fmt.Errorf("selected channel does not support model")
 	}
 	var acc db.Account
@@ -998,9 +1239,17 @@ func (r *Relayer) ApplyRuntimeConfig(cfg RuntimeConfig) {
 			ChannelID: acc.ChannelID, Name: acc.Name, Credentials: acc.Credentials, CredType: acc.CredType,
 			Weight: acc.Weight, Enabled: acc.Enabled, CooldownUntil: acc.CooldownUntil, RefreshToken: acc.RefreshToken,
 			TokenExpiry: acc.TokenExpiry, ClientID: acc.ClientID, ClientSecret: acc.ClientSecret, TokenURL: acc.TokenURL,
+			Metadata: acc.Metadata,
 		}
 	}
 	r.runtimeMu.Lock()
+	if r.db == nil {
+		for id, incoming := range accounts {
+			if existing, ok := r.runtimeAccounts[id]; ok {
+				accounts[id] = preserveFresherRuntimeOAuth(incoming, existing)
+			}
+		}
+	}
 	r.runtimeVersion = cfg.Version
 	r.runtimeChannels = channels
 	r.runtimeAccounts = accounts
@@ -1027,6 +1276,26 @@ func (r *Relayer) ApplyRuntimeConfig(cfg RuntimeConfig) {
 	}
 }
 
+func preserveFresherRuntimeOAuth(incoming, existing db.Account) db.Account {
+	if incoming.CredType != "oauth_token" || existing.CredType != "oauth_token" {
+		return incoming
+	}
+	if incoming.TokenURL != existing.TokenURL || incoming.ChannelID != existing.ChannelID {
+		return incoming
+	}
+	if existing.TokenExpiry == nil {
+		return incoming
+	}
+	if incoming.TokenExpiry != nil && !existing.TokenExpiry.After(*incoming.TokenExpiry) {
+		return incoming
+	}
+	incoming.Credentials = existing.Credentials
+	incoming.RefreshToken = existing.RefreshToken
+	incoming.TokenExpiry = existing.TokenExpiry
+	incoming.Metadata = existing.Metadata
+	return incoming
+}
+
 func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, string, error) {
 	adaptor := getAdaptor(ch.Type)
 	if adaptor == nil {
@@ -1048,7 +1317,100 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 }
 
 func (r *Relayer) ensureCredentials(account *db.Account) (string, error) {
-	return EnsureValidCredentials(account, r.db)
+	before := oauthAccountSyncSnapshot(account)
+	credential, err := EnsureValidCredentials(account, r.db)
+	if err == nil && r.db == nil && account != nil && oauthAccountChanged(before, account) {
+		r.runtimeMu.Lock()
+		if _, ok := r.runtimeAccounts[account.ID]; ok {
+			r.runtimeAccounts[account.ID] = *account
+		}
+		r.runtimeMu.Unlock()
+		r.pushRuntimeAccountUpdate(account)
+	}
+	return credential, err
+}
+
+type oauthSyncSnapshot struct {
+	credentials  string
+	refreshToken string
+	expiry       string
+	metadata     string
+}
+
+func oauthAccountSyncSnapshot(account *db.Account) oauthSyncSnapshot {
+	if account == nil || account.CredType != "oauth_token" {
+		return oauthSyncSnapshot{}
+	}
+	expiry := ""
+	if account.TokenExpiry != nil {
+		expiry = account.TokenExpiry.UTC().Format(time.RFC3339Nano)
+	}
+	metadata := ""
+	if account.Metadata != nil {
+		if b, err := json.Marshal(account.Metadata); err == nil {
+			metadata = string(b)
+		}
+	}
+	return oauthSyncSnapshot{
+		credentials:  account.Credentials,
+		refreshToken: account.RefreshToken,
+		expiry:       expiry,
+		metadata:     metadata,
+	}
+}
+
+func oauthAccountChanged(before oauthSyncSnapshot, account *db.Account) bool {
+	if account == nil || account.CredType != "oauth_token" {
+		return false
+	}
+	return before != oauthAccountSyncSnapshot(account)
+}
+
+func (r *Relayer) pushRuntimeAccountUpdate(account *db.Account) {
+	if account == nil || account.CredType != "oauth_token" || r.controlURL == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"account_id":    account.ID,
+		"channel_id":    account.ChannelID,
+		"credentials":   account.Credentials,
+		"refresh_token": account.RefreshToken,
+		"token_expiry":  account.TokenExpiry,
+		"metadata":      account.Metadata,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logger.Warnf("relay.config", "encode account update failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		return
+	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(r.controlURL + "/internal/relay/account-update")
+	req.Header.SetMethod("POST")
+	req.Header.SetContentType("application/json")
+	req.Header.Set("X-UAPI-Internal-Secret", r.internalSecret)
+	req.SetBody(body)
+	if err := bufferedClient.DoTimeout(req, resp, 10*time.Second); err != nil {
+		logger.Warnf("relay.config", "account update push failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		return
+	}
+	if resp.StatusCode() >= 300 {
+		logger.Warnf("relay.config", "account update push rejected", logger.F("account_id", account.ID.String()), logger.F("status", resp.StatusCode()))
+		return
+	}
+	var result struct {
+		Accepted bool   `json:"accepted"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		logger.Warnf("relay.config", "account update push returned invalid response", logger.F("account_id", account.ID.String()), logger.Err(err))
+		return
+	}
+	if !result.Accepted {
+		logger.Warnf("relay.config", "account update push not accepted", logger.F("account_id", account.ID.String()), logger.F("reason", result.Reason))
+	}
 }
 
 func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
@@ -1080,21 +1442,30 @@ func poolFromChannel(pm *PoolManager, ch *db.Channel) *AccountPool {
 	return p
 }
 
-func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time) {
-	r.concLimiter.Release(tokenID)
-	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, false, start, fasthttp.StatusInternalServerError, estTokens, msg)
-	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, fasthttp.StatusInternalServerError)
+func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, tokenPlanIDs ...uuid.UUID) {
+	r.refundAndErrorWithStatus(ctx, tokenID, estTokens, msg, claims, ch, acc, model, start, fasthttp.StatusInternalServerError, tokenPlanIDs...)
+}
+
+func (r *Relayer) refundAndErrorWithStatus(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
+	r.releaseLocalConcurrency(tokenID, claims)
+	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, tokenPlanIDs...)
+	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, statusCode)
+}
+
+func (r *Relayer) finishFailedBuffered(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
+	r.releaseLocalConcurrency(tokenID, claims)
+	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, tokenPlanIDs...)
 }
 
 // normalizeErrorResponse converts an upstream error body into the client's expected format.
-func normalizeErrorResponse(respBody []byte, clientFormat provider.Format) []byte {
+func normalizeErrorResponse(respBody []byte, clientFormat provider.Format, statusCode int) []byte {
 	errMsg := errorMessageFromResponse(respBody)
 	switch clientFormat {
 	case provider.FormatAnthropic:
 		return formatAnthropicError(errMsg)
 	case provider.FormatGemini:
-		return formatGeminiError(errMsg)
-	default: // OpenAI Chat / Responses
+		return formatGeminiError(errMsg, statusCode)
+	default: // OpenAI Chat Completions API / OpenAI Responses API
 		return formatOpenAIError(errMsg)
 	}
 }
@@ -1172,23 +1543,47 @@ func formatAnthropicError(msg string) []byte {
 	return result
 }
 
-func formatGeminiError(msg string) []byte {
+func formatGeminiError(msg string, statusCode int) []byte {
 	result, _ := json.Marshal(map[string]interface{}{
 		"error": map[string]interface{}{
-			"code":    500,
+			"code":    statusCode,
 			"message": msg,
-			"status":  "INTERNAL",
+			"status":  geminiStatusForHTTP(statusCode),
 		},
 	})
 	return result
 }
 
-func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format, claims *internalauth.Claims) {
-	r.concLimiter.Release(tokenID)
+func geminiStatusForHTTP(statusCode int) string {
+	switch statusCode {
+	case fasthttp.StatusBadRequest:
+		return "INVALID_ARGUMENT"
+	case fasthttp.StatusUnauthorized:
+		return "UNAUTHENTICATED"
+	case fasthttp.StatusForbidden:
+		return "PERMISSION_DENIED"
+	case fasthttp.StatusNotFound:
+		return "NOT_FOUND"
+	case fasthttp.StatusTooManyRequests:
+		return "RESOURCE_EXHAUSTED"
+	case fasthttp.StatusServiceUnavailable:
+		return "UNAVAILABLE"
+	case fasthttp.StatusGatewayTimeout:
+		return "DEADLINE_EXCEEDED"
+	default:
+		if statusCode >= 500 {
+			return "INTERNAL"
+		}
+		return "UNKNOWN"
+	}
+}
+
+func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format, claims *internalauth.Claims, tokenPlanIDs ...uuid.UUID) {
+	r.releaseLocalConcurrency(tokenID, claims)
 	ctx.SetStatusCode(statusCode)
-	normalizedBody := normalizeErrorResponse(respBody, clientFormat)
+	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.SetBody(normalizedBody)
-	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody))
+	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), tokenPlanIDs...)
 }
 
 func injectStreamTrue(body []byte) []byte {
@@ -1260,6 +1655,18 @@ func parseNonStreamUsage(respBody []byte) (int, int) {
 	return 0, 0
 }
 
+func isOpenAIErrorResponse(respBody []byte) bool {
+	var obj map[string]interface{}
+	if json.Unmarshal(respBody, &obj) != nil {
+		return false
+	}
+	if object, _ := obj["object"].(string); object == "error" {
+		return true
+	}
+	_, ok := obj["error"].(map[string]interface{})
+	return ok
+}
+
 func extractBearerToken(ctx *fasthttp.RequestCtx) string {
 	auth := string(ctx.Request.Header.Peek("Authorization"))
 	if len(auth) > 7 && auth[:7] == "Bearer " {
@@ -1269,6 +1676,9 @@ func extractBearerToken(ctx *fasthttp.RequestCtx) string {
 		return key
 	}
 	if key := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Goog-Api-Key"))); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(string(ctx.QueryArgs().Peek("key"))); key != "" {
 		return key
 	}
 	return ""
@@ -1309,16 +1719,15 @@ func modelFromImageRequest(ctx *fasthttp.RequestCtx) string {
 }
 
 // checkIPWhitelist verifies the client IP against the whitelist.
-// It checks both the direct connection IP and forwarded headers (X-Real-IP, X-Forwarded-For).
-// CAUTION: X-Forwarded-For and X-Real-IP headers can be spoofed by clients.
-// Only trust these headers when behind a trusted reverse proxy that strips untrusted headers.
-func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string) bool {
+// Only trusts X-Forwarded-For / X-Real-IP when the direct connection IP
+// matches a configured trusted proxy.
+func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string, trustedProxies []string) bool {
 	for _, allowedIP := range strings.Split(whitelist, ",") {
 		allowedIP = strings.TrimSpace(allowedIP)
 		if allowedIP == "" {
 			continue
 		}
-		for _, clientIP := range clientIPCandidates(ctx) {
+		for _, clientIP := range clientIPCandidates(ctx, trustedProxies) {
 			if allowedIP == clientIP {
 				return true
 			}
@@ -1327,8 +1736,17 @@ func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string) bool {
 	return false
 }
 
-func clientIPCandidates(ctx *fasthttp.RequestCtx) []string {
-	candidates := []string{ctx.RemoteIP().String()}
+// clientIPCandidates returns candidate client IPs for whitelist matching.
+// Forwarded headers are only considered when the direct connection IP is a trusted proxy.
+func clientIPCandidates(ctx *fasthttp.RequestCtx, trustedProxies []string) []string {
+	remoteIP := ctx.RemoteIP().String()
+	candidates := []string{remoteIP}
+
+	// Only trust forwarded headers if the direct connection is from a trusted proxy
+	if !isTrustedProxy(remoteIP, trustedProxies) {
+		return candidates
+	}
+
 	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
 		candidates = append(candidates, xRealIP)
 	}
@@ -1339,6 +1757,16 @@ func clientIPCandidates(ctx *fasthttp.RequestCtx) []string {
 		}
 	}
 	return candidates
+}
+
+// isTrustedProxy checks if the given IP is in the trusted proxies list.
+func isTrustedProxy(ip string, trustedProxies []string) bool {
+	for _, trusted := range trustedProxies {
+		if strings.TrimSpace(trusted) == ip {
+			return true
+		}
+	}
+	return false
 }
 
 func getAdaptor(channelType string) provider.Adaptor {
@@ -1354,7 +1782,23 @@ func getAdaptor(channelType string) provider.Adaptor {
 	}
 }
 
+func reverseStreamConverterForClient(clientFormat, upstreamFormat provider.Format) func([]byte) []byte {
+	switch clientFormat {
+	case provider.FormatOpenAIResponses:
+		return openai.NewResponsesReverseStreamConverter()
+	case provider.FormatAnthropic:
+		return anthropic.NewReverseStreamConverter()
+	case provider.FormatGemini:
+		return gemini.NewReverseStreamConverter()
+	default:
+		return nil
+	}
+}
+
 func modelInList(model, list string) bool {
+	if strings.TrimSpace(list) == "" {
+		return true
+	}
 	for _, m := range strings.Split(list, ",") {
 		if strings.TrimSpace(m) == model {
 			return true
@@ -1363,17 +1807,35 @@ func modelInList(model, list string) bool {
 	return false
 }
 
+func channelSupportsModel(ch db.Channel, model string) bool {
+	if strings.TrimSpace(ch.Models) == "" && isCodeAPIFormat(ch.APIFormat) {
+		return false
+	}
+	return modelInList(model, ch.Models)
+}
+
+func isCodeAPIFormat(format string) bool {
+	return format == "codex" || format == "gemini_code" || format == "claude_code"
+}
+
 func permissionForFormat(format provider.Format) string {
 	switch format {
 	case provider.FormatAnthropic:
 		return "messages"
 	case provider.FormatGemini:
 		return "gemini"
-	case provider.FormatOpenAIResp:
+	case provider.FormatOpenAIResponses:
 		return "responses"
 	default:
 		return "chat"
 	}
+}
+
+func permissionForRequest(path string, format provider.Format) string {
+	if strings.HasPrefix(path, "/v1/images/") {
+		return "images"
+	}
+	return permissionForFormat(format)
 }
 
 func permissionInList(permission, list string) bool {
@@ -1404,20 +1866,28 @@ func (r *Relayer) writeLogWithError(tokenID, channelID, accountID interface{}, m
 		TotalTokens:      int64(pt + ct),
 		LatencyMs:        time.Since(start).Milliseconds(),
 		StatusCode:       statusCode,
-		ErrorMessage:     errorMessage,
+		ErrorMessage:     logger.Redact(errorMessage),
 	}
 	if err := r.db.Create(&logEntry).Error; err != nil {
 		logger.Warnf("relay.logs", "write request log failed", logger.Err(err))
 	}
 }
 
-func (r *Relayer) finishUsage(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int) {
+func (r *Relayer) finishUsage(claims *internalauth.Claims, tokenID, tokenPlanID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int) {
+	planID := requestTokenPlanID(claims, tokenPlanID)
 	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode, estTokens) == nil {
 		return
 	}
 	r.writeLog(tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode)
 	if r.billing != nil {
-		go r.billing.RefundAndSettle(toUUID(tokenID).String(), estTokens, pt, ct, model)
+		go func() {
+			if err := r.billing.DBTransactionRefundAndSettle(toUUID(tokenID).String(), planID, estTokens, pt, ct, 0, 0, model); err != nil {
+				logger.Component("relay.billing").Warn("refund-and-settle failed",
+					logger.F("token_id", toUUID(tokenID).String()),
+					logger.F("error", err.Error()),
+				)
+			}
+		}()
 	}
 }
 
@@ -1425,13 +1895,21 @@ func (r *Relayer) finishFailureUsage(claims *internalauth.Claims, tokenID, chann
 	r.finishFailureUsageWithError(claims, tokenID, channelID, accountID, model, isStream, start, statusCode, estTokens, "")
 }
 
-func (r *Relayer) finishFailureUsageWithError(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, start time.Time, statusCode int, estTokens int, errorMessage string) {
+func (r *Relayer) finishFailureUsageWithError(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, start time.Time, statusCode int, estTokens int, errorMessage string, tokenPlanIDs ...uuid.UUID) {
+	planID := requestTokenPlanID(claims, firstUUID(tokenPlanIDs))
 	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, isStream, 0, 0, start, statusCode, estTokens) == nil {
 		return
 	}
 	r.writeLogWithError(tokenID, channelID, accountID, model, isStream, 0, 0, start, statusCode, errorMessage)
 	if r.billing != nil {
-		go r.billing.Refund(toUUID(tokenID).String(), estTokens)
+		go func() {
+			if err := r.billing.DBTransactionRefund(toUUID(tokenID).String(), planID, estTokens); err != nil {
+				logger.Component("relay.billing").Warn("refund failed",
+					logger.F("token_id", toUUID(tokenID).String()),
+					logger.F("error", err.Error()),
+				)
+			}
+		}()
 	}
 }
 
@@ -1442,6 +1920,7 @@ func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channel
 	payload := map[string]interface{}{
 		"request_id":        claims.RequestID,
 		"token_id":          toUUID(tokenID),
+		"token_plan_id":     toUUID(claims.TokenPlanID),
 		"channel_id":        toUUID(channelID),
 		"account_id":        toUUID(accountID),
 		"model":             model,
@@ -1496,17 +1975,54 @@ func jsonEscape(s string) string {
 	return s
 }
 
-func (r *Relayer) settleAndRefund(tokenID string, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int) {
-	r.concLimiter.Release(tokenID)
+func (r *Relayer) settleAndRefund(tokenID string, tokenPlanID uuid.UUID, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int) {
 	if r.billing == nil {
 		return 0, 0
 	}
-	pt, ct := 0, 0
+	pt, ct, cc, cr := 0, 0, 0, 0
 	if adaptor != nil && len(respBody) > 0 {
-		if p, c, err := adaptor.ParseUsage(respBody); err == nil {
-			pt, ct = p, c
+		if usage, err := adaptor.ParseUsageFull(respBody); err == nil {
+			pt, ct = usage.PromptTokens, usage.CompletionTokens
+			cc, cr = usage.CacheCreationInputTokens, usage.CacheReadInputTokens
+		} else {
+			logger.Component("relay.billing").Warn("ParseUsage failed, recording zero tokens",
+				logger.F("token_id", tokenID),
+				logger.F("model", model),
+				logger.F("error", err.Error()),
+			)
 		}
 	}
-	go r.billing.RefundAndSettle(tokenID, estTokens, pt, ct, model)
+	go func() {
+		if err := r.billing.DBTransactionRefundAndSettle(tokenID, tokenPlanID, estTokens, pt, ct, cc, cr, model); err != nil {
+			logger.Component("relay.billing").Warn("refund-and-settle failed",
+				logger.F("token_id", tokenID),
+				logger.F("error", err.Error()),
+			)
+		}
+	}()
 	return pt, ct
+}
+
+func requestTokenPlanID(claims *internalauth.Claims, fallback interface{}) uuid.UUID {
+	if id := toUUID(fallback); id != uuid.Nil {
+		return id
+	}
+	if claims != nil {
+		return toUUID(claims.TokenPlanID)
+	}
+	return uuid.Nil
+}
+
+func firstUUID(ids []uuid.UUID) uuid.UUID {
+	if len(ids) > 0 {
+		return ids[0]
+	}
+	return uuid.Nil
+}
+
+func (r *Relayer) releaseLocalConcurrency(tokenID string, claims *internalauth.Claims) {
+	if claims != nil && claims.RequestID != "" {
+		return
+	}
+	r.concLimiter.Release(tokenID)
 }

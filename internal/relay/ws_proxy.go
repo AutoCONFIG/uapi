@@ -9,6 +9,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	ws "github.com/fasthttp/websocket"
+	"github.com/google/uuid"
 )
 
 // tryNativeUpstream attempts to proxy the response.create event via a native
@@ -30,6 +31,7 @@ func (h *WSHandler) tryNativeUpstream(
 	creds string,
 	model string,
 	estTokens int,
+	tokenPlanID uuid.UUID,
 	start time.Time,
 ) bool {
 	endpoint := strings.TrimSuffix(ch.Endpoint, "/")
@@ -97,7 +99,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 	upstreamConn.conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
-	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, start, ts, idleTimeout)
+	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout)
 
 	return true
 }
@@ -111,6 +113,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 	acc *db.Account,
 	model string,
 	estTokens int,
+	tokenPlanID uuid.UUID,
 	start time.Time,
 	ts *turnState,
 	idleTimeout time.Duration,
@@ -123,12 +126,12 @@ func (h *WSHandler) proxyUpstreamToClient(
 		// After turn completes, discard the connection (don't return to pool).
 		// WS connections may have buffered data from the previous turn,
 		// so it's safer to close and let a fresh connection be created for the next turn.
-		upstreamConn.Close()
 		h.upstream.Discard(upstreamConn)
+		sess.ReleaseTurn()
 
 		// If turn never completed (e.g., client disconnect), refund billing
 		if !ts.isDone() {
-			h.refundBilling(sess.tokenID, estTokens)
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
 		}
 	}()
 
@@ -168,8 +171,15 @@ func (h *WSHandler) proxyUpstreamToClient(
 			return
 		}
 
-		// Check for terminal events to settle billing
-		if IsTerminalEvent(envelope.Type) {
+		if IsFailureTerminalEvent(envelope.Type) {
+			ts.markDone()
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
+			return
+		}
+
+		// Check for successful terminal events to settle billing.
+		if IsSuccessfulTerminalEvent(envelope.Type) {
 			// Extract usage from terminal event
 			pt, ct := ParseResponsesUsage(msg)
 			ts.setUsage(pt, ct)
@@ -177,19 +187,11 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 			// Settle billing
 			promptTokens, completionTokens := ts.usage()
-			h.settleBilling(sess.tokenID, estTokens, promptTokens, completionTokens, model)
+			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, model)
 			if ch.AffinityTTL > 0 {
 				h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
 			}
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, promptTokens, completionTokens, start, 200)
-			return
-		}
-
-		// Handle upstream error events
-		if envelope.Type == WSEventError {
-			ts.markDone()
-			h.refundBilling(sess.tokenID, estTokens)
-			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 500)
 			return
 		}
 	}

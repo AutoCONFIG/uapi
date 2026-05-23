@@ -147,17 +147,13 @@ export const adminApi = {
     request<{ deleted: boolean }>(`/api/admin/accounts?id=${id}`, { method: "DELETE", token }),
   tokens: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<ApiKey>>(`/api/admin/tokens?page=${page}&limit=${limit}`, { token }),
-  createToken: (token: string, body: { name: string; key: string; enabled?: boolean; ip_whitelist?: string; models?: string; permissions?: string; policy_id?: string }) =>
-    request<ApiKey>("/api/admin/tokens", { method: "POST", token, body }),
-  updateToken: (token: string, id: string, body: Partial<{ name: string; ip_whitelist: string; models: string; permissions: string; unlimited: boolean; policy_id: string }>) =>
-    request<ApiKey>(`/api/admin/tokens?id=${id}`, { method: "PUT", token, body }),
   deleteToken: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/tokens?id=${id}`, { method: "DELETE", token }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; limits?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; enabled?: boolean }) =>
+  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; limits?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; enabled?: boolean }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; limits: string; model_ratios: string; completion_ratio: string; token_quota: number; enabled: boolean }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; limits: string; model_ratios: string; completion_ratio: string; token_quota: number; enabled: boolean }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),

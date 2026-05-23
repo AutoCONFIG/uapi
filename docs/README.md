@@ -8,6 +8,8 @@ the specific current document that matches the task.
 
 - `current/`: active product, frontend, backend, and architecture notes. Use
   these files for implementation decisions.
+- `api-reference/`: official upstream API reference documents organized by the
+  four protocol surfaces implemented by UAPI.
 - `deployment/`: deployment and operations notes.
 - `reference/`: stable background references. These can explain upstream tools
   or external behavior, but they are not product requirements by themselves.
@@ -22,8 +24,11 @@ the specific current document that matches the task.
   architecture, data models, and relay engine.
 - [current/gateway-relay.md](current/gateway-relay.md): current Gateway/Relay
   control-plane architecture and implementation status.
-- [current/code-channels.md](current/code-channels.md): CodeX, Gemini Code,
+- [current/code-channels.md](current/code-channels.md): Codex, Gemini Code,
   Claude Code, and standard provider API source alignment.
+- [api-reference/README.md](api-reference/README.md): official API reference
+  corpus for OpenAI Chat Completions API, OpenAI Responses API, Gemini API, and
+  Anthropic Messages API.
 
 ## Maintenance Rules
 

@@ -11,9 +11,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var oauthHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+var ClaudeCodeSessionID = uuid.NewString()
 
 const (
 	DefaultAuthURL       = "https://claude.com/cai/oauth/authorize"
@@ -24,7 +28,8 @@ const (
 	DefaultScope         = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	ClaudeAIRefreshScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	OAuthBetaHeader      = "oauth-2025-04-20"
-	ClaudeCodeUserAgent  = "claude-cli/uapi (external, cli)"
+	ClaudeCLIUserAgent   = "claude-cli/unknown (external, cli)"
+	ClaudeCodeUserAgent  = "claude-code/unknown"
 	RolesURL             = DefaultAPIBaseURL + "/api/oauth/claude_cli/roles"
 	ProfileURL           = DefaultAPIBaseURL + "/api/oauth/profile"
 	FirstTokenDateURL    = DefaultAPIBaseURL + "/api/organization/claude_code_first_token_date"
@@ -61,17 +66,25 @@ func GenerateCodeChallenge(verifier string) string {
 }
 
 func BuildAuthURL(clientID, redirectURI, codeChallenge, state string) string {
-	params := url.Values{
-		"code":                  {"true"},
-		"client_id":             {clientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {redirectURI},
-		"scope":                 {DefaultScope},
-		"code_challenge":        {codeChallenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
+	params := [][2]string{
+		{"code", "true"},
+		{"client_id", clientID},
+		{"response_type", "code"},
+		{"redirect_uri", redirectURI},
+		{"scope", DefaultScope},
+		{"code_challenge", codeChallenge},
+		{"code_challenge_method", "S256"},
+		{"state", state},
 	}
-	return DefaultAuthURL + "?" + params.Encode()
+	return DefaultAuthURL + "?" + encodeQuery(params)
+}
+
+func encodeQuery(params [][2]string) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		parts = append(parts, param[0]+"="+url.QueryEscape(param[1]))
+	}
+	return strings.Join(parts, "&")
 }
 
 func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, state string) (*TokenResponse, error) {
@@ -324,8 +337,50 @@ func subscriptionType(orgType string) string {
 
 func compactBody(body []byte) string {
 	s := strings.TrimSpace(string(body))
+	s = redactOAuthBody(strings.Join(strings.Fields(s), " "))
 	if len(s) > 500 {
 		return s[:500] + "..."
 	}
 	return s
+}
+
+func redactOAuthBody(text string) string {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key"} {
+		for {
+			lower := strings.ToLower(text)
+			idx := strings.Index(lower, strings.ToLower(key))
+			if idx < 0 {
+				break
+			}
+			sepIdx := -1
+			for i := idx + len(key); i < len(text); i++ {
+				if text[i] == ' ' || text[i] == '\t' || text[i] == '"' || text[i] == '\'' {
+					continue
+				}
+				if text[i] == ':' || text[i] == '=' || text[i] == '&' {
+					sepIdx = i
+				}
+				break
+			}
+			if sepIdx < 0 {
+				break
+			}
+			start := sepIdx + 1
+			for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '"' || text[start] == '\'') {
+				start++
+			}
+			end := start
+			for end < len(text) && text[end] != ',' && text[end] != '}' && text[end] != '"' && text[end] != '\'' && text[end] != '&' {
+				end++
+			}
+			if end <= start {
+				break
+			}
+			if strings.HasPrefix(text[start:], "[redacted]") {
+				break
+			}
+			text = text[:start] + "[redacted]" + text[end:]
+		}
+	}
+	return text
 }

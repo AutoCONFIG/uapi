@@ -14,7 +14,7 @@ Primary surfaces:
 
 - Public auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
-- Admin console: `/admin/dashboard`, `/admin/access-policies`, `/admin/relay-nodes`, `/admin/channels`,
+- Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
   `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
   `/admin/audit-logs`
 
@@ -33,10 +33,12 @@ The frontend calls the implemented backend routes:
   `/api/user/password`, `/api/user/email`
 - Admin auth/setup: `/api/admin/login`, `/api/admin/init-status`,
   `/api/admin/setup`
-- Admin CRUD: `/api/admin/access-policies`, `/api/admin/relay-nodes`, `/api/admin/channels`,
-  `/api/admin/accounts`, `/api/admin/users`, `/api/admin/tokens`,
-  `/api/admin/plans`, `/api/admin/logs`, `/api/admin/audit-logs`
+- Admin CRUD: `/api/admin/access-policies` for plan-composed policy resources,
+  `/api/admin/relay-nodes`, `/api/admin/channels`, `/api/admin/accounts`,
+  `/api/admin/users`, `/api/admin/tokens`, `/api/admin/plans`,
+  `/api/admin/logs`, `/api/admin/audit-logs`
 - Admin channel OAuth: `POST /api/admin/channels/oauth/auth-url`,
+  `POST /api/admin/channels/oauth/complete`,
   `GET /api/admin/channels/oauth/status`, and
   `POST /api/admin/channels/oauth/bind`. Provider callbacks return to
   `GET /api/admin/channels/oauth/callback`.
@@ -60,9 +62,9 @@ drawer for channel edits and credentials. The stored `default` group is displaye
 as `默认渠道`.
 
 The channel drawer and create drawer support three provider families:
-OpenAI, Gemini, and Claude. Each family has normal API-key configuration; OpenAI
-also exposes the `standard` Chat and `responses` API format switch. Code login
-buttons create CodeX, Gemini Code, or Claude Code OAuth channels. The backend
+OpenAI, Gemini, and Anthropic. Each family has normal API-key configuration; OpenAI
+also exposes the `standard` Chat Completions and `responses` API format switch. Code login
+buttons create Codex, Gemini Code, or Claude Code OAuth channels. The backend
 returns a provider authorization URL, the UI polls callback status by `state`
 where possible, and a completed session is bound as an `oauth_token` account
 inside the channel. OAuth account metadata is shown in the credential list when
@@ -72,7 +74,7 @@ credit metadata when the backend has synced it.
 
 The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at`,
 `models`, and `permissions`. Permissions map to relay entry points: `chat`,
-`responses`, `messages`, and `gemini`.
+`responses`, `messages`, `gemini`, and `images`.
 
 The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
 `/api/user/usage` and `/api/user/usage/logs`, while preserving static preview

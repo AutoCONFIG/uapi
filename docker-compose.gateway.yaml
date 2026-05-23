@@ -25,7 +25,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./config.gateway.yaml:/app/config.yaml:ro
+      - ./config.gateway.yaml:/app/config.yaml
     expose:
       - "8080"
 

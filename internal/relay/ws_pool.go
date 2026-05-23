@@ -40,8 +40,7 @@ func (uc *UpstreamConn) Close() error {
 	if uc.closed.Swap(true) {
 		return nil
 	}
-	return uc.conn.WriteMessage(ws.CloseMessage,
-		ws.FormatCloseMessage(ws.CloseNormalClosure, ""))
+	return closeUpstreamWSConn(uc.conn)
 }
 
 // IsClosed returns whether the connection has been closed.
@@ -90,10 +89,15 @@ func (p *UpstreamPool) Discard(conn *UpstreamConn) {
 	if !conn.closed.CompareAndSwap(false, true) {
 		return // already discarded
 	}
-	conn.Close()
+	_ = closeUpstreamWSConn(conn.conn)
 	p.mu.Lock()
 	p.inFlight--
 	p.mu.Unlock()
+}
+
+func closeUpstreamWSConn(conn *ws.Conn) error {
+	_ = conn.WriteMessage(ws.CloseMessage, ws.FormatCloseMessage(ws.CloseNormalClosure, ""))
+	return conn.Close()
 }
 
 // Return is a no-op since we discard connections after each turn.

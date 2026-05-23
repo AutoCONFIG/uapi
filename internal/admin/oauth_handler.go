@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -42,14 +43,23 @@ type oauthSession struct {
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
 	BoundAccountID *uuid.UUID
+	CreatedBy      string // Admin username who started this OAuth flow
+	CreatedByIP    string // IP address of the admin who started this OAuth flow
 }
 
 func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
+	adminUsername, ok := ctx.UserValue("admin_user").(string)
+	if !ok || adminUsername == "" {
+		h.jsonError(ctx, fasthttp.StatusUnauthorized, "unauthorized")
+		return
+	}
 	var req StartOAuthRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
+	// Set admin username from JWT claims (not from request body)
+	req.AdminUsername = adminUsername
 	if req.ChannelID == uuid.Nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel_id is required")
 		return
@@ -70,6 +80,10 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	}
 	if provider != strings.ToLower(channel.Type) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth provider must match channel type")
+		return
+	}
+	if !channelAllowsOAuthProvider(channel, provider) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching Code channel format")
 		return
 	}
 
@@ -96,11 +110,15 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	if tokenURL == "" {
 		tokenURL = defaultOAuthTokenURL(provider)
 	}
+	if !oauthTokenURLMatchesProvider(provider, tokenURL) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token_url does not match provider")
+		return
+	}
 
 	if provider == "openai" && strings.EqualFold(req.Mode, "device") {
 		device, err := openai.StartDeviceAuth(clientID)
 		if err != nil {
-			h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
+			h.jsonError(ctx, fasthttp.StatusBadGateway, sanitizeOAuthError(err))
 			return
 		}
 		session := &oauthSession{
@@ -109,6 +127,7 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 			ClientID:    clientID, ClientSecret: clientSecret,
 			TokenURL: tokenURL, RedirectURI: openai.DeviceRedirectURI,
 			Status: "pending", CreatedAt: time.Now(),
+			CreatedBy: req.AdminUsername, CreatedByIP: ctx.RemoteIP().String(),
 		}
 		h.oauthMu.Lock()
 		h.pruneOAuthSessionsLocked()
@@ -133,7 +152,7 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 		redirectURI = openai.DefaultRedirectURI
 		mode = "manual_callback"
 	} else if provider == "gemini" {
-		redirectURI = gemini.DefaultRedirectURI
+		redirectURI = geminiLoopbackRedirectURI()
 		verifier = ""
 		challenge = ""
 		mode = "manual_callback"
@@ -149,6 +168,7 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 		ClientID:    clientID, ClientSecret: clientSecret,
 		TokenURL: tokenURL, RedirectURI: redirectURI, CodeVerifier: verifier,
 		Status: "pending", CreatedAt: time.Now(),
+		CreatedBy: req.AdminUsername, CreatedByIP: ctx.RemoteIP().String(),
 	}
 	h.oauthMu.Lock()
 	h.pruneOAuthSessionsLocked()
@@ -217,26 +237,17 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 	if imported != nil {
 		h.applyOAuthJSONImport(state, imported)
 		session = h.getOAuthSession(state)
-		if imported.AccessToken != "" || imported.APIKey != "" || imported.IDToken != "" {
+		if imported.AccessToken != "" || imported.IDToken != "" {
+			if session.Provider != "gemini" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Gemini Code")
+				return
+			}
+			if imported.AccessToken == "" || imported.RefreshToken == "" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "gemini oauth_json requires access_token and refresh_token")
+				return
+			}
 			credential := imported.AccessToken
-			if imported.APIKey != "" {
-				credential = imported.APIKey
-			}
-			if credential == "" && imported.IDToken != "" && session.Provider == "openai" {
-				exchanged, err := openai.ExchangeForAPIKey(session.TokenURL, imported.IDToken, session.ClientID)
-				if err != nil {
-					h.completeOAuthSession(state, "", "", nil, nil, err.Error())
-					h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
-					return
-				}
-				credential = exchanged
-			}
 			metadata := importedMetadata(imported)
-			if imported.IDToken != "" && session.Provider == "openai" {
-				if parsed, err := openai.ParseIDTokenMetadata(imported.IDToken); err == nil {
-					metadata = mergeMetadata(metadata, parsed)
-				}
-			}
 			h.completeOAuthSession(state, credential, imported.RefreshToken, imported.Expiry, metadata, "")
 			logger.Infof("admin.oauth", "oauth json import completed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("has_refresh_token", imported.RefreshToken != ""), logger.F("has_expiry", imported.Expiry != nil))
 			h.jsonResponse(ctx, 200, h.oauthStatusDTO(h.getOAuthSession(state)))
@@ -254,14 +265,96 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 	}
 	credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, code)
 	if err != nil {
-		h.completeOAuthSession(state, "", "", nil, nil, err.Error())
-		logger.Warnf("admin.oauth", "oauth code exchange failed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.Err(err))
-		h.jsonError(ctx, fasthttp.StatusBadGateway, err.Error())
+		safeErr := sanitizeOAuthError(err)
+		h.completeOAuthSession(state, "", "", nil, nil, safeErr)
+		logger.Warnf("admin.oauth", "oauth code exchange failed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("error", safeErr))
+		h.jsonError(ctx, fasthttp.StatusBadGateway, safeErr)
 		return
 	}
 	h.completeOAuthSession(state, credential, refreshToken, expiry, metadata, "")
 	logger.Infof("admin.oauth", "oauth code exchange completed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("has_refresh_token", refreshToken != ""), logger.F("has_expiry", expiry != nil))
 	h.jsonResponse(ctx, 200, h.oauthStatusDTO(h.getOAuthSession(state)))
+}
+
+func channelAllowsOAuthProvider(channel db.Channel, provider string) bool {
+	switch strings.ToLower(provider) {
+	case "openai":
+		return strings.EqualFold(channel.Type, "openai") && channel.APIFormat == "codex"
+	case "gemini":
+		return strings.EqualFold(channel.Type, "gemini") && channel.APIFormat == "gemini_code"
+	case "anthropic":
+		return strings.EqualFold(channel.Type, "anthropic") && channel.APIFormat == "claude_code"
+	default:
+		return false
+	}
+}
+
+func oauthTokenURLMatchesProvider(provider, tokenURL string) bool {
+	switch strings.ToLower(provider) {
+	case "openai":
+		return tokenURLIs(tokenURL, "https://auth.openai.com/oauth/token")
+	case "gemini":
+		return tokenURLIs(tokenURL, "https://oauth2.googleapis.com/token")
+	case "anthropic":
+		return tokenURLIs(tokenURL, "https://platform.claude.com/v1/oauth/token")
+	default:
+		return false
+	}
+}
+
+func sanitizeOAuthError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key"} {
+		msg = redactOAuthSecretField(msg, key)
+	}
+	if len(msg) > 300 {
+		msg = msg[:300] + "..."
+	}
+	return msg
+}
+
+func redactOAuthSecretField(msg, key string) string {
+	separators := []byte{':', '=', '&'}
+	for {
+		lower := strings.ToLower(msg)
+		idx := strings.Index(lower, strings.ToLower(key))
+		if idx < 0 {
+			return msg
+		}
+		sepIdx := -1
+		for i := idx + len(key); i < len(msg); i++ {
+			if msg[i] == ' ' || msg[i] == '\t' || msg[i] == '"' || msg[i] == '\'' {
+				continue
+			}
+			for _, sep := range separators {
+				if msg[i] == sep {
+					sepIdx = i
+				}
+			}
+			break
+		}
+		if sepIdx < 0 {
+			return msg
+		}
+		start := sepIdx + 1
+		for start < len(msg) && (msg[start] == ' ' || msg[start] == '\t' || msg[start] == '"' || msg[start] == '\'') {
+			start++
+		}
+		end := start
+		for end < len(msg) && msg[end] != ',' && msg[end] != '}' && msg[end] != '"' && msg[end] != '\'' && msg[end] != '&' {
+			end++
+		}
+		if end <= start {
+			return msg
+		}
+		if strings.HasPrefix(msg[start:], "[redacted]") {
+			return msg
+		}
+		msg = msg[:start] + "[redacted]" + msg[end:]
+	}
 }
 
 type oauthJSONImport struct {
@@ -343,7 +436,9 @@ func (h *Handler) applyOAuthJSONImport(state string, imp *oauthJSONImport) {
 		current.ClientSecret = imp.ClientSecret
 	}
 	if imp.TokenURL != "" {
-		current.TokenURL = imp.TokenURL
+		if oauthTokenURLMatchesProvider(current.Provider, imp.TokenURL) {
+			current.TokenURL = imp.TokenURL
+		}
 	}
 }
 
@@ -413,6 +508,11 @@ func (h *Handler) OAuthCallback(ctx *fasthttp.RequestCtx) {
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadRequest, "OAuth session was not found or expired")
 		return
 	}
+	// Verify the callback request originates from the same IP that started the OAuth flow
+	if session.CreatedByIP != "" && session.CreatedByIP != ctx.RemoteIP().String() {
+		h.writeOAuthCallbackPage(ctx, fasthttp.StatusForbidden, "OAuth callback IP mismatch - possible session hijacking attempt")
+		return
+	}
 	if providerErr != "" {
 		h.completeOAuthSession(state, "", "", nil, nil, providerErr)
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadRequest, "OAuth provider returned an error")
@@ -426,7 +526,7 @@ func (h *Handler) OAuthCallback(ctx *fasthttp.RequestCtx) {
 
 	credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, code)
 	if err != nil {
-		h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+		h.completeOAuthSession(state, "", "", nil, nil, sanitizeOAuthError(err))
 		h.writeOAuthCallbackPage(ctx, fasthttp.StatusBadGateway, "OAuth token exchange failed")
 		return
 	}
@@ -449,6 +549,7 @@ func (h *Handler) OAuthStatus(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
+	adminUsername, _ := ctx.UserValue("admin_user").(string)
 	var req BindOAuthAccountRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
@@ -461,6 +562,11 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 	session := h.getOAuthSession(req.State)
 	if session == nil {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "oauth session not found")
+		return
+	}
+	// Verify the admin who started the OAuth flow is the same one binding it
+	if session.CreatedBy != "" && session.CreatedBy != adminUsername {
+		h.jsonError(ctx, fasthttp.StatusForbidden, "oauth session was started by a different admin")
 		return
 	}
 	if session.Status != "completed" {
@@ -477,6 +583,19 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 	}
 	if session.BoundAccountID != nil {
 		h.jsonError(ctx, fasthttp.StatusConflict, "oauth session is already bound")
+		return
+	}
+	if !oauthTokenURLMatchesProvider(session.Provider, session.TokenURL) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token_url does not match provider")
+		return
+	}
+	var channel db.Channel
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", session.ChannelID).First(&channel).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "channel not found")
+		return
+	}
+	if !channelAllowsOAuthProvider(channel, session.Provider) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth account can only be bound to the matching Code channel format")
 		return
 	}
 
@@ -631,7 +750,7 @@ func (h *Handler) pollOpenAIDeviceOAuth(state, deviceAuthID, userCode string, in
 			}
 			deviceToken, ready, err := openai.PollDeviceToken(deviceAuthID, userCode)
 			if err != nil {
-				h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+				h.completeOAuthSession(state, "", "", nil, nil, sanitizeOAuthError(err))
 				return
 			}
 			if !ready {
@@ -640,7 +759,7 @@ func (h *Handler) pollOpenAIDeviceOAuth(state, deviceAuthID, userCode string, in
 			session.CodeVerifier = deviceToken.CodeVerifier
 			credential, refreshToken, expiry, metadata, err := exchangeOAuthCode(session, deviceToken.AuthorizationCode)
 			if err != nil {
-				h.completeOAuthSession(state, "", "", nil, nil, err.Error())
+				h.completeOAuthSession(state, "", "", nil, nil, sanitizeOAuthError(err))
 				return
 			}
 			h.completeOAuthSession(state, credential, refreshToken, expiry, metadata, "")
@@ -880,4 +999,17 @@ func randomURLToken(size int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func geminiLoopbackRedirectURI() string {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return gemini.DefaultRedirectURI
+	}
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || addr.Port <= 0 {
+		return gemini.DefaultRedirectURI
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/oauth2callback", addr.Port)
 }

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,6 +20,7 @@ type Config struct {
 	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	User     UserConfig     `yaml:"user"`
+	WS       WSServerConfig `yaml:"ws"`
 }
 
 type ServerConfig struct {
@@ -45,10 +48,11 @@ func (d DatabaseConfig) DSN() string {
 }
 
 type SecurityConfig struct {
-	JWTSecret         string `yaml:"jwt_secret"`
-	EncryptionKey     string `yaml:"encryption_key"`
-	AdminUsername     string `yaml:"admin_username,omitempty"`
-	AdminPasswordHash string `yaml:"admin_password_hash,omitempty"`
+	JWTSecret         string   `yaml:"jwt_secret"`
+	EncryptionKey     string   `yaml:"encryption_key"`
+	AdminUsername     string   `yaml:"admin_username,omitempty"`
+	AdminPasswordHash string   `yaml:"admin_password_hash,omitempty"`
+	TrustedProxies    []string `yaml:"trusted_proxies"` // IPs that are allowed to set X-Forwarded-For / X-Real-IP
 }
 
 type GatewayConfig struct {
@@ -67,6 +71,7 @@ type BillingConfig struct {
 type WSServerConfig struct {
 	Host                     string   `yaml:"host"`
 	Port                     int      `yaml:"port"`
+	MaxMessageSizeMB         int      `yaml:"max_message_size_mb"`
 	PoolIdleTimeoutSeconds   int      `yaml:"pool_idle_timeout_seconds"`
 	PoolMaxConnLifetime      int      `yaml:"pool_max_conn_lifetime"`
 	PoolMaxTotalConns        int      `yaml:"pool_max_total_conns"`
@@ -78,7 +83,7 @@ type WSServerConfig struct {
 
 type UserConfig struct {
 	JWTExpiry      string `yaml:"jwt_expiry"`        // default "24h"
-	MaxKeysPerUser int    `yaml:"max_keys_per_user"` // default 5
+	MaxKeysPerUser int    `yaml:"max_keys_per_user"` // default 1
 }
 
 type LoggingConfig struct {
@@ -135,9 +140,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Guard: MaxBodySizeMB <= 0 rejects all POST requests, default to 100
+	// Guard: MaxBodySizeMB <= 0 rejects all POST requests, default to 256.
 	if cfg.Server.MaxBodySizeMB <= 0 {
-		cfg.Server.MaxBodySizeMB = 100
+		cfg.Server.MaxBodySizeMB = 256
 	}
 
 	return cfg, nil
@@ -157,12 +162,15 @@ func defaultConfig() *Config {
 		Server: ServerConfig{
 			Mode:          "all",
 			Port:          8080,
-			MaxBodySizeMB: 100,
+			MaxBodySizeMB: 256,
 		},
 		Gateway: GatewayConfig{
 			CacheTTL:           "5s",
 			GatewayID:          "default",
 			ConfigPullInterval: "5s",
+		},
+		WS: WSServerConfig{
+			MaxMessageSizeMB: 256,
 		},
 		Database: DatabaseConfig{
 			Port:    5432,
@@ -176,7 +184,7 @@ func defaultConfig() *Config {
 		},
 		User: UserConfig{
 			JWTExpiry:      "24h",
-			MaxKeysPerUser: 5,
+			MaxKeysPerUser: 1,
 		},
 	}
 }
@@ -221,8 +229,29 @@ func (c *Config) validate() error {
 	if len(c.Security.EncryptionKey) != 64 {
 		return fmt.Errorf("security.encryption_key must be 64 hex characters (32 bytes)")
 	}
+	if _, err := hex.DecodeString(c.Security.EncryptionKey); err != nil {
+		return fmt.Errorf("security.encryption_key must be valid hex")
+	}
+	if isWeakPlaceholderSecret(c.Security.EncryptionKey) {
+		return fmt.Errorf("security.encryption_key must not be a placeholder or weak test value")
+	}
+	if len(strings.TrimSpace(c.Security.JWTSecret)) < 32 {
+		return fmt.Errorf("security.jwt_secret must be at least 32 characters")
+	}
+	if isPlaceholderValue(c.Security.JWTSecret) || isWeakPlaceholderSecret(c.Security.JWTSecret) {
+		return fmt.Errorf("security.jwt_secret must not be a placeholder or weak test value")
+	}
 	if c.Gateway.InternalSecret == "" {
 		return fmt.Errorf("gateway.internal_secret must be set")
+	}
+	if len(strings.TrimSpace(c.Gateway.InternalSecret)) < 32 {
+		return fmt.Errorf("gateway.internal_secret must be at least 32 characters")
+	}
+	if isPlaceholderValue(c.Gateway.InternalSecret) {
+		return fmt.Errorf("gateway.internal_secret must not be a placeholder")
+	}
+	if isWeakPlaceholderSecret(c.Gateway.InternalSecret) {
+		return fmt.Errorf("gateway.internal_secret must not be a placeholder or weak test value")
 	}
 	if c.Gateway.CacheTTL == "" {
 		c.Gateway.CacheTTL = "5s"
@@ -243,6 +272,55 @@ func (c *Config) validate() error {
 		if c.Gateway.RelayNodeID == "" {
 			return fmt.Errorf("gateway.relay_node_id must be set when server.mode is relay")
 		}
+		if isPlaceholderValue(c.Gateway.RelayNodeID) {
+			return fmt.Errorf("gateway.relay_node_id must not be a placeholder")
+		}
+		relayNodeID, err := uuid.Parse(c.Gateway.RelayNodeID)
+		if err != nil || relayNodeID == uuid.Nil {
+			return fmt.Errorf("gateway.relay_node_id must be a non-empty UUID when server.mode is relay")
+		}
+		if isRepeatedUUID(c.Gateway.RelayNodeID) {
+			return fmt.Errorf("gateway.relay_node_id must not be a placeholder UUID")
+		}
 	}
 	return nil
+}
+
+func isPlaceholderValue(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "" ||
+		strings.Contains(value, "change-me") ||
+		strings.Contains(value, "replace-with") ||
+		strings.Contains(value, "same-as") ||
+		strings.Contains(value, "same-64") ||
+		strings.Contains(value, "0123456789abcdef")
+}
+
+func isWeakPlaceholderSecret(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	allSame := true
+	for _, r := range value {
+		if r != rune(value[0]) {
+			allSame = false
+			break
+		}
+	}
+	return allSame
+}
+
+func isRepeatedUUID(value string) bool {
+	compact := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "-", "")
+	if compact == "" {
+		return true
+	}
+	first := compact[0]
+	for i := 1; i < len(compact); i++ {
+		if compact[i] != first {
+			return false
+		}
+	}
+	return true
 }

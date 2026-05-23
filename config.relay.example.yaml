@@ -2,21 +2,24 @@ server:
   mode: "relay"
   host: "0.0.0.0"
   port: 8081
-  max_body_size_mb: 50
+  max_body_size_mb: 256
   concurrency_limit: 0
 
 security:
-  jwt_secret: "unused-on-relay-but-keep-non-empty"
-  encryption_key: "same-64-hex-encryption-key-as-gateway"
+  jwt_secret: "relay-example-jwt-secret-32-chars"
+  encryption_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 
 gateway:
   gateway_id: "relay-node"
   cache_ttl: "5s"
-  internal_secret: "same-as-gateway-internal-secret"
+  internal_secret: "relay-example-internal-secret-32c"
   require_internal: true
   control_url: "http://uapi:8080" # same-host split; remote relay: change to https://your-gateway-host
-  relay_node_id: "relay-node-uuid-from-admin-page"
+  relay_node_id: "12345678-1234-4234-8234-123456789abc"
   config_pull_interval: "5s"
+
+ws:
+  max_message_size_mb: 256
 
 logging:
   level: "info"

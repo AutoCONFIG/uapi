@@ -17,6 +17,7 @@ const (
 	HeaderTimestamp       = "X-UAPI-Timestamp"
 	HeaderSignature       = "X-UAPI-Signature"
 	HeaderTokenID         = "X-UAPI-Token-ID"
+	HeaderTokenPlanID     = "X-UAPI-Token-Plan-ID"
 	HeaderUserID          = "X-UAPI-User-ID"
 	HeaderModel           = "X-UAPI-Model"
 	HeaderEstimatedTokens = "X-UAPI-Estimated-Tokens"
@@ -32,6 +33,7 @@ const MaxClockSkew = 5 * time.Minute
 type Claims struct {
 	GatewayID       string
 	TokenID         string
+	TokenPlanID     string
 	UserID          string
 	Model           string
 	EstimatedTokens int
@@ -50,6 +52,7 @@ func SignRequest(req *fasthttp.Request, secret string, claims Claims, now time.T
 	req.Header.Set(HeaderGatewayID, claims.GatewayID)
 	req.Header.Set(HeaderTimestamp, timestamp)
 	req.Header.Set(HeaderTokenID, claims.TokenID)
+	req.Header.Set(HeaderTokenPlanID, claims.TokenPlanID)
 	req.Header.Set(HeaderUserID, claims.UserID)
 	req.Header.Set(HeaderModel, claims.Model)
 	req.Header.Set(HeaderEstimatedTokens, strconv.Itoa(claims.EstimatedTokens))
@@ -88,14 +91,15 @@ func VerifyRequest(ctx *fasthttp.RequestCtx, secret string, now time.Time) (Clai
 		return claims, false
 	}
 	claims = Claims{
-		GatewayID: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderGatewayID))),
-		TokenID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderTokenID))),
-		UserID:    strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderUserID))),
-		Model:     strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderModel))),
-		ClientIP:  strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderClientIP))),
-		RequestID: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderRequestID))),
-		ChannelID: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderChannelID))),
-		AccountID: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderAccountID))),
+		GatewayID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderGatewayID))),
+		TokenID:     strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderTokenID))),
+		TokenPlanID: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderTokenPlanID))),
+		UserID:      strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderUserID))),
+		Model:       strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderModel))),
+		ClientIP:    strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderClientIP))),
+		RequestID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderRequestID))),
+		ChannelID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderChannelID))),
+		AccountID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderAccountID))),
 	}
 	est, _ := strconv.Atoi(strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderEstimatedTokens))))
 	claims.EstimatedTokens = est
@@ -108,7 +112,7 @@ func VerifyRequest(ctx *fasthttp.RequestCtx, secret string, now time.Time) (Clai
 }
 
 func StripHeaders(req *fasthttp.Request) {
-	for _, h := range []string{HeaderGatewayID, HeaderTimestamp, HeaderSignature, HeaderTokenID, HeaderUserID, HeaderModel, HeaderEstimatedTokens, HeaderPrecharged, HeaderClientIP, HeaderRequestID, HeaderChannelID, HeaderAccountID} {
+	for _, h := range []string{HeaderGatewayID, HeaderTimestamp, HeaderSignature, HeaderTokenID, HeaderTokenPlanID, HeaderUserID, HeaderModel, HeaderEstimatedTokens, HeaderPrecharged, HeaderClientIP, HeaderRequestID, HeaderChannelID, HeaderAccountID} {
 		req.Header.Del(h)
 	}
 }
@@ -122,6 +126,7 @@ func signature(method, path, timestamp string, body []byte, claims Claims, secre
 		hex.EncodeToString(bodyHash[:]),
 		claims.GatewayID,
 		claims.TokenID,
+		claims.TokenPlanID,
 		claims.UserID,
 		claims.Model,
 		strconv.Itoa(claims.EstimatedTokens),

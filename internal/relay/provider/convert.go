@@ -14,9 +14,6 @@ func RegisterFromInternal(format Format, converter func(*InternalRequest) ([]byt
 }
 
 func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
-	if clientFormat == upstreamFormat {
-		return body, nil
-	}
 	toInternal, ok := toInternalConverters[clientFormat]
 	if !ok {
 		return nil, fmt.Errorf("no ToInternal converter for format: %s", clientFormat)
@@ -33,9 +30,6 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 }
 
 func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte, adaptor Adaptor) ([]byte, error) {
-	if clientFormat == upstreamFormat {
-		return body, nil
-	}
 	toInternal, ok := toInternalConverters[clientFormat]
 	if !ok {
 		return nil, fmt.Errorf("no ToInternal converter for format: %s", clientFormat)
@@ -68,9 +62,6 @@ func RegisterFromResponseInternal(format Format, converter func(*InternalRespons
 }
 
 func ConvertResponse(upstreamFormat, clientFormat Format, body []byte) ([]byte, error) {
-	if upstreamFormat == clientFormat {
-		return body, nil
-	}
 	toResp, ok := toResponseInternal[upstreamFormat]
 	if !ok {
 		return nil, fmt.Errorf("no response ToInternal converter for format: %s", upstreamFormat)

@@ -236,9 +236,6 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	}
 	account.Metadata["oauth_last_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
 
-	if database == nil {
-		return credential, nil
-	}
 	newExpiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 	if result.ExpiresIn <= 0 {
 		newExpiry = time.Now().Add(8 * 24 * time.Hour)
@@ -284,8 +281,10 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 			logger.Warnf("relay.oauth", "sync gemini code metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		}
 	}
-	if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
-		logger.Warnf("relay.oauth", "persist refreshed credentials failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+	if database != nil {
+		if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
+			logger.Warnf("relay.oauth", "persist refreshed credentials failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		}
 	}
 
 	return credential, nil
@@ -362,37 +361,84 @@ func openAIFedRAMP(metadata map[string]interface{}) bool {
 }
 
 func isAnthropicOAuthTokenURL(tokenURL string) bool {
-	parsed, err := url.Parse(tokenURL)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(parsed.Hostname(), "platform.claude.com")
+	return oauthTokenURLIs(tokenURL, anthropic.DefaultTokenURL)
 }
 
 func isOpenAIOAuthTokenURL(tokenURL string) bool {
-	parsed, err := url.Parse(tokenURL)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(parsed.Hostname(), "auth.openai.com")
+	return oauthTokenURLIs(tokenURL, openai.DefaultTokenURL)
 }
 
 func isGoogleOAuthTokenURL(tokenURL string) bool {
-	parsed, err := url.Parse(tokenURL)
+	return oauthTokenURLIs(tokenURL, gemini.DefaultTokenURL)
+}
+
+func oauthTokenURLIs(rawURL, expectedURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(parsed.Hostname(), "oauth2.googleapis.com")
+	expected, err := url.Parse(expectedURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, expected.Scheme) &&
+		strings.EqualFold(parsed.Hostname(), expected.Hostname()) &&
+		parsed.Port() == "" &&
+		parsed.EscapedPath() == expected.EscapedPath() &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment == ""
 }
 
 func compactOAuthBody(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	text = strings.Join(strings.Fields(text), " ")
+	text = redactOAuthText(text)
 	if text == "" {
 		return "empty response"
 	}
 	if len(text) > 300 {
 		return text[:300] + "..."
+	}
+	return text
+}
+
+func redactOAuthText(text string) string {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key"} {
+		for {
+			lower := strings.ToLower(text)
+			idx := strings.Index(lower, strings.ToLower(key))
+			if idx < 0 {
+				break
+			}
+			sepIdx := -1
+			for i := idx + len(key); i < len(text); i++ {
+				if text[i] == ' ' || text[i] == '\t' || text[i] == '"' || text[i] == '\'' {
+					continue
+				}
+				if text[i] == ':' || text[i] == '=' || text[i] == '&' {
+					sepIdx = i
+				}
+				break
+			}
+			if sepIdx < 0 {
+				break
+			}
+			start := sepIdx + 1
+			for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '"' || text[start] == '\'') {
+				start++
+			}
+			end := start
+			for end < len(text) && text[end] != ',' && text[end] != '}' && text[end] != '"' && text[end] != '\'' && text[end] != '&' {
+				end++
+			}
+			if end <= start {
+				break
+			}
+			if strings.HasPrefix(text[start:], "[redacted]") {
+				break
+			}
+			text = text[:start] + "[redacted]" + text[end:]
+		}
 	}
 	return text
 }

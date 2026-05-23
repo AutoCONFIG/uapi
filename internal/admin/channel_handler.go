@@ -60,6 +60,10 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "name, type and endpoint are required")
 		return
 	}
+	if !validChannelFormatForType(req.Type, req.APIFormat) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel type and api_format are incompatible")
+		return
+	}
 	ch := db.Channel{
 		Name:        req.Name,
 		Type:        req.Type,
@@ -101,6 +105,18 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
+	targetType := existing.Type
+	targetAPIFormat := existing.APIFormat
+	if req.Type != nil {
+		targetType = *req.Type
+	}
+	if req.APIFormat != nil {
+		targetAPIFormat = *req.APIFormat
+	}
+	if !validChannelFormatForType(targetType, targetAPIFormat) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel type and api_format are incompatible")
+		return
+	}
 	updates := map[string]interface{}{}
 	if req.Name != nil {
 		updates["name"] = *req.Name
@@ -121,6 +137,10 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 		updates["priority"] = *req.Priority
 	}
 	if req.APIFormat != nil {
+		if ok, msg := h.channelAccountsCompatibleWithAPIFormat(existing.ID, *req.APIFormat); !ok {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+			return
+		}
 		updates["api_format"] = *req.APIFormat
 	}
 	if req.ForceStream != nil {
@@ -146,6 +166,44 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	}
 	auditUpdate(h.db, "channel", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, apiFormat string) (bool, string) {
+	var accounts []db.Account
+	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
+		return false, "load accounts failed"
+	}
+	if !isCodeAPIFormat(apiFormat) {
+		for _, acc := range accounts {
+			if codeOAuthAccountRequiresCodeChannel(acc) {
+				return false, "Code OAuth credentials can only be assigned to Code channels"
+			}
+		}
+		return true, ""
+	}
+	target := db.Channel{APIFormat: apiFormat}
+	for _, acc := range accounts {
+		if acc.CredType != "oauth_token" {
+			return false, "Code channels require OAuth credentials"
+		}
+		if !oauthAccountMatchesCodeChannel(acc, target) {
+			return false, "OAuth credential provider does not match Code channel"
+		}
+	}
+	return true, ""
+}
+
+func validChannelFormatForType(channelType, apiFormat string) bool {
+	switch channelType {
+	case "openai":
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex"
+	case "gemini":
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "gemini_code"
+	case "anthropic":
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "claude_code"
+	default:
+		return false
+	}
 }
 
 func (h *Handler) deleteChannel(ctx *fasthttp.RequestCtx) {

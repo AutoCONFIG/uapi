@@ -23,6 +23,7 @@ const permissionOptions = [
   { value: "responses", label: "Responses" },
   { value: "messages", label: "Messages" },
   { value: "gemini", label: "Gemini" },
+  { value: "images", label: "Images" },
 ];
 
 function fromApiKey(key: ApiKey): DisplayKey {
@@ -123,7 +124,7 @@ export default function KeysPage() {
         eyebrow="Credentials"
         title="API Key 管理"
         description="为生产、测试和自动化任务拆分密钥，减少泄露后的影响面。"
-        action={<button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button>}
+        action={items.length === 0 ? <button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button> : undefined}
       />
 
       <section className="surface">
@@ -149,7 +150,7 @@ export default function KeysPage() {
               </div>
             </article>
           )) : (
-            <section className="card"><EmptyState title="暂无密钥" description="创建一个 API Key 后即可开始调用。默认配置已适合大多数场景。" action={<button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button>} /></section>
+            <section className="card"><EmptyState title="暂无密钥" description="创建一个 API Key 后即可开始调用。" action={<button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button>} /></section>
           )}
         </div>
       </section>

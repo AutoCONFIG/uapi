@@ -7,6 +7,11 @@ proxies backend traffic to the Go API server.
 ## Basic Configuration
 
 ```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
 server {
     listen 443 ssl http2;
     server_name relay.example.com;
@@ -16,6 +21,16 @@ server {
 
     root /opt/uapi/web/out;
     index index.html;
+    client_max_body_size 256m;
+
+    # Backend health check.
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 
     # Static frontend export.
     location / {
@@ -34,15 +49,45 @@ server {
     # OpenAI-compatible relay traffic.
     location /v1/ {
         proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket support, if relay streaming needs upgrade semantics later.
-        proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Gemini-compatible relay traffic.
+    location /v1beta/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Remote Relay control endpoints. Restrict this location to trusted Relay
+    # node IPs or a private network; UAPI still requires the internal secret.
+    location /internal/relay/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -55,19 +100,34 @@ server {
 | `X-Real-IP` | For logging real client IPs |
 | `Host` | Required for generating correct redirect URLs |
 
-## OAuth Callback Flow
+## Request Body Size
 
-When using browser-based OAuth login from a remote client:
+Keep nginx `client_max_body_size` aligned with `server.max_body_size_mb` in the
+UAPI config. The default example is `256m`, leaving room for base64 expansion
+and JSON wrapping so Anthropic/Gemini/Responses-format requests with PDFs or
+long document fields reach UAPI instead of being rejected by nginx with an HTML
+`413 Request Entity Too Large` response.
 
-1. User initiates login via Web UI or API.
-2. UAPI generates an auth URL with a callback under the backend OAuth endpoint.
-3. User's browser navigates to the provider's auth page.
-4. After authentication, the provider redirects back to the callback URL.
-5. Nginx proxies this request to UAPI.
-6. UAPI exchanges the authorization code for tokens.
+The repository-local `config.yaml` is ignored by git and is the file mounted by
+the default Docker Compose deployment. Keep its `server.max_body_size_mb` aligned
+with `web/nginx.conf` when testing large uploads locally.
 
-The `X-Forwarded-Proto: https` header is critical; without it, UAPI would
-generate callback URLs with `http://` which OAuth providers would reject.
+## OAuth Completion Flow
+
+Code channel OAuth currently uses provider-specific manual callback redirect
+URIs that match the official clients. The admin UI starts the session, opens the
+provider URL, then completes the session with
+`POST /api/admin/channels/oauth/complete` using either the returned callback URL
+or token JSON. The public `GET /api/admin/channels/oauth/callback` route remains
+available for UAPI-hosted callback flows, so keep `X-Forwarded-Proto: https`
+configured correctly when deploying those flows behind nginx.
+
+## Responses WebSocket
+
+All-in-one deployments can upgrade `/v1/responses` to WebSocket. The `/v1/`
+location must keep `proxy_http_version 1.1`, `Upgrade`, and `Connection`
+headers. Split gateway/relay deployments do not currently tunnel Responses
+WebSocket turns across relay nodes; use all-in-one mode for that path.
 
 ## Security Recommendations
 

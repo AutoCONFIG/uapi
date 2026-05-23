@@ -45,6 +45,18 @@ func IsTerminalEvent(eventType string) bool {
 	return false
 }
 
+func IsSuccessfulTerminalEvent(eventType string) bool {
+	return eventType == WSEventResponseCompleted || eventType == WSEventResponseIncomp
+}
+
+func IsFailureTerminalEvent(eventType string) bool {
+	switch eventType {
+	case WSEventResponseFailed, WSEventError:
+		return true
+	}
+	return false
+}
+
 // ── Event structures ───────────────────────────────────────────────────────────
 
 // WSEventEnvelope is the outer wrapper for all WebSocket events.
@@ -69,7 +81,7 @@ type WSResponseCreateEvent struct {
 	TopP               *float64        `json:"top_p,omitempty"`
 	Tools              json.RawMessage `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	PreviousResponseID string         `json:"previous_response_id,omitempty"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 
@@ -115,6 +127,24 @@ func ParseModelFromCreateEvent(msg []byte) string {
 	return ""
 }
 
+// EstimateTokensFromCreateEvent extracts the requested output-token budget from
+// a Responses WS response.create event. The default matches HTTP relay behavior.
+func EstimateTokensFromCreateEvent(msg []byte) int {
+	var flat WSResponseCreateEvent
+	if err := json.Unmarshal(msg, &flat); err == nil && flat.MaxOutputTokens > 0 {
+		return flat.MaxOutputTokens
+	}
+	var nested struct {
+		Response struct {
+			MaxOutputTokens int `json:"max_output_tokens"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(msg, &nested); err == nil && nested.Response.MaxOutputTokens > 0 {
+		return nested.Response.MaxOutputTokens
+	}
+	return 1000
+}
+
 // WriteWSError sends a standard error event to the client.
 // Format matches OpenAI: {"type":"error","status":400,"error":{"code":"...","message":"..."}}
 func WriteWSError(conn *ws.Conn, status int, code, message string) error {
@@ -135,3 +165,20 @@ func WriteWSError(conn *ws.Conn, status int, code, message string) error {
 	return conn.WriteMessage(ws.TextMessage, data)
 }
 
+func WriteWSErrorSession(sess *Session, status int, code, message string) error {
+	ev := struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}{
+		Type:   WSEventError,
+		Status: status,
+	}
+	ev.Error.Code = code
+	ev.Error.Message = message
+	data, _ := json.Marshal(ev)
+	return sess.WriteMessage(ws.TextMessage, data)
+}

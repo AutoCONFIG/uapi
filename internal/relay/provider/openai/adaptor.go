@@ -13,6 +13,8 @@ import (
 type OpenAIAdaptor struct {
 	channel *db.Channel
 	account *db.Account
+	// Cache token tracking
+	lastCacheReadInputTokens int
 }
 
 func (a *OpenAIAdaptor) SetRequestParams(model string, stream bool) {
@@ -30,17 +32,20 @@ func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 		return base + path, nil
 	}
 	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
-		// Map /v1/chat/completions → /v1/responses
-		if strings.HasSuffix(path, "/chat/completions") {
-			return base + "/v1/responses", nil
-		}
+		return base + "/v1/responses", nil
 	}
-	return base + path, nil
+	return base + "/v1/chat/completions", nil
 }
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {
 	req.Header.Set("Authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
-	req.Header.Set("Content-Type", "application/json")
+	if a.channel != nil && a.channel.APIFormat == "codex" {
+		req.Header.Set("originator", CodexOriginator)
+		req.Header.Set("User-Agent", CodexUserAgent)
+	}
+	if len(req.Header.Peek("Content-Type")) == 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return nil
 }
 
@@ -71,21 +76,67 @@ type openAIResponse struct {
 }
 
 func (a *OpenAIAdaptor) ParseUsage(respBody []byte) (int, int, error) {
-	var resp openAIResponse
+	var resp struct {
+		Usage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			InputTokens         int `json:"input_tokens"`
+			OutputTokens        int `json:"output_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return 0, 0, fmt.Errorf("parse openai response: %w", err)
 	}
-	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, nil
+	pt, ct := resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+	if pt == 0 && ct == 0 {
+		pt, ct = resp.Usage.InputTokens, resp.Usage.OutputTokens
+	}
+	a.lastCacheReadInputTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	return pt, ct, nil
+}
+
+// ParseUsageFull returns full usage including cache tokens.
+func (a *OpenAIAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage, error) {
+	pt, ct, err := a.ParseUsage(respBody)
+	if err != nil {
+		return provider.InternalUsage{}, err
+	}
+	return provider.InternalUsage{
+		PromptTokens:         pt,
+		CompletionTokens:     ct,
+		CacheReadInputTokens: a.lastCacheReadInputTokens,
+	}, nil
 }
 
 func (a *OpenAIAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
-	// OpenAI streams send usage in the last chunk's [DONE] preceder
-	// Format: data: {"choices":[],"usage":{...}}
-	var resp openAIResponse
-	if err := json.Unmarshal(lastChunk, &resp); err != nil {
-		return 0, 0, nil // might not have usage in stream
+	var resp struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
+		} `json:"usage"`
+		Response struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
 	}
-	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, nil
+	if err := json.Unmarshal(lastChunk, &resp); err != nil {
+		return 0, 0, fmt.Errorf("parse openai stream usage: %w", err)
+	}
+	pt, ct := resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+	if pt == 0 && ct == 0 {
+		pt, ct = resp.Usage.InputTokens, resp.Usage.OutputTokens
+	}
+	if pt == 0 && ct == 0 {
+		pt, ct = resp.Response.Usage.InputTokens, resp.Response.Usage.OutputTokens
+	}
+	return pt, ct, nil
 }
 
 // ConvertStreamLine passes SSE lines through (OpenAI format is already the target).
@@ -106,11 +157,12 @@ func (a *OpenAIAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
 
 func init() {
-	provider.RegisterToInternal(provider.FormatOpenAIChat, openaiChatToInternal)
-	provider.RegisterFromInternal(provider.FormatOpenAIChat, internalToOpenAIChat)
-	provider.RegisterToResponseInternal(provider.FormatOpenAIChat, openaiResponseToInternal)
-	provider.RegisterFromResponseInternal(provider.FormatOpenAIChat, internalToOpenAIResponse)
-	provider.RegisterToInternal(provider.FormatOpenAIResp, responsesToInternal)
-	provider.RegisterFromInternal(provider.FormatOpenAIResp, internalToResponses)
-	provider.RegisterFromResponseInternal(provider.FormatOpenAIResp, internalToResponsesResponse)
+	provider.RegisterToInternal(provider.FormatOpenAIChatCompletions, openaiChatToInternal)
+	provider.RegisterFromInternal(provider.FormatOpenAIChatCompletions, internalToOpenAIChat)
+	provider.RegisterToResponseInternal(provider.FormatOpenAIChatCompletions, openaiResponseToInternal)
+	provider.RegisterFromResponseInternal(provider.FormatOpenAIChatCompletions, internalToOpenAIResponse)
+	provider.RegisterToInternal(provider.FormatOpenAIResponses, responsesToInternal)
+	provider.RegisterFromInternal(provider.FormatOpenAIResponses, internalToResponses)
+	provider.RegisterToResponseInternal(provider.FormatOpenAIResponses, responsesResponseToInternal)
+	provider.RegisterFromResponseInternal(provider.FormatOpenAIResponses, internalToResponsesResponse)
 }

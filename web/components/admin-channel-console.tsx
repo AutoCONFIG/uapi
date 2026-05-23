@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Clipboard, KeyRound, Link2, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, Filter, KeyRound, Link2, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
@@ -28,13 +28,13 @@ const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-fl
 const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
 
 const channelPresets: ChannelPreset[] = [
-  { id: "codex", label: "CodeX", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: channelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
+  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: channelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
   { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: channelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
-  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: channelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic API" },
-  { id: "openai_responses", label: "OpenAI Responses", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
-  { id: "openai_chat", label: "OpenAI Chat", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions" },
-  { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent" },
-  { id: "claude_api", label: "Claude API", type: "anthropic", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.anthropic, models: "", note: "Anthropic Messages API" },
+  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: channelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
+  { id: "openai_responses_api", label: "OpenAI Responses API", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
+  { id: "openai_chat_completions", label: "OpenAI Chat Completions API", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions API" },
+  { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent API" },
+  { id: "anthropic_messages", label: "Anthropic Messages API", type: "anthropic", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.anthropic, models: "", note: "Anthropic Messages API" },
 ];
 
 const defaultPreset = channelPresets[4];
@@ -43,11 +43,10 @@ function createInitialDraft(preset: ChannelPreset = defaultPreset) {
   return { name: "", preset: preset.id, type: preset.type, group: "default", endpoint: preset.endpoint, models: preset.models, apiFormat: preset.apiFormat };
 }
 
-const providerOptions = [
-  { type: "openai", label: "OpenAI", note: "API Key 或 CodeX 登录" },
-  { type: "gemini", label: "Gemini", note: "API Key 或 Gemini Code 登录" },
-  { type: "anthropic", label: "Claude", note: "API Key 或 Claude Code 登录" },
-];
+
+function isCodeChannel(channel: Pick<Channel, "api_format">): boolean {
+  return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code";
+}
 
 export function AdminChannelConsole() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -59,6 +58,9 @@ export function AdminChannelConsole() {
   const [createOpen, setCreateOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [error, setError] = useState("");
+  const [channelQuery, setChannelQuery] = useState("");
+  const [healthFilter, setHealthFilter] = useState<"all" | "healthy" | "warning" | "disabled">("all");
+  const [providerFilter, setProviderFilter] = useState("all");
   const [draft, setDraft] = useState(createInitialDraft());
   const [credentialMode, setCredentialMode] = useState<"oauth" | "apikey">("apikey");
   const [apiKeyName, setApiKeyName] = useState("");
@@ -124,7 +126,7 @@ export function AdminChannelConsole() {
     const codexUsage = asRecord(meta.codex_usage);
     if (codexUsage) {
       const text = summarizeCodexUsage(codexUsage);
-      if (text) items.push({ label: "CodeX 额度", value: text });
+      if (text) items.push({ label: "Codex 额度", value: text });
     }
     const geminiQuota = asRecord(meta.user_quota);
     if (geminiQuota) {
@@ -140,10 +142,10 @@ export function AdminChannelConsole() {
       }).filter(Boolean).join(" · ");
       if (text) items.push({ label: "Gemini Credits", value: text });
     }
-    const claudeUsage = asRecord(meta.usage);
-    if (claudeUsage) {
-      const text = summarizeClaudeUsage(claudeUsage);
-      if (text) items.push({ label: "Claude 用量", value: text });
+    const anthropicUsage = asRecord(meta.usage);
+    if (anthropicUsage) {
+      const text = summarizeAnthropicUsage(anthropicUsage);
+      if (text) items.push({ label: "Anthropic 用量", value: text });
     }
     return items;
   }
@@ -167,7 +169,7 @@ export function AdminChannelConsole() {
 
   useEffect(() => {
     if (!selected) return;
-    setCredentialMode(selected.api_format === "codex" || selected.api_format === "gemini_code" || selected.api_format === "claude_code" ? "oauth" : "apikey");
+    setCredentialMode(isCodeChannel(selected) ? "oauth" : "apikey");
     setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 1}`);
     setApiKeyValue("");
     setCredError("");
@@ -228,13 +230,29 @@ export function AdminChannelConsole() {
   }, [channels, accounts]);
 
   const visibleChannels = useMemo(() => {
-    return channels.filter((item) => channelGroup(item) === activeGroup);
-  }, [activeGroup, channels]);
+    const query = channelQuery.trim().toLowerCase();
+    return channels.filter((item) => {
+      if (channelGroup(item) !== activeGroup) return false;
+      if (providerFilter !== "all" && item.type !== providerFilter) return false;
+      if (healthFilter !== "all" && channelHealth(item) !== healthFilter) return false;
+      if (!query) return true;
+      const haystack = [item.name, item.type, item.group, item.endpoint, item.models, item.api_format, presetForChannel(item).label].join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [activeGroup, channels, accounts, channelQuery, healthFilter, providerFilter]);
 
-  function changeDraftProvider(type: string) {
-    const endpoint = channelDefaults[type] || channelDefaults.openai;
-    setDraft((cur) => ({ ...cur, preset: `${type}_api`, type, endpoint, apiFormat: "standard", models: "" }));
-    setCredentialMode("apikey");
+
+  function applyPreset(preset: ChannelPreset) {
+    setDraft((cur) => ({
+      ...cur,
+      preset: preset.id,
+      type: preset.type,
+      endpoint: preset.endpoint,
+      models: preset.models,
+      apiFormat: preset.apiFormat,
+      name: cur.name || ` Channel`,
+    }));
+    setCredentialMode(preset.auth === "oauth" ? "oauth" : "apikey");
     setOauthState("");
     setOauthStatus(null);
     setOauthAuthURL("");
@@ -248,7 +266,7 @@ export function AdminChannelConsole() {
   }
 
   function codeLoginLabel(type: string): string {
-    if (type === "openai") return "CodeX 登录";
+    if (type === "openai") return "Codex 登录";
     if (type === "gemini") return "Gemini Code 登录";
     return "Claude Code 登录";
   }
@@ -510,6 +528,26 @@ export function AdminChannelConsole() {
             <h2>渠道分类</h2>
             <span className="badge">{channels.length}</span>
           </div>
+          <div className="channel-filter-stack">
+            <label className="search-box">
+              <Search />
+              <input value={channelQuery} onChange={(e) => setChannelQuery(e.target.value)} placeholder="搜索渠道、模型、Endpoint" />
+            </label>
+            <div className="filter-row">
+              <select className="input compact-select" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}>
+                <option value="all">全部供应商</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="gemini">Gemini</option>
+              </select>
+              <select className="input compact-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value as typeof healthFilter)}>
+                <option value="all">全部状态</option>
+                <option value="healthy">可用</option>
+                <option value="warning">需处理</option>
+                <option value="disabled">停用</option>
+              </select>
+            </div>
+          </div>
           <div className="channel-list-items">
             {channelGroups.map((group) => {
               return (
@@ -551,14 +589,15 @@ export function AdminChannelConsole() {
               const enabledAccounts = related.filter((account) => account.enabled).length;
               const health = channelHealth(channel);
               return (
-                <button
+                <div
                   className={`channel-tile ${health}${selected?.id === channel.id ? " active" : ""}`}
                   key={channel.id}
                   onClick={() => {
                     setSelectedID(channel.id);
                     setDetailOpen(true);
                   }}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                 >
                   <span className="channel-tile-top">
                     <span className={`health-dot ${health}`} />
@@ -569,7 +608,12 @@ export function AdminChannelConsole() {
                     <span>{enabledAccounts}/{count} 凭证</span>
                     <span>{presetForChannel(channel).label}</span>
                   </span>
-                </button>
+                  <span className="channel-tile-actions" onClick={(event) => event.stopPropagation()}>
+                    <button className="btn subtle icon-only" onClick={() => patchChannel(channel.id, { enabled: !channel.enabled })} title={channel.enabled ? "停用" : "启用"} type="button"><Filter /></button>
+                    <button className="btn subtle icon-only" onClick={() => { setSelectedID(channel.id); setDetailOpen(true); }} title="添加凭证" type="button"><Plus /></button>
+                    <button className="btn subtle icon-only" onClick={() => navigator.clipboard?.writeText(channel.endpoint)} title="复制 Endpoint" type="button"><Clipboard /></button>
+                  </span>
+                </div>
               );
             })}
             {visibleChannels.length === 0 && !loading ? <EmptyState title="暂无渠道" description="这个分类下还没有渠道。" /> : null}
@@ -625,15 +669,14 @@ export function AdminChannelConsole() {
               <div className="credential-editor">
                 <div className="section-head">
                   <div><h2>添加凭证</h2><p className="muted">凭证添加后立即进入 Gateway 调度池。</p></div>
-                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") ? (
+                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isCodeChannel(selected) ? (
                     <div className="segmented">
-                      <button className={credentialMode === "oauth" ? "active" : ""} onClick={() => setCredentialMode("oauth")} type="button"><Link2 /> OAuth</button>
                       <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> API Key</button>
                     </div>
                   ) : null}
                 </div>
 
-                {credentialMode === "oauth" && (selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") ? (
+                {isCodeChannel(selected) ? (
                   <OAuthPanel
                     channel={selected}
                     loading={credLoading}
@@ -649,13 +692,13 @@ export function AdminChannelConsole() {
                     onStart={startOAuth}
                     onComplete={completeOAuth}
                   />
-                ) : (
+                ) : credentialMode === "apikey" ? (
                   <div className="api-key-editor">
                     <input className="input" value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} placeholder={`${selected.type}-key-01`} />
                     <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="API Key / Token" type="password" />
                     <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
                   </div>
-                )}
+                ) : null}
                 {credNotice && credentialMode !== "oauth" ? <p className="form-success">{credNotice}</p> : null}
                 {credError ? <p className="form-error">{credError}</p> : null}
               </div>
@@ -710,10 +753,11 @@ export function AdminChannelConsole() {
 
             <div className="drawer-body">
               <div className="preset-grid provider-pick-grid">
-                {providerOptions.map((provider) => (
-                  <button className={draft.type === provider.type ? "active" : ""} key={provider.type} onClick={() => changeDraftProvider(provider.type)} type="button">
-                    <strong>{provider.label}</strong>
-                    <small>{provider.note}</small>
+                {channelPresets.map((preset) => (
+                  <button className={draft.preset === preset.id ? "active" : ""} key={preset.id} onClick={() => applyPreset(preset)} type="button">
+                    <strong>{preset.label}</strong>
+                    <small>{preset.note}</small>
+                    <span className={`preset-auth `}>{preset.auth === "oauth" ? "OAuth" : "API Key"}</span>
                   </button>
                 ))}
               </div>
@@ -737,8 +781,8 @@ export function AdminChannelConsole() {
                 <div className="field">
                   <label>API 类型</label>
                   <div className="segmented">
-                    <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">Chat</button>
-                    <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">Responses</button>
+                    <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">Chat Completions</button>
+                    <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">Responses API</button>
                   </div>
                 </div>
               ) : null}
@@ -840,7 +884,7 @@ function summarizeGeminiQuota(quota: Record<string, unknown>): string {
   }).join(" · ");
 }
 
-function summarizeClaudeUsage(usage: Record<string, unknown>): string {
+function summarizeAnthropicUsage(usage: Record<string, unknown>): string {
   return ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"].map((key) => {
     const limit = asRecord(usage[key]);
     if (!limit) return "";
@@ -893,7 +937,7 @@ function OAuthPanel({
   if (!status) {
     return (
       <div className="oauth-inline">
-        <p className="muted">{channel.type === "openai" ? "按 CodeX 客户端方式认证。" : channel.type === "gemini" ? "按 Gemini Code 客户端方式认证。" : "按 Claude Code 客户端方式认证。"}</p>
+        <p className="muted">{channel.type === "openai" ? "按 Codex 客户端方式认证。" : channel.type === "gemini" ? "按 Gemini Code 客户端方式认证。" : "按 Claude Code 客户端方式认证。"}</p>
         <button className="btn primary" disabled={loading} onClick={onStart} type="button">{loading ? "正在生成" : "开始 OAuth"}</button>
       </div>
     );

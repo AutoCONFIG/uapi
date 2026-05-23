@@ -21,12 +21,21 @@ type Session struct {
 	userID        string
 	models        string // cached token.Models for permission checks
 	permissions   string // cached token.Permissions
+	policy        *wsSessionPolicy
 	closed        atomic.Bool
 	writeDeadline time.Duration // timeout for writes; 0 = no deadline
 	inFlight      atomic.Int64  // number of in-flight response turns
+	turnMu        sync.Mutex
+	turnRelease   func()
 }
 
-func newSession(id, tokenID, tokenKey, userID, models, permissions string, conn *ws.Conn, writeDeadline time.Duration) *Session {
+type wsSessionPolicy struct {
+	id             string
+	allowedModels  string
+	maxConcurrency int
+}
+
+func newSession(id, tokenID, tokenKey, userID, models, permissions string, policy *wsSessionPolicy, conn *ws.Conn, writeDeadline time.Duration) *Session {
 	return &Session{
 		id:            id,
 		clientConn:    conn,
@@ -35,6 +44,7 @@ func newSession(id, tokenID, tokenKey, userID, models, permissions string, conn 
 		userID:        userID,
 		models:        models,
 		permissions:   permissions,
+		policy:        policy,
 		writeDeadline: writeDeadline,
 	}
 }
@@ -79,7 +89,20 @@ func (s *Session) TryAcquireTurn() bool {
 
 // ReleaseTurn atomically decrements the in-flight turn counter.
 func (s *Session) ReleaseTurn() {
+	s.turnMu.Lock()
+	release := s.turnRelease
+	s.turnRelease = nil
+	s.turnMu.Unlock()
+	if release != nil {
+		release()
+	}
 	s.inFlight.Store(0)
+}
+
+func (s *Session) SetTurnRelease(release func()) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	s.turnRelease = release
 }
 
 // ── Session Manager ────────────────────────────────────────────────────────────
@@ -112,7 +135,7 @@ type wsCloseError struct {
 func (e *wsCloseError) Error() string { return e.msg }
 
 // Create creates and registers a new session. Returns error if the connection limit is exceeded.
-func (sm *SessionManager) Create(tokenID, tokenKey, userID, models, permissions string, conn *ws.Conn) (*Session, error) {
+func (sm *SessionManager) Create(tokenID, tokenKey, userID, models, permissions string, policy *wsSessionPolicy, conn *ws.Conn) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -121,7 +144,7 @@ func (sm *SessionManager) Create(tokenID, tokenKey, userID, models, permissions 
 	}
 
 	id := provider.RandomHex(16)
-	sess := newSession(id, tokenID, tokenKey, userID, models, permissions, conn, sm.writeDeadline)
+	sess := newSession(id, tokenID, tokenKey, userID, models, permissions, policy, conn, sm.writeDeadline)
 	sm.sessions[id] = sess
 	sm.byToken[tokenID]++
 	return sess, nil
@@ -171,4 +194,3 @@ func (sm *SessionManager) TokenCount(tokenID string) int {
 	defer sm.mu.RUnlock()
 	return sm.byToken[tokenID]
 }
-

@@ -6,13 +6,14 @@ import (
 
 type Plan struct {
 	Base
-	Name            string `gorm:"size:100;not null" json:"name"`
-	Type            string `gorm:"size:20;not null" json:"type"`
-	Limits          string `gorm:"type:jsonb" json:"limits"`
-	ModelRatios     string `gorm:"type:jsonb" json:"model_ratios"`
-	CompletionRatio string `gorm:"type:jsonb" json:"completion_ratio"`
-	TokenQuota      int64  `json:"token_quota"`
-	Enabled         bool   `gorm:"default:true" json:"enabled"`
+	Name            string     `gorm:"size:100;not null" json:"name"`
+	Type            string     `gorm:"size:20;not null" json:"type"`
+	PolicyID        *uuid.UUID `gorm:"type:uuid;index" json:"policy_id,omitempty"`
+	Limits          string     `gorm:"type:jsonb" json:"limits"`
+	ModelRatios     string     `gorm:"type:jsonb" json:"model_ratios"`
+	CompletionRatio string     `gorm:"type:jsonb" json:"completion_ratio"`
+	TokenQuota      int64      `json:"token_quota"`
+	Enabled         bool       `gorm:"default:true" json:"enabled"`
 }
 
 func (Plan) TableName() string { return "plans" }

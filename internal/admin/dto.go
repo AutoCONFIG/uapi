@@ -37,13 +37,14 @@ type UpdateChannelRequest struct {
 
 // StartOAuthRequest asks the backend to create a provider authorization URL.
 type StartOAuthRequest struct {
-	ChannelID    uuid.UUID `json:"channel_id"`
-	Provider     string    `json:"provider"`
-	AccountName  string    `json:"account_name"`
-	ClientID     string    `json:"client_id"`
-	ClientSecret string    `json:"client_secret"`
-	TokenURL     string    `json:"token_url"`
-	Mode         string    `json:"mode"`
+	ChannelID     uuid.UUID `json:"channel_id"`
+	Provider      string    `json:"provider"`
+	AccountName   string    `json:"account_name"`
+	ClientID      string    `json:"client_id"`
+	ClientSecret  string    `json:"client_secret"`
+	TokenURL      string    `json:"token_url"`
+	Mode          string    `json:"mode"`
+	AdminUsername string    `json:"-"` // Set by middleware, not from request body
 }
 
 // OAuthAuthURLResponse is returned after creating an OAuth onboarding session.
@@ -106,32 +107,6 @@ type UpdateAccountRequest struct {
 	CooldownUntil *time.Time `json:"cooldown_until"`
 }
 
-// --- Token DTOs ---
-
-// CreateTokenRequest is the request DTO for creating a token.
-type CreateTokenRequest struct {
-	Name        string     `json:"name"`
-	Key         string     `json:"key"`
-	Enabled     bool       `json:"enabled"`
-	IPWhitelist string     `json:"ip_whitelist"`
-	ExpiresAt   *time.Time `json:"expires_at"`
-	Models      string     `json:"models"`
-	Permissions string     `json:"permissions"`
-	Unlimited   bool       `json:"unlimited"`
-	PolicyID    *uuid.UUID `json:"policy_id"`
-}
-
-// UpdateTokenRequest is the request DTO for updating a token.
-type UpdateTokenRequest struct {
-	Name        *string    `json:"name,omitempty"`
-	IPWhitelist *string    `json:"ip_whitelist,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	Models      *string    `json:"models,omitempty"`
-	Permissions *string    `json:"permissions,omitempty"`
-	Unlimited   *bool      `json:"unlimited,omitempty"`
-	PolicyID    *uuid.UUID `json:"policy_id,omitempty"`
-}
-
 // --- Access Policy DTOs ---
 
 type CreateAccessPolicyRequest struct {
@@ -158,24 +133,26 @@ type UpdateAccessPolicyRequest struct {
 
 // CreatePlanRequest is the request DTO for creating a plan.
 type CreatePlanRequest struct {
-	Name            string `json:"name"`
-	Type            string `json:"type"`
-	Limits          string `json:"limits"`
-	ModelRatios     string `json:"model_ratios"`
-	CompletionRatio string `json:"completion_ratio"`
-	TokenQuota      int64  `json:"token_quota"`
-	Enabled         bool   `json:"enabled"`
+	Name            string     `json:"name"`
+	Type            string     `json:"type"`
+	PolicyID        *uuid.UUID `json:"policy_id"`
+	Limits          string     `json:"limits"`
+	ModelRatios     string     `json:"model_ratios"`
+	CompletionRatio string     `json:"completion_ratio"`
+	TokenQuota      int64      `json:"token_quota"`
+	Enabled         bool       `json:"enabled"`
 }
 
 // UpdatePlanRequest is the request DTO for updating a plan.
 type UpdatePlanRequest struct {
-	Name            *string `json:"name,omitempty"`
-	Type            *string `json:"type,omitempty"`
-	Limits          *string `json:"limits,omitempty"`
-	ModelRatios     *string `json:"model_ratios,omitempty"`
-	CompletionRatio *string `json:"completion_ratio,omitempty"`
-	TokenQuota      *int64  `json:"token_quota,omitempty"`
-	Enabled         *bool   `json:"enabled,omitempty"`
+	Name            *string    `json:"name,omitempty"`
+	Type            *string    `json:"type,omitempty"`
+	PolicyID        *uuid.UUID `json:"policy_id,omitempty"`
+	Limits          *string    `json:"limits,omitempty"`
+	ModelRatios     *string    `json:"model_ratios,omitempty"`
+	CompletionRatio *string    `json:"completion_ratio,omitempty"`
+	TokenQuota      *int64     `json:"token_quota,omitempty"`
+	Enabled         *bool      `json:"enabled,omitempty"`
 }
 
 // --- User DTOs ---

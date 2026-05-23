@@ -8,6 +8,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -23,7 +24,7 @@ func NewBillingService(database *gorm.DB) *BillingService {
 // CheckLimit checks if the token is within its plan limits. Returns error if exceeded.
 func (b *BillingService) CheckLimit(tokenID string) error {
 	var tp db.TokenPlan
-	if err := b.db.Where("token_id = ?", tokenID).First(&tp).Error; err != nil {
+	if err := latestActiveTokenPlan(b.db, tokenID).First(&tp).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil // no plan = unlimited
 		}
@@ -98,21 +99,23 @@ func (b *BillingService) checkTokenLimit(tp *db.TokenPlan, plan *db.Plan) error 
 }
 
 // PreConsume increments count usage or pre-deducts token quota.
-func (b *BillingService) PreConsume(tokenID string, model string, estimatedTokens int) error {
-	return b.db.Transaction(func(tx *gorm.DB) error {
+func (b *BillingService) PreConsume(tokenID string, model string, estimatedTokens int) (uuid.UUID, error) {
+	var planID uuid.UUID
+	err := b.db.Transaction(func(tx *gorm.DB) error {
 		var tp db.TokenPlan
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("token_id = ?", tokenID).
-			Order("created_at DESC").First(&tp).Error; err != nil {
+			Scopes(scopeLatestActiveTokenPlan(tokenID)).
+			First(&tp).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // no plan = unlimited
+				return DebitUserBalanceForTokenTx(tx, tokenID, estimatedTokens)
 			}
 			return err
 		}
+		planID = tp.ID
 		var plan db.Plan
 		if err := tx.First(&plan, "id = ? AND enabled = true AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // no plan = unlimited
+				return DebitUserBalanceForTokenTx(tx, tokenID, estimatedTokens)
 			}
 			return err
 		}
@@ -120,10 +123,11 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		case "count_based":
 			return b.incrementCountUsageTx(tx, &tp, &plan)
 		case "token_based":
-			return b.preConsumeTokensTx(tx, &tp, estimatedTokens)
+			return b.preConsumeTokensTx(tx, &tp, &plan, estimatedTokens)
 		}
 		return nil
 	})
+	return planID, err
 }
 
 func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan) error {
@@ -191,23 +195,54 @@ func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, pl
 	}).Error
 }
 
-func (b *BillingService) preConsumeTokensTx(tx *gorm.DB, tp *db.TokenPlan, amount int) error {
+func (b *BillingService) preConsumeTokensTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan, amount int) error {
+	if plan.TokenQuota > 0 && tp.UsedQuota+int64(amount) > plan.TokenQuota {
+		return fmt.Errorf("token quota exceeded")
+	}
 	return tx.Model(tp).Update("used_quota", gorm.Expr("used_quota + ?", amount)).Error
 }
 
 // RefundAndSettle atomically refunds the pre-consumed estimate and settles actual usage.
 // This prevents the race where Refund runs after Settle, undoing legitimate billing.
-func (b *BillingService) RefundAndSettle(tokenID string, estTokens int, promptTokens, completionTokens int, model string) error {
+func (b *BillingService) RefundAndSettle(tokenID string, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
-		return RefundAndSettleTx(tx, tokenID, estTokens, promptTokens, completionTokens, model)
+		return RefundAndSettleTx(tx, tokenID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
 	})
 }
 
-func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens, completionTokens int, model string) error {
+func (b *BillingService) DBTransactionRefundAndSettle(tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
+	return b.db.Transaction(func(tx *gorm.DB) error {
+		return RefundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
+	})
+}
+
+func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
+	return RefundAndSettleTxForPlan(tx, tokenID, uuid.Nil, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
+}
+
+func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
+	// Cache tokens are billed at reduced rates:
+	// cache_creation tokens: 1.25x prompt token cost (provider writes to cache)
+	// cache_read tokens: 0.1x prompt token cost (cache hit, much cheaper)
+	const cacheCreationRatio = 1.25
+	const cacheReadRatio = 0.1
+
+	if tokenPlanID == uuid.Nil {
+		actual := promptTokens + completionTokens +
+			int(float64(cacheCreationTokens)*cacheCreationRatio) +
+			int(float64(cacheReadTokens)*cacheReadRatio)
+		if actual <= 0 {
+			actual = estTokens
+		}
+		if err := CreditUserBalanceForTokenTx(tx, tokenID, estTokens); err != nil {
+			return err
+		}
+		return DebitUserBalanceForTokenTx(tx, tokenID, actual)
+	}
 	var tp db.TokenPlan
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("token_id = ?", tokenID).
-		First(&tp).Error; err != nil {
+	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
+	q = q.Where("id = ? AND token_id = ?", tokenPlanID, tokenID)
+	if err := q.First(&tp).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil // no plan = nothing to settle
 		}
@@ -215,25 +250,28 @@ func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens,
 	}
 
 	var plan db.Plan
-	if err := tx.First(&plan, "id = ? AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
+	planQuery := "id = ? AND enabled = true AND deleted_at IS NULL"
+	if tokenPlanID != uuid.Nil {
+		planQuery = "id = ? AND deleted_at IS NULL"
+	}
+	if err := tx.First(&plan, planQuery, tp.PlanID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Plan deleted mid-request — best-effort refund of estimate
-			tx.Model(&tp).Where("token_id = ?", tokenID).
-				Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens))
+			_ = tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error
 			return nil
 		}
 		return err
 	}
 
-	// Refund the pre-consumed estimate only for token-based plans.
-	if plan.Type != "count_based" {
-		if err := tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error; err != nil {
-			return err
-		}
+	if plan.Type == "count_based" {
+		// Count-based plans: pre-consume 1 count per request.
+		// No refund needed since the request already consumed a count.
+		return nil
 	}
 
-	if plan.Type == "count_based" {
-		return nil
+	// Token-based plans: refund the estimate then charge actual usage.
+	if err := tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error; err != nil {
+		return err
 	}
 
 	ratios, err := parseMap(plan.ModelRatios)
@@ -247,40 +285,129 @@ func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens,
 		}
 	}
 
-	actual := int(float64(promptTokens) + float64(completionTokens)*ratio)
+	// Cache tokens are included in prompt-equivalent tokens at reduced rates
+	cacheEquivalent := int(float64(cacheCreationTokens)*cacheCreationRatio) +
+		int(float64(cacheReadTokens)*cacheReadRatio)
+	actual := int(float64(promptTokens+cacheEquivalent) + float64(completionTokens)*ratio)
 	if actual > 0 {
 		return tx.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", actual)).Error
 	}
 	return nil
 }
 
+func DebitUserBalanceForTokenTx(tx *gorm.DB, tokenID string, amount int) error {
+	if amount <= 0 {
+		return nil
+	}
+	var token db.Token
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND enabled = true AND deleted_at IS NULL", tokenID).First(&token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if token.Unlimited || token.UserID == "" {
+		return nil
+	}
+	// Atomic check-and-update: only deduct if balance is sufficient
+	result := tx.Model(&db.User{}).
+		Where("id = ? AND status = 'active' AND deleted_at IS NULL AND balance >= ?", token.UserID, amount).
+		Update("balance", gorm.Expr("balance - ?", amount))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("insufficient user balance")
+	}
+	return nil
+}
+
+func CreditUserBalanceForTokenTx(tx *gorm.DB, tokenID string, amount int) error {
+	if amount <= 0 {
+		return nil
+	}
+	var token db.Token
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND deleted_at IS NULL", tokenID).First(&token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if token.Unlimited || token.UserID == "" {
+		return nil
+	}
+	var user db.User
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND status = 'active' AND deleted_at IS NULL", token.UserID).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	return tx.Model(&user).Update("balance", gorm.Expr("balance + ?", amount)).Error
+}
+
 // Refund returns pre-consumed tokens on failure or after actual usage is settled.
 func (b *BillingService) Refund(tokenID string, amount int) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
-		var tp db.TokenPlan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("token_id = ?", tokenID).
-			First(&tp).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // no plan = nothing to refund
-			}
-			return err
-		}
-
-		var plan db.Plan
-		if err := tx.First(&plan, "id = ? AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
-			// Can't determine plan type, try token refund anyway
-			return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
-		}
-
-		switch plan.Type {
-		case "count_based":
-			// count_based plans: PreConsume is the final usage - no refund needed.
-			return nil
-		default:
-			return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
-		}
+		return RefundTx(tx, tokenID, amount)
 	})
+}
+
+func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UUID, amount int) error {
+	return b.db.Transaction(func(tx *gorm.DB) error {
+		return RefundTxForPlan(tx, tokenID, tokenPlanID, amount)
+	})
+}
+
+func RefundTx(tx *gorm.DB, tokenID string, amount int) error {
+	return RefundTxForPlan(tx, tokenID, uuid.Nil, amount)
+}
+
+func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount int) error {
+	if tokenPlanID == uuid.Nil {
+		return CreditUserBalanceForTokenTx(tx, tokenID, amount)
+	}
+	var tp db.TokenPlan
+	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
+	q = q.Where("id = ? AND token_id = ?", tokenPlanID, tokenID)
+	if err := q.First(&tp).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // no plan = nothing to refund
+		}
+		return err
+	}
+
+	var plan db.Plan
+	planQuery := "id = ? AND enabled = true AND deleted_at IS NULL"
+	if tokenPlanID != uuid.Nil {
+		planQuery = "id = ? AND deleted_at IS NULL"
+	}
+	if err := tx.First(&plan, planQuery, tp.PlanID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	switch plan.Type {
+	case "count_based":
+		return nil
+	default:
+		return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
+	}
+}
+
+func latestActiveTokenPlan(tx *gorm.DB, tokenID string) *gorm.DB {
+	return tx.Scopes(scopeLatestActiveTokenPlan(tokenID))
+}
+
+func scopeLatestActiveTokenPlan(tokenID string) func(*gorm.DB) *gorm.DB {
+	return func(tx *gorm.DB) *gorm.DB {
+		return tx.
+			Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
+			Where("token_plans.token_id = ?", tokenID).
+			Order("token_plans.created_at DESC")
+	}
 }
 
 // CheckUserBalance verifies the user has a positive balance. Returns error if insufficient.
@@ -295,14 +422,11 @@ func (b *BillingService) CheckUserBalance(userID string, tokenID string) error {
 	}
 
 	// If the specific token has an active plan, skip balance check — plan quotas are enforced separately
-	var planCount int64
-	if err := b.db.Model(&db.TokenPlan{}).
-		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
-		Where("token_plans.token_id = ?", tokenID).
-		Count(&planCount).Error; err != nil {
+	var tp db.TokenPlan
+	if err := latestActiveTokenPlan(b.db.Model(&db.TokenPlan{}), tokenID).First(&tp).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("check plan: %w", err)
 	}
-	if planCount > 0 {
+	if tp.ID != uuid.Nil {
 		return nil
 	}
 

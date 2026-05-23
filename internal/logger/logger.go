@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func Err(err error) Field {
 	if err == nil {
 		return Field{Key: "error", Value: nil}
 	}
-	return Field{Key: "error", Value: err.Error()}
+	return Field{Key: "error", Value: Redact(err.Error())}
 }
 
 func (l *Logger) WithComponent(name string) *Logger {
@@ -103,7 +104,7 @@ func (l *Logger) log(level Level, msg string, fields ...Field) {
 		if field.Key == "" {
 			continue
 		}
-		record[field.Key] = field.Value
+		record[field.Key] = sanitizeValue(field.Value)
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -113,6 +114,83 @@ func (l *Logger) log(level Level, msg string, fields ...Field) {
 	l.state.mu.Lock()
 	defer l.state.mu.Unlock()
 	fmt.Fprintln(l.state.out, string(encoded))
+}
+
+func sanitizeValue(v interface{}) interface{} {
+	switch x := v.(type) {
+	case string:
+		return redactString(x)
+	case []string:
+		out := make([]string, len(x))
+		for i, item := range x {
+			out[i] = redactString(item)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(x))
+		for key, val := range x {
+			if isSecretKey(key) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = sanitizeValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func Redact(s string) string {
+	return redactString(s)
+}
+
+func isSecretKey(key string) bool {
+	k := strings.ToLower(key)
+	switch k {
+	case "authorization", "api_key", "apikey", "key", "client_secret", "access_token", "refresh_token", "id_token", "password", "secret":
+		return true
+	}
+	for _, suffix := range []string{"_secret", "_password", "_api_key", "_access_token", "_refresh_token", "_id_token"} {
+		if strings.HasSuffix(k, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactString(s string) string {
+	for _, marker := range []string{"Bearer ", "sk-", "sk-ant-", "ya29.", "AIza", "1//"} {
+		for {
+			start := strings.Index(s, marker)
+			if start < 0 {
+				break
+			}
+			end := start + len(marker)
+			for end < len(s) && !strings.ContainsRune(" \t\r\n\"'`,;}", rune(s[end])) {
+				end++
+			}
+			if end <= start || strings.HasPrefix(s[start:], "[redacted]") {
+				break
+			}
+			s = s[:start] + "[redacted]" + s[end:]
+		}
+	}
+	s = redactKeyValueSecrets(s)
+	return s
+}
+
+var secretKVPattern = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token|api_key|apikey|client_secret|authorization|password|secret)\b\s*[:=]\s*["']?[^"'\s,;}]+`)
+
+func redactKeyValueSecrets(s string) string {
+	return secretKVPattern.ReplaceAllStringFunc(s, func(match string) string {
+		for i, r := range match {
+			if r == ':' || r == '=' {
+				return match[:i+1] + "[redacted]"
+			}
+		}
+		return "[redacted]"
+	})
 }
 
 func (l *Logger) enabled(level Level) bool {

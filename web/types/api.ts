@@ -30,6 +30,7 @@ export type User = {
 
 export type ApiKey = {
   id: string;
+  user_id?: string;
   name: string;
   key: string;
   enabled: boolean;
@@ -37,7 +38,6 @@ export type ApiKey = {
   expires_at?: string;
   models: string;
   permissions: string;
-  policy_id?: string;
   created_at: string;
 };
 
@@ -88,6 +88,7 @@ export type Plan = {
   id: string;
   name: string;
   type: string;
+  policy_id?: string;
   token_quota: number;
   enabled: boolean;
 };

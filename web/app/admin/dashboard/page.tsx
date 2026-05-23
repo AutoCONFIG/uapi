@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Network, Route, SlidersHorizontal, Users } from "lucide-react";
+import { KeyRound, Network, Package, Route, Users } from "lucide-react";
 import { AppShell, MetricCard, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Channel, Dashboard } from "@/types/api";
@@ -77,9 +77,9 @@ export default function AdminDashboardPage() {
             <p className="muted" style={{ margin: 0 }}>按常用配置顺序进入控制台。</p>
           </div>
           <div className="quick-grid">
-            <a className="quick-card" href="/admin/access-policies">
-              <SlidersHorizontal />
-              <span><strong>访问策略</strong>限制模型、配额和并发</span>
+            <a className="quick-card" href="/admin/plans">
+              <Package />
+              <span><strong>套餐策略</strong>配置额度、模型、并发和请求窗口</span>
             </a>
             <a className="quick-card" href="/admin/channels">
               <Route />

@@ -14,9 +14,9 @@ status: current-baseline
 UAPI 是一个**面向公众的 AI API 中转平台**。用户注册账号后购买套餐，获取 API Key 调用 OpenAI/Anthropic/Gemini 等上游服务。管理员管理渠道、上游凭据、计费等后台功能。
 
 核心能力：
-- 透明代理 + 格式转换（OpenAI Chat/Responses、Anthropic、Gemini 四种格式互转，客户端可用任一原生格式接入）
+- 透明代理 + 格式转换（OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API 四种格式互转，客户端可用任一原生格式接入）
 - 渠道管理（分组、上游凭据、账号元数据、加权轮询、故障冷却、OAuth 自动刷新）
-- Code 客户端渠道（CodeX、Gemini Code、Claude Code）按本地官方客户端源码对齐；具体源文件见 `docs/current/code-channels.md`
+- Code 客户端渠道（Codex、Gemini Code、Claude Code）按本地官方客户端源码对齐；具体源文件见 `docs/current/code-channels.md`
 - 双模式计费（次数窗口限额 + Token 额度扣费）
 - 用户注册/登录/套餐购买/API Key 管理
 - 管理员后台（渠道/用户/令牌/计费管理）
@@ -56,7 +56,7 @@ Gateway 是唯一配置权威，Relay 只负责实际出口转发。完整细节
 ┌─────────────────────────────────────────────┐
 │  Gateway (/v1/*, /v1beta/*)                  │
 │    ├── API Key 鉴权                           │
-│    ├── Access Policy 限制                     │
+│    ├── 套餐策略限制（plans.policy_id）          │
 │    ├── 计费预检 / 预扣                         │
 │    ├── 选择 relay_node + channel + account    │
 │    └── HMAC 签名转发给 Relay                   │
@@ -112,7 +112,6 @@ web/
 │   └── admin/                     # 管理员后台
 │       ├── page.tsx               # 管理员入口
 │       ├── dashboard/page.tsx
-│       ├── access-policies/page.tsx
 │       ├── relay-nodes/page.tsx
 │       ├── channels/page.tsx
 │       ├── users/page.tsx
@@ -190,12 +189,13 @@ GET    /api/admin/init-status         # 初始化状态
 POST   /api/admin/setup              # 首次初始化
 
 GET    /api/admin/dashboard           # 仪表盘统计
-CRUD   /api/admin/access-policies
+CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用
 CRUD   /api/admin/relay-nodes
 CRUD   /api/admin/node-accounts         # Relay 节点管理
 CRUD   /api/admin/channels            # 渠道管理
 POST   /api/admin/channels/oauth/auth-url  # 创建 OAuth 授权 URL（admin JWT）
 GET    /api/admin/channels/oauth/callback  # Provider callback（公开回调，state 校验）
+POST   /api/admin/channels/oauth/complete  # 手动 callback/token JSON 完成认证
 GET    /api/admin/channels/oauth/status    # 查询 OAuth session 状态（admin JWT）
 POST   /api/admin/channels/oauth/bind      # 绑定完成的 session 为 oauth_token account
 CRUD   /api/admin/accounts            # 兼容接口；前端已归一到渠道
@@ -208,26 +208,26 @@ GET    /api/admin/logs                # 请求日志
 GET    /api/admin/audit-logs          # 审计日志
 
 # ── Gateway / Relay API（Gateway 鉴权调度，Relay 执行） ──
-ANY    /v1/chat/completions           # OpenAI Chat Completions 格式
+ANY    /v1/chat/completions           # OpenAI Chat Completions API 格式
 ANY    /v1/responses                  # OpenAI Responses API 格式
 GET    /v1/models                     # OpenAI/Anthropic 兼容模型列表
 ANY    /v1/images/*                   # OpenAI 兼容图片端点，需上游渠道支持
-ANY    /v1/messages                   # Anthropic Messages 格式
+ANY    /v1/messages                   # Anthropic Messages API 格式
 GET    /v1beta/models                 # Gemini 兼容模型列表
-ANY    /v1beta/*                      # Gemini generateContent 格式
+ANY    /v1beta/*                      # Gemini generateContent API 格式
 ```
 
 ### 渠道和 Code 客户端
 
 渠道用 `type` 表示供应商家族，用 `api_format` 表示具体协议变体。
-OpenAI 支持 `standard` Chat、`responses` 和 `codex`；Gemini 支持
-`standard` 和 `gemini_code`；Anthropic/Claude 支持 `standard` 和
+OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支持
+`standard` 和 `gemini_code`；Anthropic 支持 `standard` 和
 `claude_code`。`channel_group` 用于后台分组展示，空值统一归为
 `default`，前端显示为 `默认渠道`。
 
 Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客户端源码对齐：
 
-- CodeX: `upstream/codex/codex-rs/login/src/*`
+- Codex: `upstream/codex/codex-rs/login/src/*`
 - Gemini Code: `upstream/gemini-cli/packages/core/src/code_assist/*`
 - Claude Code: `upstream/claude-code/src/services/oauth/*`,
   `upstream/claude-code/src/services/api/client.ts`,
@@ -239,7 +239,7 @@ Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客
 
 ```
 用户/管理 API：  CORS → JWT认证 → Handler
-Gateway API：    API Key 认证 → Access Policy → 并发检查 → 计费预检 → 调度 → Relay
+Gateway API：    API Key 认证 → 套餐策略 → 并发检查 → 计费预检 → 调度 → Relay
 Relay API：      Gateway HMAC 签名校验 → 执行指定 channel/account → provider 转发
 ```
 
@@ -251,32 +251,50 @@ Relay API：      Gateway HMAC 签名校验 → 执行指定 channel/account →
 
 ```
 入口路径                 客户端格式
-/v1/chat/completions    OpenAI Chat Completions
+/v1/chat/completions    OpenAI Chat Completions API
 /v1/responses           OpenAI Responses API
 /v1/images/*            OpenAI Images API
-/v1/messages            Anthropic Messages
-/v1beta/*               Gemini generateContent
+/v1/messages            Anthropic Messages API
+/v1beta/*               Gemini generateContent API
 ```
 
-#### 转换策略：统一中间格式
+#### 转换策略：跨协议中间格式，同协议 raw preservation
 
-采用统一中间格式（`InternalRequest`/`InternalResponse`）：
+跨协议采用统一中间格式（`InternalRequest`/`InternalResponse`）：
 
 ```
 客户端格式 → ToInternal() → InternalRequest → FromInternal() → 上游格式
 ```
 
-只需 8 个转换器（4 个 ToInternal + 4 个 FromInternal），而非直接转换的 12 个。新增 provider 只需加 1 个 `FromInternal()`，直接转换方案要加 4 个。
+同协议请求/响应不强制进入这个较窄的中间结构，而是 raw preservation：
+下游协议和上游协议相同时保留原始 JSON/SSE，只补必要的路由、鉴权和计费
+上下文。这样不会因为中间格式暂时没有表达某个原生标准字段而丢精度。新增
+provider 仍按 Bifrost-style adaptor pipeline 接入；跨协议转换时才使用
+`ToInternal()`/`FromInternal()`。跨协议转换采用粗转换策略：能映射的
+等价字段必须映射；目标协议无法表达但不影响核心 prompt/tool 流程的字段
+记录 warning 后跳过，并保留在同协议 raw preservation/ExtraParams 路径中；
+只有畸形结构、必需字段缺失或会让目标请求语义无效的内容才返回显式转换错误。
 
-流式 SSE 逐行转换不走中间格式，直接在 adaptor 层做 provider-specific 的行转换：
+流式 SSE 不整流缓冲，采用事件级状态机转换。和 Bifrost 的 schema/adaptor
+思路一致，Relay 先把不同上游流规范化为内部 OpenAI Chat Completions-style chunk，再按
+下游协议输出 OpenAI Responses API、Gemini API、Anthropic Messages API、OpenAI Chat Completions API 对应的 SSE 事件：
 
 ```
-上游 SSE line → adaptor.ConvertStreamLine(line, clientFormat) → 客户端格式的 SSE line
+上游 SSE event → provider stream normalizer → client stream formatter → 客户端 SSE event
 ```
 
-#### 透传
+`force_stream` 会把上游 SSE 规范化为 OpenAI Chat Completions-style chunk 后汇总成非流
+JSON。若上游流中出现 error chunk，Relay 返回对应客户端协议的错误响应，
+不生成空 completion。
 
-客户端格式与上游格式相同时，直接透传请求和响应，零转换开销。所有格式（含透传）都必须实现 `ParseUsage` 和 `ParseStreamUsage`，Relay 需要从响应中提取 usage；目标架构中 usage event 回报 Gateway 后由 Gateway 幂等结算。
+#### 协议规范化
+
+Relay 的跨协议请求不依赖上游原始 envelope 透传，而是经过 UAPI 的
+ToInternal/FromInternal 或流式 normalizer/formatter。同名标准协议是一个
+例外：如果下游和上游都是同一个标准协议，Relay 保留原始标准 JSON 或 SSE，
+避免丢失 Gemini API、Anthropic Messages API、OpenAI 原生扩展字段。所有格式都必须实现
+`ParseUsage` 和 `ParseStreamUsage`，Relay 需要从响应中提取 usage；目标架构中
+usage event 回报 Gateway 后由 Gateway 幂等结算。
 
 Token 统一计量：无论客户端用哪种格式，usage 都归一化为 `prompt_tokens + completion_tokens` 进行计费。
 
@@ -368,6 +386,8 @@ type RedeemCode struct {
 不得包含 API Key、Authorization header、OAuth access token、refresh token、
 id_token 或完整请求/响应正文；需要排查上游错误时只记录截断后的错误体和
 channel/account/model/project 等非密钥上下文。
+`internal/logger` 对常见凭据字段和字符串中的 Bearer/API key/OAuth token
+形态做兜底 redaction；调用方仍应避免主动记录完整请求体和上游 credential。
 
 组件命名用于排查链路，例如：
 
@@ -387,41 +407,16 @@ channel/account/model/project 等非密钥上下文。
 
 ## 7. OAuth 凭证自动刷新
 
-参考 upstream 中 Codex CLI 和 Gemini CLI 的 OAuth 实现，relay 支持用 OAuth token 而非静态 API Key 作为上游凭证。
+参考 upstream 中 Codex CLI、Gemini CLI 和 Claude Code 的 OAuth 实现，relay 支持用 OAuth token 而非静态 API Key 作为上游凭证。
 
 管理端 OAuth onboarding 已在 `internal/admin/oauth_handler.go` 实现：
 
 1. `POST /api/admin/channels/oauth/auth-url` 创建短期内存 session、PKCE verifier/challenge 和 provider 授权 URL。
-2. `GET /api/admin/channels/oauth/callback` 校验 `state`，交换 authorization code，并把结果保留在 session 中。
+2. `POST /api/admin/channels/oauth/complete` 接收官方客户端回调 URL 或 token JSON，交换/导入凭证并保留在 session 中。`GET /api/admin/channels/oauth/callback` 仍保留给 UAPI-hosted callback 流程。
 3. `GET /api/admin/channels/oauth/status` 供前端轮询 callback 状态。
 4. `POST /api/admin/channels/oauth/bind` 由已登录管理员把完成的 session 保存为 `accounts.cred_type = oauth_token`。
 
-### Codex (OpenAI) OAuth 流程
-
-```
-Authorization Code + PKCE:
-1. 构建 auth URL: auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_challenge=...&scope=openid+profile+email+offline_access
-2. 用户浏览器登录授权，回调获取 code
-3. POST auth.openai.com/oauth/token (grant_type=authorization_code) → id_token + access_token + refresh_token
-4. POST auth.openai.com/oauth/token (grant_type=urn:ietf:params:oauth:grant-type:token-exchange, requested_token=openai-api-key, subject_token=id_token) → API Key
-
-刷新：POST auth.openai.com/oauth/token (grant_type=refresh_token)
-刷新周期：8天，30秒 skew 容差
-```
-
-详细流程参考 `docs/reference/cli-auth-reference.md`。
-
-### Gemini (Google) OAuth 流程
-
-```
-Authorization Code + PKCE:
-1. 构建 auth URL: accounts.google.com/o/oauth2/v2/auth?client_id=681255809395-...&code_challenge=...&scope=cloud-platform+userinfo.email+userinfo.profile
-2. 用户浏览器登录授权，回调获取 code
-3. POST oauth2.googleapis.com/token (grant_type=authorization_code) → access_token + refresh_token
-
-刷新：POST oauth2.googleapis.com/token (grant_type=refresh_token)
-过期检查：5分钟缓冲
-```
+Code 渠道认证和刷新细节以 `docs/current/code-channels.md` 为准。当前规则包括：Codex 在 token 过期或上次刷新超过 8 天时刷新；Gemini Code 和 Claude Code 在距过期 5 分钟内刷新，并由 Gateway 侧 idle maintenance 做保底维护。
 
 ### Relay 中的刷新逻辑
 
@@ -433,8 +428,10 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
     if account.CredType == "api_key" || account.CredType == "" {
         return crypto.Decrypt(account.Credentials)
     }
-    // OAuth token — 检查过期，使用 singleflight 去重并发刷新
-    if account.TokenExpiry != nil && time.Now().After(*account.TokenExpiry) {
+    // OAuth token — 按 provider 生命周期检查，使用 singleflight 去重并发刷新
+    // Codex: token 过期或上次刷新超过 8 天
+    // Gemini Code/Claude Code: 距过期 5 分钟内
+    if shouldRefreshOAuthCredentials(account) {
         v, err, _ := refreshGroup.Do(account.ID.String(), func() (interface{}, error) {
             return refreshOAuthToken(account, database)
         })
@@ -447,8 +444,10 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 }
 ```
 
-`refreshOAuthToken` 成功后在 Gateway/本机模式下异步更新数据库。远端 `server.mode: relay`
-不直连数据库，刷新结果只在当前进程内使用；长期凭据回写后续可通过 Gateway 内部接口补齐。
+`refreshOAuthToken` 成功后在 Gateway/本机模式下同步更新数据库。远端 `server.mode: relay`
+不直连数据库，刷新结果会先更新进程内 runtime account，再通过
+`POST /internal/relay/account-update` 回写 Gateway。该回写当前是 best-effort：
+Gateway 不可达时 Relay 会保留内存中的新凭证并记录 warning，但不会持久重试。
 使用 `singleflight.Group` 防止同一账号的并发刷新。
 
 ## 7. 计费系统
@@ -456,7 +455,9 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 保持现有 PreConsume → Settle + Refund 模式，新增用户维度：
 
 - **Token 绑定用户**：每个 API Key 关联一个 User
-- **用户余额**：token_based 套餐的额度从用户余额扣
+- **用户余额**：当前运行时在没有 active token plan 时只检查用户余额为正；
+  token_based 套餐实际扣减 `token_plans.used_quota`，不从 `users.balance`
+  扣费。后续接入支付/余额结算时需要再补用户余额扣减策略。
 - **充值码兑换**：充值码增加用户余额（支付接口后期接入）
 - **管理员调整**：管理员可直接调整用户余额
 
@@ -467,18 +468,19 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 Docker Compose:
   ├── postgres
   ├── uapi (server.mode=all, Gateway + 本机 Relay)
-  └── web (Nginx 静态前端 + /api 和 /v1 反代)
+  └── web (Nginx 静态前端 + /api、/v1 和 /v1beta 反代)
 
 只有 web 暴露宿主机端口 80。PostgreSQL、Gateway 8080、本机 Relay 都只在 Docker 内部网络可见。
 
-Nginx / web container (80/443)
+Nginx / web container (80)
   ├── / → Next.js 静态文件 (/opt/uapi/web/out)
-  ├── /api/user/* → Go API Server (127.0.0.1:8080)
-  ├── /api/admin/* → Go API Server (127.0.0.1:8080)
-  ├── /v1/chat/completions → Go API Server (127.0.0.1:8080)
-  ├── /v1/responses → Go API Server (127.0.0.1:8080)
-  ├── /v1/messages → Go API Server (127.0.0.1:8080)
-  └── /v1beta/* → Go API Server (127.0.0.1:8080)
+  ├── /api/user/* → Go API Server (compose: http://uapi:8080)
+  ├── /api/admin/* → Go API Server (compose: http://uapi:8080)
+  ├── /v1/chat/completions → Go API Server (compose: http://uapi:8080)
+  ├── /v1/responses → Go API Server (compose: http://uapi:8080)
+  ├── /v1/messages → Go API Server (compose: http://uapi:8080)
+  ├── /v1/images/* → Go API Server (compose: http://uapi:8080)
+  └── /v1beta/* → Go API Server (compose: http://uapi:8080)
 
 Go Server (单进程，fasthttp)
 PostgreSQL (本地或远程)
@@ -505,4 +507,6 @@ Relay 节点不启动 PostgreSQL/Redis，只保留内存运行时配置和短期
 - 邮箱验证 — 后期加
 - 多租户/组织 — 后期加
 - 多 Gateway / 分布式控制面 — 当前单 Gateway 足够
-- WebSocket 支持 — 当前无需求
+- WebSocket Realtime API 完整双向会话 — 当前无需求；all-in-one 模式已接入
+  `/v1/responses` Responses WebSocket 的 `response.create` turn。分离式
+  Gateway/Relay 部署当前仍使用 HTTP/SSE 路径，跨 Gateway 的 WS relay 后续再做。

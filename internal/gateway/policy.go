@@ -16,17 +16,40 @@ type policyRuntime struct {
 }
 
 func (g *Gateway) loadPolicy(token db.Token) (db.AccessPolicy, bool, error) {
-	if token.PolicyID == nil || *token.PolicyID == uuid.Nil {
+	policyID, err := g.planPolicyID(token.ID)
+	if err != nil {
+		return db.AccessPolicy{}, false, err
+	}
+	if policyID == nil || *policyID == uuid.Nil {
 		return db.AccessPolicy{}, false, nil
 	}
 	var policy db.AccessPolicy
-	if err := g.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *token.PolicyID).First(&policy).Error; err != nil {
+	if err := g.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *policyID).First(&policy).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return db.AccessPolicy{}, true, fmt.Errorf("access policy disabled or not found")
+			return db.AccessPolicy{}, false, fmt.Errorf("access policy disabled or not found")
 		}
-		return db.AccessPolicy{}, true, err
+		return db.AccessPolicy{}, false, err
 	}
 	return policy, true, nil
+}
+
+func (g *Gateway) planPolicyID(tokenID uuid.UUID) (*uuid.UUID, error) {
+	var row struct {
+		PolicyID *uuid.UUID
+	}
+	if err := g.db.Table("token_plans").
+		Select("plans.policy_id").
+		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
+		Where("token_plans.token_id = ?", tokenID).
+		Order("token_plans.created_at DESC").
+		Limit(1).
+		Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	if row.PolicyID == nil || *row.PolicyID == uuid.Nil {
+		return nil, nil
+	}
+	return row.PolicyID, nil
 }
 
 func (g *Gateway) checkPolicyWindows(policy db.AccessPolicy, tokenID uuid.UUID) error {

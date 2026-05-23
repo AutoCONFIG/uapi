@@ -16,8 +16,10 @@ func anthropicResponseToInternal(body []byte) (*provider.InternalResponse, error
 		Content    json.RawMessage `json:"content"`
 		StopReason string          `json:"stop_reason"`
 		Usage      struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens             int `json:"input_tokens"`
+			OutputTokens            int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 
@@ -29,41 +31,65 @@ func anthropicResponseToInternal(body []byte) (*provider.InternalResponse, error
 		ID:    resp.ID,
 		Model: resp.Model,
 		Choices: []provider.InternalChoice{
-			{Index: 0},
+			{Index: 0, Message: provider.InternalMessage{Role: resp.Role}},
 		},
 		Usage: provider.InternalUsage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
+			PromptTokens:               resp.Usage.InputTokens,
+			CompletionTokens:           resp.Usage.OutputTokens,
+			CacheCreationInputTokens:   resp.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:       resp.Usage.CacheReadInputTokens,
 		},
+	}
+	if ir.Choices[0].Message.Role == "" {
+		ir.Choices[0].Message.Role = "assistant"
 	}
 
 	// Parse content — could be a string or array of blocks
 	var contentBlocks []map[string]interface{}
-	if err := json.Unmarshal(resp.Content, &contentBlocks); err == nil {
-		for _, block := range contentBlocks {
-			blockType, _ := block["type"].(string)
-			switch blockType {
-			case "text":
-				text, _ := block["text"].(string)
-				ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{
-					Type: "text",
-					Text: text,
-				})
-			case "tool_use":
-				id, _ := block["id"].(string)
-				name, _ := block["name"].(string)
-				args := "{}"
-				if inputVal, ok := block["input"]; ok {
-					if b, err := json.Marshal(inputVal); err == nil {
-						args = string(b)
-					}
-				}
-				ir.Choices[0].Message.ToolCalls = append(ir.Choices[0].Message.ToolCalls, provider.InternalToolCall{
-					ID:        id,
-					Name:      name,
-					Arguments: args,
-				})
+	if len(resp.Content) > 0 {
+		if err := provider.DecodeJSONUseNumber(resp.Content, &contentBlocks); err != nil {
+			return nil, fmt.Errorf("anthropic response content must be an array of blocks: %w", err)
+		}
+	}
+	for _, block := range contentBlocks {
+		if err := validateAnthropicContentBlockKeys(block); err != nil {
+			return nil, err
+		}
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text":
+			text, ok := block["text"].(string)
+			if !ok {
+				return nil, fmt.Errorf("anthropic response text block requires text")
 			}
+			ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{
+				Type: "text",
+				Text: text,
+			})
+		case "tool_use":
+			id, _ := block["id"].(string)
+			name, _ := block["name"].(string)
+			if id == "" || name == "" {
+				return nil, fmt.Errorf("anthropic response tool_use requires id and name")
+			}
+			args := "{}"
+			if inputVal, ok := block["input"]; ok {
+				b, err := json.Marshal(inputVal)
+				if err != nil {
+					return nil, fmt.Errorf("anthropic response tool_use input must be JSON-serializable: %w", err)
+				}
+				args = string(b)
+			}
+			ir.Choices[0].Message.ToolCalls = append(ir.Choices[0].Message.ToolCalls, provider.InternalToolCall{
+				ID:        id,
+				Name:      name,
+				Arguments: args,
+			})
+		case "thinking", "thinking_delta":
+			// Thinking blocks cannot be converted to non-Anthropic formats, skip them
+			continue
+		default:
+			return nil, fmt.Errorf("anthropic response content block type %q cannot be converted to non-anthropic downstream formats", blockType)
 		}
 	}
 
@@ -119,8 +145,13 @@ func internalToAnthropicResponse(resp *provider.InternalResponse) ([]byte, error
 
 	// Add tool_use blocks
 	for _, tc := range choice.Message.ToolCalls {
-		// Arguments is a JSON string; use it directly as RawMessage for "input"
-		var input json.RawMessage = []byte(tc.Arguments)
+		args := tc.Arguments
+		if args == "" {
+			args = "{}"
+		} else if !json.Valid([]byte(args)) {
+			return nil, fmt.Errorf("internal tool call arguments for %q are not valid JSON", tc.Name)
+		}
+		var input json.RawMessage = []byte(args)
 		blocks = append(blocks, contentBlock{
 			Type:  "tool_use",
 			ID:    tc.ID,
@@ -134,8 +165,10 @@ func internalToAnthropicResponse(resp *provider.InternalResponse) ([]byte, error
 
 	// Build the response
 	type anthropicUsage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens             int `json:"input_tokens"`
+		OutputTokens            int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	}
 
 	anthResp := struct {
@@ -154,8 +187,10 @@ func internalToAnthropicResponse(resp *provider.InternalResponse) ([]byte, error
 		StopReason:   stopReason,
 		StopSequence: nil,
 		Usage: anthropicUsage{
-			InputTokens:  resp.Usage.PromptTokens,
-			OutputTokens: resp.Usage.CompletionTokens,
+			InputTokens:              resp.Usage.PromptTokens,
+			OutputTokens:             resp.Usage.CompletionTokens,
+			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 		},
 	}
 

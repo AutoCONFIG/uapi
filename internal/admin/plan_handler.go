@@ -54,6 +54,7 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 	p := db.Plan{
 		Name:            req.Name,
 		Type:            req.Type,
+		PolicyID:        req.PolicyID,
 		Limits:          req.Limits,
 		ModelRatios:     req.ModelRatios,
 		CompletionRatio: req.CompletionRatio,
@@ -92,6 +93,9 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Type != nil {
 		updates["type"] = *req.Type
+	}
+	if req.PolicyID != nil {
+		updates["policy_id"] = *req.PolicyID
 	}
 	if req.Limits != nil {
 		updates["limits"] = *req.Limits

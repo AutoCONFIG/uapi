@@ -7,14 +7,28 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 )
 
-// geminiResponseToInternal parses a Gemini generateContent response into InternalResponse.
+// geminiResponseToInternal parses a Gemini generateContent API response into InternalResponse.
 func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 	var resp map[string]interface{}
-	if err := json.Unmarshal(body, &resp); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &resp); err != nil {
 		return nil, fmt.Errorf("parse gemini response: %w", err)
 	}
-	if wrapped, ok := resp["response"].(map[string]interface{}); ok {
-		resp = wrapped
+	if wrapped, exists := resp["response"]; exists {
+		switch v := wrapped.(type) {
+		case map[string]interface{}:
+			resp = v
+		case []interface{}:
+			if len(v) == 0 {
+				return nil, fmt.Errorf("gemini response wrapper array is empty")
+			}
+			first, ok := v[0].(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("gemini response wrapper array entries must be objects")
+			}
+			resp = first
+		default:
+			return nil, fmt.Errorf("gemini response wrapper must be an object or array")
+		}
 	}
 
 	ir := &provider.InternalResponse{
@@ -26,9 +40,16 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 	}
 
 	// Parse candidates
-	candidates, _ := resp["candidates"].([]interface{})
+	candidatesRaw, exists := resp["candidates"]
+	candidates, _ := candidatesRaw.([]interface{})
+	if exists && candidates == nil {
+		return nil, fmt.Errorf("gemini response candidates must be an array")
+	}
 	if len(candidates) > 0 {
-		cand, _ := candidates[0].(map[string]interface{})
+		cand, ok := candidates[0].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("gemini response candidates entries must be objects")
+		}
 		ir.Choices = []provider.InternalChoice{
 			{
 				Index: 0,
@@ -44,12 +65,23 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 		}
 
 		// Content parts
-		if cont, ok := cand["content"].(map[string]interface{}); ok {
-			parts, _ := cont["parts"].([]interface{})
+		if contRaw, exists := cand["content"]; exists {
+			cont, ok := contRaw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("gemini response candidate content must be an object")
+			}
+			partsRaw, exists := cont["parts"]
+			parts, _ := partsRaw.([]interface{})
+			if exists && parts == nil {
+				return nil, fmt.Errorf("gemini response candidate content parts must be an array")
+			}
 			for _, partRaw := range parts {
 				part, ok := partRaw.(map[string]interface{})
 				if !ok {
-					continue
+					return nil, fmt.Errorf("gemini response parts entries must be objects")
+				}
+				if err := validateGeminiPartKeys(part); err != nil {
+					return nil, err
 				}
 				// Text part → InternalContentPart
 				if text, ok := part["text"].(string); ok {
@@ -57,12 +89,24 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 						Type: "text",
 						Text: text,
 					})
+				} else if _, exists := part["text"]; exists {
+					return nil, fmt.Errorf("gemini response text part requires string text")
 				}
 				// functionCall part → InternalToolCall
 				if fc, ok := part["functionCall"].(map[string]interface{}); ok {
+					if err := validateAllowedKeys(fc, "gemini response functionCall", "name", "args"); err != nil {
+						return nil, err
+					}
 					name, _ := fc["name"].(string)
+					if name == "" {
+						return nil, fmt.Errorf("gemini response functionCall requires name")
+					}
 					args := "{}"
-					if a, err := json.Marshal(fc["args"]); err == nil {
+					if argsVal, exists := fc["args"]; exists {
+						a, err := json.Marshal(argsVal)
+						if err != nil {
+							return nil, fmt.Errorf("gemini response functionCall args must be JSON-serializable: %w", err)
+						}
 						args = string(a)
 					}
 					ir.Choices[0].Message.ToolCalls = append(ir.Choices[0].Message.ToolCalls, provider.InternalToolCall{
@@ -70,6 +114,13 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 						Name:      name,
 						Arguments: args,
 					})
+				} else if _, exists := part["functionCall"]; exists {
+					return nil, fmt.Errorf("gemini response functionCall part requires object functionCall")
+				}
+				if _, hasText := part["text"]; !hasText {
+					if _, hasCall := part["functionCall"]; !hasCall {
+						return nil, fmt.Errorf("gemini response part cannot be converted to non-gemini downstream formats")
+					}
 				}
 			}
 		}
@@ -77,10 +128,14 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 
 	// Usage metadata
 	if um, ok := resp["usageMetadata"].(map[string]interface{}); ok {
-		ir.Usage = provider.InternalUsage{
+		usage := provider.InternalUsage{
 			PromptTokens:     provider.ToInt(um["promptTokenCount"]),
 			CompletionTokens: provider.ToInt(um["candidatesTokenCount"]),
 		}
+		if cached, ok := um["cachedContentTokenCount"]; ok {
+			usage.CacheReadInputTokens = provider.ToInt(cached)
+		}
+		ir.Usage = usage
 	}
 
 	return ir, nil
@@ -90,7 +145,7 @@ func geminiCodeAssistResponseToInternal(body []byte) (*provider.InternalResponse
 	return geminiResponseToInternal(body)
 }
 
-// internalToGeminiResponse serializes an InternalResponse into Gemini generateContent response format.
+// internalToGeminiResponse serializes an InternalResponse into Gemini generateContent API response format.
 func internalToGeminiResponse(resp *provider.InternalResponse) ([]byte, error) {
 	// Build candidates
 	cand := map[string]interface{}{}
@@ -110,9 +165,12 @@ func internalToGeminiResponse(resp *provider.InternalResponse) ([]byte, error) {
 		}
 		// Tool calls → functionCall parts (reverse args: JSON string → object)
 		for _, tc := range resp.Choices[0].Message.ToolCalls {
-			args := map[string]interface{}{}
+			var args json.RawMessage = []byte("{}")
 			if tc.Arguments != "" {
-				_ = json.Unmarshal([]byte(tc.Arguments), &args)
+				if !json.Valid([]byte(tc.Arguments)) {
+					return nil, fmt.Errorf("internal tool call arguments for %q are not valid JSON", tc.Name)
+				}
+				args = json.RawMessage(tc.Arguments)
 			}
 			parts = append(parts, map[string]interface{}{
 				"functionCall": map[string]interface{}{
@@ -136,6 +194,9 @@ func internalToGeminiResponse(resp *provider.InternalResponse) ([]byte, error) {
 		"promptTokenCount":     resp.Usage.PromptTokens,
 		"candidatesTokenCount": resp.Usage.CompletionTokens,
 		"totalTokenCount":      resp.Usage.PromptTokens + resp.Usage.CompletionTokens,
+	}
+	if resp.Usage.CacheReadInputTokens > 0 {
+		usage["cachedContentTokenCount"] = resp.Usage.CacheReadInputTokens
 	}
 
 	result := map[string]interface{}{

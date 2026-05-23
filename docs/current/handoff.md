@@ -23,12 +23,14 @@ working state so the next agent can continue without extra user briefing.
 - `docs/README.md` is the documentation index.
 - `docs/current/` is the source of truth for active implementation work.
 - `docs/current/gateway-relay.md` is the current source of truth for Gateway/Relay control-plane architecture.
-- `docs/current/code-channels.md` is the current source of truth for CodeX,
+- `docs/current/code-channels.md` is the current source of truth for Codex,
   Gemini Code, Claude Code, and standard provider API alignment.
 - Runtime logging is documented in `docs/current/platform-design.md`; backend
   logs are structured JSON from `internal/logger`, controlled by
   `logging.level` in config. Current local development config uses `debug`;
-  production should normally use `info` or `warn`.
+  production should normally use `info` or `warn`. The logger has a global
+  redaction fallback for common credential fields and token-shaped strings, but
+  handlers should still avoid logging full request bodies or credentials.
 - Code channel model presets and provider quota/usage metadata display are
   documented in `docs/current/code-channels.md`; the old
   `docs/reference/cli-auth-reference.md` is only a pointer to avoid stale auth
@@ -51,12 +53,18 @@ working state so the next agent can continue without extra user briefing.
 - OAuth lifecycle follows upstream client behavior on use. UAPI adds expiry-driven
   idle maintenance only for Claude Code and Gemini Code, because their normal
   local client paths do not have a standalone long-idle keep-alive loop. Each
-  enabled Claude/Gemini OAuth account gets a timer based on provider
+  enabled Claude Code/Gemini Code OAuth account gets a timer based on provider
   `token_expiry`, with stable jitter between 60 and 5 minutes before expiry;
-  CodeX keeps Codex's own expired-token/8-day refresh rule.
+  Codex keeps the official client's expired-token/8-day refresh rule.
 - Code channel behavior must be checked against the local upstream official
   client sources listed in `docs/current/code-channels.md` before changing auth,
   refresh, metadata, or request-shaping logic.
+- Protocol conversion rule: same-protocol HTTP bodies and SSE streams are
+  preserved raw where possible (raw preservation). Cross-protocol requests/responses
+  use internal structures with graceful degradation: equivalent fields are mapped,
+  fields without target-protocol equivalents are logged with warning and skipped
+  (unless they would invalidate core prompt/tool flow), and only malformed input or
+  missing required fields cause explicit conversion errors.
 
 ## Frontend
 
@@ -81,7 +89,7 @@ Main routes:
 
 - Auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
-- Admin console: `/admin/dashboard`, `/admin/access-policies`, `/admin/relay-nodes`, `/admin/channels`,
+- Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
   `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
   `/admin/audit-logs`
 - `/admin/accounts` is a compatibility page only. Accounts are conceptually folded
@@ -127,7 +135,7 @@ internal/
 │   ├── pool.go                # Weighted round-robin pool
 │   ├── affinity.go            # Channel affinity cache
 │   ├── billing.go             # PreConsume/Settle/Refund
-│   ├── concurrency.go         # Per-token concurrency limit
+│   ├── concurrency.go         # Shared per-key concurrency limiter
 │   ├── streaming.go           # SSE stream forwarding
 │   ├── sse_reader.go          # SSE reader
 │   ├── stream_converter.go    # Stream-to-non-stream conversion
@@ -135,13 +143,13 @@ internal/
 │       ├── types.go           # Adaptor interface + internal format
 │       ├── credentials.go     # Credential extraction
 │       ├── convert.go         # Format conversion registry
-│       ├── openai/            # OpenAI Chat/Responses adaptor
+│       ├── openai/            # OpenAI Chat Completions API/OpenAI Responses API adaptor
 │       │   ├── adaptor.go
 │       │   ├── auth.go
 │       │   ├── responses.go
 │       │   ├── response_convert.go
 │       │   └── to_internal.go
-│       ├── anthropic/         # Anthropic Messages adaptor
+│       ├── anthropic/         # Anthropic Messages API adaptor
 │       │   ├── adaptor.go
 │       │   ├── crypto.go
 │       │   ├── streaming.go
@@ -216,12 +224,13 @@ POST   /api/admin/login
 GET    /api/admin/init-status
 POST   /api/admin/setup
 GET    /api/admin/dashboard
-CRUD   /api/admin/access-policies
+CRUD   /api/admin/access-policies   # policy resource used by plan management
 CRUD   /api/admin/relay-nodes
 CRUD   /api/admin/node-accounts
 CRUD   /api/admin/channels
 POST   /api/admin/channels/oauth/auth-url
 GET    /api/admin/channels/oauth/callback
+POST   /api/admin/channels/oauth/complete
 GET    /api/admin/channels/oauth/status
 POST   /api/admin/channels/oauth/bind
 CRUD   /api/admin/accounts
@@ -237,11 +246,13 @@ GET    /api/admin/audit-logs
 ### Gateway / Relay API (Gateway auth + scheduling, Relay execution)
 
 ```
-ANY    /v1/chat/completions    # OpenAI Chat Completions
-ANY    /v1/responses           # OpenAI Responses API
+ANY    /v1/chat/completions    # OpenAI Chat Completions API
+ANY    /v1/responses           # OpenAI Responses API HTTP/SSE; WS 仅 all-in-one 模式暴露
 GET    /v1/models              # 当前 API Key 可用模型列表
-ANY    /v1/messages            # Anthropic Messages
-ANY    /v1beta/*               # Gemini generateContent
+ANY    /v1/images/*            # OpenAI Images API
+ANY    /v1/messages            # Anthropic Messages API
+ANY    /v1beta/*               # Gemini generateContent API
+GET    /v1beta/models          # Gemini 格式模型列表
 ```
 
 
@@ -266,8 +277,9 @@ gateway behavior.
 - `internal/db/account.go`: OAuth accounts can store an encrypted `client_secret`
   for providers that require it during refresh.
 - `internal/db/token.go`: User API keys support `ip_whitelist`, `expires_at`,
-  `models`, `permissions`, and optional `policy_id`; Gateway enforces policy
-  limits before scheduling relay execution.
+  `models`, and `permissions`. API keys do not bind policies directly; Gateway
+  resolves access limits from the key's active subscription plan (`token_plans`
+  -> `plans.policy_id`) before scheduling relay execution.
 - `internal/user/service.go`: `CreateKeyRequest` accepts advanced key fields and
   returns them from key listing/creation responses.
 - `internal/user/dto.go` and `internal/user/service.go`: Usage endpoints return
@@ -301,8 +313,9 @@ gateway behavior.
 - `web/lib/api.ts`: Admin channel OAuth helpers are available as
   `adminApi.startChannelOAuth`, `adminApi.channelOAuthStatus`, and
   `adminApi.bindChannelOAuth`.
-- `web/app/admin/access-policies/page.tsx`: Access Policy management is available
-  for model limits, fixed-window request limits, and max concurrency.
+- `web/app/admin/plans/page.tsx`: Plan management composes plan CRUD with
+  access-policy CRUD so admins configure quota, model limits, fixed-window
+  request limits, and max concurrency from the plan page.
 - `web/app/admin/relay-nodes/page.tsx`: Relay node management is available for
   node address, region, egress IP, weight, max concurrency, status, and
   account-node bindings.
@@ -316,8 +329,9 @@ implemented path includes account-to-node bindings, Gateway scheduling of
 execution, and usage-event settlement by `request_id`.
 
 Remaining hardening items are intentionally deferred: node-specific credential
-encryption and a durable retry queue for usage events when a remote Relay cannot
-reach Gateway after a request completes.
+encryption, a durable retry queue for usage events when a remote Relay cannot
+reach Gateway after a request completes, and durable retry for remote Relay
+OAuth account-update pushes if Gateway is temporarily unreachable.
 
 ## Commands
 
@@ -346,6 +360,16 @@ npm --prefix web audit --audit-level=high
 rg "TODO|FIXME|debugger|>CR<" web internal -g "!node_modules" -g "!.next" -g "!out"
 git diff --check
 ```
+
+Current relay notes:
+
+- Default HTTP body size, WS message size, nginx `client_max_body_size`, and the
+  checked-in example configs are aligned at 256 MB. The local `config.yaml` is
+  git-ignored but mounted by default Docker Compose, so keep it aligned too.
+- SSE conversion must preserve `event:` names and significant `data:` payload
+  whitespace. Only the single optional space after `data:` may be removed.
+- The Responses WS HTTP-SSE bridge synthesizes a final `[DONE]` for Chat Completions
+  upstreams that ended after `finish_reason` without sending `[DONE]`.
 
 Also verify static routes after `npm --prefix web run serve:static`:
 

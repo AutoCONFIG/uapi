@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,8 +12,10 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	ws "github.com/fasthttp/websocket"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // WSHandler handles WebSocket connections for the /v1/responses endpoint.
@@ -42,6 +45,9 @@ func NewWSHandler(database *gorm.DB, billing *BillingService, relayer *Relayer, 
 	}
 	if cfg.StreamIdleTimeoutSeconds == 0 {
 		cfg.StreamIdleTimeoutSeconds = 120
+	}
+	if cfg.MaxMessageSizeMB == 0 {
+		cfg.MaxMessageSizeMB = 256
 	}
 
 	allowedOrigins := cfg.AllowedOrigins
@@ -88,6 +94,11 @@ func (h *WSHandler) Close() {
 
 // HandleUpgrade handles the WebSocket upgrade for /v1/responses.
 func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
+	if h.relayer != nil && h.relayer.requireInternal {
+		ctx.Error(`{"error":"gateway signature required"}`, fasthttp.StatusUnauthorized)
+		return
+	}
+
 	// 1. Extract Bearer token from header or query param
 	tokenKey := extractBearerToken(ctx)
 	if tokenKey == "" {
@@ -111,9 +122,24 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 
 	// 3. IP whitelist check
 	if token.IPWhitelist != "" {
-		if !checkIPWhitelist(ctx, token.IPWhitelist) {
+		if !checkIPWhitelist(ctx, token.IPWhitelist, h.relayer.trustedProxies) {
 			ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 			return
+		}
+	}
+	policy, hasPolicy, err := h.loadWSPolicy(token)
+	if err != nil {
+		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
+		return
+	}
+	models := token.Models
+	var sessionPolicy *wsSessionPolicy
+	if hasPolicy {
+		models = policy.AllowedModels
+		sessionPolicy = &wsSessionPolicy{
+			id:             policy.ID.String(),
+			allowedModels:  policy.AllowedModels,
+			maxConcurrency: policy.MaxConcurrency,
 		}
 	}
 
@@ -141,9 +167,9 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 	}
 
 	// 6. Upgrade to WebSocket
-	err := h.upgrader.Upgrade(ctx, func(conn *ws.Conn) {
+	err = h.upgrader.Upgrade(ctx, func(conn *ws.Conn) {
 		// Create session
-		sess, sErr := h.sessions.Create(tokenID, tokenKey, token.UserID, token.Models, token.Permissions, conn)
+		sess, sErr := h.sessions.Create(tokenID, tokenKey, token.UserID, models, token.Permissions, sessionPolicy, conn)
 		if sErr != nil {
 			logger.Component("relay.ws").Warn("session create failed", logger.F("token_id", tokenID), logger.Err(sErr))
 			h.concLimiter.Release(tokenID)
@@ -164,6 +190,43 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+func (h *WSHandler) loadWSPolicy(token db.Token) (db.AccessPolicy, bool, error) {
+	policyID, err := h.planPolicyID(token.ID)
+	if err != nil {
+		return db.AccessPolicy{}, false, err
+	}
+	if policyID == nil || *policyID == uuid.Nil {
+		return db.AccessPolicy{}, false, nil
+	}
+	var policy db.AccessPolicy
+	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *policyID).First(&policy).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return db.AccessPolicy{}, true, fmt.Errorf("access policy disabled or not found")
+		}
+		return db.AccessPolicy{}, true, err
+	}
+	return policy, true, nil
+}
+
+func (h *WSHandler) planPolicyID(tokenID uuid.UUID) (*uuid.UUID, error) {
+	var row struct {
+		PolicyID *uuid.UUID
+	}
+	if err := h.db.Table("token_plans").
+		Select("plans.policy_id").
+		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
+		Where("token_plans.token_id = ?", tokenID).
+		Order("token_plans.created_at DESC").
+		Limit(1).
+		Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	if row.PolicyID == nil || *row.PolicyID == uuid.Nil {
+		return nil, nil
+	}
+	return row.PolicyID, nil
+}
+
 // eventLoop reads messages from the client and dispatches them.
 func (h *WSHandler) eventLoop(sess *Session) {
 	defer func() {
@@ -172,8 +235,8 @@ func (h *WSHandler) eventLoop(sess *Session) {
 		h.sessions.Remove(sess)
 	}()
 
-	sess.clientConn.SetReadLimit(10 * 1024 * 1024) // 10MB max message
-	sess.clientConn.SetReadDeadline(time.Time{})   // no deadline for reading
+	sess.clientConn.SetReadLimit(int64(h.cfg.MaxMessageSizeMB) * 1024 * 1024)
+	sess.clientConn.SetReadDeadline(time.Time{}) // no deadline for reading
 
 	for {
 		msgType, msg, err := sess.clientConn.ReadMessage()
@@ -192,20 +255,20 @@ func (h *WSHandler) eventLoop(sess *Session) {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(msg, &envelope); err != nil {
-			WriteWSError(sess.clientConn, 400, "invalid_event", "invalid JSON event")
+			WriteWSErrorSession(sess, 400, "invalid_event", "invalid JSON event")
 			continue
 		}
 
 		switch envelope.Type {
 		case WSEventResponseCreate:
 			if !sess.TryAcquireTurn() {
-				WriteWSError(sess.clientConn, 429, "turn_in_progress",
+				WriteWSErrorSession(sess, 429, "turn_in_progress",
 					"a response turn is already in progress")
 				continue
 			}
 			h.handleResponseCreate(sess, msg)
 		default:
-			WriteWSError(sess.clientConn, 400, "unsupported_event",
+			WriteWSErrorSession(sess, 400, "unsupported_event",
 				"unsupported event type: "+envelope.Type)
 		}
 	}
@@ -213,39 +276,68 @@ func (h *WSHandler) eventLoop(sess *Session) {
 
 // handleResponseCreate processes a response.create event from the client.
 // The caller (eventLoop) is responsible for acquiring the turn semaphore via
-// sess.TryAcquireTurn(). This function MUST call sess.ReleaseTurn() before returning.
+// sess.TryAcquireTurn(). Synchronous failures release it here; async proxy paths
+// release it when the upstream turn actually completes.
 func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
-	defer sess.ReleaseTurn()
+	releaseTurn := true
+	defer func() {
+		if releaseTurn {
+			sess.ReleaseTurn()
+		}
+	}()
 
 	model := ParseModelFromCreateEvent(msg)
 	if model == "" {
-		WriteWSError(sess.clientConn, 400, "model_required", "model is required")
+		WriteWSErrorSession(sess, 400, "model_required", "model is required")
 		return
 	}
 
 	// Check model permissions
 	if sess.models != "" && !modelInList(model, sess.models) {
-		WriteWSError(sess.clientConn, 403, "model_forbidden", "model not allowed for token")
+		WriteWSErrorSession(sess, 403, "model_forbidden", "model not allowed for token")
 		return
 	}
 	if sess.permissions != "" && !permissionInList("responses", sess.permissions) {
-		WriteWSError(sess.clientConn, 403, "permission_forbidden", "responses permission not allowed")
+		WriteWSErrorSession(sess, 403, "permission_forbidden", "responses permission not allowed")
 		return
+	}
+	if sess.policy != nil {
+		if sess.policy.allowedModels != "" && !modelInList(model, sess.policy.allowedModels) {
+			WriteWSErrorSession(sess, 403, "model_forbidden", "model not allowed for policy")
+			return
+		}
+		if sess.policy.maxConcurrency > 0 {
+			limitKey := "policy:" + sess.policy.id
+			if !h.concLimiter.AcquireWithLimit(limitKey, sess.policy.maxConcurrency) {
+				WriteWSErrorSession(sess, 429, "policy_concurrency", "policy concurrent request limit exceeded")
+				return
+			}
+			sess.SetTurnRelease(func() { h.concLimiter.Release(limitKey) })
+		}
+		if err := h.checkWSPolicyWindows(sess.policy.id, sess.tokenID); err != nil {
+			WriteWSErrorSession(sess, 429, "policy_limit", err.Error())
+			return
+		}
 	}
 
 	// Resolve channel and account (reuse relayer logic)
 	ch, account, adaptor, creds, err := h.relayer.resolveChannelAndAccount(sess.tokenID, model)
 	if err != nil {
-		WriteWSError(sess.clientConn, 404, "no_channel", err.Error())
+		WriteWSErrorSession(sess, 404, "no_channel", err.Error())
 		return
 	}
 
 	// Per-turn billing (after successful channel resolution)
-	estTokens := 1000
+	estTokens := EstimateTokensFromCreateEvent(msg)
+	var tokenPlanID uuid.UUID
 	if h.billing != nil {
-		if err := h.billing.PreConsume(sess.tokenID, model, estTokens); err != nil {
+		planID, err := h.billing.PreConsume(sess.tokenID, model, estTokens)
+		if err != nil {
 			logger.Component("relay.ws").Warn("billing pre-consume error", logger.F("token_id", sess.tokenID), logger.F("model", model), logger.Err(err))
+			WriteWSErrorSession(sess, 429, "billing_error", "pre-consume failed")
+			return
 		}
+		tokenPlanID = planID
 	}
 
 	start := time.Now()
@@ -253,33 +345,125 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	// Decide: native WS upstream or HTTP bridge
 	// Native WS only for OpenAI Responses format channels
 	if ch.Type == "openai" && ch.APIFormat == "responses" {
-		if h.tryNativeUpstream(sess, msg, ch, account, creds, model, estTokens, start) {
+		if h.tryNativeUpstream(sess, msg, ch, account, creds, model, estTokens, tokenPlanID, start) {
+			releaseTurn = false
 			return
 		}
 	}
 
 	// Fallback: HTTP-SSE bridge
-	h.httpBridgeFallback(sess, msg, ch, account, adaptor, creds, model, estTokens, start)
+	if h.httpBridgeFallback(sess, msg, ch, account, adaptor, creds, model, estTokens, tokenPlanID, start) {
+		releaseTurn = false
+	}
+}
+
+func (h *WSHandler) checkWSPolicyWindows(policyID, tokenID string) error {
+	pid, err := uuid.Parse(policyID)
+	if err != nil {
+		return err
+	}
+	tid, err := uuid.Parse(tokenID)
+	if err != nil {
+		return err
+	}
+	var policy db.AccessPolicy
+	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", pid).First(&policy).Error; err != nil {
+		return err
+	}
+	windows := []struct {
+		typeName string
+		limit    int
+		start    time.Time
+	}{
+		{"hour", policy.HourlyLimit, wsCurrentHour()},
+		{"week", policy.WeeklyLimit, wsCurrentWeek()},
+		{"month", policy.MonthlyLimit, wsCurrentMonth()},
+	}
+	return h.db.Transaction(func(tx *gorm.DB) error {
+		for _, w := range windows {
+			if w.limit <= 0 {
+				continue
+			}
+			var usage db.PolicyUsageWindow
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", pid, tid, w.typeName, w.start).
+				First(&usage).Error
+			if err != nil {
+				if err != gorm.ErrRecordNotFound {
+					return err
+				}
+				newUsage := db.PolicyUsageWindow{
+					ID:          uuid.New(),
+					PolicyID:    pid,
+					TokenID:     tid,
+					WindowType:  w.typeName,
+					WindowStart: w.start,
+					UsedCount:   0,
+				}
+				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newUsage).Error; err != nil {
+					return err
+				}
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+					Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", pid, tid, w.typeName, w.start).
+					First(&usage).Error; err != nil {
+					return err
+				}
+			}
+			if usage.UsedCount >= w.limit {
+				return fmt.Errorf("%s request limit exceeded", w.typeName)
+			}
+			if err := tx.Model(&usage).Update("used_count", gorm.Expr("used_count + 1")).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func wsCurrentHour() time.Time {
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+}
+
+func wsCurrentWeek() time.Time {
+	now := time.Now().UTC()
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
+}
+
+func wsCurrentMonth() time.Time {
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 // ── Per-turn billing helpers ───────────────────────────────────────────────────
 
-func (h *WSHandler) settleBilling(tokenID string, estTokens, promptTokens, completionTokens int, model string) {
+func (h *WSHandler) settleBilling(tokenID string, tokenPlanID uuid.UUID, estTokens, promptTokens, completionTokens int, model string) {
 	if h.billing == nil {
 		return
 	}
 	go func() {
-		if err := h.billing.RefundAndSettle(tokenID, estTokens, promptTokens, completionTokens, model); err != nil {
+		if err := h.billing.DBTransactionRefundAndSettle(tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, 0, 0, model); err != nil {
 			logger.Component("relay.ws").Warn("billing settle error", logger.F("token_id", tokenID), logger.F("model", model), logger.Err(err))
 		}
 	}()
 }
 
-func (h *WSHandler) refundBilling(tokenID string, estTokens int) {
+func (h *WSHandler) refundBilling(tokenID string, tokenPlanID uuid.UUID, estTokens int) {
 	if h.billing == nil || estTokens == 0 {
 		return
 	}
-	go h.billing.Refund(tokenID, estTokens)
+	go func() {
+		if err := h.billing.DBTransactionRefund(tokenID, tokenPlanID, estTokens); err != nil {
+			logger.Component("relay.ws").Warn("billing refund failed",
+				logger.F("token_id", tokenID),
+				logger.F("error", err.Error()),
+			)
+		}
+	}()
 }
 
 func (h *WSHandler) writeWSLog(tokenID, channelID, accountID interface{}, model string, pt, ct int, start time.Time, statusCode int) {

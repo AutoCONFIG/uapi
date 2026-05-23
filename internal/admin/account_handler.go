@@ -2,6 +2,8 @@ package admin
 
 import (
 	"encoding/json"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/crypto"
@@ -52,6 +54,15 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "name, channel_id and credentials are required")
 		return
 	}
+	var ch db.Channel
+	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", req.ChannelID).First(&ch).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
+		return
+	}
+	if isCodeAPIFormat(ch.APIFormat) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channels require OAuth credentials")
+		return
+	}
 	encrypted, err := crypto.Encrypt(req.Credentials)
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt failed")
@@ -79,6 +90,52 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, acc)
 }
 
+func isCodeAPIFormat(format string) bool {
+	return format == "codex" || format == "gemini_code" || format == "claude_code"
+}
+
+func oauthAccountMatchesCodeChannel(acc db.Account, ch db.Channel) bool {
+	if acc.CredType != "oauth_token" {
+		return false
+	}
+	switch ch.APIFormat {
+	case "codex":
+		return tokenURLIs(acc.TokenURL, "https://auth.openai.com/oauth/token")
+	case "gemini_code":
+		return tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token")
+	case "claude_code":
+		return tokenURLIs(acc.TokenURL, "https://platform.claude.com/v1/oauth/token")
+	default:
+		return true
+	}
+}
+
+func codeOAuthAccountRequiresCodeChannel(acc db.Account) bool {
+	if acc.CredType != "oauth_token" {
+		return false
+	}
+	return tokenURLIs(acc.TokenURL, "https://auth.openai.com/oauth/token") ||
+		tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token") ||
+		tokenURLIs(acc.TokenURL, "https://platform.claude.com/v1/oauth/token")
+}
+
+func tokenURLIs(rawURL, expectedURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	expected, err := url.Parse(expectedURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, expected.Scheme) &&
+		strings.EqualFold(parsed.Hostname(), expected.Hostname()) &&
+		parsed.Port() == "" &&
+		parsed.EscapedPath() == expected.EscapedPath() &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment == ""
+}
+
 func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 	idStr := string(ctx.QueryArgs().Peek("id"))
 	id, err := uuid.Parse(idStr)
@@ -102,9 +159,41 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		updates["name"] = req.Name
 	}
 	if req.ChannelID != uuid.Nil {
+		var target db.Channel
+		if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", req.ChannelID).First(&target).Error; err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
+			return
+		}
+		if isCodeAPIFormat(target.APIFormat) && existing.CredType != "oauth_token" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channels require OAuth credentials")
+			return
+		}
+		if codeOAuthAccountRequiresCodeChannel(existing) && !isCodeAPIFormat(target.APIFormat) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code OAuth credentials can only be assigned to Code channels")
+			return
+		}
+		if isCodeAPIFormat(target.APIFormat) {
+			if !oauthAccountMatchesCodeChannel(existing, target) {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth credential provider does not match Code channel")
+				return
+			}
+		}
 		updates["channel_id"] = req.ChannelID
 	}
 	if req.Credentials != "" {
+		currentChannelID := existing.ChannelID
+		if req.ChannelID != uuid.Nil {
+			currentChannelID = req.ChannelID
+		}
+		var target db.Channel
+		if err := h.db.Where("id = ? AND deleted_at IS NULL", currentChannelID).First(&target).Error; err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
+			return
+		}
+		if isCodeAPIFormat(target.APIFormat) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channel credentials must be updated through OAuth")
+			return
+		}
 		encrypted, err := crypto.Encrypt(req.Credentials)
 		if err != nil {
 			h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt failed")

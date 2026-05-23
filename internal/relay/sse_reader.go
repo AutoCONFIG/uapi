@@ -25,11 +25,15 @@ func NewSSEStreamReader() *SSEStreamReader {
 
 func (r *SSEStreamReader) Read(p []byte) (int, error) {
 	if len(r.current) == 0 {
-		event, ok := <-r.eventCh
-		if !ok {
+		select {
+		case event, ok := <-r.eventCh:
+			if !ok {
+				return 0, io.EOF
+			}
+			r.current = event
+		case <-r.closeCh:
 			return 0, io.EOF
 		}
-		r.current = event
 	}
 	n := copy(p, r.current)
 	r.current = r.current[n:]
@@ -40,8 +44,8 @@ func (r *SSEStreamReader) Close() error {
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
-		r.mu.Unlock()
 		close(r.closeCh)
+		r.mu.Unlock()
 	})
 	return nil
 }
@@ -53,14 +57,13 @@ func (r *SSEStreamReader) Send(event []byte) bool {
 		r.mu.Unlock()
 		return false
 	}
-	// Hold lock while sending to prevent Close() from closing closeCh
-	// between our closed check and the select statement.
+	closeCh := r.closeCh
+	r.mu.Unlock()
+
 	select {
 	case r.eventCh <- event:
-		r.mu.Unlock()
 		return true
-	case <-r.closeCh:
-		r.mu.Unlock()
+	case <-closeCh:
 		return false
 	}
 }
@@ -68,6 +71,10 @@ func (r *SSEStreamReader) Send(event []byte) bool {
 // SendDone sends the standard SSE done marker.
 func (r *SSEStreamReader) SendDone() bool {
 	return r.Send([]byte("data: [DONE]\n\n"))
+}
+
+func (r *SSEStreamReader) Closed() <-chan struct{} {
+	return r.closeCh
 }
 
 // Done closes the event channel, signaling Read that the stream is finished.

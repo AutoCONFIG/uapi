@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -25,6 +26,7 @@ const (
 	DefaultScope        = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
 	CodeAssistEndpoint  = "https://cloudcode-pa.googleapis.com"
 	CodeAssistVersion   = "v1internal"
+	GeminiCLIVersion    = "0.44.0-nightly.20260512.g022e8baef"
 
 	UserTierFree     = "free-tier"
 	UserTierLegacy   = "legacy-tier"
@@ -58,20 +60,27 @@ func GenerateCodeChallenge(verifier string) string {
 // BuildAuthURL constructs the authorization URL. Gemini CLI browser auth does
 // not use PKCE; PKCE is only included when a challenge is provided.
 func BuildAuthURL(clientID, redirectURI, codeChallenge, state string) string {
-	params := url.Values{
-		"response_type": {"code"},
-		"client_id":     {clientID},
-		"redirect_uri":  {redirectURI},
-		"scope":         {DefaultScope},
-		"state":         {state},
-		"access_type":   {"offline"},
-		"prompt":        {"consent"},
+	params := [][2]string{
+		{"response_type", "code"},
+		{"client_id", clientID},
+		{"redirect_uri", redirectURI},
+		{"access_type", "offline"},
+		{"scope", DefaultScope},
+		{"state", state},
 	}
 	if codeChallenge != "" {
-		params.Set("code_challenge", codeChallenge)
-		params.Set("code_challenge_method", "S256")
+		params = append(params, [2]string{"code_challenge", codeChallenge})
+		params = append(params, [2]string{"code_challenge_method", "S256"})
 	}
-	return DefaultAuthURL + "?" + params.Encode()
+	return DefaultAuthURL + "?" + encodeGoogleQuery(params)
+}
+
+func encodeGoogleQuery(params [][2]string) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		parts = append(parts, param[0]+"="+strings.ReplaceAll(url.QueryEscape(param[1]), "+", "%20"))
+	}
+	return strings.Join(parts, "&")
 }
 
 // ExchangeCode exchanges authorization code for tokens
@@ -119,17 +128,70 @@ func setCodeAssistHeaders(req *http.Request, accessToken, model string) {
 	if model == "" {
 		model = "gemini-2.5-pro"
 	}
-	req.Header.Set("User-Agent", "GeminiCLI/unknown/"+model+" (linux; amd64; cli)")
+	req.Header.Set("User-Agent", GeminiCLIUserAgent(model))
+}
+
+func GeminiCLIUserAgent(model string) string {
+	if model == "" {
+		model = "gemini-2.5-pro"
+	}
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "x64"
+	}
+	return "GeminiCLI/" + GeminiCLIVersion + "/" + model + " (" + runtime.GOOS + "; " + arch + "; cli)"
 }
 
 func compactBody(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	text = strings.Join(strings.Fields(text), " ")
+	text = redactOAuthBody(text)
 	if text == "" {
 		return "empty response"
 	}
 	if len(text) > 300 {
 		return text[:300] + "..."
+	}
+	return text
+}
+
+func redactOAuthBody(text string) string {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key"} {
+		for {
+			lower := strings.ToLower(text)
+			idx := strings.Index(lower, strings.ToLower(key))
+			if idx < 0 {
+				break
+			}
+			sepIdx := -1
+			for i := idx + len(key); i < len(text); i++ {
+				if text[i] == ' ' || text[i] == '\t' || text[i] == '"' || text[i] == '\'' {
+					continue
+				}
+				if text[i] == ':' || text[i] == '=' || text[i] == '&' {
+					sepIdx = i
+				}
+				break
+			}
+			if sepIdx < 0 {
+				break
+			}
+			start := sepIdx + 1
+			for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '"' || text[start] == '\'') {
+				start++
+			}
+			end := start
+			for end < len(text) && text[end] != ',' && text[end] != '}' && text[end] != '"' && text[end] != '\'' && text[end] != '&' {
+				end++
+			}
+			if end <= start {
+				break
+			}
+			if strings.HasPrefix(text[start:], "[redacted]") {
+				break
+			}
+			text = text[:start] + "[redacted]" + text[end:]
+		}
 	}
 	return text
 }
@@ -361,8 +423,7 @@ func boolValue(value interface{}) bool {
 
 func retrieveUserQuota(accessToken, projectID string) (map[string]interface{}, error) {
 	reqBody := map[string]interface{}{
-		"project":   projectID,
-		"userAgent": "gemini-cli",
+		"project": projectID,
 	}
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequest(http.MethodPost, CodeAssistEndpoint+"/"+CodeAssistVersion+":retrieveUserQuota", strings.NewReader(string(body)))

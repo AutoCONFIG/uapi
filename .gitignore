@@ -5,6 +5,8 @@ upstream/
 *~
 .env
 config.yaml
+config.gateway.yaml
+config.relay.yaml
 *.db
 *.db-wal
 *.db-shm

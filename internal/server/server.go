@@ -30,6 +30,7 @@ type Server struct {
 	adminHandler *admin.Handler
 	oauthIdle    *admin.OAuthIdleMaintainer
 	userHandler  *user.Handler
+	wsHandler    *relay.WSHandler
 	router       *Router
 }
 
@@ -37,6 +38,11 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 	affinity := relay.NewAffinityCache()
 	cacheTTL, _ := time.ParseDuration(cfg.Gateway.CacheTTL)
 	pullInterval, _ := time.ParseDuration(cfg.Gateway.ConfigPullInterval)
+
+	// Create a single shared ConcurrencyLimiter for both gateway and relay in "all" mode.
+	// Always create one (limit 0 = unlimited), so it's never nil.
+	concLimiter := relay.NewConcurrencyLimiter(cfg.Server.ConcurrencyLimit)
+
 	s := &Server{
 		cfg:      cfg,
 		cfgPath:  cfgPath,
@@ -46,7 +52,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		affinity: affinity,
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
-		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL)
+		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies))
 		s.relayer.StartConfigPuller(cfg.Gateway.RelayNodeID, pullInterval)
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "gateway" {
@@ -54,12 +60,15 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		if s.relayer != nil {
 			fallback = s.relayer.HandleRelay
 		}
-		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, cfg.Server.ConcurrencyLimit, cacheTTL)
+		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies)
 		refreshPool := makeRefreshPool(database, pools)
 		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools))
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
 		s.userHandler = user.NewHandler(userSvc)
+	}
+	if cfg.Server.Mode == "all" && s.relayer != nil && database != nil {
+		s.wsHandler = relay.NewWSHandler(database, billing, s.relayer, cfg.WS)
 	}
 	s.setupRoutes()
 	return s
@@ -80,6 +89,9 @@ func (s *Server) Close() {
 	}
 	if s.oauthIdle != nil {
 		s.oauthIdle.Stop()
+	}
+	if s.wsHandler != nil {
+		s.wsHandler.Close()
 	}
 }
 
@@ -117,6 +129,10 @@ func (s *Server) handler() fasthttp.RequestHandler {
 
 		// Relay paths — shortest path, no router/middleware
 		if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") {
+			if s.wsHandler != nil && path == "/v1/responses" && isWebSocketUpgrade(ctx) {
+				s.wsHandler.HandleUpgrade(ctx)
+				return
+			}
 			if s.cfg.Server.Mode == "relay" {
 				s.relayer.HandleRelay(ctx)
 			} else {
@@ -158,6 +174,7 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/admin/channels/oauth/callback", s.adminHandler.OAuthCallback)
 	r.GET("/internal/relay/config", s.handleInternalAuth(s.adminHandler.RelayConfig))
 	r.POST("/internal/relay/usage-events", s.handleInternalAuth(s.adminHandler.UsageEvent))
+	r.POST("/internal/relay/account-update", s.handleInternalAuth(s.adminHandler.RelayAccountUpdate))
 
 	// Admin CRUD (JWT checked inside handleAdminAuth + individual handlers)
 	r.GET("/api/admin/dashboard", s.handleAdminAuth(s.adminHandler.HandleDashboard))
@@ -224,6 +241,15 @@ func (s *Server) setupRoutes() {
 
 func unavailableRelay(ctx *fasthttp.RequestCtx) {
 	ctx.Error(`{"error":"no relay route available"}`, fasthttp.StatusServiceUnavailable)
+}
+
+func isWebSocketUpgrade(ctx *fasthttp.RequestCtx) bool {
+	upgrade := string(ctx.Request.Header.Peek("Upgrade"))
+	if !strings.EqualFold(upgrade, "websocket") {
+		return false
+	}
+	connection := strings.ToLower(string(ctx.Request.Header.Peek("Connection")))
+	return strings.Contains(connection, "upgrade")
 }
 
 func (s *Server) handleInternalAuth(next fasthttp.RequestHandler) fasthttp.RequestHandler {

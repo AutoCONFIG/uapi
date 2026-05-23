@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	statusActive        = "active"
-	healthHealthy       = "healthy"
-	defaultCacheTTL     = 5 * time.Second
-	passiveFailCooldown = 10 * time.Second
+	statusActive           = "active"
+	healthHealthy          = "healthy"
+	defaultCacheTTL        = 5 * time.Minute
+	passiveFailCooldown    = 10 * time.Second
+	defaultTokenCacheSize  = 10000
 )
 
 type Gateway struct {
@@ -36,6 +37,7 @@ type Gateway struct {
 
 	internalSecret string
 	gatewayID      string
+	trustedProxies []string
 
 	mu        sync.Mutex
 	nodes     []*nodeState
@@ -44,11 +46,10 @@ type Gateway struct {
 	cacheTTL  time.Duration
 	lastError error
 
-	tokenMu sync.Mutex
-	tokens  map[string]tokenCacheEntry
-
-	modelMu    sync.Mutex
-	modelCache map[string]modelDiscoveryCacheEntry
+	tokenMu      sync.Mutex
+	tokenCache   *tokenLRUCache
+	modelMu      sync.Mutex
+	modelCache   map[string]modelDiscoveryCacheEntry
 }
 
 type nodeState struct {
@@ -74,6 +75,100 @@ type tokenCacheEntry struct {
 	expiresAt time.Time
 }
 
+// tokenLRUCache is a bounded LRU cache with TTL-based expiry.
+type tokenLRUCache struct {
+	capacity int
+	cache    map[string]*cacheNode
+	head     *cacheNode
+	tail     *cacheNode
+}
+
+type cacheNode struct {
+	key  string
+	val  tokenCacheEntry
+	prev *cacheNode
+	next *cacheNode
+}
+
+func newTokenLRUCache(capacity int) *tokenLRUCache {
+	if capacity <= 0 {
+		capacity = defaultTokenCacheSize
+	}
+	c := &tokenLRUCache{
+		capacity: capacity,
+		cache:    make(map[string]*cacheNode, capacity),
+	}
+	return c
+}
+
+func (c *tokenLRUCache) Get(key string) (tokenCacheEntry, bool) {
+	if node, ok := c.cache[key]; ok {
+		// TTL expired — remove and report miss
+		if !node.val.expiresAt.IsZero() && time.Now().After(node.val.expiresAt) {
+			c.removeNode(node)
+			delete(c.cache, node.key)
+			return tokenCacheEntry{}, false
+		}
+		c.moveToFront(node)
+		return node.val, true
+	}
+	return tokenCacheEntry{}, false
+}
+
+func (c *tokenLRUCache) Put(key string, entry tokenCacheEntry) {
+	if node, ok := c.cache[key]; ok {
+		node.val = entry
+		c.moveToFront(node)
+		return
+	}
+	// Evict if at capacity
+	for len(c.cache) >= c.capacity {
+		evicted := c.tail
+		if evicted != nil {
+			c.removeNode(evicted)
+			delete(c.cache, evicted.key)
+		}
+	}
+	node := &cacheNode{key: key, val: entry}
+	c.cache[key] = node
+	c.pushFront(node)
+}
+
+func (c *tokenLRUCache) moveToFront(node *cacheNode) {
+	if node == c.head {
+		return
+	}
+	c.removeNode(node)
+	c.pushFront(node)
+}
+
+func (c *tokenLRUCache) removeNode(node *cacheNode) {
+	if node.prev != nil {
+		node.prev.next = node.next
+	} else {
+		c.head = node.next
+	}
+	if node.next != nil {
+		node.next.prev = node.prev
+	} else {
+		c.tail = node.prev
+	}
+	node.prev = nil
+	node.next = nil
+}
+
+func (c *tokenLRUCache) pushFront(node *cacheNode) {
+	node.prev = nil
+	node.next = c.head
+	if c.head != nil {
+		c.head.prev = node
+	}
+	c.head = node
+	if c.tail == nil {
+		c.tail = node
+	}
+}
+
 type authenticatedToken struct {
 	token     db.Token
 	policy    db.AccessPolicy
@@ -86,9 +181,12 @@ type relayRequest struct {
 	MaxTokens int    `json:"max_tokens,omitempty"`
 }
 
-func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimit int, cacheTTL time.Duration) *Gateway {
+func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string) *Gateway {
 	if cacheTTL <= 0 {
 		cacheTTL = defaultCacheTTL
+	}
+	if concLimiter == nil {
+		concLimiter = relay.NewConcurrencyLimiter(0)
 	}
 	return &Gateway{
 		db:             database,
@@ -97,8 +195,9 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 		cacheTTL:       cacheTTL,
 		internalSecret: internalSecret,
 		gatewayID:      gatewayID,
-		limiter:        relay.NewConcurrencyLimiter(concLimit),
-		tokens:         make(map[string]tokenCacheEntry),
+		limiter:        concLimiter,
+		trustedProxies: trustedProxies,
+		tokenCache:     newTokenLRUCache(defaultTokenCacheSize),
 		modelCache:     make(map[string]modelDiscoveryCacheEntry),
 		client: &fasthttp.Client{
 			ReadTimeout:                   0,
@@ -145,8 +244,6 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	limitKey := tokenID
 	if authInfo.hasPolicy && authInfo.policy.MaxConcurrency > 0 {
 		limitKey = authInfo.policy.ID.String()
-	}
-	if authInfo.hasPolicy && authInfo.policy.MaxConcurrency > 0 {
 		if !g.limiter.AcquireWithLimit(limitKey, authInfo.policy.MaxConcurrency) {
 			ctx.Error(`{"error":"concurrent request limit exceeded"}`, fasthttp.StatusTooManyRequests)
 			return
@@ -193,7 +290,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 				return
 			}
 		}
-		if err := g.billing.PreConsume(tokenID, req.Model, estimatedTokens); err != nil {
+		if _, err := g.billing.PreConsume(tokenID, req.Model, estimatedTokens); err != nil {
 			logger.Warnf("gateway.billing", "pre-consume failed", logger.F("token_id", tokenID), logger.Err(err))
 		}
 	}
@@ -203,7 +300,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	upResp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(upReq)
 
-	if err := buildRequest(ctx, upReq, node.BaseURL); err != nil {
+	if err := g.buildRequest(ctx, upReq, node.BaseURL); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
 			go g.billing.Refund(tokenID, estimatedTokens)
@@ -220,7 +317,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		Model:           req.Model,
 		EstimatedTokens: estimatedTokens,
 		Precharged:      precharged,
-		ClientIP:        clientIP(ctx),
+		ClientIP:        g.clientIP(ctx),
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
 		AccountID:       route.AccountID.String(),
@@ -236,11 +333,16 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	if err := g.client.Do(upReq, upResp); err != nil {
 		fasthttp.ReleaseResponse(upResp)
-		logger.Warnf("gateway.proxy", "relay proxy failed", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
+		logger.Warnf("gateway.proxy", "relay proxy failed, trying local fallback", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
 		releaseNode(true)
 		releaseNode = nil
 		if precharged {
 			go g.billing.Refund(tokenID, estimatedTokens)
+		}
+		// Fallback to local relayer when external relay fails
+		if g.fallback != nil {
+			g.fallback(ctx)
+			return
 		}
 		ctx.Error(`{"error":"relay node unavailable"}`, fasthttp.StatusBadGateway)
 		return
@@ -352,7 +454,7 @@ func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticated
 		ctx.Error(`{"error":"token expired"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
 	}
-	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist) {
+	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
@@ -436,7 +538,7 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 		ctx.Error(`{"error":"token expired"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
 	}
-	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist) {
+	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
@@ -464,7 +566,7 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 func (g *Gateway) getToken(key string) (db.Token, error) {
 	now := time.Now()
 	g.tokenMu.Lock()
-	if entry, ok := g.tokens[key]; ok && now.Before(entry.expiresAt) {
+	if entry, ok := g.tokenCache.Get(key); ok && now.Before(entry.expiresAt) {
 		g.tokenMu.Unlock()
 		return entry.token, nil
 	}
@@ -476,7 +578,7 @@ func (g *Gateway) getToken(key string) (db.Token, error) {
 		return db.Token{}, err
 	}
 	g.tokenMu.Lock()
-	g.tokens[key] = tokenCacheEntry{token: token, expiresAt: now.Add(g.cacheTTL)}
+	g.tokenCache.Put(key, tokenCacheEntry{token: token, expiresAt: now.Add(g.cacheTTL)})
 	g.tokenMu.Unlock()
 	return token, nil
 }
@@ -615,7 +717,7 @@ func (g *Gateway) markPassiveFailure(id uuid.UUID) {
 	}
 }
 
-func buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL string) error {
+func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL string) error {
 	path := string(ctx.RequestURI())
 	target := baseURL + path
 	if _, err := url.ParseRequestURI(target); err != nil {
@@ -627,7 +729,7 @@ func buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL strin
 	out.Header.Del("Proxy-Connection")
 	out.Header.Del("Keep-Alive")
 	out.Header.Del("Transfer-Encoding")
-	out.Header.Set("X-Forwarded-For", clientIP(ctx))
+	out.Header.Set("X-Forwarded-For", g.clientIP(ctx))
 	out.Header.Set("X-Forwarded-Proto", string(ctx.URI().Scheme()))
 	return nil
 }
@@ -703,13 +805,13 @@ func modelFromRequestPath(path, bodyModel string) string {
 	return strings.TrimSpace(rest)
 }
 
-func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string) bool {
+func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string, trustedProxies []string) bool {
 	for _, allowedIP := range strings.Split(whitelist, ",") {
 		allowedIP = strings.TrimSpace(allowedIP)
 		if allowedIP == "" {
 			continue
 		}
-		for _, clientIP := range clientIPCandidates(ctx) {
+		for _, clientIP := range clientIPCandidates(ctx, trustedProxies) {
 			if allowedIP == clientIP {
 				return true
 			}
@@ -718,8 +820,17 @@ func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string) bool {
 	return false
 }
 
-func clientIPCandidates(ctx *fasthttp.RequestCtx) []string {
-	candidates := []string{ctx.RemoteIP().String()}
+// clientIPCandidates returns candidate client IPs for whitelist matching.
+// Forwarded headers are only considered when the direct connection IP is a trusted proxy.
+func clientIPCandidates(ctx *fasthttp.RequestCtx, trustedProxies []string) []string {
+	remoteIP := ctx.RemoteIP().String()
+	candidates := []string{remoteIP}
+
+	// Only trust forwarded headers if the direct connection is from a trusted proxy
+	if !isTrustedProxy(remoteIP, trustedProxies) {
+		return candidates
+	}
+
 	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
 		candidates = append(candidates, xRealIP)
 	}
@@ -732,8 +843,18 @@ func clientIPCandidates(ctx *fasthttp.RequestCtx) []string {
 	return candidates
 }
 
-func clientIP(ctx *fasthttp.RequestCtx) string {
-	ips := clientIPCandidates(ctx)
+// isTrustedProxy checks if the given IP is in the trusted proxies list.
+func isTrustedProxy(ip string, trustedProxies []string) bool {
+	for _, trusted := range trustedProxies {
+		if strings.TrimSpace(trusted) == ip {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gateway) clientIP(ctx *fasthttp.RequestCtx) string {
+	ips := clientIPCandidates(ctx, g.trustedProxies)
 	if len(ips) == 0 {
 		return ""
 	}

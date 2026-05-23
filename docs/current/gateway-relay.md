@@ -89,10 +89,18 @@ The model set is the intersection of:
 - models discovered from enabled regular API-key channels by calling native
   upstream model-list endpoints and falling back to OpenAI-compatible
   `/v1/models`;
-- the current API key's `tokens.models`, or its bound Access Policy
-  `allowed_models` when a policy is present.
+- the current API key's active subscription plan policy (`token_plans` ->
+  `plans.policy_id` -> `access_policies.allowed_models`) when a plan policy is
+  configured.
 
-This is intentional for Code channels because CodeX/Gemini Code/Claude Code do
+For regular API channels, an empty channel `models` field means the channel does
+not impose a local model allow-list and may route any model that passes the
+downstream token and plan-policy checks. This matches the admin UI placeholder "留空表示不限制"
+and lets regular API-key channels rely on upstream model discovery. Code
+channels still use explicit preset/configured models because their upstream Code
+client paths do not expose a regular model-list endpoint.
+
+This is intentional for Code channels because Codex/Gemini Code/Claude Code do
 not expose a stable public model-list endpoint equivalent to regular provider
 APIs. Their available model set is represented by UAPI channel configuration,
 which is initially pre-filled from the local official client source presets.
@@ -103,15 +111,30 @@ with a short cache.
 
 Config sync should stay simple for the current scale:
 
-- Relay pulls assigned runtime config from Gateway on a fixed interval, initially 5 seconds.
+- Relay pulls assigned runtime config from Gateway on `gateway.config_pull_interval`,
+  initially 5 seconds. Pull failures use exponential backoff up to 60 seconds;
+  successful pulls reset the interval.
 - Config has a version so Relay can skip unchanged config.
 - Request hot paths only read local memory.
 - Relay keeps channel/account pools, cooldown state, and assigned credentials in memory.
 - Redis is not used for Relay runtime state at the current scale; adding it would add network latency and operational cost without improving the hot path.
 - Short config delay is acceptable.
 - If Gateway disables an account/node, Gateway immediately stops scheduling new requests to it even before Relay pulls the next config.
+- Runtime config versioning includes disabled or soft-deleted bindings,
+  accounts, and channels assigned to the node. That makes removals visible to
+  Relay on the next pull instead of leaving stale in-memory routes active.
 
-Long polling, WebSocket, gRPC stream, and mTLS are not current requirements.
+Long polling, gRPC stream, and mTLS are not current requirements. WebSocket is
+currently limited to all-in-one `/v1/responses` turn handling; split
+Gateway/Relay deployments continue to use HTTP/SSE relay paths for Responses
+until WS relay across Gateway nodes is exposed.
+
+Remote Relay OAuth refreshes are pushed back to Gateway through the internal
+account-update endpoint after the local in-memory account is refreshed. Gateway
+only accepts fresher OAuth updates for the same account/channel and keeps
+credentials encrypted at rest. The push is currently best-effort: Relay keeps
+the fresher credential in memory and logs a warning if Gateway is unreachable,
+but durable retry for account-update is a deferred hardening item.
 
 ## Security
 
@@ -125,7 +148,7 @@ Long polling, WebSocket, gRPC stream, and mTLS are not current requirements.
 
 The binary supports three modes via `server.mode`:
 
-- `all`: Gateway, admin/user APIs, and local in-process Relay in one process. This is the default for small single-machine deployments.
+- `all`: Gateway, admin/user APIs, and local in-process Relay in one process. This is the default for small single-machine deployments. Gateway and the in-process Relay share the same `ConcurrencyLimiter`, so policy/token concurrency is counted once across Gateway admission and local Relay execution.
 - `gateway`: Gateway/control plane only. It owns PostgreSQL and schedules remote Relay nodes.
 - `relay`: execution-only node. It does not connect to PostgreSQL; it pulls assigned runtime config from Gateway and accepts only Gateway-signed requests.
 
@@ -135,6 +158,11 @@ Recommended Docker layout:
 - Same-machine split test: `docker-compose.gateway.yaml` plus `docker-compose.relay.yaml` share the internal `uapi-net` network. Relay publishes no host port; Gateway reaches it as `http://relay:8081`.
 - Remote Relay machine: `docker-compose.relay.remote.yaml` runs only the Relay binary with `server.mode: relay` and publishes `8081` for Gateway-to-Relay traffic.
 
+Before starting split or remote Relay compose files, copy
+`config.relay.example.yaml` to `config.relay.yaml` and fill
+`gateway.control_url`, `gateway.relay_node_id`, `gateway.internal_secret`, and
+the shared encryption key. `config.relay.yaml` is intentionally ignored by git.
+
 ## Access Policy Scope
 
 Access Policy first version includes only:
@@ -143,14 +171,48 @@ Access Policy first version includes only:
 - Hourly request limit.
 - Weekly request limit.
 - Monthly request limit.
-- Max concurrency.
+- Max concurrency (per plan policy when the active subscription plan has a policy; otherwise per-token).
 
 It intentionally does not limit:
 
 - Streaming.
 - Endpoint type (`chat`, `responses`, `messages`, `gemini`).
 
-Policies are bound to API keys. If a token has no policy, legacy `tokens.models` behavior remains compatible.
+Policies are bound to plans, not API keys. The runtime source of truth is the
+active token subscription (`token_plans`) and the subscribed plan's
+`plans.policy_id`. API keys keep only their own security fields such as
+`tokens.models`, `tokens.permissions`, expiry, and IP whitelist; they do not
+store or override policy IDs.
+
+## Format Conversion
+
+Relay follows a Bifrost-style adapter pipeline and preserves raw bodies only
+when the upstream and downstream are the same standard protocol:
+
+- Detect the downstream client format from the request path: OpenAI Chat Completions API, OpenAI Responses API, Anthropic Messages API, or Gemini generateContent API.
+- For cross-protocol requests, convert into UAPI's internal request structure,
+  then serialize to the selected upstream channel format.
+- For same-protocol requests/responses, keep the standard body/stream intact
+  where that is safer than rebuilding a narrower internal schema.
+- Cross-protocol conversion follows a coarse, Bifrost-style degradation model:
+  fields that have an equivalent target-protocol representation are mapped;
+  fields that cannot be represented and do not affect the core prompt/tool
+  flow are skipped with a warning and retained only for same-protocol raw
+  preservation/ExtraParams passthrough. Only malformed input or semantics that
+  would make the target request invalid are rejected with an explicit conversion
+  error.
+- For streaming, keep conversion incremental: normalize upstream SSE chunks to OpenAI Chat Completions-style chunks and immediately format those chunks as the downstream stream protocol.
+- Same-protocol streaming preserves the upstream SSE event body. OpenAI Chat Completions API
+  streams only add a final `[DONE]` marker when the upstream omitted it; Gemini,
+  Anthropic, and Responses streams keep native event fields and usage intact.
+- SSE normalization preserves `event:` names for converters and removes only the
+  single optional space after `data:`. Do not trim the remaining payload: leading
+  or trailing spaces may be valid JSON string content in multi-line SSE data.
+- The `/v1/responses` WS HTTP-SSE bridge feeds a synthetic `[DONE]` to the
+  OpenAI Chat Completions API-to-OpenAI Responses API converter at EOF when the upstream sent a terminal
+  `finish_reason` but omitted `[DONE]`, matching the HTTP streaming path.
+
+This avoids sending OpenAI Chat Completions API SSE to OpenAI Responses API, Gemini API, or Anthropic Messages API clients and avoids buffering full streams just to translate protocol envelopes.
 
 ## Current Implementation Status
 
@@ -165,9 +227,24 @@ Implemented now:
 - Gateway-to-Relay internal HMAC signatures.
 - Relay internal signature verification and optional `gateway.require_internal`.
 - Relay runtime config pull into in-memory channel/account pools.
-- Usage event reporting to Gateway and idempotent settlement by `request_id`.
+- Usage event reporting to Gateway and idempotent settlement by `request_id`;
+  remote pre-consume also records `token_plan_id` so final settlement/refund
+  targets the same token-plan row that was pre-charged.
 - Relay-only runtime mode without PostgreSQL/Redis.
 - Local fallback to in-process Relay when there are no active remote Relay nodes.
+- In all-in-one deployments, `/v1/responses` WebSocket turns hold a per-session
+  turn lock until the upstream native WS or HTTP-SSE bridge finishes, and
+  upstream WS pool capacity is released when the turn is discarded. WS request
+  message size defaults to `ws.max_message_size_mb: 256`, aligned with the
+  HTTP/nginx body limit. Split Gateway/Relay deployments currently use HTTP/SSE
+  relay paths for `/v1/responses`; WS relay across Gateway nodes is not yet
+  exposed.
+- Streaming billing settles only after a valid terminal event. Successful
+  terminal events include normal completion and standard partial-completion
+  terminals such as OpenAI Responses `response.incomplete` with valid
+  `incomplete_details`. Upstream failure terminals, conversion error chunks,
+  scanner errors, client disconnects, or streams ending without a terminal event
+  are recorded as failures and refund the pre-consumed estimate.
 
 Still to implement:
 

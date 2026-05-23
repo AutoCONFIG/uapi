@@ -6,7 +6,7 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 
 ## 特性
 
-- **多供应商支持** — OpenAI (Chat Completions / Responses API)、Anthropic Messages、Google Gemini，统一转为内部格式并按需互转
+- **多供应商支持** — OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API，统一转为内部格式并按需互转
 - **OpenAI 兼容接口** — 下游客户端只需对接 `/v1/chat/completions`，即可路由到任意供应商
 - **多账号池 & 加权轮询** — 同一渠道可挂载多个上游账号，按权重自动调度
 - **API Key 管理** — 用户自助创建密钥，支持 IP 白名单、过期时间、模型限制和端点权限
@@ -14,7 +14,7 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 - **管理后台** — 渠道管理、账号管理、用户管理、套餐管理、操作审计
 - **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
 - **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
-- **Code 客户端接入** — 支持 CodeX、Gemini Code、Claude Code 的 OAuth 登录、账号元数据同步和自动刷新
+- **Code 客户端接入** — 支持 Codex、Gemini Code、Claude Code 的 OAuth 登录、账号元数据同步和自动刷新
 - **流式转发** — SSE 流式响应透明转发，支持流式转非流式
 
 ## 快速开始
@@ -46,6 +46,7 @@ make build
 
 ```bash
 cp config.example.yaml config.yaml
+# 首次启动会自动写入随机 jwt_secret/encryption_key/internal_secret
 docker compose up -d --build
 ```
 
@@ -53,11 +54,13 @@ docker compose up -d --build
 
 ```bash
 cp config.gateway.example.yaml config.gateway.yaml
+# 首次启动会自动写入随机 jwt_secret/encryption_key/internal_secret
 docker compose -f docker-compose.gateway.yaml up -d --build
 
 cp config.relay.example.yaml config.relay.yaml
 # 在后台创建 Relay Node，base_url 填 http://relay:8081
-# 把节点 ID 写入 config.relay.yaml 的 gateway.relay_node_id
+# 把 Gateway 的 security.encryption_key、gateway.internal_secret
+# 以及节点 ID 写入 config.relay.yaml
 docker compose -f docker-compose.relay.yaml up -d --build
 ```
 
@@ -65,7 +68,8 @@ docker compose -f docker-compose.relay.yaml up -d --build
 
 ```bash
 cp config.relay.example.yaml config.relay.yaml
-# 编辑 gateway.control_url、gateway.relay_node_id、internal_secret、encryption_key
+# 编辑 gateway.control_url、gateway.relay_node_id，并复制 Gateway 的
+# gateway.internal_secret 与 security.encryption_key
 docker compose -f docker-compose.relay.remote.yaml up -d --build
 ```
 
@@ -107,6 +111,7 @@ docs/              项目文档
 | 路径前缀 | 说明 |
 |----------|------|
 | `/v1/*` | 中继接口 (OpenAI 兼容) |
+| `/v1beta/*` | Gemini 兼容中继接口 |
 | `/api/user/*` | 用户 API |
 | `/api/admin/*` | 管理后台 API |
 

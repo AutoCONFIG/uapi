@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
@@ -32,19 +33,29 @@ func (s *geminiStreamState) convertLine(line []byte, model string) []byte {
 	}
 
 	var chunk map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return nil
+	if err := provider.DecodeJSONUseNumber([]byte(data), &chunk); err != nil {
+		return buildGeminiStreamError(s.roleID, model, "gemini streaming response is not valid JSON")
 	}
 
 	// Gemini may wrap chunks: {"method":"generateContentStream","response":[...]}
-	if resp, ok := chunk["response"].([]interface{}); ok {
+	if wrapped, ok := chunk["response"]; ok {
+		respObj, ok := wrapped.(map[string]interface{})
+		if ok {
+			return s.convertChunk(respObj, model)
+		}
+		resp, ok := wrapped.([]interface{})
+		if !ok {
+			return buildGeminiStreamError(s.roleID, model, "gemini streaming response wrapper must be an object or array")
+		}
 		var out []byte
 		for _, r := range resp {
-			if rMap, ok := r.(map[string]interface{}); ok {
-				converted := s.convertChunk(rMap, model)
-				if converted != nil {
-					out = append(out, converted...)
-				}
+			rMap, ok := r.(map[string]interface{})
+			if !ok {
+				return buildGeminiStreamError(s.roleID, model, "gemini streaming response wrapper entries must be objects")
+			}
+			converted := s.convertChunk(rMap, model)
+			if converted != nil {
+				out = append(out, converted...)
 			}
 		}
 		return out
@@ -59,7 +70,11 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 		s.model = model
 	}
 
-	candidates, _ := chunk["candidates"].([]interface{})
+	candidatesRaw, exists := chunk["candidates"]
+	candidates, _ := candidatesRaw.([]interface{})
+	if exists && candidates == nil {
+		return buildGeminiStreamError(s.roleID, s.model, "gemini streaming candidates must be an array")
+	}
 	if len(candidates) == 0 {
 		if um, ok := chunk["usageMetadata"].(map[string]interface{}); ok {
 			pt := provider.ToInt(um["promptTokenCount"])
@@ -69,9 +84,18 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 		return nil
 	}
 
-	cand, _ := candidates[0].(map[string]interface{})
-	cont, _ := cand["content"].(map[string]interface{})
-	parts, _ := cont["parts"].([]interface{})
+	cand, ok := candidates[0].(map[string]interface{})
+	if !ok {
+		return buildGeminiStreamError(s.roleID, s.model, "gemini streaming candidates entries must be objects")
+	}
+	cont, ok := cand["content"].(map[string]interface{})
+	if !ok {
+		return buildGeminiStreamError(s.roleID, s.model, "gemini streaming candidate content must be an object")
+	}
+	parts, ok := cont["parts"].([]interface{})
+	if !ok {
+		return buildGeminiStreamError(s.roleID, s.model, "gemini streaming candidate content parts must be an array")
+	}
 	finishReason := ""
 	if fr, ok := cand["finishReason"].(string); ok {
 		finishReason = mapGeminiFinishReason(fr)
@@ -92,15 +116,33 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 	for _, partRaw := range parts {
 		part, ok := partRaw.(map[string]interface{})
 		if !ok {
-			continue
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming parts entries must be objects")
 		}
+		if err := validateGeminiPartKeys(part); err != nil {
+			return buildGeminiStreamError(s.roleID, s.model, err.Error())
+		}
+		handled := false
 		if text, ok := part["text"].(string); ok {
+			handled = true
 			contentText += text
+		} else if _, exists := part["text"]; exists {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming text part requires string text")
 		}
 		if fc, ok := part["functionCall"].(map[string]interface{}); ok {
+			handled = true
+			if err := validateAllowedKeys(fc, "gemini streaming functionCall", "name", "args"); err != nil {
+				return buildGeminiStreamError(s.roleID, s.model, err.Error())
+			}
 			name, _ := fc["name"].(string)
+			if name == "" {
+				return buildGeminiStreamError(s.roleID, s.model, "gemini streaming functionCall requires name")
+			}
 			args := "{}"
-			if a, err := json.Marshal(fc["args"]); err == nil {
+			if argsVal, exists := fc["args"]; exists {
+				a, err := json.Marshal(argsVal)
+				if err != nil {
+					return buildGeminiStreamError(s.roleID, s.model, "gemini streaming functionCall args must be JSON-serializable")
+				}
 				args = string(a)
 			}
 			toolCalls = append(toolCalls, map[string]interface{}{
@@ -112,6 +154,9 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 					"arguments": args,
 				},
 			})
+		}
+		if !handled {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming response part cannot be converted to non-gemini downstream formats")
 		}
 	}
 
@@ -140,15 +185,32 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 	return result
 }
 
+func buildGeminiStreamError(id, model, message string) []byte {
+	if id == "" {
+		id = "chatcmpl-gemini"
+	}
+	payload := map[string]interface{}{
+		"id":     id,
+		"object": "error",
+		"model":  model,
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "conversion_error",
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return []byte("data: " + string(b) + "\n\n")
+}
+
 func buildGeminiChunk(id, model string, delta map[string]interface{}, finishReason string) []byte {
 	finishVal := interface{}(nil)
 	if finishReason != "" {
 		finishVal = finishReason
 	}
 	chunk := map[string]interface{}{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"model":   model,
+		"id":     id,
+		"object": "chat.completion.chunk",
+		"model":  model,
 		"choices": []interface{}{
 			map[string]interface{}{
 				"index":         0,
@@ -167,9 +229,9 @@ func buildGeminiChunkWithUsage(id, model string, delta map[string]interface{}, f
 		finishVal = finishReason
 	}
 	chunk := map[string]interface{}{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"model":   model,
+		"id":     id,
+		"object": "chat.completion.chunk",
+		"model":  model,
 		"choices": []interface{}{
 			map[string]interface{}{
 				"index":         0,
@@ -190,15 +252,10 @@ func buildGeminiChunkWithUsage(id, model string, delta map[string]interface{}, f
 // convertGeminiSSEBuffer converts a full buffered Gemini SSE body to OpenAI SSE format.
 func convertGeminiSSEBuffer(sseBody []byte) []byte {
 	state := &geminiStreamState{}
-	lines := strings.Split(string(sseBody), "\n")
 	var outLines []string
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		converted := state.convertLine([]byte(line), "")
+	for _, event := range splitGeminiSSEEvents(sseBody) {
+		converted := state.convertLine(normalizeGeminiSSEEvent(event), "")
 		if converted != nil {
 			for _, chunk := range strings.Split(strings.TrimRight(string(converted), "\n"), "\n\n") {
 				if chunk != "" {
@@ -214,15 +271,58 @@ func convertGeminiSSEBuffer(sseBody []byte) []byte {
 	return sseBody
 }
 
+func normalizeGeminiSSEEvent(event []byte) []byte {
+	lines := strings.Split(strings.TrimRight(string(event), "\n"), "\n")
+	dataParts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			if strings.HasPrefix(data, " ") {
+				data = strings.TrimPrefix(data, " ")
+			}
+			dataParts = append(dataParts, data)
+		}
+	}
+	if len(dataParts) == 0 {
+		return nil
+	}
+	return []byte("data: " + strings.Join(dataParts, "\n") + "\n\n")
+}
+
+func splitGeminiSSEEvents(buf []byte) [][]byte {
+	parts := strings.Split(strings.TrimRight(string(buf), "\n"), "\n\n")
+	out := make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			out = append(out, []byte(part+"\n\n"))
+		}
+	}
+	return out
+}
+
 // --- Reverse SSE conversion: OpenAI SSE → Gemini SSE ---
 
 // geminiReverseState tracks state for converting OpenAI SSE chunks back to Gemini format.
 type geminiReverseState struct {
-	model string
+	model        string
+	toolCalls    map[int]*geminiToolCall
+	toolOrder    []int
+	toolsFlushed bool
+}
+
+type geminiToolCall struct {
+	Name      string
+	Arguments strings.Builder
 }
 
 func newGeminiReverseState() *geminiReverseState {
-	return &geminiReverseState{}
+	return &geminiReverseState{toolCalls: make(map[int]*geminiToolCall)}
+}
+
+func NewReverseStreamConverter() func([]byte) []byte {
+	state := newGeminiReverseState()
+	return state.convertReverseLine
 }
 
 // convertReverseLine converts a single OpenAI SSE data line to Gemini SSE format.
@@ -235,7 +335,7 @@ func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
 	}
 	data := strings.TrimPrefix(lineStr, "data: ")
 	if data == "[DONE]" {
-		return []byte("data: [DONE]\n\n")
+		return nil
 	}
 
 	var chunk struct {
@@ -251,7 +351,7 @@ func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return nil
+		return buildGeminiReverseStreamError("invalid OpenAI SSE JSON for Gemini conversion")
 	}
 
 	if chunk.Model != "" {
@@ -273,7 +373,10 @@ func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
 	parts := []interface{}{}
 
 	// Text content
-	if content, ok := choice.Delta["content"].(string); ok && content != "" {
+	if hasOpenAIReasoningDelta(choice.Delta) {
+		return buildGeminiReverseStreamError("OpenAI reasoning deltas cannot be converted to Gemini text parts")
+	}
+	if content := openAITextDelta(choice.Delta); content != "" {
 		parts = append(parts, map[string]interface{}{
 			"text": content,
 		})
@@ -284,30 +387,61 @@ func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
 		for _, tcRaw := range tcs {
 			tc, ok := tcRaw.(map[string]interface{})
 			if !ok {
-				continue
+				return buildGeminiReverseStreamError("OpenAI tool_calls entries must be objects for Gemini conversion")
 			}
 			fn, _ := tc["function"].(map[string]interface{})
 			if fn == nil {
-				continue
+				return buildGeminiReverseStreamError("OpenAI tool_call function must be an object for Gemini conversion")
+			}
+			idx := provider.ToInt(tc["index"])
+			state := s.toolCalls[idx]
+			if state == nil {
+				state = &geminiToolCall{}
+				s.toolCalls[idx] = state
+				s.toolOrder = append(s.toolOrder, idx)
 			}
 			name, _ := fn["name"].(string)
-			argsStr, _ := fn["arguments"].(string)
-			args := map[string]interface{}{}
-			if argsStr != "" {
-				_ = json.Unmarshal([]byte(argsStr), &args)
+			if name != "" {
+				state.Name = name
+			}
+			if argsVal, exists := fn["arguments"]; exists {
+				argsStr, ok := argsVal.(string)
+				if !ok {
+					return buildGeminiReverseStreamError("OpenAI tool call arguments must be a string for Gemini conversion")
+				}
+				if argsStr != "" {
+					state.Arguments.WriteString(argsStr)
+				}
+			}
+		}
+	}
+
+	if choice.FinishReason != nil && len(s.toolCalls) > 0 && !s.toolsFlushed {
+		for _, idx := range s.toolOrder {
+			state := s.toolCalls[idx]
+			if state == nil || state.Name == "" {
+				return buildGeminiReverseStreamError("OpenAI tool call is missing function name for Gemini conversion")
+			}
+			var args json.RawMessage = []byte("{}")
+			if state.Arguments.Len() > 0 {
+				if !json.Valid([]byte(state.Arguments.String())) {
+					return buildGeminiReverseStreamError("OpenAI tool call arguments must be valid JSON for Gemini conversion")
+				}
+				args = json.RawMessage(state.Arguments.String())
 			}
 			parts = append(parts, map[string]interface{}{
 				"functionCall": map[string]interface{}{
-					"name": name,
+					"name": state.Name,
 					"args": args,
 				},
 			})
 		}
+		s.toolsFlushed = true
 	}
 
 	// Role-only delta (skip, Gemini doesn't need it)
 	if len(parts) == 0 {
-		if choice.FinishReason == nil && chunk.Usage == nil {
+		if choice.FinishReason == nil && (chunk.Usage == nil || (chunk.Usage.PromptTokens == 0 && chunk.Usage.CompletionTokens == 0)) {
 			return nil
 		}
 	}
@@ -339,6 +473,34 @@ func (s *geminiReverseState) convertReverseLine(line []byte) []byte {
 	b, _ := json.Marshal(gemChunk)
 	result = append(result, []byte("data: "+string(b)+"\n\n")...)
 	return result
+}
+
+func buildGeminiReverseStreamError(message string) []byte {
+	payload := map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    400,
+			"message": message,
+			"status":  "INVALID_ARGUMENT",
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return []byte(fmt.Sprintf("event: error\ndata: %s\n\n", b))
+}
+
+func openAITextDelta(delta map[string]interface{}) string {
+	if text, ok := delta["content"].(string); ok && text != "" {
+		return text
+	}
+	return ""
+}
+
+func hasOpenAIReasoningDelta(delta map[string]interface{}) bool {
+	for _, key := range []string{"reasoning_content", "reasoning"} {
+		if text, ok := delta[key].(string); ok && text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *geminiReverseState) buildUsageChunk(pt, ct int) []byte {

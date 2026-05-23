@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -23,7 +24,6 @@ const (
 	DefaultScope       = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 	DefaultRedirectURI = "http://localhost:1455/auth/callback"
 	CodexOriginator    = "codex_cli_rs"
-	CodexUserAgent     = "codex_cli_rs/uapi"
 
 	DeviceUserCodeURL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
 	DeviceTokenURL    = "https://auth.openai.com/api/accounts/deviceauth/token"
@@ -31,6 +31,8 @@ const (
 	DeviceRedirectURI = "https://auth.openai.com/deviceauth/callback"
 	CodexUsageURL     = "https://chatgpt.com/backend-api/api/codex/usage"
 )
+
+var CodexUserAgent = buildCodexUserAgent()
 
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -65,7 +67,7 @@ type DeviceTokenResponse struct {
 
 // GenerateCodeVerifier creates a PKCE code verifier
 func GenerateCodeVerifier() (string, error) {
-	b := make([]byte, 32)
+	b := make([]byte, 64)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
@@ -78,21 +80,49 @@ func GenerateCodeChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+func buildCodexUserAgent() string {
+	osName := map[string]string{
+		"darwin":  "Mac OS",
+		"linux":   "Linux",
+		"windows": "Windows",
+	}[runtime.GOOS]
+	if osName == "" {
+		osName = runtime.GOOS
+	}
+	arch := map[string]string{
+		"amd64": "x86_64",
+		"arm64": "arm64",
+		"386":   "x86",
+	}[runtime.GOARCH]
+	if arch == "" {
+		arch = runtime.GOARCH
+	}
+	return fmt.Sprintf("%s/0.0.0 (%s unknown; %s) unknown", CodexOriginator, osName, arch)
+}
+
 // BuildAuthURL constructs the authorization URL with PKCE
 func BuildAuthURL(clientID, redirectURI, codeChallenge, state string) string {
-	params := url.Values{
-		"response_type":              {"code"},
-		"client_id":                  {clientID},
-		"redirect_uri":               {redirectURI},
-		"code_challenge":             {codeChallenge},
-		"code_challenge_method":      {"S256"},
-		"scope":                      {DefaultScope},
-		"state":                      {state},
-		"id_token_add_organizations": {"true"},
-		"codex_cli_simplified_flow":  {"true"},
-		"originator":                 {"codex_cli_rs"},
+	params := [][2]string{
+		{"response_type", "code"},
+		{"client_id", clientID},
+		{"redirect_uri", redirectURI},
+		{"scope", DefaultScope},
+		{"code_challenge", codeChallenge},
+		{"code_challenge_method", "S256"},
+		{"id_token_add_organizations", "true"},
+		{"codex_cli_simplified_flow", "true"},
+		{"state", state},
+		{"originator", CodexOriginator},
 	}
-	return DefaultAuthURL + "?" + params.Encode()
+	return DefaultAuthURL + "?" + encodeCodexQuery(params)
+}
+
+func encodeCodexQuery(params [][2]string) string {
+	parts := make([]string, 0, len(params))
+	for _, param := range params {
+		parts = append(parts, param[0]+"="+strings.ReplaceAll(url.QueryEscape(param[1]), "+", "%20"))
+	}
+	return strings.Join(parts, "&")
 }
 
 // StartDeviceAuth creates an OpenAI device-code authorization session.
@@ -103,8 +133,6 @@ func StartDeviceAuth(clientID string) (*DeviceUserCodeResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("originator", CodexOriginator)
-	req.Header.Set("User-Agent", CodexUserAgent)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("device auth request failed: %w", err)
@@ -138,8 +166,6 @@ func PollDeviceToken(deviceAuthID, userCode string) (*DeviceTokenResponse, bool,
 		return nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("originator", CodexOriginator)
-	req.Header.Set("User-Agent", CodexUserAgent)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, false, fmt.Errorf("device token request failed: %w", err)
@@ -174,7 +200,7 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*
 		"code_verifier": {codeVerifier},
 		"client_id":     {clientID},
 	}
-	resp, err := postFormWithCodexHeaders(tokenURL, data)
+	resp, err := postForm(tokenURL, data)
 	if err != nil {
 		return nil, fmt.Errorf("exchange request failed: %w", err)
 	}
@@ -208,7 +234,7 @@ func ExchangeForAPIKey(tokenURL, idToken, clientID string) (string, error) {
 		"client_id":          {clientID},
 		"requested_token":    {"openai-api-key"},
 	}
-	resp, err := postFormWithCodexHeaders(tokenURL, data)
+	resp, err := postForm(tokenURL, data)
 	if err != nil {
 		return "", fmt.Errorf("api key exchange failed: %w", err)
 	}
@@ -272,6 +298,7 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 func compactBody(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	text = strings.Join(strings.Fields(text), " ")
+	text = redactOAuthBody(text)
 	if len(text) > 300 {
 		return text[:300] + "..."
 	}
@@ -281,14 +308,53 @@ func compactBody(body []byte) string {
 	return text
 }
 
-func postFormWithCodexHeaders(tokenURL string, data url.Values) (*http.Response, error) {
+func redactOAuthBody(text string) string {
+	for _, key := range []string{"access_token", "refresh_token", "id_token", "client_secret", "authorization", "api_key"} {
+		for {
+			lower := strings.ToLower(text)
+			idx := strings.Index(lower, strings.ToLower(key))
+			if idx < 0 {
+				break
+			}
+			sepIdx := -1
+			for i := idx + len(key); i < len(text); i++ {
+				if text[i] == ' ' || text[i] == '\t' || text[i] == '"' || text[i] == '\'' {
+					continue
+				}
+				if text[i] == ':' || text[i] == '=' || text[i] == '&' {
+					sepIdx = i
+				}
+				break
+			}
+			if sepIdx < 0 {
+				break
+			}
+			start := sepIdx + 1
+			for start < len(text) && (text[start] == ' ' || text[start] == '\t' || text[start] == '"' || text[start] == '\'') {
+				start++
+			}
+			end := start
+			for end < len(text) && text[end] != ',' && text[end] != '}' && text[end] != '"' && text[end] != '\'' && text[end] != '&' {
+				end++
+			}
+			if end <= start {
+				break
+			}
+			if strings.HasPrefix(text[start:], "[redacted]") {
+				break
+			}
+			text = text[:start] + "[redacted]" + text[end:]
+		}
+	}
+	return text
+}
+
+func postForm(tokenURL string, data url.Values) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("originator", CodexOriginator)
-	req.Header.Set("User-Agent", CodexUserAgent)
 	return httpClient.Do(req)
 }
 

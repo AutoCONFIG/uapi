@@ -212,7 +212,7 @@ func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
 		keys[i] = KeyResponse{
 			ID:          t.ID.String(),
 			Name:        t.Name,
-			Key:         maskKey(t.Key),
+			Key:         t.Key,
 			Enabled:     t.Enabled,
 			IPWhitelist: t.IPWhitelist,
 			ExpiresAt:   formatOptionalTime(t.ExpiresAt),
@@ -252,7 +252,10 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 			Models:      normalizeCSV(req.Models),
 			Permissions: normalizeCSV(req.Permissions),
 		}
-		return tx.Create(&token).Error
+		if err := tx.Create(&token).Error; err != nil {
+			return err
+		}
+		return s.attachActivePlanToNewTokenTx(tx, userID, &token)
 	})
 	if err != nil {
 		return nil, err
@@ -268,6 +271,29 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 		Permissions: token.Permissions,
 		CreatedAt:   token.CreatedAt.Format(time.RFC3339),
 	}, nil
+}
+
+func (s *Service) attachActivePlanToNewTokenTx(tx *gorm.DB, userID string, token *db.Token) error {
+	var existing db.TokenPlan
+	if err := tx.Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
+		Order("token_plans.created_at DESC").
+		First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	var plan db.Plan
+	if err := tx.Where("id = ? AND enabled = ? AND deleted_at IS NULL", existing.PlanID, true).First(&plan).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	tokenPlan := db.TokenPlan{TokenID: token.ID, PlanID: plan.ID}
+	return tx.Create(&tokenPlan).Error
 }
 
 func (s *Service) DeleteKey(userID, keyID string) error {
@@ -382,16 +408,20 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 	offset := (page - 1) * limit
 
 	var total int64
-	s.db.Model(&db.Log{}).
+	if err := s.db.Model(&db.Log{}).
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
-		Count(&total)
+		Count(&total).Error; err != nil {
+		return nil, fmt.Errorf("failed to count usage logs: %w", err)
+	}
 
 	var logs []db.Log
-	s.db.Model(&db.Log{}).
+	if err := s.db.Model(&db.Log{}).
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
 		Offset(offset).Limit(limit).
 		Order("created_at DESC").
-		Find(&logs)
+		Find(&logs).Error; err != nil {
+		return nil, fmt.Errorf("failed to query usage logs: %w", err)
+	}
 
 	items := make([]UsageLogItem, len(logs))
 	for i, log := range logs {
@@ -420,11 +450,11 @@ func (s *Service) ListPlans() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, len(plans))
 	for i, p := range plans {
 		result[i] = map[string]interface{}{
-			"id":           p.ID.String(),
-			"name":         p.Name,
-			"type":         p.Type,
-			"token_quota":  p.TokenQuota,
-			"enabled":      p.Enabled,
+			"id":          p.ID.String(),
+			"name":        p.Name,
+			"type":        p.Type,
+			"token_quota": p.TokenQuota,
+			"enabled":     p.Enabled,
 		}
 	}
 	return result, nil
@@ -537,12 +567,4 @@ func (s *Service) parseTokenAllowExpired(tokenStr string) (string, string, error
 		return "", "", err
 	}
 	return claims.UserID, claims.Username, nil
-}
-
-// maskKey returns a masked version of the API key showing only prefix and last 4 chars.
-func maskKey(key string) string {
-	if len(key) <= 8 {
-		return key
-	}
-	return key[:8] + "****" + key[len(key)-4:]
 }

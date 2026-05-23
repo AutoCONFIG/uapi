@@ -87,7 +87,7 @@ export default function OverviewPage() {
     "messages": [{"role": "user", "content": "Ping"}]
   }'`}</pre>
         <p className="muted" style={{ margin: "12px 0 0", fontSize: 13 }}>
-          同一个 Key 可用于 OpenAI Chat、Responses、Anthropic Messages 和 Gemini 格式入口。
+          同一个 Key 可用于 OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API 和 Gemini API 格式入口。
         </p>
       </section>
     </AppShell>

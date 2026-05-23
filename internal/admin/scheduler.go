@@ -31,9 +31,9 @@ func StartLogCleanup(database *gorm.DB, retentionDays int) {
 	}()
 }
 
-// OAuthIdleMaintainer keeps idle Claude/Gemini OAuth accounts from expiring
-// before their next user request. It is expiry-driven: each account gets one
-// timer derived from token_expiry instead of a periodic table scan. CodeX is
+// OAuthIdleMaintainer keeps idle Claude Code/Gemini Code OAuth accounts from
+// expiring before their next user request. It is expiry-driven: each account gets one
+// timer derived from token_expiry instead of a periodic table scan. Codex is
 // intentionally excluded because Codex has its own upstream-aligned on-use
 // proactive refresh rule.
 type OAuthIdleMaintainer struct {
