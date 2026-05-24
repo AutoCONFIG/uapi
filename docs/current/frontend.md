@@ -62,9 +62,10 @@ cards and drawer-based channel/account editing.
 
 The channel drawer and create drawer support three provider families:
 OpenAI, Gemini, and Anthropic. Channels define provider family, protocol variant,
-and model scope only. API-key accounts carry their own upstream endpoint so
-third-party compatible providers can use per-account URL prefixes, including
-custom path segments such as `/v1`, `/api/openai`, or vendor-specific routes. Code/OAuth
+and model scope only. API-key accounts carry their own upstream endpoint. The UI edits it as Base URL
+plus a route prefix; leaving the route prefix blank uses the provider standard
+path such as `/v1` or `/v1beta`, while compatible providers can use paths like
+`/api/openai` or `/compatible/v2`. Code/OAuth
 accounts do not expose endpoint editing in the UI; the backend stores the
 provider default endpoint on the account when OAuth binding completes. OpenAI
 also exposes the `standard` Chat Completions and `responses` API format switch.

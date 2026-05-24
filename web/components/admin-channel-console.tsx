@@ -53,6 +53,28 @@ function defaultEndpointForChannel(channel: Pick<Channel, "type" | "api_format" 
   return channel.endpoint || channelPresets.find((preset) => preset.type === channel.type && preset.apiFormat === channel.api_format)?.endpoint || channelDefaults[channel.type] || "";
 }
 
+function splitEndpoint(endpoint: string, fallback: string): { baseURL: string; path: string } {
+  const value = endpoint.trim() || fallback;
+  try {
+    const parsed = new URL(value);
+    const path = parsed.pathname === "/" ? "" : parsed.pathname;
+    return { baseURL: parsed.origin, path };
+  } catch {
+    return { baseURL: value.replace(/\/+(v1beta|v1)\/?$/i, ""), path: "" };
+  }
+}
+
+function defaultEndpointPath(channel: Pick<Channel, "type" | "api_format" | "endpoint">): string {
+  return splitEndpoint(defaultEndpointForChannel(channel), "").path || (channel.type === "gemini" ? "/v1beta" : "/v1");
+}
+
+function composeEndpoint(baseURL: string, path: string, defaultPath: string): string {
+  const base = baseURL.trim().replace(/\/+$/, "");
+  if (!base) return "";
+  const route = (path.trim() || defaultPath).replace(/^\/*/, "");
+  return route ? `${base}/${route}` : base;
+}
+
 function isCodeChannel(channel: Pick<Channel, "api_format">): boolean {
   return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code";
 }
@@ -87,7 +109,8 @@ export function AdminChannelConsole() {
   const [credentialMode, setCredentialMode] = useState<"oauth" | "apikey">("apikey");
   const [apiKeyName, setApiKeyName] = useState("");
   const [apiKeyValue, setApiKeyValue] = useState("");
-  const [apiKeyEndpoint, setApiKeyEndpoint] = useState("");
+  const [apiKeyBaseURL, setApiKeyBaseURL] = useState("");
+  const [apiKeyPath, setApiKeyPath] = useState("");
   const [credLoading, setCredLoading] = useState(false);
   const [credError, setCredError] = useState("");
   const [credNotice, setCredNotice] = useState("");
@@ -187,9 +210,11 @@ export function AdminChannelConsole() {
   useEffect(() => {
     if (!selected) return;
     setCredentialMode(isCodeChannel(selected) ? "oauth" : "apikey");
+    const endpoint = splitEndpoint("", defaultEndpointForChannel(selected));
     setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 1}`);
     setApiKeyValue("");
-    setApiKeyEndpoint(defaultEndpointForChannel(selected));
+    setApiKeyBaseURL(endpoint.baseURL);
+    setApiKeyPath(endpoint.path);
     setCredError("");
     setCredNotice("");
     setOauthState("");
@@ -299,7 +324,8 @@ export function AdminChannelConsole() {
     setCredError("");
     setCredNotice("");
     setApiKeyValue("");
-    setApiKeyEndpoint("");
+    setApiKeyBaseURL("");
+    setApiKeyPath("");
     setOauthChannel(null);
     setOauthState("");
     setOauthStatus(null);
@@ -348,14 +374,16 @@ export function AdminChannelConsole() {
         channel_id: selected.id,
         name: apiKeyName.trim() || `${selected.type}-key`,
         credentials: apiKeyValue.trim(),
-        endpoint: apiKeyEndpoint.trim() || defaultEndpointForChannel(selected),
+        endpoint: composeEndpoint(apiKeyBaseURL, apiKeyPath, defaultEndpointPath(selected)) || defaultEndpointForChannel(selected),
         weight: 100,
         enabled: true,
       });
       setAccounts((cur) => [account, ...cur]);
+      const endpoint = splitEndpoint("", defaultEndpointForChannel(selected));
       setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 2}`);
       setApiKeyValue("");
-      setApiKeyEndpoint(defaultEndpointForChannel(selected));
+      setApiKeyBaseURL(endpoint.baseURL);
+      setApiKeyPath(endpoint.path);
       setCredNotice("密钥账号已添加。");
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "添加失败");
@@ -488,8 +516,11 @@ export function AdminChannelConsole() {
       enabled,
     };
     if (nextKey) body.credentials = nextKey;
-    const nextEndpoint = String(data.get("endpoint") || "").trim();
-    if (account.cred_type === "api_key" && selected) body.endpoint = nextEndpoint || defaultEndpointForChannel(selected);
+    const nextBaseURL = String(data.get("endpoint_base_url") || "").trim();
+    const nextPath = String(data.get("endpoint_path") || "").trim();
+    if (account.cred_type === "api_key" && selected) {
+      body.endpoint = composeEndpoint(nextBaseURL, nextPath, defaultEndpointPath(selected)) || defaultEndpointForChannel(selected);
+    }
     setCredLoading(true);
     setCredError("");
     try {
@@ -657,12 +688,21 @@ export function AdminChannelConsole() {
                     <input className="input" name="credentials" placeholder="留空则不更新" type="password" />
                   </div>
                 ) : null}
-                {selectedAccount.cred_type === "api_key" ? (
-                  <div className="field">
-                    <label>接入点（含路径）</label>
-                    <input className="input" name="endpoint" defaultValue={selectedAccount.endpoint || defaultEndpointForChannel(selected)} placeholder="https://api.example.com/custom-route" />
-                  </div>
-                ) : null}
+                {selectedAccount.cred_type === "api_key" ? (() => {
+                  const endpoint = splitEndpoint(selectedAccount.endpoint || "", defaultEndpointForChannel(selected));
+                  return (
+                    <div className="endpoint-split-row">
+                      <div className="field">
+                        <label>Base URL</label>
+                        <input className="input" name="endpoint_base_url" defaultValue={endpoint.baseURL} placeholder="https://api.example.com" />
+                      </div>
+                      <div className="field endpoint-path-field">
+                        <label>路径</label>
+                        <input className="input" name="endpoint_path" defaultValue={endpoint.path} placeholder={defaultEndpointPath(selected)} />
+                      </div>
+                    </div>
+                  );
+                })() : null}
                 <button className="btn primary" disabled={credLoading} type="submit">{credLoading ? "保存中" : "保存账号"}</button>
               </form>
 
@@ -786,7 +826,8 @@ export function AdminChannelConsole() {
                 ) : credentialMode === "apikey" ? (
                   <div className="api-key-editor">
                     <input className="input" value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} placeholder={`${selected.type}-key-01`} />
-                    <input className="input" value={apiKeyEndpoint} onChange={(e) => setApiKeyEndpoint(e.target.value)} placeholder={`${defaultEndpointForChannel(selected)} 或自定义路径`} />
+                    <input className="input" value={apiKeyBaseURL} onChange={(e) => setApiKeyBaseURL(e.target.value)} placeholder="https://api.example.com" />
+                    <input className="input" value={apiKeyPath} onChange={(e) => setApiKeyPath(e.target.value)} placeholder={defaultEndpointPath(selected)} />
                     <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
                     <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
                   </div>
@@ -841,7 +882,7 @@ export function AdminChannelConsole() {
               <button className="btn primary" disabled={saving} onClick={createChannelOnly} type="button">
                 {saving ? "正在创建" : "创建渠道"}
               </button>
-              <p className="muted">渠道只定义供应商、协议和模型范围；接入点随账号维护，可填写包含 /v1 或其他兼容路由的完整前缀。</p>
+              <p className="muted">渠道只定义供应商、协议和模型范围；账号接入点由 Base URL 和路径组成，路径留空时使用标准路由。</p>
 
               {error ? <p className="form-error">{error}</p> : null}
             </div>

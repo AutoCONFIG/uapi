@@ -224,7 +224,7 @@ ANY    /v1beta/*                      # Gemini generateContent API 格式
 OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支持
 `standard` 和 `gemini_code`；Anthropic 支持 `standard` 和
 `claude_code`。渠道只表达供应商、协议和模型范围；上游接入点归属账号。
-API Key 账号可单独配置接入点，接入点是包含 `/v1` 或其他兼容路由前缀的完整上游 URL；OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
+API Key 账号可单独配置接入点；Web UI 拆成 Base URL 和路径前缀两个输入，路径留空时使用 `/v1` 或 `/v1beta` 等标准路由，保存到后端时仍合成为完整上游 URL。OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
 Web UI 不提供手工编辑入口。Web UI 直接按渠道展示，账号在渠道内以卡片管理；
 `channel_group` 不再作为用户可见的一级分组。
 

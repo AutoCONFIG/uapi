@@ -1256,8 +1256,18 @@ h3 {
 
 .api-key-editor {
   display: grid;
-  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(210px, 1fr) minmax(84px, 0.45fr) minmax(180px, 1fr) auto;
   gap: 10px;
+}
+
+.endpoint-split-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(96px, 0.35fr);
+  gap: 10px;
+}
+
+.endpoint-path-field .input {
+  text-align: left;
 }
 
 .oauth-inline {
@@ -1978,7 +1988,8 @@ tr:last-child td {
   .channel-edit-grid,
   .channel-inline-config,
   .credential-console,
-  .api-key-editor {
+  .api-key-editor,
+  .endpoint-split-row {
     grid-template-columns: 1fr;
   }
 
