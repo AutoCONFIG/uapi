@@ -162,34 +162,8 @@ export function AdminChannelConsole() {
     return { message, url };
   }
 
-  function accountQuotaItems(account: Account): { label: string; values: string[] }[] {
-    const meta = account.metadata || {};
-    const items: { label: string; values: string[] }[] = [];
-    const codexUsage = asRecord(meta.codex_usage);
-    if (codexUsage) {
-      const text = summarizeCodexUsage(codexUsage);
-      if (text) items.push({ label: "Codex 额度", values: splitQuotaText(text) });
-    }
-    const geminiQuota = asRecord(meta.user_quota);
-    if (geminiQuota) {
-      const text = summarizeGeminiQuota(geminiQuota);
-      if (text) items.push({ label: "Gemini 配额", values: splitQuotaText(text) });
-    }
-    const paidTier = asRecord(meta.paid_tier);
-    const credits = asArray(paidTier?.availableCredits);
-    if (credits.length > 0) {
-      const text = credits.map((credit) => {
-        const row = asRecord(credit);
-        return [stringValue(row?.creditType), stringValue(row?.creditAmount)].filter(Boolean).join(" ");
-      }).filter(Boolean).join(" · ");
-      if (text) items.push({ label: "Gemini Credits", values: splitQuotaText(text) });
-    }
-    const anthropicUsage = asRecord(meta.usage);
-    if (anthropicUsage) {
-      const text = summarizeAnthropicUsage(anthropicUsage);
-      if (text) items.push({ label: "Anthropic 用量", values: splitQuotaText(text) });
-    }
-    return items;
+  function accountQuotaItems(account: Account): QuotaDisplayItem[] {
+    return buildQuotaDisplayItems(account);
   }
 
   function loadData() {
@@ -629,10 +603,16 @@ export function AdminChannelConsole() {
                       </div>
                       {quotaItems.length > 0 ? (
                         <div className="account-card-quota">
-                          {quotaItems.slice(0, 2).map((item) => (
-                            <div className="quota-block" key={item.label}>
-                              <b>{item.label}</b>
-                              {item.values.map((value) => <span key={`${item.label}-${value}`}>{value}</span>)}
+                          {quotaItems.slice(0, 3).map((item) => (
+                            <div className="quota-compact-item" key={item.key} title={item.detail || item.label}>
+                              <div className="quota-compact-header">
+                                <span className="quota-label">{item.label}</span>
+                                <span className={`quota-percent ${quotaTone(item.remainingPercent)}`}>{item.remainingPercent}%</span>
+                              </div>
+                              <div className="quota-compact-bar-track">
+                                <div className={`quota-compact-bar ${quotaTone(item.remainingPercent)}`} style={{ width: `${item.remainingPercent}%` }} />
+                              </div>
+                              {item.resetText ? <span className="quota-compact-reset">{item.resetText}</span> : null}
                             </div>
                           ))}
                         </div>
@@ -893,6 +873,109 @@ export function AdminChannelConsole() {
   );
 }
 
+
+type QuotaDisplayItem = {
+  key: string;
+  label: string;
+  remainingPercent: number;
+  resetText?: string;
+  detail?: string;
+};
+
+function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
+  const meta = account.metadata || {};
+  const items: QuotaDisplayItem[] = [];
+  const codexUsage = asRecord(meta.codex_usage);
+  if (codexUsage) {
+    const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
+    addUsageLimit(items, "codex-primary", "Codex 主窗口", asRecord(limits.primary));
+    addUsageLimit(items, "codex-secondary", "Codex 次窗口", asRecord(limits.secondary));
+    const credits = asRecord(limits.credits);
+    if (credits) {
+      const balance = stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "");
+      items.push({ key: "codex-credits", label: "Credits", remainingPercent: credits.unlimited === true ? 100 : 0, detail: balance ? `Credits ${balance}` : "" });
+    }
+  }
+  const geminiQuota = asRecord(meta.user_quota);
+  if (geminiQuota) {
+    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+    for (const [index, bucket] of buckets.entries()) {
+      const remaining = numberValue(bucket.remainingFraction);
+      const amount = stringValue(bucket.remainingAmount);
+      if (remaining === null && !amount) continue;
+      const percent = remaining !== null ? Math.round(clampPercent(remaining * 100)) : 0;
+      const reset = stringValue(bucket.resetTime);
+      items.push({
+        key: `gemini-${index}`,
+        label: quotaBucketLabel(bucket, index + 1),
+        remainingPercent: percent,
+        resetText: formatResetTimeShort(reset),
+        detail: [amount ? `剩余 ${amount}` : `剩余 ${percent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
+      });
+    }
+  }
+  const geminiCredits = asRecord(meta.credits) || asRecord(meta.credit_balance);
+  if (geminiCredits) {
+    const balance = stringValue(geminiCredits.balance) || stringValue(geminiCredits.remaining) || stringValue(geminiCredits.amount);
+    if (balance) items.push({ key: "gemini-credits", label: "Credits", remainingPercent: 100, detail: `Credits ${balance}` });
+  }
+  const anthropicUsage = asRecord(meta.usage);
+  if (anthropicUsage) {
+    for (const key of ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"]) {
+      addUsageLimit(items, `anthropic-${key}`, key.replaceAll("_", " "), asRecord(anthropicUsage[key]));
+    }
+  }
+  return items.sort((left, right) => left.remainingPercent - right.remainingPercent);
+}
+
+function addUsageLimit(items: QuotaDisplayItem[], key: string, label: string, row: Record<string, unknown> | null) {
+  if (!row) return;
+  const used = numberValue(row.used_percent ?? row.usedPercent ?? row.utilization);
+  if (used === null) return;
+  const usedPercent = normalizePercent(used);
+  const remainingPercent = Math.round(clampPercent(100 - usedPercent));
+  const reset = stringValue(row.resets_at ?? row.reset_at ?? row.resetAt ?? row.resetTime);
+  items.push({
+    key,
+    label,
+    remainingPercent,
+    resetText: formatResetTimeShort(reset),
+    detail: [`剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
+  });
+}
+
+function quotaBucketLabel(bucket: Record<string, unknown>, index: number): string {
+  return stringValue(bucket.model) || stringValue(bucket.name) || stringValue(bucket.type) || `额度桶 ${index}`;
+}
+
+function quotaTone(percent: number): string {
+  if (percent >= 50) return "high";
+  if (percent > 0) return "medium";
+  return "low";
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function formatResetTimeShort(raw: string): string {
+  if (!raw) return "";
+  const reset = new Date(raw);
+  if (Number.isNaN(reset.getTime())) return raw;
+  const diffMs = reset.getTime() - Date.now();
+  if (diffMs <= 0) return "已重置";
+  const totalMinutes = Math.max(1, Math.floor(diffMs / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  const relative = [days ? `${days}天` : "", hours ? `${hours}时` : "", !days && minutes ? `${minutes}分` : ""].filter(Boolean).join(" ");
+  const month = String(reset.getMonth() + 1).padStart(2, "0");
+  const day = String(reset.getDate()).padStart(2, "0");
+  const hh = String(reset.getHours()).padStart(2, "0");
+  const mm = String(reset.getMinutes()).padStart(2, "0");
+  return `${relative || "<1分"}后 (${month}/${day} ${hh}:${mm})`;
+}
+
 type AccountTone = "healthy" | "warning" | "exhausted";
 
 function accountState(account: Account): { tone: AccountTone; label: string } {
@@ -954,10 +1037,6 @@ function normalizePercent(value: number): number {
 }
 
 
-function splitQuotaText(text: string): string[] {
-  return text.split(" · ").map((item) => item.trim()).filter(Boolean);
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -971,55 +1050,6 @@ function stringValue(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   return "";
-}
-
-function percentValue(value: unknown): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "";
-  return `${Math.round(value)}%`;
-}
-
-function fractionPercentValue(value: unknown): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "";
-  return `${Math.round(value * 100)}%`;
-}
-
-function summarizeCodexUsage(usage: Record<string, unknown>): string {
-  const rateLimits = asRecord(usage.rate_limits) || asRecord(usage.rateLimits) || usage;
-  const primary = asRecord(rateLimits.primary);
-  const secondary = asRecord(rateLimits.secondary);
-  const credits = asRecord(rateLimits.credits);
-  const bits = [
-    stringValue(rateLimits.plan_type || rateLimits.planType),
-    primary ? `主窗口 ${percentValue(primary.used_percent || primary.usedPercent)}` : "",
-    secondary ? `次窗口 ${percentValue(secondary.used_percent || secondary.usedPercent)}` : "",
-    credits ? `Credits ${stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "")}` : "",
-  ].filter(Boolean);
-  return bits.join(" · ");
-}
-
-function summarizeGeminiQuota(quota: Record<string, unknown>): string {
-  const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-  if (buckets.length === 0) return "";
-  const remainingPercents = buckets
-    .map((bucket) => numberValue(bucket.remainingFraction))
-    .filter((value): value is number => value !== null)
-    .map((value) => Math.max(0, Math.min(100, value * 100)));
-  const remainingAmounts = buckets.map((bucket) => stringValue(bucket.remainingAmount)).filter(Boolean);
-  const reset = buckets.map((bucket) => stringValue(bucket.resetTime)).filter(Boolean).sort()[0] || "";
-  const remaining = remainingPercents.length > 0
-    ? `${Math.round(Math.min(...remainingPercents))}%`
-    : remainingAmounts[0] || "";
-  return [`${buckets.length} 个额度桶`, remaining ? `最低剩余 ${remaining}` : "", reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · ");
-}
-
-function summarizeAnthropicUsage(usage: Record<string, unknown>): string {
-  return ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"].map((key) => {
-    const limit = asRecord(usage[key]);
-    if (!limit) return "";
-    const used = percentValue(limit.utilization);
-    const reset = stringValue(limit.resets_at);
-    return [key.replaceAll("_", " "), used ? `${used} used` : "", reset ? `reset ${reset}` : ""].filter(Boolean).join(" ");
-  }).filter(Boolean).join(" · ");
 }
 
 function OAuthPanel({

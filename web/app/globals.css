@@ -1403,7 +1403,7 @@ h3 {
 
 .account-card-grid,
 .account-card,
-.quota-block {
+.quota-compact-item {
   min-width: 0;
   box-sizing: border-box;
 }
@@ -1482,28 +1482,80 @@ h3 {
 
 .account-card-quota {
   display: grid;
-  gap: 6px;
-}
-
-.quota-block {
-  display: grid;
-  gap: 3px;
-  border: 1px solid var(--line);
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
   border-radius: 4px;
-  background: white;
-  padding: 7px 8px;
-  font-size: 11px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--panel-soft));
+  padding: 8px;
 }
 
-.quota-block b {
-  color: var(--text);
-  font-size: 11px;
+.quota-compact-item {
+  display: grid;
+  gap: 5px;
 }
 
-.quota-block span {
+.quota-compact-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quota-label,
+.quota-percent,
+.quota-compact-reset {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quota-label {
   color: var(--muted);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.quota-percent {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quota-percent.high { color: var(--green); }
+.quota-percent.medium { color: var(--amber); }
+.quota-percent.low { color: var(--red); }
+
+.quota-compact-bar-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.quota-compact-bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  transition: width 420ms ease;
+}
+
+.quota-compact-bar.high {
+  background: linear-gradient(90deg, var(--green), color-mix(in srgb, var(--green) 72%, white));
+}
+
+.quota-compact-bar.medium {
+  background: linear-gradient(90deg, var(--amber), color-mix(in srgb, var(--amber) 72%, white));
+}
+
+.quota-compact-bar.low {
+  background: linear-gradient(90deg, var(--red), color-mix(in srgb, var(--amber) 40%, var(--red)));
+}
+
+.quota-compact-reset {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 .account-card-warning {
