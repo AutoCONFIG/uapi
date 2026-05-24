@@ -77,7 +77,50 @@ func (h *Handler) parsePagination(ctx *fasthttp.RequestCtx) (page, limit int) {
 	return page, limit
 }
 
-// HandleLogin authenticates the admin and returns a JWT token.
+type AuthResponse struct {
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	AccessExpiresAt  int64  `json:"access_expires_at"`
+	RefreshExpiresAt int64  `json:"refresh_expires_at"`
+}
+
+func (h *Handler) authDurations() (time.Duration, time.Duration) {
+	access := 15 * time.Minute
+	refresh := 720 * time.Hour
+	if h.cfg.Auth.AccessTokenExpiry != "" {
+		if d, err := time.ParseDuration(h.cfg.Auth.AccessTokenExpiry); err == nil {
+			access = d
+		}
+	}
+	if h.cfg.Auth.RefreshTokenExpiry != "" {
+		if d, err := time.ParseDuration(h.cfg.Auth.RefreshTokenExpiry); err == nil {
+			refresh = d
+		}
+	}
+	return access, refresh
+}
+
+func (h *Handler) issueAdminTokenPair() (*AuthResponse, error) {
+	accessExpiry, refreshExpiry := h.authDurations()
+	now := time.Now()
+	version := auth.SecretVersion(h.cfg.Security.AdminPasswordHash)
+	accessToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, accessExpiry, version)
+	if err != nil {
+		return nil, err
+	}
+	refreshToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdminRefresh, refreshExpiry, version)
+	if err != nil {
+		return nil, err
+	}
+	return &AuthResponse{
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		AccessExpiresAt:  now.Add(accessExpiry).Unix(),
+		RefreshExpiresAt: now.Add(refreshExpiry).Unix(),
+	}, nil
+}
+
+// HandleLogin authenticates the admin and returns an access/refresh token pair.
 func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 	var req struct {
 		Email    string `json:"email"`
@@ -108,13 +151,38 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	token, err := auth.GenerateToken(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, 24*time.Hour)
+	resp, err := h.issueAdminTokenPair()
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
 		return
 	}
 
-	h.jsonResponse(ctx, 200, map[string]string{"token": token})
+	h.jsonResponse(ctx, 200, resp)
+}
+
+func (h *Handler) HandleRefresh(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil || req.RefreshToken == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
+		return
+	}
+	claims, err := auth.ParseToken(h.cfg.Security.JWTSecret, req.RefreshToken)
+	if err != nil || claims.Type != auth.TokenTypeAdminRefresh || claims.Username != h.cfg.Security.AdminUsername || claims.Version != auth.SecretVersion(h.cfg.Security.AdminPasswordHash) {
+		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	if h.cfg.Security.AdminPasswordHash == "" {
+		h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
+		return
+	}
+	resp, err := h.issueAdminTokenPair()
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
+		return
+	}
+	h.jsonResponse(ctx, 200, resp)
 }
 
 // RequireAuth verifies the Bearer JWT in the Authorization header.
@@ -213,17 +281,13 @@ func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 	// Mark as done — subsequent calls will be rejected
 	h.setupDone = true
 
-	// Auto-login: generate JWT
-	token, err := auth.GenerateToken(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, 24*time.Hour)
+	resp, err := h.issueAdminTokenPair()
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "internal error")
 		return
 	}
 
-	h.jsonResponse(ctx, 200, map[string]interface{}{
-		"token":    token,
-		"username": h.cfg.Security.AdminUsername,
-	})
+	h.jsonResponse(ctx, 200, resp)
 }
 
 // HandleDashboard returns admin dashboard statistics.
@@ -246,4 +310,9 @@ func (h *Handler) HandleDashboard(ctx *fasthttp.RequestCtx) {
 		ActiveChannels: activeChannels,
 		ActiveAccounts: activeAccounts,
 	})
+}
+
+// HandleAccountCredentialExport returns decrypted credential material to authenticated admins.
+func (h *Handler) HandleAccountCredentialExport(ctx *fasthttp.RequestCtx) {
+	h.exportAccountCredential(ctx)
 }

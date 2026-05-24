@@ -76,9 +76,6 @@ func (h *Handler) createNodeAccount(ctx *fasthttp.RequestCtx) {
 		enabled = *req.Enabled
 	}
 	binding := db.NodeAccount{RelayNodeID: req.RelayNodeID, AccountID: req.AccountID, Weight: req.Weight, Enabled: enabled}
-	if binding.Weight == 0 {
-		binding.Weight = 100
-	}
 	binding.ID = uuid.New()
 	if err := h.db.Create(&binding).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")

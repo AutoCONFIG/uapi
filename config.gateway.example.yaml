@@ -31,10 +31,13 @@ gateway:
 ws:
   max_message_size_mb: 256
 
+auth:
+  access_token_expiry: "15m"
+  refresh_token_expiry: "720h"
+
 logging:
   level: "info"
   retention_days: 180
 
 user:
-  jwt_expiry: "24h"
   max_keys_per_user: 1

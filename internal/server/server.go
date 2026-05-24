@@ -169,6 +169,7 @@ func (s *Server) setupRoutes() {
 
 	// Admin auth (no JWT required)
 	r.POST("/api/admin/login", s.adminHandler.HandleLogin)
+	r.POST("/api/admin/refresh", s.adminHandler.HandleRefresh)
 	r.GET("/api/admin/init-status", s.adminHandler.HandleInitStatus)
 	r.POST("/api/admin/setup", s.adminHandler.HandleSetup)
 	r.GET("/api/admin/channels/oauth/callback", s.adminHandler.OAuthCallback)
@@ -198,6 +199,7 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.PUT("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.DELETE("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
+	r.POST("/api/admin/accounts/export", s.handleAdminAuth(s.adminHandler.HandleAccountCredentialExport))
 	r.GET("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.POST("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.PUT("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))

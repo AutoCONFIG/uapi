@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	statusActive           = "active"
-	healthHealthy          = "healthy"
-	defaultCacheTTL        = 5 * time.Minute
-	passiveFailCooldown    = 10 * time.Second
-	defaultTokenCacheSize  = 10000
+	statusActive          = "active"
+	healthHealthy         = "healthy"
+	defaultCacheTTL       = 5 * time.Minute
+	passiveFailCooldown   = 10 * time.Second
+	defaultTokenCacheSize = 10000
 )
 
 type Gateway struct {
@@ -46,10 +46,10 @@ type Gateway struct {
 	cacheTTL  time.Duration
 	lastError error
 
-	tokenMu      sync.Mutex
-	tokenCache   *tokenLRUCache
-	modelMu      sync.Mutex
-	modelCache   map[string]modelDiscoveryCacheEntry
+	tokenMu    sync.Mutex
+	tokenCache *tokenLRUCache
+	modelMu    sync.Mutex
+	modelCache map[string]modelDiscoveryCacheEntry
 }
 
 type nodeState struct {
@@ -595,16 +595,24 @@ func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
 	bestScore := math.MaxFloat64
 	for _, route := range g.routes {
 		node := route.Node
-		if route.AccountWeight <= 0 || !modelInList(model, route.ChannelModels) {
+		if !modelInList(model, route.ChannelModels) {
 			continue
 		}
-		if node.Weight <= 0 || now.Before(node.FailUntil) {
+		if now.Before(node.FailUntil) {
 			continue
 		}
 		if node.MaxConcurrency > 0 && node.Current >= node.MaxConcurrency {
 			continue
 		}
-		effectiveWeight := node.Weight * route.AccountWeight
+		nodeWeight := node.Weight
+		if nodeWeight <= 0 {
+			nodeWeight = 1
+		}
+		accountWeight := route.AccountWeight
+		if accountWeight <= 0 {
+			accountWeight = 1
+		}
+		effectiveWeight := nodeWeight * accountWeight
 		score := float64(node.Current+1) / float64(effectiveWeight)
 		if score < bestScore {
 			best = route

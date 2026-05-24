@@ -31,8 +31,7 @@ export default function TokensPage() {
   return (
     <AppShell title="令牌管理" variant="admin">
       <PageHead
-        eyebrow="Admin / Tokens"
-        title="用户 API Key"
+        title="用户密钥"
         description="管理员仅查看用户密钥状态和归属，不生成或持有可用 Key。"
       />
       <section className="card">
@@ -51,7 +50,7 @@ export default function TokensPage() {
                 </tr>
               ))}
               {tokens.length === 0 && !loading && (
-                <tr><td colSpan={6}><EmptyState title="暂无用户 Key" description="用户在控制台创建 API Key 后，管理员可在这里查看状态和归属。" /></td></tr>
+                <tr><td colSpan={6}><EmptyState title="暂无用户密钥" description="用户在控制台创建密钥后，管理员可在这里查看状态和归属。" /></td></tr>
               )}
             </tbody>
           </table>

@@ -26,6 +26,7 @@ type RelayConfigAccount struct {
 	Name          string                 `json:"name"`
 	Credentials   string                 `json:"credentials"`
 	CredType      string                 `json:"cred_type"`
+	Endpoint      string                 `json:"endpoint"`
 	Weight        int                    `json:"weight"`
 	Enabled       bool                   `json:"enabled"`
 	CooldownUntil *time.Time             `json:"cooldown_until,omitempty"`
@@ -102,7 +103,7 @@ func (h *Handler) RelayConfig(ctx *fasthttp.RequestCtx) {
 	for _, acc := range accounts {
 		runtimeAccounts = append(runtimeAccounts, RelayConfigAccount{
 			ID: acc.ID, ChannelID: acc.ChannelID, Name: acc.Name, Credentials: acc.Credentials,
-			CredType: acc.CredType, Weight: acc.Weight, Enabled: acc.Enabled, CooldownUntil: acc.CooldownUntil,
+			CredType: acc.CredType, Endpoint: acc.Endpoint, Weight: acc.Weight, Enabled: acc.Enabled, CooldownUntil: acc.CooldownUntil,
 			RefreshToken: acc.RefreshToken, TokenExpiry: acc.TokenExpiry, ClientID: acc.ClientID,
 			ClientSecret: acc.ClientSecret, TokenURL: acc.TokenURL, Metadata: acc.Metadata,
 		})

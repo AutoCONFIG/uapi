@@ -20,7 +20,7 @@ UAPI 是一个**面向公众的 AI API 中转平台**。用户注册账号后购
 - 双模式计费（次数窗口限额 + Token 额度扣费）
 - 用户注册/登录/套餐购买/API Key 管理
 - 管理员后台（渠道/用户/令牌/计费管理）
-- 结构化运行日志（全局分级 stdout JSON）和可查询请求日志
+- 结构化运行日志（全局分级 stdout JSON）和可查询调用日志
 - 前后端完全分离；Gateway 统一承载控制与调度，Relay 节点只执行转发
 
 ## 2. 整体架构
@@ -165,7 +165,7 @@ web/
 # ── 用户侧 API（用户 JWT 认证） ──
 POST   /api/user/register             # 注册
 POST   /api/user/login                # 登录
-POST   /api/user/refresh              # 刷新 JWT
+POST   /api/user/refresh              # 使用 refresh_token 换发 AT/RT
 
 GET    /api/user/profile              # 个人信息
 POST   /api/user/password             # 修改密码
@@ -184,9 +184,10 @@ POST   /api/user/subscription/:planID # 购买套餐
 POST   /api/user/redeem               # 兑换充值码
 
 # ── 管理员 API（admin JWT 认证） ──
-POST   /api/admin/login              # 管理员登录
+POST   /api/admin/login              # 管理员登录，返回 AT/RT
+POST   /api/admin/refresh            # 使用 refresh_token 换发 AT/RT
 GET    /api/admin/init-status         # 初始化状态
-POST   /api/admin/setup              # 首次初始化
+POST   /api/admin/setup              # 首次初始化，返回 AT/RT
 
 GET    /api/admin/dashboard           # 仪表盘统计
 CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用
@@ -198,14 +199,14 @@ GET    /api/admin/channels/oauth/callback  # Provider callback（公开回调，
 POST   /api/admin/channels/oauth/complete  # 手动 callback/token JSON 完成认证
 GET    /api/admin/channels/oauth/status    # 查询 OAuth session 状态（admin JWT）
 POST   /api/admin/channels/oauth/bind      # 绑定完成的 session 为 oauth_token account
-CRUD   /api/admin/accounts            # 兼容接口；前端已归一到渠道
+CRUD   /api/admin/accounts            # 账号管理；凭据导出必须二次校验管理员密码
 CRUD   /api/admin/tokens              # 令牌管理
 CRUD   /api/admin/plans               # 套餐管理
 GET    /api/admin/users               # 用户列表
 PUT    /api/admin/users               # 用户管理
 DELETE /api/admin/users               # 用户管理
-GET    /api/admin/logs                # 请求日志
-GET    /api/admin/audit-logs          # 审计日志
+GET    /api/admin/logs                # 调用日志
+GET    /api/admin/audit-logs          # 系统审计
 
 # ── Gateway / Relay API（Gateway 鉴权调度，Relay 执行） ──
 ANY    /v1/chat/completions           # OpenAI Chat Completions API 格式
@@ -222,8 +223,10 @@ ANY    /v1beta/*                      # Gemini generateContent API 格式
 渠道用 `type` 表示供应商家族，用 `api_format` 表示具体协议变体。
 OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支持
 `standard` 和 `gemini_code`；Anthropic 支持 `standard` 和
-`claude_code`。`channel_group` 用于后台分组展示，空值统一归为
-`default`，前端显示为 `默认渠道`。
+`claude_code`。渠道只表达供应商、协议和模型范围；上游接入点归属账号。
+API Key 账号可单独配置接入点，OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
+Web UI 不提供手工编辑入口。Web UI 直接按渠道展示，账号在渠道内以卡片管理；
+`channel_group` 不再作为用户可见的一级分组。
 
 Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客户端源码对齐：
 
@@ -238,12 +241,14 @@ Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客
 ### 中间件链
 
 ```
-用户/管理 API：  CORS → JWT认证 → Handler
+用户/管理 API：  CORS → Access Token JWT 认证 → Handler
 Gateway API：    API Key 认证 → 套餐策略 → 并发检查 → 计费预检 → 调度 → Relay
 Relay API：      Gateway HMAC 签名校验 → 执行指定 channel/account → provider 转发
 ```
 
 `/v1/*` 和 `/v1beta/*` 当前先进入 Gateway。Relay 节点在生产远端模式下应开启 `gateway.require_internal`，只接受 Gateway 签名请求。
+
+用户和管理员登录统一使用 AT/RT：`auth.access_token_expiry` 默认 `15m`，`auth.refresh_token_expiry` 默认 `720h`。Access Token 只用于业务接口鉴权，Refresh Token 只用于 `/api/user/refresh` 和 `/api/admin/refresh` 换发新 token pair。Refresh Token 绑定当前密码哈希指纹，密码变更后旧 RT 自动失效。当前实现不维护服务端 session 表，以保持低资源占用；需要踢下线、设备管理或两步验证强绑定时再引入 refresh token 版本号或会话表。
 
 ### 多格式中转
 
@@ -322,6 +327,7 @@ type Account struct {
     Name          string     `gorm:"size:100;not null"`
     Credentials   string     `gorm:"type:text;not null"`        // AES-256-GCM encrypted
     CredType      string     `gorm:"size:20;default:api_key"`   // api_key | oauth_token
+    Endpoint      string     `gorm:"size:500"`                  // upstream base URL for this account
     Weight        int        `gorm:"default:1"`
     Enabled       bool       `gorm:"default:true"`
     CooldownUntil *time.Time

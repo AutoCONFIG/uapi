@@ -19,6 +19,10 @@ security:
   admin_username: "admin"
   admin_password_hash: ""  # 留空则首次启动自动生成
 
+auth:
+  access_token_expiry: "15m"
+  refresh_token_expiry: "720h"
+
 gateway:
   gateway_id: "default"
   cache_ttl: "5s"

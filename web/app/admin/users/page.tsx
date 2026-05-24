@@ -5,7 +5,6 @@ export default function UsersPage() {
   return (
     <AppShell title="用户管理" variant="admin">
       <PageHead
-        eyebrow="Admin / Users"
         title="用户管理"
         description="管理用户状态、余额和密码重置。"
       />

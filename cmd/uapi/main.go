@@ -58,13 +58,19 @@ func main() {
 
 		admin.StartLogCleanup(database, cfg.Logging.RetentionDays)
 
-		jwtExpiry := 24 * time.Hour
-		if cfg.User.JWTExpiry != "" {
-			if d, err := time.ParseDuration(cfg.User.JWTExpiry); err == nil {
-				jwtExpiry = d
+		accessTokenExpiry := 15 * time.Minute
+		if cfg.Auth.AccessTokenExpiry != "" {
+			if d, err := time.ParseDuration(cfg.Auth.AccessTokenExpiry); err == nil {
+				accessTokenExpiry = d
 			}
 		}
-		userSvc = user.NewService(database, cfg.Security.JWTSecret, jwtExpiry, cfg.User.MaxKeysPerUser)
+		refreshTokenExpiry := 720 * time.Hour
+		if cfg.Auth.RefreshTokenExpiry != "" {
+			if d, err := time.ParseDuration(cfg.Auth.RefreshTokenExpiry); err == nil {
+				refreshTokenExpiry = d
+			}
+		}
+		userSvc = user.NewService(database, cfg.Security.JWTSecret, accessTokenExpiry, refreshTokenExpiry, cfg.User.MaxKeysPerUser)
 	}
 
 	srv := server.New(cfg, database, pools, billing, userSvc, *configPath)

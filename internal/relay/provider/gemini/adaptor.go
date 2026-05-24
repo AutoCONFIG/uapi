@@ -7,6 +7,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
 
@@ -33,7 +34,7 @@ func (a *GeminiAdaptor) Init(channel *db.Channel, account *db.Account) {
 }
 
 func (a *GeminiAdaptor) GetRequestURL(path string) (string, error) {
-	base := strings.TrimRight(a.channel.Endpoint, "/")
+	base := strings.TrimRight(upstreamconfig.AccountEndpoint(a.channel, a.account), "/")
 	if a.channel.APIFormat == "gemini_code" {
 		return codeAssistBase(base) + "/v1internal:generateContent", nil
 	}
@@ -45,7 +46,7 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	req.Header.Set("Content-Type", "application/json")
 
 	// Build Gemini API URL
-	base := strings.TrimRight(a.channel.Endpoint, "/")
+	base := strings.TrimRight(upstreamconfig.AccountEndpoint(a.channel, a.account), "/")
 	if a.channel.APIFormat == "gemini_code" {
 		action := "generateContent"
 		suffix := ""
@@ -66,7 +67,7 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 		suffix = "?alt=sse"
 	}
 	if a.model != "" {
-		req.SetRequestURI(base + "/v1beta/models/" + a.model + ":" + action + suffix)
+		req.SetRequestURI(base + "/models/" + a.model + ":" + action + suffix)
 	}
 
 	// Set API key AFTER SetRequestURI so it's not overwritten

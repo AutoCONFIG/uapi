@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
@@ -30,7 +31,7 @@ func (h *Handler) HandleChannels(ctx *fasthttp.RequestCtx) {
 func normalizeChannelGroup(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "default"
+		return "默认渠道"
 	}
 	return value
 }
@@ -56,8 +57,8 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.Name == "" || req.Type == "" || req.Endpoint == "" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "name, type and endpoint are required")
+	if req.Name == "" || req.Type == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "name and type are required")
 		return
 	}
 	if !validChannelFormatForType(req.Type, req.APIFormat) {
@@ -68,7 +69,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		Name:        req.Name,
 		Type:        req.Type,
 		Group:       normalizeChannelGroup(req.Group),
-		Endpoint:    req.Endpoint,
+		Endpoint:    channelEndpointOrDefault(req.Type, req.APIFormat),
 		Models:      req.Models,
 		Priority:    req.Priority,
 		APIFormat:   req.APIFormat,
@@ -86,6 +87,10 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 	}
 	auditCreate(h.db, "channel", ch.ID, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, ch)
+}
+
+func channelEndpointOrDefault(providerType, apiFormat string) string {
+	return upstreamconfig.DefaultEndpoint(providerType, apiFormat)
 }
 
 func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
@@ -126,9 +131,6 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Group != nil {
 		updates["channel_group"] = normalizeChannelGroup(*req.Group)
-	}
-	if req.Endpoint != nil {
-		updates["endpoint"] = *req.Endpoint
 	}
 	if req.Models != nil {
 		updates["models"] = *req.Models

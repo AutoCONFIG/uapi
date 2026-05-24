@@ -100,7 +100,6 @@ export default function SettingsPage() {
   return (
     <AppShell title="设置">
       <PageHead
-        eyebrow="Settings"
         title="账号设置"
         description="管理用户控制台账号的登录邮箱和密码。"
       />

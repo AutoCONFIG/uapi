@@ -16,6 +16,7 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
 	Security SecurityConfig `yaml:"security"`
+	Auth     AuthConfig     `yaml:"auth"`
 	Gateway  GatewayConfig  `yaml:"gateway"`
 	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
@@ -55,6 +56,11 @@ type SecurityConfig struct {
 	TrustedProxies    []string `yaml:"trusted_proxies"` // IPs that are allowed to set X-Forwarded-For / X-Real-IP
 }
 
+type AuthConfig struct {
+	AccessTokenExpiry  string `yaml:"access_token_expiry"`  // default "15m"
+	RefreshTokenExpiry string `yaml:"refresh_token_expiry"` // default "720h"
+}
+
 type GatewayConfig struct {
 	InternalSecret     string `yaml:"internal_secret"`
 	CacheTTL           string `yaml:"cache_ttl"`
@@ -82,8 +88,7 @@ type WSServerConfig struct {
 }
 
 type UserConfig struct {
-	JWTExpiry      string `yaml:"jwt_expiry"`        // default "24h"
-	MaxKeysPerUser int    `yaml:"max_keys_per_user"` // default 1
+	MaxKeysPerUser int `yaml:"max_keys_per_user"` // default 1
 }
 
 type LoggingConfig struct {
@@ -182,8 +187,11 @@ func defaultConfig() *Config {
 			Level:         "info",
 			RetentionDays: 180,
 		},
+		Auth: AuthConfig{
+			AccessTokenExpiry:  "15m",
+			RefreshTokenExpiry: "720h",
+		},
 		User: UserConfig{
-			JWTExpiry:      "24h",
 			MaxKeysPerUser: 1,
 		},
 	}

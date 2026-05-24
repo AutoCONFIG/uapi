@@ -25,9 +25,28 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 type RequestOptions = Omit<RequestInit, "body"> & {
   token?: string;
   body?: unknown;
+  skipAuthRefresh?: boolean;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+type AuthScope = "admin" | "user";
+
+function storeAuth(scope: AuthScope, auth: LoginResponse) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(`uapi.${scope}.token`, auth.access_token);
+  window.localStorage.setItem(`uapi.${scope}.refresh_token`, auth.refresh_token);
+  window.localStorage.setItem(`uapi.${scope}.access_expires_at`, String(auth.access_expires_at));
+  window.localStorage.setItem(`uapi.${scope}.refresh_expires_at`, String(auth.refresh_expires_at));
+}
+
+function clearAuth(scope: AuthScope) {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(`uapi.${scope}.token`);
+  window.localStorage.removeItem(`uapi.${scope}.refresh_token`);
+  window.localStorage.removeItem(`uapi.${scope}.access_expires_at`);
+  window.localStorage.removeItem(`uapi.${scope}.refresh_expires_at`);
+}
+
+async function rawRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Content-Type", "application/json");
   if (options.token) {
@@ -41,17 +60,63 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   });
   const payload = (await response.json()) as ApiEnvelope<T>;
   if (!response.ok || payload.code !== 0) {
-    throw new Error(payload.message || "Request failed");
+    const error = new Error(payload.message || "Request failed");
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
   return payload.data as T;
 }
+
+async function refreshStoredAuth(scope: AuthScope): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const refreshToken = window.localStorage.getItem(`uapi.${scope}.refresh_token`);
+  if (!refreshToken) return null;
+  try {
+    const auth = await rawRequest<LoginResponse>(`/api/${scope}/refresh`, {
+      method: "POST",
+      body: { refresh_token: refreshToken },
+      skipAuthRefresh: true,
+    });
+    storeAuth(scope, auth);
+    return auth.access_token;
+  } catch {
+    clearAuth(scope);
+    return null;
+  }
+}
+
+function tokenScope(token?: string): AuthScope | null {
+  if (!token || typeof window === "undefined") return null;
+  if (token === window.localStorage.getItem("uapi.admin.token")) return "admin";
+  if (token === window.localStorage.getItem("uapi.user.token")) return "user";
+  return null;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  try {
+    return await rawRequest<T>(path, options);
+  } catch (error) {
+    const status = (error as Error & { status?: number }).status;
+    const scope = tokenScope(options.token);
+    if (status !== 401 || options.skipAuthRefresh || !scope) {
+      throw error;
+    }
+    const accessToken = await refreshStoredAuth(scope);
+    if (!accessToken) {
+      throw error;
+    }
+    return rawRequest<T>(path, { ...options, token: accessToken, skipAuthRefresh: true });
+  }
+}
+
+export const authStorage = { storeAuth, clearAuth };
 
 export const userApi = {
   register: (body: { email: string; username: string; password: string }) =>
     request<LoginResponse>("/api/user/register", { method: "POST", body }),
   login: (body: { email: string; password: string }) =>
     request<LoginResponse>("/api/user/login", { method: "POST", body }),
-  refresh: (token: string) => request<LoginResponse>("/api/user/refresh", { method: "POST", body: { token } }),
+  refresh: (refreshToken: string) => request<LoginResponse>("/api/user/refresh", { method: "POST", body: { refresh_token: refreshToken }, skipAuthRefresh: true }),
   profile: (token: string) => request<Profile>("/api/user/profile", { token }),
   updatePassword: (token: string, body: { old_password: string; new_password: string }) =>
     request<void>("/api/user/password", { method: "POST", token, body }),
@@ -78,8 +143,9 @@ export const userApi = {
 export const adminApi = {
   login: (body: { email: string; password: string }) =>
     request<LoginResponse>("/api/admin/login", { method: "POST", body }),
+  refresh: (refreshToken: string) => request<LoginResponse>("/api/admin/refresh", { method: "POST", body: { refresh_token: refreshToken }, skipAuthRefresh: true }),
   initStatus: () => request<{ initialized: boolean }>("/api/admin/init-status"),
-  setup: (body: { email: string; password: string }) => request<void>("/api/admin/setup", { method: "POST", body }),
+  setup: (body: { email: string; password: string }) => request<LoginResponse>("/api/admin/setup", { method: "POST", body }),
   dashboard: (token: string) => request<Dashboard>("/api/admin/dashboard", { token }),
   accessPolicies: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<AccessPolicy>>(`/api/admin/access-policies?page=${page}&limit=${limit}`, { token }),
@@ -111,14 +177,13 @@ export const adminApi = {
     name: string;
     type: string;
     group?: string;
-    endpoint: string;
     models?: string;
     priority?: number;
     api_format?: string;
     force_stream?: boolean;
     affinity_ttl?: number;
   }) => request<Channel>("/api/admin/channels", { method: "POST", token, body }),
-  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "endpoint" | "models" | "priority" | "api_format" | "force_stream" | "affinity_ttl" | "enabled">>) =>
+  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "models" | "priority" | "api_format" | "force_stream" | "affinity_ttl" | "enabled">>) =>
     request<Channel>(`/api/admin/channels?id=${id}`, { method: "PUT", token, body }),
   deleteChannel: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/channels?id=${id}`, { method: "DELETE", token }),
@@ -139,12 +204,14 @@ export const adminApi = {
     request<Account>("/api/admin/channels/oauth/bind", { method: "POST", token, body }),
   accounts: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Account>>(`/api/admin/accounts?page=${page}&limit=${limit}`, { token }),
-  createAccount: (token: string, body: { channel_id: string; name: string; credentials: string; weight: number; enabled: boolean }) =>
+  createAccount: (token: string, body: { channel_id: string; name: string; credentials: string; endpoint?: string; weight: number; enabled: boolean }) =>
     request<Account>("/api/admin/accounts", { method: "POST", token, body }),
-  updateAccount: (token: string, id: string, body: Partial<{ channel_id: string; name: string; credentials: string; weight: number; enabled: boolean; cooldown_until: string }>) =>
+  updateAccount: (token: string, id: string, body: Partial<{ channel_id: string; name: string; credentials: string; endpoint: string; weight: number; enabled: boolean; cooldown_until: string }>) =>
     request<Account>(`/api/admin/accounts?id=${id}`, { method: "PUT", token, body }),
   deleteAccount: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/accounts?id=${id}`, { method: "DELETE", token }),
+  exportAccount: (token: string, body: { id: string; password: string }) =>
+    request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   tokens: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<ApiKey>>(`/api/admin/tokens?page=${page}&limit=${limit}`, { token }),
   deleteToken: (token: string, id: string) =>

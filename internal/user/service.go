@@ -9,7 +9,6 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/db"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -17,14 +16,21 @@ import (
 )
 
 type Service struct {
-	db             *gorm.DB
-	jwtSecret      string
-	jwtExpiry      time.Duration
-	maxKeysPerUser int
+	db                 *gorm.DB
+	jwtSecret          string
+	accessTokenExpiry  time.Duration
+	refreshTokenExpiry time.Duration
+	maxKeysPerUser     int
 }
 
-func NewService(database *gorm.DB, jwtSecret string, jwtExpiry time.Duration, maxKeysPerUser int) *Service {
-	return &Service{db: database, jwtSecret: jwtSecret, jwtExpiry: jwtExpiry, maxKeysPerUser: maxKeysPerUser}
+func NewService(database *gorm.DB, jwtSecret string, accessTokenExpiry, refreshTokenExpiry time.Duration, maxKeysPerUser int) *Service {
+	return &Service{
+		db:                 database,
+		jwtSecret:          jwtSecret,
+		accessTokenExpiry:  accessTokenExpiry,
+		refreshTokenExpiry: refreshTokenExpiry,
+		maxKeysPerUser:     maxKeysPerUser,
+	}
 }
 
 func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
@@ -87,13 +93,7 @@ func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
 		return nil, err
 	}
 
-	// Generate JWT
-	token, err := s.generateUserToken(newUser.ID.String(), newUser.Username)
-	if err != nil {
-		return nil, err
-	}
-
-	return &LoginResponse{Token: token, ExpiresAt: time.Now().Add(s.jwtExpiry).Unix()}, nil
+	return s.issueTokenPair(newUser.ID.String(), newUser.Username, newUser.PasswordHash)
 }
 
 func (s *Service) Login(req *LoginRequest) (*LoginResponse, error) {
@@ -108,33 +108,24 @@ func (s *Service) Login(req *LoginRequest) (*LoginResponse, error) {
 		return nil, errors.New("invalid email or password")
 	}
 
-	token, err := s.generateUserToken(user.ID.String(), user.Username)
-	if err != nil {
-		return nil, err
-	}
-
-	return &LoginResponse{Token: token, ExpiresAt: time.Now().Add(s.jwtExpiry).Unix()}, nil
+	return s.issueTokenPair(user.ID.String(), user.Username, user.PasswordHash)
 }
 
 func (s *Service) RefreshToken(tokenStr string) (*LoginResponse, error) {
-	// Parse the old token - we allow expired tokens for refresh
-	userID, username, err := s.parseTokenAllowExpired(tokenStr)
-	if err != nil {
-		return nil, errors.New("invalid token")
+	claims, err := auth.ParseToken(s.jwtSecret, tokenStr)
+	if err != nil || claims.Type != auth.TokenTypeUserRefresh {
+		return nil, errors.New("invalid refresh token")
 	}
 
-	// Verify user still exists and is active
 	var user db.User
-	if err := s.db.Where("id = ? AND deleted_at IS NULL AND status = 'active'", userID).First(&user).Error; err != nil {
+	if err := s.db.Where("id = ? AND deleted_at IS NULL AND status = 'active'", claims.UserID).First(&user).Error; err != nil {
 		return nil, errors.New("user not found or inactive")
 	}
-
-	token, err := s.generateUserToken(userID, username)
-	if err != nil {
-		return nil, err
+	if claims.Version != auth.SecretVersion(user.PasswordHash) {
+		return nil, errors.New("invalid refresh token")
 	}
 
-	return &LoginResponse{Token: token, ExpiresAt: time.Now().Add(s.jwtExpiry).Unix()}, nil
+	return s.issueTokenPair(user.ID.String(), user.Username, user.PasswordHash)
 }
 
 func (s *Service) GetProfile(userID string) (*ProfileResponse, error) {
@@ -542,29 +533,21 @@ func (s *Service) RedeemCode(userID, code string) (int64, error) {
 	return redeemCode.Value, nil
 }
 
-// Helper: generate user JWT using auth package
-func (s *Service) generateUserToken(userID, username string) (string, error) {
-	return auth.GenerateToken(s.jwtSecret, userID, username, auth.TokenTypeUser, s.jwtExpiry)
-}
-
-// Helper: parse token allowing expired (for refresh)
-func (s *Service) parseTokenAllowExpired(tokenStr string) (string, string, error) {
-	claims, err := auth.ParseToken(s.jwtSecret, tokenStr)
+func (s *Service) issueTokenPair(userID, username, passwordHash string) (*LoginResponse, error) {
+	now := time.Now()
+	version := auth.SecretVersion(passwordHash)
+	accessToken, err := auth.GenerateTokenWithVersion(s.jwtSecret, userID, username, auth.TokenTypeUser, s.accessTokenExpiry, version)
 	if err != nil {
-		if errors.Is(err, auth.ErrExpiredToken) {
-			// Expired is OK for refresh — verify signature but skip expiration check
-			token, parseErr := jwt.ParseWithClaims(tokenStr, &auth.Claims{}, func(t *jwt.Token) (interface{}, error) {
-				return []byte(s.jwtSecret), nil
-			}, jwt.WithoutClaimsValidation())
-			if parseErr != nil {
-				return "", "", parseErr
-			}
-			if c, ok := token.Claims.(*auth.Claims); ok {
-				return c.UserID, c.Username, nil
-			}
-			return "", "", fmt.Errorf("invalid token claims")
-		}
-		return "", "", err
+		return nil, err
 	}
-	return claims.UserID, claims.Username, nil
+	refreshToken, err := auth.GenerateTokenWithVersion(s.jwtSecret, userID, username, auth.TokenTypeUserRefresh, s.refreshTokenExpiry, version)
+	if err != nil {
+		return nil, err
+	}
+	return &LoginResponse{
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		AccessExpiresAt:  now.Add(s.accessTokenExpiry).Unix(),
+		RefreshExpiresAt: now.Add(s.refreshTokenExpiry).Unix(),
+	}, nil
 }

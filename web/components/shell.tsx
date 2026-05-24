@@ -30,21 +30,21 @@ type NavItem = {
 
 const userNav: NavItem[] = [
   { href: "/overview", label: "总览", icon: LayoutDashboard },
-  { href: "/keys", label: "API Keys", icon: KeyRound },
+  { href: "/keys", label: "密钥管理", icon: KeyRound },
   { href: "/usage", label: "用量", icon: BarChart3 },
   { href: "/plans", label: "套餐", icon: WalletCards },
   { href: "/settings", label: "设置", icon: Settings },
 ];
 
 const adminNav: NavItem[] = [
-  { href: "/admin/dashboard", label: "管理总览", icon: Gauge },
-  { href: "/admin/relay-nodes", label: "转发节点", icon: Network },
-  { href: "/admin/channels", label: "渠道", icon: Route },
-  { href: "/admin/users", label: "用户", icon: Users },
-  { href: "/admin/tokens", label: "令牌", icon: Shield },
-  { href: "/admin/plans", label: "套餐", icon: Package },
-  { href: "/admin/logs", label: "日志", icon: FileText },
-  { href: "/admin/audit-logs", label: "审计", icon: UserRound },
+  { href: "/admin/dashboard", label: "运营总览", icon: Gauge },
+  { href: "/admin/relay-nodes", label: "节点管理", icon: Network },
+  { href: "/admin/channels", label: "渠道管理", icon: Route },
+  { href: "/admin/users", label: "用户管理", icon: Users },
+  { href: "/admin/tokens", label: "令牌管理", icon: Shield },
+  { href: "/admin/plans", label: "套餐管理", icon: Package },
+  { href: "/admin/logs", label: "调用日志", icon: FileText },
+  { href: "/admin/audit-logs", label: "系统审计", icon: UserRound },
 ];
 
 type AppShellVariant = "user" | "admin";
@@ -60,52 +60,51 @@ export function AppShell({
 }) {
   return (
     <div className="app-shell">
-      <Sidebar variant={variant} />
       <main className="main">
-        <header className="topbar">
-          <div className="topbar-title">{title}</div>
-          <div className="topbar-actions">
-            <span className="badge green">
-              <Activity size={14} /> 系统正常
-            </span>
-            <Link className="btn" href="/login" title="退出" onClick={() => {
-            if (typeof window !== "undefined") {
-              window.localStorage.removeItem("uapi.admin.token");
-              window.localStorage.removeItem("uapi.user.token");
-            }
-          }}>
-              <LogOut /> 退出
-            </Link>
-          </div>
-        </header>
+        <TopNav title={title} variant={variant} />
         <div className="content">{children}</div>
       </main>
     </div>
   );
 }
 
-function Sidebar({ variant }: { variant: AppShellVariant }) {
+function clearStoredAuth() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem("uapi.admin.token");
+  window.localStorage.removeItem("uapi.admin.refresh_token");
+  window.localStorage.removeItem("uapi.admin.access_expires_at");
+  window.localStorage.removeItem("uapi.admin.refresh_expires_at");
+  window.localStorage.removeItem("uapi.user.token");
+  window.localStorage.removeItem("uapi.user.refresh_token");
+  window.localStorage.removeItem("uapi.user.access_expires_at");
+  window.localStorage.removeItem("uapi.user.refresh_expires_at");
+}
+
+function TopNav({ title, variant }: { title: string; variant: AppShellVariant }) {
   const pathname = usePathname();
   const homeHref = variant === "admin" ? "/admin/dashboard" : "/overview";
   return (
-    <aside className="sidebar">
-      <Link className="brand" href={homeHref}>
+    <header className="topbar">
+      <Link className="brand" href={homeHref} title={title}>
         <span className="brand-mark"><Blocks size={18} /></span>
         <span>UAPI</span>
       </Link>
-      {variant === "admin" ? (
-        <NavGroup label="Admin" items={adminNav} pathname={pathname} />
-      ) : (
-        <NavGroup label="Console" items={userNav} pathname={pathname} />
-      )}
-    </aside>
+      <NavGroup items={variant === "admin" ? adminNav : userNav} pathname={pathname} />
+      <div className="topbar-actions">
+        <span className="badge green">
+          <Activity size={14} /> 系统正常
+        </span>
+        <Link className="btn" href="/login" title="退出" onClick={clearStoredAuth}>
+          <LogOut /> 退出
+        </Link>
+      </div>
+    </header>
   );
 }
 
-function NavGroup({ label, items, pathname }: { label: string; items: NavItem[]; pathname: string }) {
+function NavGroup({ items, pathname }: { items: NavItem[]; pathname: string }) {
   return (
-    <nav className="nav-section" aria-label={label}>
-      <p className="nav-label">{label}</p>
+    <nav className="nav-section" aria-label="主导航">
       {items.map((item) => {
         const Icon = item.icon;
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -121,12 +120,10 @@ function NavGroup({ label, items, pathname }: { label: string; items: NavItem[];
 }
 
 export function PageHead({
-  eyebrow,
   title,
   description,
   action,
 }: {
-  eyebrow: string;
   title: string;
   description: string;
   action?: React.ReactNode;
@@ -134,7 +131,6 @@ export function PageHead({
   return (
     <div className="page-head">
       <div className="page-title-block">
-        <p className="eyebrow">{eyebrow}</p>
         <h1>{title}</h1>
         <p className="lede">{description}</p>
       </div>

@@ -8,7 +8,7 @@ import (
 
 func TestGetRequestURLAlwaysUsesMessagesEndpoint(t *testing.T) {
 	a := &AnthropicAdaptor{}
-	a.Init(&db.Channel{Endpoint: "https://api.anthropic.com"}, nil)
+	a.Init(&db.Channel{Endpoint: "https://api.anthropic.com/v1"}, nil)
 
 	for _, path := range []string{
 		"/v1/chat/completions",

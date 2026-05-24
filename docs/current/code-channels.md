@@ -16,11 +16,14 @@ the standard non-Code API formats.
   - `responses`: standard OpenAI Responses API.
   - `standard`: OpenAI Chat Completions API, Gemini generateContent API, or
     Anthropic Messages API depending on `channels.type`.
-- `channels.channel_group` stores UI grouping. Missing or empty group values are
-  normalized to `default`; the UI displays this as `默认渠道`.
-- OAuth/API credentials are stored as `accounts` under a channel. OAuth accounts
-  keep encrypted refresh tokens and structured `metadata` with plan/account
-  details synced from the provider flow when available.
+- The Web UI lists channels directly and no longer exposes `channel_group` as a
+  primary grouping control.
+- OAuth/API credentials are stored as `accounts` under a channel. API-key
+  accounts carry their upstream endpoint so compatible third-party providers can
+  vary by account. OAuth/Code accounts store the provider default endpoint
+  automatically during binding, plus encrypted refresh tokens and structured
+  `metadata` with plan/account details synced from the provider flow when
+  available.
 - OAuth credentials refresh on use, matching the upstream client lifecycle.
   Codex follows the official client's on-use proactive rule: refresh when the access token is
   expired or when the last refresh is older than 8 days. Claude Code and Gemini

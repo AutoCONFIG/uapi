@@ -51,7 +51,7 @@ func (g *Gateway) discoverStandardModels() []modelDiscoveryItem {
 	var rows []standardModelAccount
 	if err := g.db.Table("accounts").
 		Select(`accounts.id AS account_id, accounts.channel_id, channels.type AS provider,
-			channels.api_format, channels.endpoint, accounts.credentials`).
+			channels.api_format, COALESCE(NULLIF(accounts.endpoint, ''), channels.endpoint) AS endpoint, accounts.credentials`).
 		Joins("JOIN channels ON channels.id = accounts.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
 		Where("accounts.enabled = true AND accounts.deleted_at IS NULL AND accounts.cred_type = ?", "api_key").
 		Where("channels.api_format IN ?", []string{"", "standard", "responses"}).
@@ -140,7 +140,7 @@ func fetchOpenAICompatibleModels(endpoint, key string) ([]modelDiscoveryItem, er
 	req, resp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(endpoint, "/") + "/v1/models")
+	req.SetRequestURI(strings.TrimRight(endpoint, "/") + "/models")
 	req.Header.SetMethod(fasthttp.MethodGet)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if err := modelDiscoveryClient.DoTimeout(req, resp, modelDiscoveryTimeout); err != nil {
@@ -181,11 +181,7 @@ func fetchGeminiModels(endpoint, key string) ([]modelDiscoveryItem, error) {
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
 	base := strings.TrimRight(endpoint, "/")
-	if strings.HasSuffix(base, "/v1beta") || strings.HasSuffix(base, "/v1") {
-		req.SetRequestURI(base + "/models")
-	} else {
-		req.SetRequestURI(base + "/v1beta/models")
-	}
+	req.SetRequestURI(base + "/models")
 	req.Header.SetMethod(fasthttp.MethodGet)
 	req.URI().QueryArgs().Set("key", key)
 	if err := modelDiscoveryClient.DoTimeout(req, resp, modelDiscoveryTimeout); err != nil {
@@ -229,7 +225,7 @@ func fetchAnthropicModels(endpoint, key string) ([]modelDiscoveryItem, error) {
 	req, resp := fasthttp.AcquireRequest(), fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(endpoint, "/") + "/v1/models")
+	req.SetRequestURI(strings.TrimRight(endpoint, "/") + "/models")
 	req.Header.SetMethod(fasthttp.MethodGet)
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")

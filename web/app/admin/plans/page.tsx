@@ -171,7 +171,6 @@ export default function AdminPlansPage() {
   return (
     <AppShell title="套餐管理" variant="admin">
       <PageHead
-        eyebrow="Admin / Plans"
         title="套餐"
         description="配置套餐额度，并在套餐内维护对应的模型、并发和请求窗口限制。"
         action={<button className="btn primary" onClick={openCreate}><Plus /> 新建套餐</button>}

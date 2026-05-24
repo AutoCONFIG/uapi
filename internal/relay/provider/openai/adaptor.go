@@ -7,6 +7,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
 
@@ -27,14 +28,14 @@ func (a *OpenAIAdaptor) Init(channel *db.Channel, account *db.Account) {
 }
 
 func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
-	base := strings.TrimRight(a.channel.Endpoint, "/")
+	base := strings.TrimRight(upstreamconfig.AccountEndpoint(a.channel, a.account), "/")
 	if strings.HasPrefix(path, "/v1/images/") {
-		return base + path, nil
+		return base + strings.TrimPrefix(path, "/v1"), nil
 	}
 	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
-		return base + "/v1/responses", nil
+		return base + "/responses", nil
 	}
-	return base + "/v1/chat/completions", nil
+	return base + "/chat/completions", nil
 }
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {

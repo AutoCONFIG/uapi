@@ -55,7 +55,6 @@ export default function UsagePage() {
   return (
     <AppShell title="用量统计">
       <PageHead
-        eyebrow="Usage"
         title="请求、Token 和费用"
         description="按时间、模型、格式和状态查看中转流量。"
       />

@@ -12,12 +12,14 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-	Token     string `json:"token"`
-	ExpiresAt int64  `json:"expires_at"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	AccessExpiresAt  int64  `json:"access_expires_at"`
+	RefreshExpiresAt int64  `json:"refresh_expires_at"`
 }
 
 type RefreshRequest struct {
-	Token string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 type UpdatePasswordRequest struct {

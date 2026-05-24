@@ -32,15 +32,14 @@ export default function AdminDashboardPage() {
   }
 
   return (
-    <AppShell title="管理员后台" variant="admin">
+    <AppShell title="总览" variant="admin">
       <PageHead
-        eyebrow="Admin"
         title="平台运营总览"
         description="集中查看中转流量、渠道健康、账号池和错误率。"
       />
       <div className="grid grid-4">
-        <MetricCard label="总请求" value={dashboard ? formatNumber(dashboard.total_requests) : "—"} foot="all time" />
-        <MetricCard label="总 Token" value={dashboard ? formatNumber(dashboard.total_tokens) : "—"} foot="billable usage" tone="green" />
+        <MetricCard label="总请求" value={dashboard ? formatNumber(dashboard.total_requests) : "—"} foot="累计" />
+        <MetricCard label="总 Token" value={dashboard ? formatNumber(dashboard.total_tokens) : "—"} foot="计费用量" tone="green" />
         <MetricCard label="活跃渠道" value={dashboard ? String(dashboard.active_channels) : "—"} foot="providers" tone="green" />
         <MetricCard label="活跃凭证" value={dashboard ? String(dashboard.active_accounts) : "—"} foot="inside channels" />
       </div>
@@ -52,18 +51,17 @@ export default function AdminDashboardPage() {
           </div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>渠道</th><th>类型</th><th>状态</th><th>Endpoint</th><th>权重</th></tr></thead>
+              <thead><tr><th>渠道</th><th>类型</th><th>状态</th><th>权重</th></tr></thead>
               <tbody>
                 {channels.length > 0 ? channels.map((ch) => (
                   <tr key={ch.id}>
                     <td>{ch.name}</td>
                     <td>{ch.type}</td>
                     <td><StatusBadge value={ch.enabled ? "enabled" : "disabled"} /></td>
-                    <td className="muted" style={{ fontSize: 12 }}>{ch.endpoint}</td>
                     <td>{ch.priority}</td>
                   </tr>
                 )) : (
-                  <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                  <tr><td colSpan={4} className="muted" style={{ textAlign: "center", padding: 24 }}>
                     {loading ? "加载中…" : "暂无渠道数据"}
                   </td></tr>
                 )}
@@ -87,7 +85,7 @@ export default function AdminDashboardPage() {
             </a>
             <a className="quick-card" href="/admin/relay-nodes">
               <Network />
-              <span><strong>转发节点</strong>配置节点权重和账号绑定</span>
+              <span><strong>节点</strong>配置节点权重和账号绑定</span>
             </a>
             <a className="quick-card" href="/admin/tokens">
               <KeyRound />

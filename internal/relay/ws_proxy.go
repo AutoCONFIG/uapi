@@ -8,6 +8,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	ws "github.com/fasthttp/websocket"
 	"github.com/google/uuid"
 )
@@ -34,7 +35,7 @@ func (h *WSHandler) tryNativeUpstream(
 	tokenPlanID uuid.UUID,
 	start time.Time,
 ) bool {
-	endpoint := strings.TrimSuffix(ch.Endpoint, "/")
+	endpoint := strings.TrimSuffix(upstreamconfig.AccountEndpoint(ch, acc), "/")
 	upstreamPath := "/v1/responses"
 
 	key := PoolKey{

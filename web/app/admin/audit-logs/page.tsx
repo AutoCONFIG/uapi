@@ -54,10 +54,9 @@ export default function AuditLogsPage() {
   const totalPages = Math.ceil(total / 20);
 
   return (
-    <AppShell title="审计日志" variant="admin">
+    <AppShell title="系统审计" variant="admin">
       <PageHead
-        eyebrow="Admin / Audit"
-        title="后台操作审计"
+        title="系统审计"
         description="记录管理员和系统对渠道、用户余额、账号池的关键变更。"
       />
       <section className="card">
@@ -76,7 +75,7 @@ export default function AuditLogsPage() {
               ))}
               {logs.length === 0 && !loading && (
                 <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 24 }}>
-                  {loading ? "加载中…" : "暂无审计日志"}
+                  {loading ? "加载中…" : "暂无系统审计"}
                 </td></tr>
               )}
             </tbody>

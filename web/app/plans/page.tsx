@@ -66,7 +66,6 @@ export default function PlansPage() {
   return (
     <AppShell title="套餐">
       <PageHead
-        eyebrow="Plans"
         title="套餐和充值"
         description="查看当前套餐、额度和可用升级项。兑换码用于手动充值或活动额度。"
         action={

@@ -8,8 +8,10 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // HandleAccounts routes account CRUD operations by HTTP method.
@@ -72,6 +74,7 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		ChannelID:   req.ChannelID,
 		Name:        req.Name,
 		Credentials: encrypted,
+		Endpoint:    accountEndpointOrDefault(ch, req.Endpoint),
 		Weight:      req.Weight,
 		Enabled:     true,
 	}
@@ -134,6 +137,89 @@ func tokenURLIs(rawURL, expectedURL string) bool {
 		parsed.EscapedPath() == expected.EscapedPath() &&
 		parsed.RawQuery == "" &&
 		parsed.Fragment == ""
+}
+
+func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		ID       string `json:"id"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil || req.ID == "" || req.Password == "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "id and password are required")
+		return
+	}
+	if h.cfg.Security.AdminPasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(h.cfg.Security.AdminPasswordHash), []byte(req.Password)) != nil {
+		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid password")
+		return
+	}
+	id, err := uuid.Parse(req.ID)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid id")
+		return
+	}
+	var acc db.Account
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&acc).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
+		return
+	}
+	var ch db.Channel
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", acc.ChannelID).First(&ch).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "channel not found")
+		return
+	}
+	credential, err := crypto.Decrypt(acc.Credentials)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "decrypt credential failed")
+		return
+	}
+	data := map[string]interface{}{
+		"name":     acc.Name,
+		"provider": ch.Type,
+		"endpoint": upstreamconfig.AccountEndpoint(&ch, &acc),
+	}
+	if ch.APIFormat != "" {
+		data["api_format"] = ch.APIFormat
+	}
+	if acc.CredType == "oauth_token" {
+		data["type"] = "oauth_token"
+		data["access_token"] = credential
+		refreshToken := ""
+		if acc.RefreshToken != "" {
+			refreshToken, err = crypto.Decrypt(acc.RefreshToken)
+			if err != nil {
+				h.jsonError(ctx, fasthttp.StatusInternalServerError, "decrypt refresh token failed")
+				return
+			}
+		}
+		clientSecret := ""
+		if acc.ClientSecret != "" {
+			clientSecret, err = crypto.Decrypt(acc.ClientSecret)
+			if err != nil {
+				h.jsonError(ctx, fasthttp.StatusInternalServerError, "decrypt client secret failed")
+				return
+			}
+		}
+		if refreshToken != "" {
+			data["refresh_token"] = refreshToken
+		}
+		if acc.TokenExpiry != nil {
+			data["expiry"] = acc.TokenExpiry
+		}
+		if acc.ClientID != "" {
+			data["client_id"] = acc.ClientID
+		}
+		if clientSecret != "" {
+			data["client_secret"] = clientSecret
+		}
+		if acc.TokenURL != "" {
+			data["token_url"] = acc.TokenURL
+		}
+	} else {
+		data["type"] = "api_key"
+		data["api_key"] = credential
+	}
+	auditCreate(h.db, "account_export", acc.ID, h.getAdminUser(ctx))
+	h.jsonResponse(ctx, 200, data)
 }
 
 func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
@@ -201,6 +287,22 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 		}
 		updates["credentials"] = encrypted
 	}
+	if req.Endpoint != nil {
+		endpoint := strings.TrimSpace(*req.Endpoint)
+		if endpoint == "" {
+			currentChannelID := existing.ChannelID
+			if req.ChannelID != uuid.Nil {
+				currentChannelID = req.ChannelID
+			}
+			var target db.Channel
+			if err := h.db.Where("id = ? AND deleted_at IS NULL", currentChannelID).First(&target).Error; err != nil {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
+				return
+			}
+			endpoint = upstreamconfig.DefaultEndpoint(target.Type, target.APIFormat)
+		}
+		updates["endpoint"] = endpoint
+	}
 	if req.Weight != nil {
 		updates["weight"] = *req.Weight
 	}
@@ -233,6 +335,13 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 	}
 	auditUpdate(h.db, "account", id, h.getAdminUser(ctx))
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func accountEndpointOrDefault(ch db.Channel, endpoint string) string {
+	if value := strings.TrimSpace(endpoint); value != "" {
+		return value
+	}
+	return upstreamconfig.DefaultEndpoint(ch.Type, ch.APIFormat)
 }
 
 func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {

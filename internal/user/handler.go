@@ -57,7 +57,7 @@ func (h *Handler) RefreshToken(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	resp, err := h.service.RefreshToken(req.Token)
+	resp, err := h.service.RefreshToken(req.RefreshToken)
 	if err != nil {
 		sendError(ctx, 401, err.Error())
 		return

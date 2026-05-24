@@ -33,10 +33,9 @@ export default function LogsPage() {
   const totalPages = Math.ceil(total / 20);
 
   return (
-    <AppShell title="请求日志" variant="admin">
+    <AppShell title="调用日志" variant="admin">
       <PageHead
-        eyebrow="Admin / Logs"
-        title="请求日志"
+        title="调用日志"
         description="查看所有中转请求的模型、状态、Token 用量和延迟。"
       />
       <section className="card">
@@ -56,7 +55,7 @@ export default function LogsPage() {
               ))}
               {logs.length === 0 && !loading && (
                 <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 24 }}>
-                  {loading ? "加载中…" : "暂无日志"}
+                  {loading ? "加载中…" : "暂无调用日志"}
                 </td></tr>
               )}
             </tbody>

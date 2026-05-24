@@ -43,15 +43,14 @@ export default function OverviewPage() {
   return (
     <AppShell title="用户控制台">
       <PageHead
-        eyebrow="Overview"
         title="生产流量总览"
         description="查看余额、请求表现和最近调用。"
       />
       <div className="grid grid-4">
-        <MetricCard label="可用余额" value={formatNumber(balance)} foot="Token credits" tone="green" />
-        <MetricCard label="总请求" value={usage ? formatNumber(usage.total_requests) : "—"} foot="all time" tone="primary" />
+        <MetricCard label="可用余额" value={formatNumber(balance)} foot="Token 余额" tone="green" />
+        <MetricCard label="总请求" value={usage ? formatNumber(usage.total_requests) : "—"} foot="累计" tone="primary" />
         <MetricCard label="成功率" value={`${successRate}%`} foot={usage ? `失败 ${usage.failed_requests}` : ""} tone="green" />
-        <MetricCard label="总 Token" value={usage ? formatNumber(usage.total_tokens) : "—"} foot={`${formatQuota(balance)} quota`} />
+        <MetricCard label="总 Token" value={usage ? formatNumber(usage.total_tokens) : "—"} foot={`${formatQuota(balance)} 余额`} />
       </div>
 
       {usage && usage.by_model && usage.by_model.length > 0 && (
@@ -87,7 +86,7 @@ export default function OverviewPage() {
     "messages": [{"role": "user", "content": "Ping"}]
   }'`}</pre>
         <p className="muted" style={{ margin: "12px 0 0", fontSize: 13 }}>
-          同一个 Key 可用于 OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API 和 Gemini API 格式入口。
+          同一个密钥可用于 OpenAI 对话补全、OpenAI 响应接口、Anthropic 消息接口和 Gemini 接口格式入口。
         </p>
       </section>
     </AppShell>

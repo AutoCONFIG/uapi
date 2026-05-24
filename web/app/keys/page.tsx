@@ -20,8 +20,8 @@ type DisplayKey = {
 
 const permissionOptions = [
   { value: "chat", label: "Chat" },
-  { value: "responses", label: "Responses" },
-  { value: "messages", label: "Messages" },
+  { value: "responses", label: "响应" },
+  { value: "messages", label: "消息" },
   { value: "gemini", label: "Gemini" },
   { value: "images", label: "Images" },
 ];
@@ -31,7 +31,7 @@ function fromApiKey(key: ApiKey): DisplayKey {
     id: key.id,
     name: key.name,
     key: key.key,
-    status: key.enabled ? "Enabled" : "Paused",
+    status: key.enabled ? "已启用" : "已暂停",
     created: key.created_at ? new Date(key.created_at).toLocaleDateString() : "-",
     ipWhitelist: key.ip_whitelist,
     expiresAt: key.expires_at,
@@ -68,7 +68,7 @@ export default function KeysPage() {
 
   async function createKey() {
     const token = window.localStorage.getItem("uapi.user.token");
-    const trimmedName = name.trim() || `API Key ${items.length + 1}`;
+    const trimmedName = name.trim() || `密钥 ${items.length + 1}`;
     if (!token) return;
     setLoading(true);
     setError("");
@@ -119,10 +119,9 @@ export default function KeysPage() {
   }
 
   return (
-    <AppShell title="API Keys">
+    <AppShell title="密钥管理">
       <PageHead
-        eyebrow="Credentials"
-        title="API Key 管理"
+        title="密钥管理"
         description="为生产、测试和自动化任务拆分密钥，减少泄露后的影响面。"
         action={items.length === 0 ? <button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button> : undefined}
       />
@@ -130,7 +129,7 @@ export default function KeysPage() {
       <section className="surface">
         <div className="stat-bar">
           <span className="stat-chip"><span>全部密钥</span><strong>{items.length}</strong></span>
-          <span className="stat-chip"><span>启用中</span><strong>{items.filter((item) => item.status === "Enabled").length}</strong></span>
+          <span className="stat-chip"><span>启用中</span><strong>{items.filter((item) => item.status === "已启用").length}</strong></span>
           <span className="stat-chip"><span>受限密钥</span><strong>{items.filter((item) => item.models || item.ipWhitelist || item.expiresAt).length}</strong></span>
         </div>
 
@@ -142,15 +141,15 @@ export default function KeysPage() {
                 <div className="key-meta"><span>创建 {key.created}</span><StatusBadge value={key.status} /></div>
               </div>
               <code>{key.key}</code>
-              <div className="key-meta"><span>权限</span><strong>{key.permissions || "All"}</strong></div>
-              <div className="key-meta"><span>模型</span><strong>{key.models || "All"}</strong><span>{key.expiresAt ? new Date(key.expiresAt).toLocaleDateString() : "Never"}</span></div>
+              <div className="key-meta"><span>权限</span><strong>{key.permissions || "全部"}</strong></div>
+              <div className="key-meta"><span>模型</span><strong>{key.models || "全部"}</strong><span>{key.expiresAt ? new Date(key.expiresAt).toLocaleDateString() : "永不过期"}</span></div>
               <div className="row-actions">
                 <button className="btn icon-only" onClick={() => navigator.clipboard?.writeText(key.key)} title="复制" type="button"><Copy /></button>
                 <button className="btn danger icon-only" onClick={() => deleteKey(key)} title="删除" type="button"><Trash2 /></button>
               </div>
             </article>
           )) : (
-            <section className="card"><EmptyState title="暂无密钥" description="创建一个 API Key 后即可开始调用。" action={<button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button>} /></section>
+            <section className="card"><EmptyState title="暂无密钥" description="创建一个密钥后即可开始调用。" action={<button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button>} /></section>
           )}
         </div>
       </section>
@@ -160,7 +159,7 @@ export default function KeysPage() {
           <section aria-modal="true" className="modal" role="dialog">
             <div className="modal-head">
               <div>
-                <p className="eyebrow">New Key</p>
+                <p className="eyebrow">新建密钥</p>
                 <h2>新建密钥</h2>
               </div>
               <button className="btn" disabled={loading} onClick={closeCreate} type="button">关闭</button>
@@ -168,7 +167,7 @@ export default function KeysPage() {
 
             <div className="field">
               <label htmlFor="key-name">名称</label>
-              <input className="input" id="key-name" onChange={(event) => setName(event.target.value)} placeholder={`API Key ${items.length + 1}`} value={name} />
+              <input className="input" id="key-name" onChange={(event) => setName(event.target.value)} placeholder={`密钥 ${items.length + 1}`} value={name} />
             </div>
             <button className="btn subtle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
               <SlidersHorizontal /> {advancedOpen ? "收起高级限制" : "高级限制"}

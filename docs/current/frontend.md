@@ -56,21 +56,24 @@ API keys, and OAuth credentials are represented as credentials within a channel 
 than as a separate primary navigation item. The old `/admin/accounts` route remains as
 a compatibility page only.
 
-The `/admin/channels` page groups channels by `channel_group`. The left rail
-shows groups and the right side shows channel tiles; clicking a tile opens a
-drawer for channel edits and credentials. The stored `default` group is displayed
-as `默认渠道`.
+The `/admin/channels` page treats each channel as a top-level item. The left rail
+lists channels directly, while the right side shows the selected channel's account
+cards and drawer-based channel/account editing.
 
 The channel drawer and create drawer support three provider families:
-OpenAI, Gemini, and Anthropic. Each family has normal API-key configuration; OpenAI
-also exposes the `standard` Chat Completions and `responses` API format switch. Code login
-buttons create Codex, Gemini Code, or Claude Code OAuth channels. The backend
-returns a provider authorization URL, the UI polls callback status by `state`
-where possible, and a completed session is bound as an `oauth_token` account
-inside the channel. OAuth account metadata is shown in the credential list when
-available. Code channel presets pre-fill model allow-lists from the local
-upstream client source trees, and the credential list displays provider quota or
-credit metadata when the backend has synced it.
+OpenAI, Gemini, and Anthropic. Channels define provider family, protocol variant,
+and model scope only. API-key accounts carry their own upstream endpoint so
+third-party compatible providers can use per-account base URLs. Code/OAuth
+accounts do not expose endpoint editing in the UI; the backend stores the
+provider default endpoint on the account when OAuth binding completes. OpenAI
+also exposes the `standard` Chat Completions and `responses` API format switch.
+Code login buttons create Codex, Gemini Code, or Claude Code OAuth channels. The
+backend returns a provider authorization URL, the UI polls callback status by
+`state` where possible, and a completed session is bound as an `oauth_token`
+account inside the channel. OAuth account metadata is shown in the credential
+list when available. Code channel presets pre-fill model allow-lists from the
+local upstream client source trees, and the credential list displays provider
+quota or credit metadata when the backend has synced it.
 
 The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at`,
 `models`, and `permissions`. Permissions map to relay entry points: `chat`,

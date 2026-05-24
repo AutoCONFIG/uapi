@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { adminApi, authStorage } from "@/lib/api";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -30,32 +31,11 @@ export default function SetupPage() {
     }
 
     try {
-      const res = await fetch("/api/admin/setup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const json = await res.json();
-      if (json.code !== 0) {
-        setError(json.message || "设置失败");
-        setLoading(false);
-        return;
-      }
-      // Setup success — auto login
-      const loginRes = await fetch("/api/admin/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const loginJson = await loginRes.json();
-      if (loginJson.code === 0 && loginJson.data?.token) {
-        window.localStorage.setItem("uapi.admin.token", loginJson.data.token);
-        router.replace("/admin/dashboard");
-      } else {
-        router.replace("/");
-      }
-    } catch {
-      setError("网络错误，请检查后端服务");
+      const auth = await adminApi.setup({ email, password });
+      authStorage.storeAuth("admin", auth);
+      router.replace("/admin/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "网络错误，请检查后端服务");
     } finally {
       setLoading(false);
     }

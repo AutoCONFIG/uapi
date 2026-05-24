@@ -117,7 +117,7 @@ docs/              项目文档
 
 ## 技术栈
 
-- **后端**: Go / fasthttp / GORM / PostgreSQL / JWT (HS256) / AES-256-GCM
+- **后端**: Go / fasthttp / GORM / PostgreSQL / AT/RT JWT (HS256) / AES-256-GCM
 - **前端**: Next.js 15 / React / TypeScript / 纯 CSS
 
 ## 部署

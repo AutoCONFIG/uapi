@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -15,8 +17,10 @@ var (
 type TokenType string
 
 const (
-	TokenTypeAdmin TokenType = "admin"
-	TokenTypeUser  TokenType = "user"
+	TokenTypeAdmin        TokenType = "admin"
+	TokenTypeAdminRefresh TokenType = "admin_refresh"
+	TokenTypeUser         TokenType = "user"
+	TokenTypeUserRefresh  TokenType = "user_refresh"
 )
 
 type Claims struct {
@@ -24,9 +28,14 @@ type Claims struct {
 	UserID   string    `json:"uid,omitempty"`
 	Username string    `json:"username"`
 	Type     TokenType `json:"type"`
+	Version  string    `json:"ver,omitempty"`
 }
 
 func GenerateToken(secret string, userID, username string, tokenType TokenType, expiry time.Duration) (string, error) {
+	return GenerateTokenWithVersion(secret, userID, username, tokenType, expiry, "")
+}
+
+func GenerateTokenWithVersion(secret string, userID, username string, tokenType TokenType, expiry time.Duration, version string) (string, error) {
 	now := time.Now()
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -36,9 +45,15 @@ func GenerateToken(secret string, userID, username string, tokenType TokenType, 
 		UserID:   userID,
 		Username: username,
 		Type:     tokenType,
+		Version:  version,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
+}
+
+func SecretVersion(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:16])
 }
 
 func ParseToken(secret string, tokenStr string) (*Claims, error) {

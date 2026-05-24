@@ -18,6 +18,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
@@ -636,7 +637,7 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 
 	account := db.Account{
 		ChannelID: session.ChannelID, Name: name, Credentials: encryptedCredential,
-		CredType: "oauth_token", Weight: weight, Enabled: enabled,
+		CredType: "oauth_token", Endpoint: upstreamconfig.DefaultEndpoint(channel.Type, channel.APIFormat), Weight: weight, Enabled: enabled,
 		RefreshToken: encryptedRefresh, TokenExpiry: session.Expiry,
 		ClientID: session.ClientID, ClientSecret: encryptedClientSecret,
 		TokenURL: session.TokenURL,

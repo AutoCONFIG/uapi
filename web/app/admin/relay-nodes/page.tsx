@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Link2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Link2, Plus, RefreshCw, Shuffle, Trash2 } from "lucide-react";
 import { AppShell, EmptyState, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Account, Channel, NodeAccount, RelayNode } from "@/types/api";
@@ -14,9 +14,10 @@ export default function RelayNodesPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [expandedNodeID, setExpandedNodeID] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "local-relay", base_url: "http://relay:8081", region: "local", egress_ip: "", weight: "100", max_concurrency: "100" });
-  const [quickBind, setQuickBind] = useState<Record<string, { account_id: string; weight: string }>>({});
+  const [form, setForm] = useState({ name: "local-relay", base_url: "http://relay:8081", region: "local", egress_ip: "", weight: "0", max_concurrency: "0" });
+  const [quickBind, setQuickBind] = useState<Record<string, { channel_id: string; weight: string }>>({});
 
   useEffect(() => { loadAll(); }, []);
 
@@ -44,7 +45,7 @@ export default function RelayNodesPage() {
         setQuickBind((current) => {
           const next = { ...current };
           for (const node of nodeItems) {
-            if (!next[node.id]) next[node.id] = { account_id: validAccounts[0]?.id || "", weight: "100" };
+            if (!next[node.id]) next[node.id] = { channel_id: channelItems[0]?.id || "", weight: "0" };
           }
           return next;
         });
@@ -71,14 +72,14 @@ export default function RelayNodesPage() {
         base_url: form.base_url.trim() || "http://relay:8081",
         region: form.region.trim() || "local",
         egress_ip: form.egress_ip.trim(),
-        weight: Number(form.weight || 100),
-        max_concurrency: Number(form.max_concurrency || 100),
+        weight: Number(form.weight || 0),
+        max_concurrency: Number(form.max_concurrency || 0),
         status: "active",
         health_status: "healthy",
       });
       setNodes((cur) => [created, ...cur]);
-      setQuickBind((cur) => ({ ...cur, [created.id]: { account_id: accounts[0]?.id || "", weight: "100" } }));
-      setForm({ name: "", base_url: "", region: "", egress_ip: "", weight: "100", max_concurrency: "100" });
+      setQuickBind((cur) => ({ ...cur, [created.id]: { channel_id: "", weight: "0" } }));
+      setForm({ name: "", base_url: "", region: "", egress_ip: "", weight: "0", max_concurrency: "0" });
       setCreateOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
@@ -99,7 +100,7 @@ export default function RelayNodesPage() {
   async function deleteNode(id: string) {
     const adminToken = token();
     if (!adminToken) return;
-    if (!confirm("确认删除该转发节点？关联绑定也会失效。")) return;
+    if (!confirm("确认删除该节点？关联绑定也会失效。")) return;
     try {
       await adminApi.deleteRelayNode(adminToken, id);
       setNodes((cur) => cur.filter((node) => node.id !== id));
@@ -110,17 +111,43 @@ export default function RelayNodesPage() {
   async function createBinding(nodeID: string) {
     const adminToken = token();
     const draft = quickBind[nodeID];
-    if (!adminToken || !draft?.account_id) return;
+    if (!adminToken || !draft?.channel_id) return;
+    const selectedAccounts = channelAccounts(draft.channel_id);
+    const existingAccountIDs = new Set(nodeBindings(nodeID).map((item) => item.account_id));
+    const accountsToBind = selectedAccounts.filter((account) => !existingAccountIDs.has(account.id));
+    if (accountsToBind.length === 0) return;
     try {
-      const created = await adminApi.createNodeAccount(adminToken, {
+      const created = await Promise.all(accountsToBind.map((account) => adminApi.createNodeAccount(adminToken, {
         relay_node_id: nodeID,
-        account_id: draft.account_id,
-        weight: Number(draft.weight || 100),
+        account_id: account.id,
+        weight: Number(draft.weight || 0),
         enabled: true,
-      });
-      setBindings((cur) => [created, ...cur]);
-      setQuickBind((cur) => ({ ...cur, [nodeID]: { account_id: accounts[0]?.id || "", weight: "100" } }));
+      })));
+      setBindings((cur) => [...created, ...cur]);
+      setQuickBind((cur) => ({ ...cur, [nodeID]: { channel_id: "", weight: "0" } }));
     } catch { /* keep current state */ }
+  }
+
+  async function autoBalanceBindings() {
+    const adminToken = token();
+    if (!adminToken || nodes.length === 0 || accounts.length === 0) return;
+    if (!confirm("确认自动均分绑定？现有节点绑定会被替换。")) return;
+    setSaving(true);
+    setError("");
+    try {
+      await Promise.all(bindings.map((binding) => adminApi.deleteNodeAccount(adminToken, binding.id)));
+      const created = await Promise.all(accounts.map((account, index) => adminApi.createNodeAccount(adminToken, {
+        relay_node_id: nodes[index % nodes.length].id,
+        account_id: account.id,
+        weight: 0,
+        enabled: true,
+      })));
+      setBindings(created);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "自动均分失败");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function patchBinding(id: string, body: Partial<NodeAccount>) {
@@ -132,30 +159,40 @@ export default function RelayNodesPage() {
     } catch { /* keep current state */ }
   }
 
-  async function deleteBinding(id: string) {
+  const channelName = (id: string) => channels.find((channel) => channel.id === id)?.name || id.slice(0, 8);
+  const channelAccounts = (channelID: string) => accounts.filter((account) => account.channel_id === channelID);
+  const nodeBindings = (nodeID: string) => bindings.filter((binding) => binding.relay_node_id === nodeID);
+  const nodeChannelGroups = (nodeID: string) => {
+    const grouped = new Map<string, { channelID: string; accountCount: number; weight: number; bindingIDs: string[] }>();
+    for (const binding of nodeBindings(nodeID)) {
+      const account = accounts.find((item) => item.id === binding.account_id);
+      if (!account) continue;
+      const current = grouped.get(account.channel_id) || { channelID: account.channel_id, accountCount: 0, weight: binding.weight, bindingIDs: [] };
+      current.accountCount += 1;
+      current.bindingIDs.push(binding.id);
+      grouped.set(account.channel_id, current);
+    }
+    return Array.from(grouped.values());
+  };
+  const unboundChannels = (nodeID: string) => {
+    const boundChannelIDs = new Set(nodeChannelGroups(nodeID).map((group) => group.channelID));
+    return channels.filter((channel) => !boundChannelIDs.has(channel.id));
+  };
+  async function deleteChannelBinding(bindingIDs: string[]) {
     const adminToken = token();
     if (!adminToken) return;
     try {
-      await adminApi.deleteNodeAccount(adminToken, id);
-      setBindings((cur) => cur.filter((item) => item.id !== id));
+      await Promise.all(bindingIDs.map((id) => adminApi.deleteNodeAccount(adminToken, id)));
+      setBindings((cur) => cur.filter((item) => !bindingIDs.includes(item.id)));
     } catch { /* keep current state */ }
   }
 
-  const accountName = (id: string) => accounts.find((account) => account.id === id)?.name || id.slice(0, 8);
-  const accountChannel = (id: string) => {
-    const account = accounts.find((item) => item.id === id);
-    if (!account) return "-";
-    return channels.find((channel) => channel.id === account.channel_id)?.name || account.channel_id.slice(0, 8);
-  };
-  const nodeBindings = (nodeID: string) => bindings.filter((binding) => binding.relay_node_id === nodeID);
-
   return (
-    <AppShell title="转发节点" variant="admin">
+    <AppShell title="节点" variant="admin">
       <PageHead
-        eyebrow="Admin / Relay Nodes"
-        title="Gateway 调度"
-        description="Gateway 统一选择节点、渠道和账号；Relay 只执行转发。节点、权重、并发和账号绑定在这里集中维护。"
-        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
+        title="节点"
+        description="配置转发节点，并将渠道批量绑定到可用节点。"
+        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn" onClick={autoBalanceBindings} disabled={saving || nodes.length === 0 || accounts.length === 0} type="button"><Shuffle /> 自动均分绑定</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
       />
 
       <section className="ops-summary">
@@ -165,8 +202,8 @@ export default function RelayNodesPage() {
       </section>
 
       {createOpen ? (
-        <div className="drawer-backdrop" role="presentation">
-          <aside aria-label="新增节点" className="side-drawer">
+        <div className="drawer-backdrop" onClick={() => setCreateOpen(false)} role="presentation">
+          <aside aria-label="新增节点" className="side-drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-head">
               <div>
                 <p className="eyebrow">New Relay</p>
@@ -196,59 +233,60 @@ export default function RelayNodesPage() {
         </div>
       ) : null}
 
-      <section className="resource-list">
+      <section className="resource-list node-grid">
         {nodes.map((node) => {
-          const draft = quickBind[node.id] || { account_id: accounts[0]?.id || "", weight: "100" };
-          const related = nodeBindings(node.id);
+          const draft = quickBind[node.id] || { channel_id: "", weight: "0" };
+          const bindableChannels = unboundChannels(node.id);
+          const draftChannelID = bindableChannels.some((channel) => channel.id === draft.channel_id) ? draft.channel_id : "";
           return (
-            <article className="resource-card" key={node.id}>
-              <div className="resource-main">
+            <article className={`resource-card node-card${expandedNodeID === node.id ? " expanded" : ""}`} key={node.id}>
+              <div className="resource-main node-card-head">
                 <div>
                   <div className="resource-title">
                     <strong>{node.name}</strong>
-                    <StatusBadge value={node.status} />
                     <StatusBadge value={node.health_status} />
                   </div>
-                  <code className="resource-code">{node.base_url}</code>
-                  <p className="muted">{node.region || "-"} / {node.egress_ip || "-"} · 当前 {node.current_concurrency || 0} 并发 · {related.length} 个账号绑定</p>
+                  <p className="muted node-meta"><code className="resource-code">{node.base_url}</code><span>{node.current_concurrency || 0} 并发</span><span>{nodeChannelGroups(node.id).length} 渠道</span></p>
                 </div>
                 <div className="resource-actions">
-                  <div className="segmented compact-segment">
-                    {(["active", "draining", "disabled"] as RelayNode["status"][]).map((status) => (
-                      <button className={node.status === status ? "active" : ""} key={status} onClick={() => patchNode(node.id, { status })} type="button">{status}</button>
-                    ))}
-                  </div>
-                  <button className="btn danger" onClick={() => deleteNode(node.id)} title="删除节点" type="button"><Trash2 /></button>
+                  <button className="btn danger icon-only" onClick={() => deleteNode(node.id)} title="删除节点" type="button"><Trash2 /></button>
                 </div>
               </div>
 
-              <div className="node-controls">
-                <div className="field compact"><label>节点权重</label><input className="input" defaultValue={node.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.weight) patchNode(node.id, { weight: value }); }} type="number" /></div>
-                <div className="field compact"><label>最大并发</label><input className="input" defaultValue={node.max_concurrency} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.max_concurrency) patchNode(node.id, { max_concurrency: value }); }} type="number" /></div>
-                <div className="field wide"><label>绑定账号</label><select className="input" value={draft.account_id} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, account_id: e.target.value } }))}><option value="">选择账号</option>{accounts.map((account) => <option value={account.id} key={account.id}>{accountName(account.id)} · {accountChannel(account.id)}</option>)}</select></div>
-                <div className="field compact"><label>绑定权重</label><input className="input" type="number" value={draft.weight} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, weight: e.target.value } }))} /></div>
-                <button className="btn primary form-row-action" disabled={!draft.account_id} onClick={() => createBinding(node.id)} type="button"><Link2 /> 绑定</button>
+              <div className="node-fast-controls">
+                <div className="field compact"><label>权重</label><input className="input" defaultValue={node.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.weight) patchNode(node.id, { weight: value }); }} type="number" /></div>
+                <div className="field compact"><label>并发</label><input className="input" defaultValue={node.max_concurrency} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.max_concurrency) patchNode(node.id, { max_concurrency: value }); }} type="number" /></div>
+                <button className="btn primary" onClick={() => setExpandedNodeID(expandedNodeID === node.id ? null : node.id)} type="button"><Link2 /> 绑定管理</button>
               </div>
 
-              <div className="credential-strip">
-                {related.length > 0 ? related.map((binding) => (
-                  <div className="credential-pill" key={binding.id}>
-                    <Link2 />
-                    <span>{accountName(binding.account_id)}</span>
-                    <small>渠道 {accountChannel(binding.account_id)}</small>
-                    <input className="mini-input" defaultValue={binding.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== binding.weight) patchBinding(binding.id, { weight: value }); }} type="number" />
-                    <button onClick={() => patchBinding(binding.id, { enabled: !binding.enabled })} type="button"><StatusBadge value={binding.enabled ? "enabled" : "disabled"} /></button>
-                    <button onClick={() => deleteBinding(binding.id)} title="删除绑定" type="button"><Trash2 /></button>
+              {expandedNodeID === node.id ? (
+                <div className="node-quick-drawer">
+                  <div className="node-bind-row">
+                    <div className="field wide"><label>绑定渠道</label><select className="input" value={draftChannelID} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, channel_id: e.target.value } }))}><option value="">选择渠道</option>{bindableChannels.map((channel) => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></div>
+                    <div className="field compact"><label>权重</label><input className="input" type="number" value={draft.weight} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, weight: e.target.value } }))} /></div>
+                    <button className="btn primary form-row-action" disabled={!draftChannelID || bindableChannels.length === 0} onClick={() => createBinding(node.id)} type="button"><Link2 /> 新增绑定</button>
                   </div>
-                )) : (
-                  <EmptyState title="暂无账号绑定" description={accounts.length ? "选择账号后点击绑定，Gateway 才会把请求调度到这个节点。" : "先在渠道页面添加凭证，再回到这里绑定节点。"} />
-                )}
-              </div>
+
+                  <div className="node-bindings-list">
+                    {nodeChannelGroups(node.id).length > 0 ? nodeChannelGroups(node.id).map((group) => (
+                  <div className="credential-pill" key={group.channelID}>
+                    <Link2 />
+                    <span>{channelName(group.channelID)}</span>
+                    <small>{group.accountCount} 个账号</small>
+                    <input className="mini-input" defaultValue={group.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== group.weight) Promise.all(group.bindingIDs.map((id) => patchBinding(id, { weight: value }))); }} type="number" />
+                    <button onClick={() => deleteChannelBinding(group.bindingIDs)} title="删除绑定" type="button"><Trash2 /></button>
+                  </div>
+                    )) : (
+                      <EmptyState title="暂无渠道绑定" description={bindableChannels.length ? "选择渠道后点击新增绑定。" : "没有可绑定渠道。"} />
+                    )}
+                  </div>
+                </div>
+              ) : null}
             </article>
           );
         })}
         {nodes.length === 0 && !loading ? (
-          <section className="card"><EmptyState title="暂无转发节点" description="单机模式可添加 local-relay；没有节点时系统会尝试本机 fallback。" /></section>
+          <section className="card"><EmptyState title="暂无节点" description="单机模式可添加 local-relay；没有节点时系统会尝试本机 fallback。" /></section>
         ) : null}
       </section>
     </AppShell>

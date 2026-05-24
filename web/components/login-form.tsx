@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { adminApi, userApi } from "@/lib/api";
+import { adminApi, authStorage, userApi } from "@/lib/api";
 
 export function LoginForm() {
   const router = useRouter();
@@ -24,7 +24,7 @@ export function LoginForm() {
     if (adminLike) {
       try {
         const adminLogin = await adminApi.login({ email, password });
-        window.localStorage.setItem("uapi.admin.token", adminLogin.token);
+        authStorage.storeAuth("admin", adminLogin);
         router.push("/admin/dashboard");
         return;
       } catch {
@@ -34,7 +34,7 @@ export function LoginForm() {
 
     try {
       const userLogin = await userApi.login({ email, password });
-      window.localStorage.setItem("uapi.user.token", userLogin.token);
+      authStorage.storeAuth("user", userLogin);
       router.push("/overview");
       return;
     } catch {
@@ -44,7 +44,7 @@ export function LoginForm() {
     if (!adminLike) {
       try {
         const adminLogin = await adminApi.login({ email, password });
-        window.localStorage.setItem("uapi.admin.token", adminLogin.token);
+        authStorage.storeAuth("admin", adminLogin);
         router.push("/admin/dashboard");
         return;
       } catch {

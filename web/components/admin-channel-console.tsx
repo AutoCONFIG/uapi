@@ -1,14 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Clipboard, Filter, KeyRound, Link2, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
 
 const channelDefaults: Record<string, string> = {
-  openai: "https://api.openai.com",
-  anthropic: "https://api.anthropic.com",
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
+};
+
+const codeChannelDefaults: Record<string, string> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com",
 };
 
@@ -28,9 +34,9 @@ const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-fl
 const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
 
 const channelPresets: ChannelPreset[] = [
-  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: channelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
-  { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: channelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
-  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: channelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
+  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: codeChannelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
+  { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: codeChannelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
+  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: codeChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
   { id: "openai_responses_api", label: "OpenAI Responses API", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
   { id: "openai_chat_completions", label: "OpenAI Chat Completions API", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions API" },
   { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent API" },
@@ -40,31 +46,48 @@ const channelPresets: ChannelPreset[] = [
 const defaultPreset = channelPresets[4];
 
 function createInitialDraft(preset: ChannelPreset = defaultPreset) {
-  return { name: "", preset: preset.id, type: preset.type, group: "default", endpoint: preset.endpoint, models: preset.models, apiFormat: preset.apiFormat };
+  return { name: "", preset: preset.id, type: preset.type, models: preset.models, apiFormat: preset.apiFormat };
 }
 
+function defaultEndpointForChannel(channel: Pick<Channel, "type" | "api_format" | "endpoint">): string {
+  return channel.endpoint || channelPresets.find((preset) => preset.type === channel.type && preset.apiFormat === channel.api_format)?.endpoint || channelDefaults[channel.type] || "";
+}
 
 function isCodeChannel(channel: Pick<Channel, "api_format">): boolean {
   return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code";
+}
+
+function presetTitleLines(preset: ChannelPreset): [string, string] {
+  const map: Record<string, [string, string]> = {
+    codex: ["OpenAI", "Codex"],
+    gemini_code: ["Google", "Gemini Code"],
+    claude_code: ["Anthropic", "Claude Code"],
+    openai_responses_api: ["OpenAI", "Responses API"],
+    openai_chat_completions: ["OpenAI", "Chat Completions"],
+    gemini_api: ["Google", "Gemini API"],
+    anthropic_messages: ["Anthropic", "Messages API"],
+  };
+  return map[preset.id] || [preset.type.toUpperCase(), preset.label];
 }
 
 export function AdminChannelConsole() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedID, setSelectedID] = useState("");
-  const [activeGroup, setActiveGroup] = useState("default");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [channelEditOpen, setChannelEditOpen] = useState(false);
+  const [accountEditOpen, setAccountEditOpen] = useState(false);
+  const [selectedAccountID, setSelectedAccountID] = useState("");
+  const [reauthAccountID, setReauthAccountID] = useState("");
   const [error, setError] = useState("");
-  const [channelQuery, setChannelQuery] = useState("");
-  const [healthFilter, setHealthFilter] = useState<"all" | "healthy" | "warning" | "disabled">("all");
-  const [providerFilter, setProviderFilter] = useState("all");
   const [draft, setDraft] = useState(createInitialDraft());
   const [credentialMode, setCredentialMode] = useState<"oauth" | "apikey">("apikey");
   const [apiKeyName, setApiKeyName] = useState("");
   const [apiKeyValue, setApiKeyValue] = useState("");
+  const [apiKeyEndpoint, setApiKeyEndpoint] = useState("");
   const [credLoading, setCredLoading] = useState(false);
   const [credError, setCredError] = useState("");
   const [credNotice, setCredNotice] = useState("");
@@ -76,17 +99,13 @@ export function AdminChannelConsole() {
   const [oauthAuthURL, setOauthAuthURL] = useState("");
   const [oauthCallbackURL, setOauthCallbackURL] = useState("");
   const [oauthJSON, setOauthJSON] = useState("");
+  const [exportPassword, setExportPassword] = useState("");
+  const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const selected = channels.find((item) => item.id === selectedID) || null;
+  const selectedAccount = accounts.find((item) => item.id === selectedAccountID) || null;
 
-  function channelGroup(channel: Channel): string {
-    return channel.group?.trim() || "default";
-  }
-
-  function groupLabel(group: string): string {
-    return group === "default" ? "默认渠道" : group;
-  }
 
   function presetForChannel(channel: Channel): ChannelPreset {
     if (channel.api_format === "codex") return channelPresets[0];
@@ -120,18 +139,18 @@ export function AdminChannelConsole() {
     return { message, url };
   }
 
-  function accountQuotaItems(account: Account): { label: string; value: string }[] {
+  function accountQuotaItems(account: Account): { label: string; values: string[] }[] {
     const meta = account.metadata || {};
-    const items: { label: string; value: string }[] = [];
+    const items: { label: string; values: string[] }[] = [];
     const codexUsage = asRecord(meta.codex_usage);
     if (codexUsage) {
       const text = summarizeCodexUsage(codexUsage);
-      if (text) items.push({ label: "Codex 额度", value: text });
+      if (text) items.push({ label: "Codex 额度", values: splitQuotaText(text) });
     }
     const geminiQuota = asRecord(meta.user_quota);
     if (geminiQuota) {
       const text = summarizeGeminiQuota(geminiQuota);
-      if (text) items.push({ label: "Gemini 配额", value: text });
+      if (text) items.push({ label: "Gemini 配额", values: splitQuotaText(text) });
     }
     const paidTier = asRecord(meta.paid_tier);
     const credits = asArray(paidTier?.availableCredits);
@@ -140,12 +159,12 @@ export function AdminChannelConsole() {
         const row = asRecord(credit);
         return [stringValue(row?.creditType), stringValue(row?.creditAmount)].filter(Boolean).join(" ");
       }).filter(Boolean).join(" · ");
-      if (text) items.push({ label: "Gemini Credits", value: text });
+      if (text) items.push({ label: "Gemini Credits", values: splitQuotaText(text) });
     }
     const anthropicUsage = asRecord(meta.usage);
     if (anthropicUsage) {
       const text = summarizeAnthropicUsage(anthropicUsage);
-      if (text) items.push({ label: "Anthropic 用量", value: text });
+      if (text) items.push({ label: "Anthropic 用量", values: splitQuotaText(text) });
     }
     return items;
   }
@@ -159,9 +178,7 @@ export function AdminChannelConsole() {
     ]).then(([ch, ac]) => {
       setChannels(ch);
       setAccounts(ac);
-      const firstGroup = ch[0] ? channelGroup(ch[0]) : "default";
-      setActiveGroup((current) => current === "default" && ch.length > 0 && !ch.some((item) => channelGroup(item) === "default") ? firstGroup : current);
-      setSelectedID((current) => current || ch.find((item) => channelGroup(item) === firstGroup)?.id || ch[0]?.id || "");
+      setSelectedID((current) => current || ch[0]?.id || "");
     }).finally(() => setLoading(false));
   }
 
@@ -172,6 +189,7 @@ export function AdminChannelConsole() {
     setCredentialMode(isCodeChannel(selected) ? "oauth" : "apikey");
     setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 1}`);
     setApiKeyValue("");
+    setApiKeyEndpoint(defaultEndpointForChannel(selected));
     setCredError("");
     setCredNotice("");
     setOauthState("");
@@ -219,27 +237,7 @@ export function AdminChannelConsole() {
     return "healthy";
   }
 
-  const channelGroups = useMemo(() => {
-    const groups = Array.from(new Set(channels.map((item) => channelGroup(item)))).sort();
-    return groups.map((group) => {
-      const items = channels.filter((item) => channelGroup(item) === group);
-      const enabled = items.filter((item) => item.enabled).length;
-      const warning = items.filter((item) => channelHealth(item) === "warning").length;
-      return { type: group, label: groupLabel(group), items, enabled, warning };
-    });
-  }, [channels, accounts]);
-
-  const visibleChannels = useMemo(() => {
-    const query = channelQuery.trim().toLowerCase();
-    return channels.filter((item) => {
-      if (channelGroup(item) !== activeGroup) return false;
-      if (providerFilter !== "all" && item.type !== providerFilter) return false;
-      if (healthFilter !== "all" && channelHealth(item) !== healthFilter) return false;
-      if (!query) return true;
-      const haystack = [item.name, item.type, item.group, item.endpoint, item.models, item.api_format, presetForChannel(item).label].join(" ").toLowerCase();
-      return haystack.includes(query);
-    });
-  }, [activeGroup, channels, accounts, channelQuery, healthFilter, providerFilter]);
+  const selectedAccounts = useMemo(() => selected ? channelAccounts(selected.id) : [], [selected?.id, accounts]);
 
 
   function applyPreset(preset: ChannelPreset) {
@@ -247,10 +245,9 @@ export function AdminChannelConsole() {
       ...cur,
       preset: preset.id,
       type: preset.type,
-      endpoint: preset.endpoint,
       models: preset.models,
       apiFormat: preset.apiFormat,
-      name: cur.name || ` Channel`,
+      name: cur.name,
     }));
     setCredentialMode(preset.auth === "oauth" ? "oauth" : "apikey");
     setOauthState("");
@@ -261,16 +258,6 @@ export function AdminChannelConsole() {
     setApiKeyValue("");
   }
 
-  function codePresetForProvider(type: string): ChannelPreset {
-    return channelPresets.find((item) => item.auth === "oauth" && item.type === type) || defaultPreset;
-  }
-
-  function codeLoginLabel(type: string): string {
-    if (type === "openai") return "Codex 登录";
-    if (type === "gemini") return "Gemini Code 登录";
-    return "Claude Code 登录";
-  }
-
   async function createDraftChannel(selectAfterCreate: boolean, overrides: Partial<typeof draft> = {}): Promise<Channel | null> {
     if (!token || saving) return null;
     setSaving(true);
@@ -278,10 +265,9 @@ export function AdminChannelConsole() {
     const channelDraft = { ...draft, ...overrides };
     try {
       const created = await adminApi.createChannel(token, {
-        name: channelDraft.name.trim() || `${channelDraft.type.toUpperCase()} Channel`,
+        name: channelDraft.name.trim() || `${channelDraft.type.toUpperCase()} 渠道`,
         type: channelDraft.type,
-        group: channelDraft.group.trim() || "default",
-        endpoint: channelDraft.endpoint.trim() || channelDefaults[channelDraft.type],
+        group: channelDraft.name.trim() || `${channelDraft.type.toUpperCase()} 渠道`,
         models: channelDraft.models.trim(),
         priority: 100,
         api_format: channelDraft.apiFormat,
@@ -292,7 +278,6 @@ export function AdminChannelConsole() {
       if (selectAfterCreate) {
         setSelectedID(created.id);
       }
-      setActiveGroup(created.group || "default");
       setDraft(createInitialDraft());
       return created;
     } catch (err) {
@@ -303,52 +288,9 @@ export function AdminChannelConsole() {
     }
   }
 
-  async function startNewOAuth() {
-    const preset = codePresetForProvider(draft.type);
-    const channel = await createDraftChannel(false, { preset: preset.id, apiFormat: preset.apiFormat, type: preset.type, endpoint: draft.endpoint || preset.endpoint, models: preset.models });
-    if (!channel || !token) return;
-    setCredLoading(true);
-    setCredError("");
-    setCredNotice("");
-    try {
-      const started = await adminApi.startChannelOAuth(token, { channel_id: channel.id, provider: channel.type });
-      setOauthChannel(channel);
-      setOauthState(started.state);
-      setOauthMode(started.mode);
-      setOauthUserCode(started.user_code || "");
-      setOauthAuthURL(started.auth_url);
-      setOauthStatus({ state: started.state, provider: channel.type as "openai" | "gemini" | "anthropic", channel_id: channel.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
-      setCredNotice("登录页已打开，完成后把本地回调 URL 或认证 JSON 粘贴回来。");
-      window.open(started.auth_url, "_blank", "noopener,noreferrer");
-    } catch (err) {
-      setCredError(err instanceof Error ? err.message : "发起认证失败");
-    } finally {
-      setCredLoading(false);
-    }
-  }
-
-  async function createAPIKeyChannel() {
-    if (!token || !apiKeyValue.trim()) return;
-    const channel = await createDraftChannel(false);
-    if (!channel) return;
-    setCredLoading(true);
-    setCredError("");
-    try {
-      const account = await adminApi.createAccount(token, {
-        channel_id: channel.id,
-        name: apiKeyName.trim() || `${channel.type}-key`,
-        credentials: apiKeyValue.trim(),
-        weight: 100,
-        enabled: true,
-      });
-      setAccounts((cur) => [account, ...cur]);
-      setSelectedID(channel.id);
-      closeCreateDrawer();
-    } catch (err) {
-      setCredError(err instanceof Error ? err.message : "添加失败");
-    } finally {
-      setCredLoading(false);
-    }
+  async function createChannelOnly() {
+    const channel = await createDraftChannel(true);
+    if (channel) closeCreateDrawer();
   }
 
   function closeCreateDrawer() {
@@ -357,6 +299,7 @@ export function AdminChannelConsole() {
     setCredError("");
     setCredNotice("");
     setApiKeyValue("");
+    setApiKeyEndpoint("");
     setOauthChannel(null);
     setOauthState("");
     setOauthStatus(null);
@@ -378,18 +321,19 @@ export function AdminChannelConsole() {
 
   async function deleteChannel(id: string) {
     if (!token) return;
-    if (!confirm("确认删除该渠道？关联凭证也会停止使用。")) return;
+    if (!confirm("确认删除该渠道？关联账号也会停止使用。")) return;
     setCredError("");
     try {
       await adminApi.deleteChannel(token, id);
       setChannels((cur) => {
         const next = cur.filter((item) => item.id !== id);
-        const scoped = next.filter((item) => channelGroup(item) === activeGroup);
-        setSelectedID(scoped[0]?.id || next[0]?.id || "");
+        setSelectedID(next[0]?.id || "");
         return next;
       });
       setAccounts((cur) => cur.filter((item) => item.channel_id !== id));
       setDetailOpen(false);
+      setChannelEditOpen(false);
+      setAccountEditOpen(false);
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "删除渠道失败");
     }
@@ -404,13 +348,15 @@ export function AdminChannelConsole() {
         channel_id: selected.id,
         name: apiKeyName.trim() || `${selected.type}-key`,
         credentials: apiKeyValue.trim(),
+        endpoint: apiKeyEndpoint.trim() || defaultEndpointForChannel(selected),
         weight: 100,
         enabled: true,
       });
       setAccounts((cur) => [account, ...cur]);
       setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 2}`);
       setApiKeyValue("");
-      setCredNotice("API Key 已添加。");
+      setApiKeyEndpoint(defaultEndpointForChannel(selected));
+      setCredNotice("密钥账号已添加。");
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "添加失败");
     } finally {
@@ -440,6 +386,11 @@ export function AdminChannelConsole() {
     }
   }
 
+  async function startOAuthReauth(account: Account) {
+    setReauthAccountID(account.id);
+    await startOAuth();
+  }
+
   async function completeOAuth() {
     if (!token || !oauthState || (!oauthCallbackURL.trim() && !oauthJSON.trim())) return;
     setCredLoading(true);
@@ -466,15 +417,24 @@ export function AdminChannelConsole() {
     if (!channel) return;
     setCredLoading(true);
     try {
+      const replacing = reauthAccountID ? accounts.find((item) => item.id === reauthAccountID) : null;
       const account = await adminApi.bindChannelOAuth(adminToken, {
         state,
-        account_name: `${channel.type}-oauth-${channelAccounts(channel.id).length + 1}`,
-        weight: 100,
-        enabled: true,
+        account_name: replacing?.name || `${channel.type}-oauth-${channelAccounts(channel.id).length + 1}`,
+        weight: replacing?.weight ?? 100,
+        enabled: replacing?.enabled ?? true,
       });
-      setAccounts((cur) => [account, ...cur]);
+      if (replacing && token) {
+        await adminApi.deleteAccount(token, replacing.id);
+        setAccounts((cur) => [account, ...cur.filter((item) => item.id !== replacing.id)]);
+        setSelectedAccountID(account.id);
+        setCredNotice("OAuth 账号已重新认证。");
+      } else {
+        setAccounts((cur) => [account, ...cur]);
+        setCredNotice("OAuth 凭证已绑定。");
+      }
       setSelectedID(channel.id);
-      setCredNotice("OAuth 凭证已绑定。");
+      setReauthAccountID("");
       setOauthState("");
       setOauthStatus(null);
       setOauthCallbackURL("");
@@ -489,6 +449,23 @@ export function AdminChannelConsole() {
     }
   }
 
+  async function exportAccountCredential(account: Account) {
+    if (!token || !exportPassword.trim()) return;
+    setCredLoading(true);
+    setCredError("");
+    setCredNotice("");
+    setExportData(null);
+    try {
+      const data = await adminApi.exportAccount(token, { id: account.id, password: exportPassword });
+      setExportData(data);
+      setCredNotice("凭据已解密，仅在当前页面显示。");
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : "导出凭据失败");
+    } finally {
+      setCredLoading(false);
+    }
+  }
+
   async function patchAccount(id: string, body: Partial<Account>) {
     if (!token) return;
     setCredError("");
@@ -497,6 +474,32 @@ export function AdminChannelConsole() {
       setAccounts((cur) => cur.map((item) => item.id === id ? updated : item));
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "更新凭证失败");
+    }
+  }
+
+  async function updateAccountFromForm(account: Account, form: HTMLFormElement) {
+    if (!token) return;
+    const data = new FormData(form);
+    const nextKey = String(data.get("credentials") || "").trim();
+    const enabled = data.get("enabled") === "on";
+    const body: Partial<{ name: string; credentials: string; endpoint: string; weight: number; enabled: boolean }> = {
+      name: String(data.get("name") || account.name).trim() || account.name,
+      weight: Number(data.get("weight") || account.weight || 0),
+      enabled,
+    };
+    if (nextKey) body.credentials = nextKey;
+    const nextEndpoint = String(data.get("endpoint") || "").trim();
+    if (account.cred_type === "api_key" && selected) body.endpoint = nextEndpoint || defaultEndpointForChannel(selected);
+    setCredLoading(true);
+    setCredError("");
+    try {
+      const updated = await adminApi.updateAccount(token, account.id, body);
+      setAccounts((cur) => cur.map((item) => item.id === account.id ? updated : item));
+      setCredNotice("账号信息已更新。");
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : "更新账号失败");
+    } finally {
+      setCredLoading(false);
     }
   }
 
@@ -516,119 +519,232 @@ export function AdminChannelConsole() {
       <section className="ops-summary">
         <div className="ops-stat"><span>可用渠道</span><strong>{stats.enabledChannels} / {channels.length}</strong></div>
         <div className="ops-stat"><span>可用凭证</span><strong>{stats.enabledAccounts} / {stats.totalAccounts}</strong></div>
-        <div className="ops-actions">
-          <button className="btn" onClick={loadData} type="button" title="刷新"><RefreshCw /> 刷新</button>
-          <button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增渠道</button>
-        </div>
       </section>
 
       <section className="channel-workbench">
         <aside className="channel-list card">
           <div className="channel-list-head">
-            <h2>渠道分类</h2>
-            <span className="badge">{channels.length}</span>
-          </div>
-          <div className="channel-filter-stack">
-            <label className="search-box">
-              <Search />
-              <input value={channelQuery} onChange={(e) => setChannelQuery(e.target.value)} placeholder="搜索渠道、模型、Endpoint" />
-            </label>
-            <div className="filter-row">
-              <select className="input compact-select" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}>
-                <option value="all">全部供应商</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="gemini">Gemini</option>
-              </select>
-              <select className="input compact-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value as typeof healthFilter)}>
-                <option value="all">全部状态</option>
-                <option value="healthy">可用</option>
-                <option value="warning">需处理</option>
-                <option value="disabled">停用</option>
-              </select>
+            <h2>渠道</h2>
+            <div className="channel-list-actions">
+              <span className="badge">{channels.length}</span>
+              <button className="btn primary icon-only" onClick={() => setCreateOpen(true)} title="新增渠道" type="button"><Plus /></button>
             </div>
           </div>
           <div className="channel-list-items">
-            {channelGroups.map((group) => {
-              return (
-                <button
-                  className={`channel-item${activeGroup === group.type ? " active" : ""}`}
-                  key={group.type}
-                  onClick={() => {
-                    setActiveGroup(group.type);
-                    setSelectedID(group.items[0]?.id || "");
-                    setDetailOpen(false);
-                  }}
-                  type="button"
-                >
-                  <span>
-                    <strong>{group.label}</strong>
-                    <small>{group.enabled} 可用 · {group.warning} 需处理</small>
-                  </span>
-                  <span className="badge">{group.items.length}</span>
-                </button>
-              );
-            })}
-            {channels.length === 0 && !loading ? <EmptyState title="暂无渠道" description="先在上方创建一个渠道。" /> : null}
-          </div>
-        </aside>
-
-        <section className="channel-detail card">
-          <div className="channel-grid-head">
-            <div>
-              <h2>{channelGroups.find((group) => group.type === activeGroup)?.label || groupLabel(activeGroup)}</h2>
-              <p className="muted">点击渠道方块打开抽屉，查看详情、编辑凭证和开关状态。</p>
-            </div>
-            <span className="badge">{visibleChannels.length} 个渠道</span>
-          </div>
-
-          <div className="channel-tile-grid">
-            {visibleChannels.map((channel) => {
+            {channels.map((channel) => {
               const related = channelAccounts(channel.id);
-              const count = related.length;
-              const enabledAccounts = related.filter((account) => account.enabled).length;
               const health = channelHealth(channel);
               return (
                 <div
-                  className={`channel-tile ${health}${selected?.id === channel.id ? " active" : ""}`}
+                  className={`channel-item${selected?.id === channel.id ? " active" : ""}`}
                   key={channel.id}
                   onClick={() => {
                     setSelectedID(channel.id);
-                    setDetailOpen(true);
+                    setDetailOpen(false);
+                    setChannelEditOpen(false);
+                    setAccountEditOpen(false);
                   }}
                   role="button"
                   tabIndex={0}
                 >
-                  <span className="channel-tile-top">
-                    <span className={`health-dot ${health}`} />
+                  <span>
                     <strong>{channel.name}</strong>
+                    <small>{related.length} 个账号</small>
                   </span>
-                  <small>{channel.endpoint}</small>
-                  <span className="channel-tile-meta">
-                    <span>{enabledAccounts}/{count} 凭证</span>
-                    <span>{presetForChannel(channel).label}</span>
-                  </span>
-                  <span className="channel-tile-actions" onClick={(event) => event.stopPropagation()}>
-                    <button className="btn subtle icon-only" onClick={() => patchChannel(channel.id, { enabled: !channel.enabled })} title={channel.enabled ? "停用" : "启用"} type="button"><Filter /></button>
-                    <button className="btn subtle icon-only" onClick={() => { setSelectedID(channel.id); setDetailOpen(true); }} title="添加凭证" type="button"><Plus /></button>
-                    <button className="btn subtle icon-only" onClick={() => navigator.clipboard?.writeText(channel.endpoint)} title="复制 Endpoint" type="button"><Clipboard /></button>
-                  </span>
+                  <div className="channel-item-actions" onClick={(event) => event.stopPropagation()}>
+                    <span className={`health-dot ${health}`} />
+                    <button className="btn subtle icon-only" onClick={() => patchChannel(channel.id, { enabled: !channel.enabled })} title={channel.enabled ? "停用渠道" : "启用渠道"} type="button"><Power /></button>
+                    <button className="btn subtle icon-only danger-icon" onClick={() => deleteChannel(channel.id)} title="删除渠道" type="button"><Trash2 /></button>
+                  </div>
                 </div>
               );
             })}
-            {visibleChannels.length === 0 && !loading ? <EmptyState title="暂无渠道" description="这个分类下还没有渠道。" /> : null}
-          </div>
+            {channels.length === 0 && !loading ? <EmptyState title="暂无渠道" description="先创建一个渠道，再添加账号。" /> : null}
+                      </div>
+        </aside>
 
-          {visibleChannels.length === 0 && loading ? <EmptyState title="加载中" description="正在加载渠道。" /> : null}
+        <section className="channel-detail card">
+          {selected ? (
+            <>
+              <div className="channel-grid-head">
+                <div className="channel-title-edit">
+                  <input className="channel-title-input" defaultValue={selected.name} key={`title-${selected.id}`} onBlur={(e) => {
+                    const value = e.target.value.trim();
+                    if (value && value !== selected.name) patchChannel(selected.id, { name: value });
+                  }} placeholder="渠道名称" />
+                </div>
+                <div className="channel-head-actions">
+                  <button className="btn" onClick={() => setChannelEditOpen(true)} type="button"><Pencil /> 编辑渠道</button>
+                  <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
+                </div>
+              </div>
+
+              <div className="account-card-grid">
+                {selectedAccounts.map((account) => {
+                  const state = accountState(account);
+                  const quotaItems = accountQuotaItems(account);
+                  const validation = accountValidation(account);
+                  return (
+                    <article className={`account-card ${state.tone}`} key={account.id}>
+                      <div className="account-card-head">
+                        <span className={`account-light ${state.tone}`} title={state.label} />
+                        <strong>{account.name}</strong>
+                        <span className="badge">{account.cred_type === "oauth_token" ? "OAuth" : "Key"}</span>
+                      </div>
+                      {accountMetaSummary(account) ? <p>{accountMetaSummary(account)}</p> : <p>{selected.type} · 权重 {account.weight || 0}</p>}
+                      <div className="account-card-meta">
+                        <span>{state.label}</span>
+                        {account.token_expiry ? <span>访问令牌 {new Date(account.token_expiry).toLocaleString()}</span> : <span>长期凭证</span>}
+                      </div>
+                      {quotaItems.length > 0 ? (
+                        <div className="account-card-quota">
+                          {quotaItems.slice(0, 2).map((item) => (
+                            <div className="quota-block" key={item.label}>
+                              <b>{item.label}</b>
+                              {item.values.map((value) => <span key={`${item.label}-${value}`}>{value}</span>)}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      {validation ? <a className="account-card-warning" href={validation.url || undefined} rel="noreferrer" target="_blank">{validation.message}</a> : null}
+                      <div className="account-card-actions">
+                        <button className="btn subtle" onClick={() => { setSelectedAccountID(account.id); setExportPassword(""); setExportData(null); setAccountEditOpen(true); }} type="button"><Pencil /> 编辑</button>
+                        <button className="btn subtle" onClick={() => patchAccount(account.id, { enabled: !account.enabled })} type="button">{account.enabled ? "停用" : "启用"}</button>
+                        <button className="btn danger" onClick={() => deleteAccount(account.id)} title="删除账号" type="button"><X /></button>
+                      </div>
+                    </article>
+                  );
+                })}
+                {selectedAccounts.length === 0 && !loading ? <EmptyState title="暂无账号" description="点击添加账号，绑定密钥或完成 OAuth 登录。" /> : null}
+              </div>
+            </>
+          ) : loading ? (
+            <EmptyState title="加载中" description="正在加载渠道。" />
+          ) : (
+            <EmptyState title="暂无渠道" description="先创建渠道。" />
+          )}
         </section>
       </section>
 
-      {detailOpen && selected ? (
-        <div className="drawer-backdrop" role="presentation">
-          <aside aria-label="渠道配置" className="side-drawer channel-config-drawer">
+      {accountEditOpen && selected && selectedAccount ? (
+        <div className="drawer-backdrop" onClick={() => setAccountEditOpen(false)} role="presentation">
+          <aside aria-label="编辑账号" className="side-drawer channel-config-drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-head">
               <div>
-                <p className="eyebrow">{presetForChannel(selected).label}</p>
+                <p className="eyebrow">账号</p>
+                <h2>编辑账号</h2>
+              </div>
+              <button className="btn" onClick={() => setAccountEditOpen(false)} title="关闭" type="button"><X /></button>
+            </div>
+
+            <div className="drawer-body">
+              <form className="account-edit-form" onSubmit={(event) => { event.preventDefault(); updateAccountFromForm(selectedAccount, event.currentTarget); }}>
+                <div className="field">
+                  <label>账号名称</label>
+                  <input className="input" name="name" defaultValue={selectedAccount.name} />
+                </div>
+                <div className="field">
+                  <label>调度权重</label>
+                  <input className="input" name="weight" type="number" min={0} defaultValue={selectedAccount.weight || 0} />
+                </div>
+                <label className="check-row">
+                  <input name="enabled" type="checkbox" defaultChecked={selectedAccount.enabled} />
+                  <span>启用账号</span>
+                </label>
+                {selectedAccount.cred_type === "api_key" ? (
+                  <div className="field">
+                    <label>更新密钥</label>
+                    <input className="input" name="credentials" placeholder="留空则不更新" type="password" />
+                  </div>
+                ) : null}
+                {selectedAccount.cred_type === "api_key" ? (
+                  <div className="field">
+                    <label>接入点</label>
+                    <input className="input" name="endpoint" defaultValue={selectedAccount.endpoint || defaultEndpointForChannel(selected)} placeholder="https://api.example.com/v1" />
+                  </div>
+                ) : null}
+                <button className="btn primary" disabled={credLoading} type="submit">{credLoading ? "保存中" : "保存账号"}</button>
+              </form>
+
+              <div className="credential-export-panel">
+                <div className="section-head">
+                  <div><h2>{selectedAccount.cred_type === "oauth_token" ? "导出认证 JSON" : "导出密钥"}</h2><p className="muted">需要输入管理员密码后显示，便于导入其他工具。</p></div>
+                </div>
+                <div className="export-form-row">
+                  <input className="input" value={exportPassword} onChange={(event) => setExportPassword(event.target.value)} placeholder="管理员密码" type="password" />
+                  <button className="btn" disabled={credLoading || !exportPassword.trim()} onClick={() => exportAccountCredential(selectedAccount)} type="button"><KeyRound /> 显示</button>
+                  {exportData ? <button className="btn subtle" onClick={() => navigator.clipboard?.writeText(JSON.stringify(exportData, null, 2))} type="button"><Clipboard /> 复制</button> : null}
+                </div>
+                {exportData ? <pre className="credential-export-json">{JSON.stringify(exportData, null, 2)}</pre> : null}
+              </div>
+
+              {selectedAccount.cred_type === "oauth_token" ? (
+                <div className="credential-editor account-create-panel">
+                  <div className="section-head">
+                    <div><h2>重新认证</h2><p className="muted">完成 OAuth 后会替换当前账号的认证信息。</p></div>
+                  </div>
+                  <OAuthPanel
+                    channel={selected}
+                    loading={credLoading}
+                    authURL={oauthAuthURL}
+                    callbackURL={oauthCallbackURL}
+                    jsonValue={oauthJSON}
+                    mode={oauthMode}
+                    notice={credNotice}
+                    status={oauthStatus}
+                    userCode={oauthUserCode}
+                    onCallbackChange={setOauthCallbackURL}
+                    onJSONChange={setOauthJSON}
+                    onStart={() => startOAuthReauth(selectedAccount)}
+                    onComplete={completeOAuth}
+                  />
+                </div>
+              ) : null}
+              {credNotice ? <p className="form-success">{credNotice}</p> : null}
+              {credError ? <p className="form-error">{credError}</p> : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      {channelEditOpen && selected ? (
+        <div className="drawer-backdrop" onClick={() => setChannelEditOpen(false)} role="presentation">
+          <aside aria-label="编辑渠道" className="side-drawer channel-config-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-head">
+              <div>
+                <p className="eyebrow">渠道</p>
+                <h2>编辑渠道</h2>
+              </div>
+              <button className="btn" onClick={() => setChannelEditOpen(false)} title="关闭" type="button"><X /></button>
+            </div>
+
+            <div className="drawer-body">
+              <div className="resource-title">
+                <StatusBadge value={selected.enabled ? "enabled" : "disabled"} />
+                <span className="badge">{presetForChannel(selected).label}</span>
+                <span className="badge">{selected.api_format || "standard"}</span>
+              </div>
+              <div className="channel-edit-grid drawer-channel-edit">
+                <input className="input" defaultValue={selected.name} key={`drawer-name-${selected.id}`} onBlur={(e) => {
+                  const value = e.target.value.trim();
+                  if (value && value !== selected.name) patchChannel(selected.id, { name: value });
+                }} placeholder="渠道名称" />
+                <input className="input wide" defaultValue={selected.models} key={`drawer-models-${selected.id}`} onBlur={(e) => {
+                  const value = e.target.value.trim();
+                  if (value !== selected.models) patchChannel(selected.id, { models: value });
+                }} placeholder="模型列表，留空表示不限制" />
+              </div>
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      {detailOpen && selected ? (
+        <div className="drawer-backdrop" onClick={() => setDetailOpen(false)} role="presentation">
+          <aside aria-label="新增账号" className="side-drawer channel-config-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-head">
+              <div>
+                <p className="eyebrow">新增账号</p>
                 <h2>{selected.name}</h2>
               </div>
               <button className="btn" onClick={() => setDetailOpen(false)} title="关闭" type="button"><X /></button>
@@ -637,41 +753,16 @@ export function AdminChannelConsole() {
             <div className="drawer-body">
               <div className="resource-title">
                 <StatusBadge value={selected.enabled ? "enabled" : "disabled"} />
-                <span className="badge">{groupLabel(channelGroup(selected))}</span>
-                <span className="badge">{selected.api_format || "standard"}</span>
-              </div>
-              <div className="channel-edit-grid">
-                <input className="input" defaultValue={selected.name} key={`name-${selected.id}`} onBlur={(e) => {
-                  const value = e.target.value.trim();
-                  if (value && value !== selected.name) patchChannel(selected.id, { name: value });
-                }} placeholder="渠道名称" />
-                <input className="input" defaultValue={channelGroup(selected)} key={`group-${selected.id}`} onBlur={(e) => {
-                  const value = e.target.value.trim() || "default";
-                  if (value !== channelGroup(selected)) {
-                    patchChannel(selected.id, { group: value });
-                    setActiveGroup(value);
-                  }
-                }} placeholder="默认渠道" />
-                <input className="input wide" defaultValue={selected.endpoint} key={`endpoint-${selected.id}`} onBlur={(e) => {
-                  const value = e.target.value.trim();
-                  if (value && value !== selected.endpoint) patchChannel(selected.id, { endpoint: value });
-                }} placeholder="Endpoint" />
-                <input className="input wide" defaultValue={selected.models} key={`models-${selected.id}`} onBlur={(e) => {
-                  const value = e.target.value.trim();
-                  if (value !== selected.models) patchChannel(selected.id, { models: value });
-                }} placeholder="模型列表，留空表示不限制" />
-              </div>
-              <div className="resource-actions">
-                <button className="btn" onClick={() => patchChannel(selected.id, { enabled: !selected.enabled })} type="button">{selected.enabled ? "停用" : "启用"}</button>
-                <button className="btn danger" onClick={() => deleteChannel(selected.id)} type="button"><Trash2 /> 删除</button>
+                <span className="badge">{presetForChannel(selected).label}</span>
+                <span className="badge">{selectedAccounts.length} 个账号</span>
               </div>
 
-              <div className="credential-editor">
+              <div className="credential-editor account-create-panel">
                 <div className="section-head">
-                  <div><h2>添加凭证</h2><p className="muted">凭证添加后立即进入 Gateway 调度池。</p></div>
+                  <div><h2>新增账号</h2><p className="muted">账号添加后归入当前渠道，由 Gateway 统一调度。</p></div>
                   {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isCodeChannel(selected) ? (
                     <div className="segmented">
-                      <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> API Key</button>
+                      <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> 密钥</button>
                     </div>
                   ) : null}
                 </div>
@@ -695,45 +786,13 @@ export function AdminChannelConsole() {
                 ) : credentialMode === "apikey" ? (
                   <div className="api-key-editor">
                     <input className="input" value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} placeholder={`${selected.type}-key-01`} />
-                    <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="API Key / Token" type="password" />
+                    <input className="input" value={apiKeyEndpoint} onChange={(e) => setApiKeyEndpoint(e.target.value)} placeholder={defaultEndpointForChannel(selected)} />
+                    <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
                     <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
                   </div>
                 ) : null}
                 {credNotice && credentialMode !== "oauth" ? <p className="form-success">{credNotice}</p> : null}
                 {credError ? <p className="form-error">{credError}</p> : null}
-              </div>
-
-              <div className="credential-list-panel">
-                <h2>凭证池</h2>
-                <div className="credential-list">
-                  {channelAccounts(selected.id).map((account) => (
-                    <div className="credential-row" key={account.id}>
-                      <span>
-                        {account.cred_type === "oauth_token" ? <Link2 /> : <KeyRound />}
-                        <span className="credential-main">
-                          <strong>{account.name}</strong>
-                          {accountMetaSummary(account) ? <small>{accountMetaSummary(account)}</small> : null}
-                          {accountValidation(account) ? (
-                            <small className="credential-warning">
-                              {accountValidation(account)?.message}
-                              {accountValidation(account)?.url ? <a href={accountValidation(account)?.url} rel="noreferrer" target="_blank">打开验证</a> : null}
-                            </small>
-                          ) : null}
-                          {accountQuotaItems(account).length > 0 ? (
-                            <span className="credential-quota">
-                              {accountQuotaItems(account).map((item) => (
-                                <small key={`${item.label}-${item.value}`}><b>{item.label}</b>{item.value}</small>
-                              ))}
-                            </span>
-                          ) : null}
-                        </span>
-                      </span>
-                      <button className="btn subtle" onClick={() => patchAccount(account.id, { enabled: !account.enabled })} type="button"><StatusBadge value={account.enabled ? "enabled" : "disabled"} /></button>
-                      <button className="btn danger" onClick={() => deleteAccount(account.id)} title="删除凭证" type="button"><X /></button>
-                    </div>
-                  ))}
-                  {channelAccounts(selected.id).length === 0 ? <EmptyState title="暂无凭证" description="先添加 OAuth 或 API Key。" /> : null}
-                </div>
               </div>
             </div>
           </aside>
@@ -741,11 +800,11 @@ export function AdminChannelConsole() {
       ) : null}
 
       {createOpen ? (
-        <div className="drawer-backdrop" role="presentation">
-          <aside aria-label="新增渠道" className="side-drawer">
+        <div className="drawer-backdrop" onClick={closeCreateDrawer} role="presentation">
+          <aside aria-label="新增渠道" className="side-drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-head">
               <div>
-                <p className="eyebrow">New Channel</p>
+                <p className="eyebrow">新增渠道</p>
                 <h2>新增渠道</h2>
               </div>
               <button className="btn" onClick={closeCreateDrawer} title="关闭" type="button"><X /></button>
@@ -755,84 +814,107 @@ export function AdminChannelConsole() {
               <div className="preset-grid provider-pick-grid">
                 {channelPresets.map((preset) => (
                   <button className={draft.preset === preset.id ? "active" : ""} key={preset.id} onClick={() => applyPreset(preset)} type="button">
-                    <strong>{preset.label}</strong>
-                    <small>{preset.note}</small>
-                    <span className={`preset-auth `}>{preset.auth === "oauth" ? "OAuth" : "API Key"}</span>
+                    <strong className="preset-title">
+                      {presetTitleLines(preset).map((line) => <span key={`${preset.id}-${line}`}>{line}</span>)}
+                    </strong>
+                    <span className={`preset-auth ${preset.auth}`}>{preset.auth === "oauth" ? "OAuth 认证" : "密钥认证"}</span>
                   </button>
                 ))}
               </div>
 
               <div className="field">
                 <label>渠道名称</label>
-                <input className="input" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`${channelPresets.find((item) => item.id === draft.preset)?.label || draft.type} Channel`} />
+                <input className="input" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`${channelPresets.find((item) => item.id === draft.preset)?.label || draft.type} 渠道`} />
               </div>
 
-              <div className="field">
-                <label>渠道分组</label>
-                <input className="input" value={draft.group} onChange={(e) => setDraft((d) => ({ ...d, group: e.target.value }))} placeholder="默认渠道" />
-              </div>
 
-              <div className="field">
-                <label>Endpoint</label>
-                <input className="input" value={draft.endpoint} onChange={(e) => setDraft((d) => ({ ...d, endpoint: e.target.value }))} />
-              </div>
-
-              {draft.type === "openai" ? (
+              {draft.type === "openai" && !isCodeChannel({ api_format: draft.apiFormat } as Channel) ? (
                 <div className="field">
                   <label>API 类型</label>
                   <div className="segmented">
-                    <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">Chat Completions</button>
-                    <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">Responses API</button>
+                    <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">对话补全</button>
+                    <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">响应接口</button>
                   </div>
                 </div>
               ) : null}
 
-              <div className="drawer-oauth">
-                <div className="field">
-                  <label>API Key</label>
-                  <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder={draft.type === "anthropic" ? "sk-ant-..." : "API Key"} type="password" />
-                </div>
-                <button className="btn primary" disabled={saving || credLoading || !apiKeyValue.trim()} onClick={createAPIKeyChannel} type="button">
-                  {saving || credLoading ? "正在创建" : "创建 API 渠道"}
-                </button>
-              </div>
-
-              <div className="drawer-oauth code-login-panel">
-                {!oauthStatus ? (
-                  <>
-                    <button className="btn" disabled={saving || credLoading} onClick={startNewOAuth} type="button">
-                      <Link2 /> {credLoading || saving ? "正在发起" : codeLoginLabel(draft.type)}
-                    </button>
-                    <p className="muted">使用账号登录创建 {codeLoginLabel(draft.type).replace(" 登录", "")} OAuth 渠道，后续通过刷新 token 保持可用。</p>
-                  </>
-                ) : (
-                  <OAuthPanel
-                    channel={oauthChannel || ({ id: "", name: draft.name, type: draft.type, group: draft.group || "default", endpoint: draft.endpoint, enabled: true, models: "", priority: 100, api_format: codePresetForProvider(draft.type).apiFormat, force_stream: false, affinity_ttl: 0, created_at: "" } as Channel)}
-                    loading={credLoading}
-                    authURL={oauthAuthURL}
-                    callbackURL={oauthCallbackURL}
-                    jsonValue={oauthJSON}
-                    mode={oauthMode}
-                    notice={credNotice}
-                    status={oauthStatus}
-                    userCode={oauthUserCode}
-                    onCallbackChange={setOauthCallbackURL}
-                    onJSONChange={setOauthJSON}
-                    onStart={startNewOAuth}
-                    onComplete={completeOAuth}
-                  />
-                )}
-                {credNotice && oauthStatus ? <p className="form-success">{credNotice}</p> : null}
-              </div>
+              <button className="btn primary" disabled={saving} onClick={createChannelOnly} type="button">
+                {saving ? "正在创建" : "创建渠道"}
+              </button>
+              <p className="muted">渠道只定义供应商、协议和模型范围；接入点随账号维护，OAuth 账号会自动配置。</p>
 
               {error ? <p className="form-error">{error}</p> : null}
-              {credError ? <p className="form-error">{credError}</p> : null}
             </div>
           </aside>
         </div>
       ) : null}
     </>
   );
+}
+
+type AccountTone = "healthy" | "warning" | "exhausted";
+
+function accountState(account: Account): { tone: AccountTone; label: string } {
+  const meta = account.metadata || {};
+  const now = Date.now();
+  const expiry = account.token_expiry ? Date.parse(account.token_expiry) : 0;
+  const invalidStatus = ["invalid", "revoked", "expired", "auth_failed", "unauthorized", "disabled"].includes(String(meta.status || meta.setup_status || "").toLowerCase());
+  const needsValidation = meta.validation_required === true || meta.setup_status === "validation_required";
+  if (!account.enabled || invalidStatus || needsValidation || (expiry > 0 && expiry <= now)) {
+    return { tone: "exhausted", label: "渠道失效" };
+  }
+  const usage = accountUsagePercent(account);
+  if ((usage !== null && usage >= 100) || Boolean(account.cooldown_until)) return { tone: "warning", label: "额度耗尽" };
+  return { tone: "healthy", label: "账号正常" };
+}
+
+function accountUsagePercent(account: Account): number | null {
+  const meta = account.metadata || {};
+  const candidates: number[] = [];
+  const codexUsage = asRecord(meta.codex_usage);
+  if (codexUsage) {
+    const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
+    for (const key of ["primary", "secondary", "credits"]) {
+      const row = asRecord(limits[key]);
+      const percent = numberValue(row?.used_percent ?? row?.usedPercent ?? row?.utilization);
+      if (percent !== null) candidates.push(normalizePercent(percent));
+    }
+  }
+  const geminiQuota = asRecord(meta.user_quota);
+  if (geminiQuota) {
+    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+    for (const bucket of buckets) {
+      const remaining = numberValue(bucket.remainingFraction);
+      if (remaining !== null) candidates.push(Math.max(0, Math.min(100, (1 - remaining) * 100)));
+    }
+  }
+  const anthropicUsage = asRecord(meta.usage);
+  if (anthropicUsage) {
+    for (const key of ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"]) {
+      const row = asRecord(anthropicUsage[key]);
+      const percent = numberValue(row?.utilization);
+      if (percent !== null) candidates.push(normalizePercent(percent));
+    }
+  }
+  return candidates.length > 0 ? Math.max(...candidates) : null;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function normalizePercent(value: number): number {
+  return value <= 1 ? value * 100 : value;
+}
+
+
+function splitQuotaText(text: string): string[] {
+  return text.split(" · ").map((item) => item.trim()).filter(Boolean);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -876,12 +958,17 @@ function summarizeCodexUsage(usage: Record<string, unknown>): string {
 
 function summarizeGeminiQuota(quota: Record<string, unknown>): string {
   const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-  return buckets.slice(0, 4).map((bucket) => {
-    const model = stringValue(bucket.modelId) || stringValue(bucket.tokenType) || "all";
-    const remaining = stringValue(bucket.remainingAmount) || fractionPercentValue(bucket.remainingFraction);
-    const reset = stringValue(bucket.resetTime);
-    return [model, remaining ? `剩余 ${remaining}` : "", reset ? `重置 ${reset}` : ""].filter(Boolean).join(" ");
-  }).join(" · ");
+  if (buckets.length === 0) return "";
+  const remainingPercents = buckets
+    .map((bucket) => numberValue(bucket.remainingFraction))
+    .filter((value): value is number => value !== null)
+    .map((value) => Math.max(0, Math.min(100, value * 100)));
+  const remainingAmounts = buckets.map((bucket) => stringValue(bucket.remainingAmount)).filter(Boolean);
+  const reset = buckets.map((bucket) => stringValue(bucket.resetTime)).filter(Boolean).sort()[0] || "";
+  const remaining = remainingPercents.length > 0
+    ? `${Math.round(Math.min(...remainingPercents))}%`
+    : remainingAmounts[0] || "";
+  return [`${buckets.length} 个额度桶`, remaining ? `最低剩余 ${remaining}` : "", reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · ");
 }
 
 function summarizeAnthropicUsage(usage: Record<string, unknown>): string {

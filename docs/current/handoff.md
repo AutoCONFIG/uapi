@@ -40,14 +40,17 @@ working state so the next agent can continue without extra user briefing.
 
 ## Current Channel State
 
-- Admin channels are grouped by `channels.channel_group`; missing values become
-  `default`, displayed as `默认渠道`.
-- The channel page uses a narrow group rail, tile grid, and drawer-based channel
-  editing/credential management.
+- Admin channels are listed directly as top-level items; `channel_group` is no
+  longer a user-facing grouping concept in the Web UI.
+- The channel page uses a narrow channel rail, dense account cards, and
+  drawer-based channel/account editing.
 - Channel provider family remains `channels.type`: `openai`, `gemini`,
   `anthropic`.
 - Protocol/client variant is `channels.api_format`: `standard`, `responses`,
   `codex`, `gemini_code`, or `claude_code`.
+- Upstream endpoints are account-level configuration. API-key accounts can set
+  a custom endpoint; OAuth/Code accounts receive the provider default endpoint
+  automatically when bound.
 - OAuth accounts store encrypted refresh tokens plus JSON `accounts.metadata`
   for provider account/project/plan fields.
 - OAuth lifecycle follows upstream client behavior on use. UAPI adds expiry-driven
@@ -197,7 +200,7 @@ internal/
 
 All routes below are registered in `internal/server/server.go`.
 
-### User API (user JWT auth)
+### User API (short access JWT + long refresh JWT)
 
 ```
 POST   /api/user/register
@@ -217,10 +220,11 @@ POST   /api/user/redeem
 GET    /api/user/plans
 ```
 
-### Admin API (admin JWT auth)
+### Admin API (short access JWT + long refresh JWT)
 
 ```
 POST   /api/admin/login
+POST   /api/admin/refresh
 GET    /api/admin/init-status
 POST   /api/admin/setup
 GET    /api/admin/dashboard
@@ -233,7 +237,7 @@ GET    /api/admin/channels/oauth/callback
 POST   /api/admin/channels/oauth/complete
 GET    /api/admin/channels/oauth/status
 POST   /api/admin/channels/oauth/bind
-CRUD   /api/admin/accounts
+CRUD   /api/admin/accounts   # credential export is POST-only and requires admin password
 CRUD   /api/admin/tokens
 CRUD   /api/admin/plans
 GET    /api/admin/users

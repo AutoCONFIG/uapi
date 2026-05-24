@@ -75,12 +75,6 @@ func (h *Handler) createRelayNode(ctx *fasthttp.RequestCtx) {
 		Status:         status,
 		HealthStatus:   health,
 	}
-	if node.Weight == 0 {
-		node.Weight = 100
-	}
-	if node.MaxConcurrency == 0 {
-		node.MaxConcurrency = 100
-	}
 	node.ID = uuid.New()
 	if err := h.db.Create(&node).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")

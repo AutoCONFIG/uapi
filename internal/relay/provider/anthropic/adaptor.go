@@ -7,6 +7,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
 
@@ -31,8 +32,8 @@ func (a *AnthropicAdaptor) Init(channel *db.Channel, account *db.Account) {
 }
 
 func (a *AnthropicAdaptor) GetRequestURL(path string) (string, error) {
-	base := strings.TrimRight(a.channel.Endpoint, "/")
-	return base + "/v1/messages", nil
+	base := strings.TrimRight(upstreamconfig.AccountEndpoint(a.channel, a.account), "/")
+	return base + "/messages", nil
 }
 
 func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {

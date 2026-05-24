@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { userApi } from "@/lib/api";
+import { authStorage, userApi } from "@/lib/api";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -31,7 +31,7 @@ export default function RegisterPage() {
 
     try {
       const res = await userApi.register({ email, username: email, password });
-      window.localStorage.setItem("uapi.user.token", res.token);
+      authStorage.storeAuth("user", res);
       router.replace("/keys");
     } catch (err) {
       setError(err instanceof Error ? err.message : "注册失败");
@@ -43,9 +43,9 @@ export default function RegisterPage() {
   return (
     <main className="form-page">
       <section className="auth-card">
-        <p className="eyebrow">Get started</p>
+        <p className="eyebrow">开始使用</p>
         <h1>创建账号</h1>
-        <p className="lede" style={{ marginBottom: 22 }}>拿到一个 OpenAI-compatible API Key，开始接入多上游中转。</p>
+        <p className="lede" style={{ marginBottom: 22 }}>获取一个 OpenAI 兼容密钥，开始接入多上游中转。</p>
         <form onSubmit={handleSubmit}>
           <div className="field">
             <label htmlFor="email">邮箱</label>

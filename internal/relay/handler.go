@@ -109,6 +109,7 @@ type RuntimeAccount struct {
 	Name          string                 `json:"name"`
 	Credentials   string                 `json:"credentials"`
 	CredType      string                 `json:"cred_type"`
+	Endpoint      string                 `json:"endpoint"`
 	Weight        int                    `json:"weight"`
 	Enabled       bool                   `json:"enabled"`
 	CooldownUntil *time.Time             `json:"cooldown_until,omitempty"`
@@ -1236,7 +1237,7 @@ func (r *Relayer) ApplyRuntimeConfig(cfg RuntimeConfig) {
 	for _, acc := range cfg.Accounts {
 		accounts[acc.ID] = db.Account{
 			Base:      db.Base{ID: acc.ID},
-			ChannelID: acc.ChannelID, Name: acc.Name, Credentials: acc.Credentials, CredType: acc.CredType,
+			ChannelID: acc.ChannelID, Name: acc.Name, Credentials: acc.Credentials, CredType: acc.CredType, Endpoint: acc.Endpoint,
 			Weight: acc.Weight, Enabled: acc.Enabled, CooldownUntil: acc.CooldownUntil, RefreshToken: acc.RefreshToken,
 			TokenExpiry: acc.TokenExpiry, ClientID: acc.ClientID, ClientSecret: acc.ClientSecret, TokenURL: acc.TokenURL,
 			Metadata: acc.Metadata,

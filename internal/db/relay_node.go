@@ -8,8 +8,8 @@ type RelayNode struct {
 	BaseURL            string     `gorm:"size:500;not null" json:"base_url"`
 	Region             string     `gorm:"size:50" json:"region"`
 	EgressIP           string     `gorm:"size:100" json:"egress_ip"`
-	Weight             int        `gorm:"default:100" json:"weight"`
-	MaxConcurrency     int        `gorm:"default:100" json:"max_concurrency"`
+	Weight             int        `gorm:"default:0" json:"weight"`
+	MaxConcurrency     int        `gorm:"default:0" json:"max_concurrency"`
 	Status             string     `gorm:"size:20;default:'disabled';index" json:"status"`
 	HealthStatus       string     `gorm:"size:20;default:'healthy';index" json:"health_status"`
 	CurrentConcurrency int        `gorm:"default:0" json:"current_concurrency"`

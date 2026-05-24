@@ -13,7 +13,6 @@ type CreateChannelRequest struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
 	Group       string `json:"group"`
-	Endpoint    string `json:"endpoint"`
 	Models      string `json:"models"`
 	Priority    int    `json:"priority"`
 	APIFormat   string `json:"api_format"`
@@ -26,7 +25,6 @@ type UpdateChannelRequest struct {
 	Name        *string `json:"name,omitempty"`
 	Type        *string `json:"type,omitempty"`
 	Group       *string `json:"group,omitempty"`
-	Endpoint    *string `json:"endpoint,omitempty"`
 	Models      *string `json:"models,omitempty"`
 	Priority    *int    `json:"priority,omitempty"`
 	APIFormat   *string `json:"api_format,omitempty"`
@@ -93,6 +91,7 @@ type CreateAccountRequest struct {
 	ChannelID   uuid.UUID `json:"channel_id"`
 	Name        string    `json:"name"`
 	Credentials string    `json:"credentials"`
+	Endpoint    string    `json:"endpoint"`
 	Weight      int       `json:"weight"`
 	Enabled     bool      `json:"enabled"`
 }
@@ -102,6 +101,7 @@ type UpdateAccountRequest struct {
 	ChannelID     uuid.UUID  `json:"channel_id"`
 	Name          string     `json:"name"`
 	Credentials   string     `json:"credentials"`
+	Endpoint      *string    `json:"endpoint,omitempty"`
 	Weight        *int       `json:"weight"`
 	Enabled       *bool      `json:"enabled"`
 	CooldownUntil *time.Time `json:"cooldown_until"`

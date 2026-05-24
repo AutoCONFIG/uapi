@@ -113,7 +113,7 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         <section className="card card-pad reset-result">
           <div>
             <h3>已为 {passwordResult.email} 生成新密码</h3>
-            <p className="muted">前端仅展示一次。真实接入后，后端应保存哈希并写入审计日志。</p>
+            <p className="muted">前端仅展示一次。真实接入后，后端应保存哈希并写入系统审计。</p>
           </div>
           <code>{passwordResult.password}</code>
         </section>

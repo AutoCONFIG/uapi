@@ -5,8 +5,10 @@ export type ApiEnvelope<T> = {
 };
 
 export type LoginResponse = {
-  token: string;
-  expires_at?: number;
+  access_token: string;
+  refresh_token: string;
+  access_expires_at: number;
+  refresh_expires_at: number;
 };
 
 export type Profile = {
@@ -114,6 +116,7 @@ export type Account = {
   channel_id: string;
   name: string;
   cred_type: "api_key" | "oauth_token";
+  endpoint?: string;
   weight: number;
   enabled: boolean;
   cooldown_until?: string;
