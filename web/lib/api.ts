@@ -7,7 +7,7 @@ import type {
   Channel,
   Dashboard,
   LoginResponse,
-  NodeAccount,
+  NodeChannel,
   OAuthAuthURL,
   OAuthStatus,
   RelayNode,
@@ -163,14 +163,14 @@ export const adminApi = {
     request<RelayNode>(`/api/admin/relay-nodes?id=${id}`, { method: "PUT", token, body }),
   deleteRelayNode: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/relay-nodes?id=${id}`, { method: "DELETE", token }),
-  nodeAccounts: (token: string, page = 1, limit = 100) =>
-    request<PaginatedResponse<NodeAccount>>(`/api/admin/node-accounts?page=${page}&limit=${limit}`, { token }),
-  createNodeAccount: (token: string, body: { relay_node_id: string; account_id: string; weight?: number; enabled?: boolean }) =>
-    request<NodeAccount>("/api/admin/node-accounts", { method: "POST", token, body }),
-  updateNodeAccount: (token: string, id: string, body: Partial<{ relay_node_id: string; account_id: string; weight: number; enabled: boolean }>) =>
-    request<NodeAccount>(`/api/admin/node-accounts?id=${id}`, { method: "PUT", token, body }),
-  deleteNodeAccount: (token: string, id: string) =>
-    request<{ deleted: boolean }>(`/api/admin/node-accounts?id=${id}`, { method: "DELETE", token }),
+  nodeChannels: (token: string, page = 1, limit = 100) =>
+    request<PaginatedResponse<NodeChannel>>(`/api/admin/node-channels?page=${page}&limit=${limit}`, { token }),
+  createNodeChannel: (token: string, body: { relay_node_id: string; channel_id: string; weight?: number; enabled?: boolean }) =>
+    request<NodeChannel>("/api/admin/node-channels", { method: "POST", token, body }),
+  updateNodeChannel: (token: string, id: string, body: Partial<{ relay_node_id: string; channel_id: string; weight: number; enabled: boolean }>) =>
+    request<NodeChannel>(`/api/admin/node-channels?id=${id}`, { method: "PUT", token, body }),
+  deleteNodeChannel: (token: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/admin/node-channels?id=${id}`, { method: "DELETE", token }),
   channels: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Channel>>(`/api/admin/channels?page=${page}&limit=${limit}`, { token }),
   createChannel: (token: string, body: {

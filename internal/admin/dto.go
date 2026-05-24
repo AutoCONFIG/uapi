@@ -190,16 +190,16 @@ type UpdateRelayNodeRequest struct {
 
 // --- Node Account Binding DTOs ---
 
-type CreateNodeAccountRequest struct {
+type CreateNodeChannelRequest struct {
 	RelayNodeID uuid.UUID `json:"relay_node_id"`
-	AccountID   uuid.UUID `json:"account_id"`
+	ChannelID   uuid.UUID `json:"channel_id"`
 	Weight      int       `json:"weight"`
 	Enabled     *bool     `json:"enabled"`
 }
 
-type UpdateNodeAccountRequest struct {
+type UpdateNodeChannelRequest struct {
 	RelayNodeID *uuid.UUID `json:"relay_node_id,omitempty"`
-	AccountID   *uuid.UUID `json:"account_id,omitempty"`
+	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
 	Weight      *int       `json:"weight,omitempty"`
 	Enabled     *bool      `json:"enabled,omitempty"`
 }

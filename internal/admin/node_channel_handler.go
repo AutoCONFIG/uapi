@@ -9,25 +9,25 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-func (h *Handler) HandleNodeAccounts(ctx *fasthttp.RequestCtx) {
+func (h *Handler) HandleNodeChannels(ctx *fasthttp.RequestCtx) {
 	switch string(ctx.Method()) {
 	case "GET":
-		h.listNodeAccounts(ctx)
+		h.listNodeChannels(ctx)
 	case "POST":
-		h.createNodeAccount(ctx)
+		h.createNodeChannel(ctx)
 	case "PUT":
-		h.updateNodeAccount(ctx)
+		h.updateNodeChannel(ctx)
 	case "DELETE":
-		h.deleteNodeAccount(ctx)
+		h.deleteNodeChannel(ctx)
 	default:
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func (h *Handler) listNodeAccounts(ctx *fasthttp.RequestCtx) {
+func (h *Handler) listNodeChannels(ctx *fasthttp.RequestCtx) {
 	page, limit := h.parsePagination(ctx)
 	offset := (page - 1) * limit
-	query := h.db.Model(&db.NodeAccount{}).Where("deleted_at IS NULL")
+	query := h.db.Model(&db.NodeChannel{}).Where("deleted_at IS NULL")
 	if nodeID := string(ctx.QueryArgs().Peek("relay_node_id")); nodeID != "" {
 		if _, err := uuid.Parse(nodeID); err != nil {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid relay_node_id")
@@ -35,28 +35,28 @@ func (h *Handler) listNodeAccounts(ctx *fasthttp.RequestCtx) {
 		}
 		query = query.Where("relay_node_id = ?", nodeID)
 	}
-	if accountID := string(ctx.QueryArgs().Peek("account_id")); accountID != "" {
-		if _, err := uuid.Parse(accountID); err != nil {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid account_id")
+	if channelID := string(ctx.QueryArgs().Peek("channel_id")); channelID != "" {
+		if _, err := uuid.Parse(channelID); err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid channel_id")
 			return
 		}
-		query = query.Where("account_id = ?", accountID)
+		query = query.Where("channel_id = ?", channelID)
 	}
 	var total int64
-	var items []db.NodeAccount
+	var items []db.NodeChannel
 	query.Count(&total)
 	query.Order("created_at desc").Limit(limit).Offset(offset).Find(&items)
 	h.jsonResponse(ctx, 200, PaginatedResponse{Total: total, Page: page, Limit: limit, Items: items})
 }
 
-func (h *Handler) createNodeAccount(ctx *fasthttp.RequestCtx) {
-	var req CreateNodeAccountRequest
+func (h *Handler) createNodeChannel(ctx *fasthttp.RequestCtx) {
+	var req CreateNodeChannelRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.RelayNodeID == uuid.Nil || req.AccountID == uuid.Nil {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "relay_node_id and account_id are required")
+	if req.RelayNodeID == uuid.Nil || req.ChannelID == uuid.Nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "relay_node_id and channel_id are required")
 		return
 	}
 	if req.Weight < 0 || req.Weight > 10000 {
@@ -67,15 +67,15 @@ func (h *Handler) createNodeAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "relay node not found")
 		return
 	}
-	if !h.existsAccount(req.AccountID) {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "account not found")
+	if !h.existsChannel(req.ChannelID) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
 		return
 	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	binding := db.NodeAccount{RelayNodeID: req.RelayNodeID, AccountID: req.AccountID, Weight: req.Weight, Enabled: enabled}
+	binding := db.NodeChannel{RelayNodeID: req.RelayNodeID, ChannelID: req.ChannelID, Weight: req.Weight, Enabled: enabled}
 	binding.ID = uuid.New()
 	if err := h.db.Create(&binding).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
@@ -85,18 +85,18 @@ func (h *Handler) createNodeAccount(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, binding)
 }
 
-func (h *Handler) updateNodeAccount(ctx *fasthttp.RequestCtx) {
+func (h *Handler) updateNodeChannel(ctx *fasthttp.RequestCtx) {
 	id, err := uuid.Parse(string(ctx.QueryArgs().Peek("id")))
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid id")
 		return
 	}
-	var req UpdateNodeAccountRequest
+	var req UpdateNodeChannelRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	var existing db.NodeAccount
+	var existing db.NodeChannel
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
@@ -109,12 +109,12 @@ func (h *Handler) updateNodeAccount(ctx *fasthttp.RequestCtx) {
 		}
 		updates["relay_node_id"] = *req.RelayNodeID
 	}
-	if req.AccountID != nil {
-		if *req.AccountID == uuid.Nil || !h.existsAccount(*req.AccountID) {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "account not found")
+	if req.ChannelID != nil {
+		if *req.ChannelID == uuid.Nil || !h.existsChannel(*req.ChannelID) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
 			return
 		}
-		updates["account_id"] = *req.AccountID
+		updates["channel_id"] = *req.ChannelID
 	}
 	if req.Weight != nil {
 		if *req.Weight < 0 || *req.Weight > 10000 {
@@ -138,14 +138,14 @@ func (h *Handler) updateNodeAccount(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, existing)
 }
 
-func (h *Handler) deleteNodeAccount(ctx *fasthttp.RequestCtx) {
+func (h *Handler) deleteNodeChannel(ctx *fasthttp.RequestCtx) {
 	id, err := uuid.Parse(string(ctx.QueryArgs().Peek("id")))
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid id")
 		return
 	}
 	now := time.Now()
-	result := h.db.Model(&db.NodeAccount{}).Where("id = ? AND deleted_at IS NULL", id).Updates(map[string]interface{}{
+	result := h.db.Model(&db.NodeChannel{}).Where("id = ? AND deleted_at IS NULL", id).Updates(map[string]interface{}{
 		"enabled":    false,
 		"deleted_at": now,
 	})
@@ -167,8 +167,8 @@ func (h *Handler) existsRelayNode(id uuid.UUID) bool {
 	return count > 0
 }
 
-func (h *Handler) existsAccount(id uuid.UUID) bool {
+func (h *Handler) existsChannel(id uuid.UUID) bool {
 	var count int64
-	h.db.Model(&db.Account{}).Where("id = ? AND deleted_at IS NULL", id).Count(&count)
+	h.db.Model(&db.Channel{}).Where("id = ? AND deleted_at IS NULL", id).Count(&count)
 	return count > 0
 }

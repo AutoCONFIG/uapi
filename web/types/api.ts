@@ -174,10 +174,10 @@ export type RelayNode = {
   updated_at?: string;
 };
 
-export type NodeAccount = {
+export type NodeChannel = {
   id: string;
   relay_node_id: string;
-  account_id: string;
+  channel_id: string;
   weight: number;
   enabled: boolean;
   created_at: string;

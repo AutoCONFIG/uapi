@@ -100,7 +100,7 @@ type RuntimeConfig struct {
 	Version  int64            `json:"version"`
 	Channels []db.Channel     `json:"channels"`
 	Accounts []RuntimeAccount `json:"accounts"`
-	Bindings []db.NodeAccount `json:"bindings"`
+	Bindings []db.NodeChannel `json:"bindings"`
 }
 
 type RuntimeAccount struct {

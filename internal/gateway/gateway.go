@@ -660,11 +660,11 @@ func (g *Gateway) reloadLocked() {
 	err := g.db.Table("relay_nodes").
 		Select(`relay_nodes.id AS node_id, relay_nodes.name AS node_name, relay_nodes.base_url,
 			relay_nodes.weight AS node_weight, relay_nodes.max_concurrency,
-			accounts.channel_id, accounts.id AS account_id, node_accounts.weight AS account_weight,
+			node_channels.channel_id, accounts.id AS account_id, node_channels.weight AS account_weight,
 			channels.models AS channel_models`).
-		Joins("JOIN node_accounts ON node_accounts.relay_node_id = relay_nodes.id AND node_accounts.enabled = true AND node_accounts.deleted_at IS NULL").
-		Joins("JOIN accounts ON accounts.id = node_accounts.account_id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
-		Joins("JOIN channels ON channels.id = accounts.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
+		Joins("JOIN node_channels ON node_channels.relay_node_id = relay_nodes.id AND node_channels.enabled = true AND node_channels.deleted_at IS NULL").
+		Joins("JOIN channels ON channels.id = node_channels.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
+		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
 		Where("relay_nodes.deleted_at IS NULL AND relay_nodes.status = ? AND relay_nodes.health_status = ?", statusActive, healthHealthy).
 		Order("relay_nodes.created_at asc").
 		Scan(&rows).Error

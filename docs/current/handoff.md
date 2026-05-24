@@ -55,6 +55,10 @@ working state so the next agent can continue without extra user briefing.
   automatically when bound.
 - OAuth accounts store encrypted refresh tokens plus JSON `accounts.metadata`
   for provider account/project/plan fields.
+
+- Relay node bindings are channel-level. The historical `/api/admin/node-channels`
+  path is kept, but the binding payload is `relay_node_id + channel_id`; runtime
+  config expands each bound channel to all enabled accounts in that channel.
 - OAuth lifecycle follows upstream client behavior on use. UAPI adds expiry-driven
   idle maintenance only for Claude Code and Gemini Code, because their normal
   local client paths do not have a standalone long-idle keep-alive loop. Each
@@ -232,7 +236,7 @@ POST   /api/admin/setup
 GET    /api/admin/dashboard
 CRUD   /api/admin/access-policies   # policy resource used by plan management
 CRUD   /api/admin/relay-nodes
-CRUD   /api/admin/node-accounts
+CRUD   /api/admin/node-channels   # node-channel bindings; request/response uses channel_id
 CRUD   /api/admin/channels
 POST   /api/admin/channels/oauth/auth-url
 GET    /api/admin/channels/oauth/callback

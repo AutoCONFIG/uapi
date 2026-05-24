@@ -17,7 +17,7 @@ type RelayConfigResponse struct {
 	Version  int64                `json:"version"`
 	Channels []db.Channel         `json:"channels"`
 	Accounts []RelayConfigAccount `json:"accounts"`
-	Bindings []db.NodeAccount     `json:"bindings"`
+	Bindings []db.NodeChannel     `json:"bindings"`
 }
 
 type RelayConfigAccount struct {
@@ -73,29 +73,45 @@ func (h *Handler) RelayConfig(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "node not found")
 		return
 	}
-	var allBindings []db.NodeAccount
+	var allBindings []db.NodeChannel
 	h.db.Where("relay_node_id = ? AND deleted_at IS NULL", nodeID).Find(&allBindings)
-	accountIDs := make([]uuid.UUID, 0, len(allBindings))
-	for _, b := range allBindings {
-		accountIDs = append(accountIDs, b.AccountID)
-	}
-	var allAccounts []db.Account
-	if len(accountIDs) > 0 {
-		h.db.Where("id IN ? AND deleted_at IS NULL", accountIDs).Find(&allAccounts)
-	}
-	var bindings []db.NodeAccount
+	var bindings []db.NodeChannel
+	channelSet := map[uuid.UUID]bool{}
+	channelIDs := make([]uuid.UUID, 0, len(allBindings))
 	for _, b := range allBindings {
 		if b.Enabled && b.DeletedAt == nil {
 			bindings = append(bindings, b)
+			if !channelSet[b.ChannelID] {
+				channelSet[b.ChannelID] = true
+				channelIDs = append(channelIDs, b.ChannelID)
+			}
 		}
 	}
-	activeAccountIDs := map[uuid.UUID]bool{}
-	for _, b := range bindings {
-		activeAccountIDs[b.AccountID] = true
+
+	var allChannels []db.Channel
+	if len(channelIDs) > 0 {
+		h.db.Where("id IN ? AND deleted_at IS NULL", channelIDs).Find(&allChannels)
+	}
+	activeChannelIDs := map[uuid.UUID]bool{}
+	channels := make([]db.Channel, 0, len(allChannels))
+	for _, ch := range allChannels {
+		if ch.Enabled && ch.DeletedAt == nil {
+			channels = append(channels, ch)
+			activeChannelIDs[ch.ID] = true
+		}
+	}
+
+	var allAccounts []db.Account
+	if len(activeChannelIDs) > 0 {
+		activeIDs := make([]uuid.UUID, 0, len(activeChannelIDs))
+		for id := range activeChannelIDs {
+			activeIDs = append(activeIDs, id)
+		}
+		h.db.Where("channel_id IN ? AND deleted_at IS NULL", activeIDs).Find(&allAccounts)
 	}
 	accounts := make([]db.Account, 0, len(allAccounts))
 	for _, acc := range allAccounts {
-		if activeAccountIDs[acc.ID] && acc.Enabled && acc.DeletedAt == nil {
+		if activeChannelIDs[acc.ChannelID] && acc.Enabled && acc.DeletedAt == nil {
 			accounts = append(accounts, acc)
 		}
 	}
@@ -107,24 +123,6 @@ func (h *Handler) RelayConfig(ctx *fasthttp.RequestCtx) {
 			RefreshToken: acc.RefreshToken, TokenExpiry: acc.TokenExpiry, ClientID: acc.ClientID,
 			ClientSecret: acc.ClientSecret, TokenURL: acc.TokenURL, Metadata: acc.Metadata,
 		})
-	}
-	channelSet := map[uuid.UUID]bool{}
-	channelIDs := make([]uuid.UUID, 0, len(accounts))
-	for _, acc := range accounts {
-		if !channelSet[acc.ChannelID] {
-			channelSet[acc.ChannelID] = true
-			channelIDs = append(channelIDs, acc.ChannelID)
-		}
-	}
-	var allChannels []db.Channel
-	if len(channelIDs) > 0 {
-		h.db.Where("id IN ? AND deleted_at IS NULL", channelIDs).Find(&allChannels)
-	}
-	channels := make([]db.Channel, 0, len(allChannels))
-	for _, ch := range allChannels {
-		if ch.Enabled && ch.DeletedAt == nil {
-			channels = append(channels, ch)
-		}
 	}
 	version := node.UpdatedAt.UnixNano()
 	version = maxDeletedAtVersion(version, node.DeletedAt)

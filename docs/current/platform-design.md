@@ -72,8 +72,8 @@ Gateway 是唯一配置权威，Relay 只负责实际出口转发。完整细节
 ```
 
 关键设计决策：
-- **Gateway 是管家和唯一配置权威**：用户、Key、策略、渠道、账号、节点、绑定、计费都由 Gateway/Control Plane 管理。
-- **Relay 是执行节点**：不提供管理能力，不做用户 API Key 鉴权，不独立选择账号；目标状态下只执行 Gateway 指定的 channel/account。
+- **Gateway 是管家和唯一配置权威**：用户、Key、策略、渠道、账号、节点、节点-渠道绑定、计费都由 Gateway/Control Plane 管理。
+- **Relay 是执行节点**：不提供管理能力，不做用户 API Key 鉴权，不独立选择账号；只执行 Gateway 指定的 channel/account。节点只绑定渠道，Gateway/Relay 运行时再展开该渠道下的可用账号。
 - **Relay 不需要数据库或 Redis**：远端节点只把 Gateway 下发的运行配置放在进程内存，请求热路径不查库、不访问缓存中间件。
 - **单机兼容**：没有 active Relay 节点时，Gateway fallback 到本机 relay，适合小规模单机运行。
 - **近期扩展目标**：单 Gateway + 2-3 Relay 节点，用于分散出口 IP；暂不引入 CDN、HAProxy、GSLB、多 Gateway 或长连接配置推送。
@@ -192,7 +192,7 @@ POST   /api/admin/setup              # 首次初始化，返回 AT/RT
 GET    /api/admin/dashboard           # 仪表盘统计
 CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用
 CRUD   /api/admin/relay-nodes
-CRUD   /api/admin/node-accounts         # Relay 节点管理
+CRUD   /api/admin/node-channels         # 节点-渠道绑定；保留路径名，字段为 channel_id
 CRUD   /api/admin/channels            # 渠道管理
 POST   /api/admin/channels/oauth/auth-url  # 创建 OAuth 授权 URL（admin JWT）
 GET    /api/admin/channels/oauth/callback  # Provider callback（公开回调，state 校验）

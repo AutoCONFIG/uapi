@@ -4,13 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Link2, Plus, RefreshCw, Shuffle, Trash2 } from "lucide-react";
 import { AppShell, EmptyState, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
-import type { Account, Channel, NodeAccount, RelayNode } from "@/types/api";
+import type { Channel, NodeChannel, RelayNode } from "@/types/api";
 
 export default function RelayNodesPage() {
   const [nodes, setNodes] = useState<RelayNode[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [bindings, setBindings] = useState<NodeAccount[]>([]);
+  const [bindings, setBindings] = useState<NodeChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -32,15 +31,11 @@ export default function RelayNodesPage() {
     Promise.all([
       adminApi.relayNodes(adminToken, 1, 100).then((data) => data.items),
       adminApi.channels(adminToken, 1, 100).then((data) => data.items),
-      adminApi.accounts(adminToken, 1, 200).then((data) => data.items),
-      adminApi.nodeAccounts(adminToken, 1, 200).then((data) => data.items),
+      adminApi.nodeChannels(adminToken, 1, 200).then((data) => data.items),
     ])
-      .then(([nodeItems, channelItems, accountItems, bindingItems]) => {
-        const channelIDs = new Set(channelItems.map((item) => item.id));
-        const validAccounts = accountItems.filter((item) => channelIDs.has(item.channel_id));
+      .then(([nodeItems, channelItems, bindingItems]) => {
         setNodes(nodeItems);
         setChannels(channelItems);
-        setAccounts(validAccounts);
         setBindings(bindingItems);
         setQuickBind((current) => {
           const next = { ...current };
@@ -112,33 +107,30 @@ export default function RelayNodesPage() {
     const adminToken = token();
     const draft = quickBind[nodeID];
     if (!adminToken || !draft?.channel_id) return;
-    const selectedAccounts = channelAccounts(draft.channel_id);
-    const existingAccountIDs = new Set(nodeBindings(nodeID).map((item) => item.account_id));
-    const accountsToBind = selectedAccounts.filter((account) => !existingAccountIDs.has(account.id));
-    if (accountsToBind.length === 0) return;
+    if (nodeBindings(nodeID).some((item) => item.channel_id === draft.channel_id)) return;
     try {
-      const created = await Promise.all(accountsToBind.map((account) => adminApi.createNodeAccount(adminToken, {
+      const created = await adminApi.createNodeChannel(adminToken, {
         relay_node_id: nodeID,
-        account_id: account.id,
+        channel_id: draft.channel_id,
         weight: Number(draft.weight || 0),
         enabled: true,
-      })));
-      setBindings((cur) => [...created, ...cur]);
+      });
+      setBindings((cur) => [created, ...cur]);
       setQuickBind((cur) => ({ ...cur, [nodeID]: { channel_id: "", weight: "0" } }));
     } catch { /* keep current state */ }
   }
 
   async function autoBalanceBindings() {
     const adminToken = token();
-    if (!adminToken || nodes.length === 0 || accounts.length === 0) return;
+    if (!adminToken || nodes.length === 0 || channels.length === 0) return;
     if (!confirm("确认自动均分绑定？现有节点绑定会被替换。")) return;
     setSaving(true);
     setError("");
     try {
-      await Promise.all(bindings.map((binding) => adminApi.deleteNodeAccount(adminToken, binding.id)));
-      const created = await Promise.all(accounts.map((account, index) => adminApi.createNodeAccount(adminToken, {
+      await Promise.all(bindings.map((binding) => adminApi.deleteNodeChannel(adminToken, binding.id)));
+      const created = await Promise.all(channels.map((channel, index) => adminApi.createNodeChannel(adminToken, {
         relay_node_id: nodes[index % nodes.length].id,
-        account_id: account.id,
+        channel_id: channel.id,
         weight: 0,
         enabled: true,
       })));
@@ -150,30 +142,22 @@ export default function RelayNodesPage() {
     }
   }
 
-  async function patchBinding(id: string, body: Partial<NodeAccount>) {
+  async function patchBinding(id: string, body: Partial<NodeChannel>) {
     const adminToken = token();
     if (!adminToken) return;
     try {
-      const updated = await adminApi.updateNodeAccount(adminToken, id, body);
+      const updated = await adminApi.updateNodeChannel(adminToken, id, body);
       setBindings((cur) => cur.map((item) => item.id === id ? updated : item));
     } catch { /* keep current state */ }
   }
 
   const channelName = (id: string) => channels.find((channel) => channel.id === id)?.name || id.slice(0, 8);
-  const channelAccounts = (channelID: string) => accounts.filter((account) => account.channel_id === channelID);
   const nodeBindings = (nodeID: string) => bindings.filter((binding) => binding.relay_node_id === nodeID);
-  const nodeChannelGroups = (nodeID: string) => {
-    const grouped = new Map<string, { channelID: string; accountCount: number; weight: number; bindingIDs: string[] }>();
-    for (const binding of nodeBindings(nodeID)) {
-      const account = accounts.find((item) => item.id === binding.account_id);
-      if (!account) continue;
-      const current = grouped.get(account.channel_id) || { channelID: account.channel_id, accountCount: 0, weight: binding.weight, bindingIDs: [] };
-      current.accountCount += 1;
-      current.bindingIDs.push(binding.id);
-      grouped.set(account.channel_id, current);
-    }
-    return Array.from(grouped.values());
-  };
+  const nodeChannelGroups = (nodeID: string) => nodeBindings(nodeID).map((binding) => ({
+    channelID: binding.channel_id,
+    weight: binding.weight,
+    bindingID: binding.id,
+  }));
   const unboundChannels = (nodeID: string) => {
     const boundChannelIDs = new Set(nodeChannelGroups(nodeID).map((group) => group.channelID));
     return channels.filter((channel) => !boundChannelIDs.has(channel.id));
@@ -182,7 +166,7 @@ export default function RelayNodesPage() {
     const adminToken = token();
     if (!adminToken) return;
     try {
-      await Promise.all(bindingIDs.map((id) => adminApi.deleteNodeAccount(adminToken, id)));
+      await Promise.all(bindingIDs.map((id) => adminApi.deleteNodeChannel(adminToken, id)));
       setBindings((cur) => cur.filter((item) => !bindingIDs.includes(item.id)));
     } catch { /* keep current state */ }
   }
@@ -192,7 +176,7 @@ export default function RelayNodesPage() {
       <PageHead
         title="节点"
         description="配置转发节点，并将渠道批量绑定到可用节点。"
-        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn" onClick={autoBalanceBindings} disabled={saving || nodes.length === 0 || accounts.length === 0} type="button"><Shuffle /> 自动均分绑定</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
+        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn" onClick={autoBalanceBindings} disabled={saving || nodes.length === 0 || channels.length === 0} type="button"><Shuffle /> 自动均分绑定</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
       />
 
       <section className="ops-summary">
@@ -272,9 +256,9 @@ export default function RelayNodesPage() {
                   <div className="credential-pill" key={group.channelID}>
                     <Link2 />
                     <span>{channelName(group.channelID)}</span>
-                    <small>{group.accountCount} 个账号</small>
-                    <input className="mini-input" defaultValue={group.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== group.weight) Promise.all(group.bindingIDs.map((id) => patchBinding(id, { weight: value }))); }} type="number" />
-                    <button onClick={() => deleteChannelBinding(group.bindingIDs)} title="删除绑定" type="button"><Trash2 /></button>
+                    <small>渠道</small>
+                    <input className="mini-input" defaultValue={group.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== group.weight) patchBinding(group.bindingID, { weight: value }); }} type="number" />
+                    <button onClick={() => deleteChannelBinding([group.bindingID])} title="删除绑定" type="button"><Trash2 /></button>
                   </div>
                     )) : (
                       <EmptyState title="暂无渠道绑定" description={bindableChannels.length ? "选择渠道后点击新增绑定。" : "没有可绑定渠道。"} />
