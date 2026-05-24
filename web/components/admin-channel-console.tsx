@@ -659,8 +659,8 @@ export function AdminChannelConsole() {
                 ) : null}
                 {selectedAccount.cred_type === "api_key" ? (
                   <div className="field">
-                    <label>接入点</label>
-                    <input className="input" name="endpoint" defaultValue={selectedAccount.endpoint || defaultEndpointForChannel(selected)} placeholder="https://api.example.com/v1" />
+                    <label>接入点（含路径）</label>
+                    <input className="input" name="endpoint" defaultValue={selectedAccount.endpoint || defaultEndpointForChannel(selected)} placeholder="https://api.example.com/custom-route" />
                   </div>
                 ) : null}
                 <button className="btn primary" disabled={credLoading} type="submit">{credLoading ? "保存中" : "保存账号"}</button>
@@ -786,7 +786,7 @@ export function AdminChannelConsole() {
                 ) : credentialMode === "apikey" ? (
                   <div className="api-key-editor">
                     <input className="input" value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} placeholder={`${selected.type}-key-01`} />
-                    <input className="input" value={apiKeyEndpoint} onChange={(e) => setApiKeyEndpoint(e.target.value)} placeholder={defaultEndpointForChannel(selected)} />
+                    <input className="input" value={apiKeyEndpoint} onChange={(e) => setApiKeyEndpoint(e.target.value)} placeholder={`${defaultEndpointForChannel(selected)} 或自定义路径`} />
                     <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
                     <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
                   </div>
@@ -841,7 +841,7 @@ export function AdminChannelConsole() {
               <button className="btn primary" disabled={saving} onClick={createChannelOnly} type="button">
                 {saving ? "正在创建" : "创建渠道"}
               </button>
-              <p className="muted">渠道只定义供应商、协议和模型范围；接入点随账号维护，OAuth 账号会自动配置。</p>
+              <p className="muted">渠道只定义供应商、协议和模型范围；接入点随账号维护，可填写包含 /v1 或其他兼容路由的完整前缀。</p>
 
               {error ? <p className="form-error">{error}</p> : null}
             </div>

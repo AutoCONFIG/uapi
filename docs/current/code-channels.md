@@ -19,8 +19,8 @@ the standard non-Code API formats.
 - The Web UI lists channels directly and no longer exposes `channel_group` as a
   primary grouping control.
 - OAuth/API credentials are stored as `accounts` under a channel. API-key
-  accounts carry their upstream endpoint so compatible third-party providers can
-  vary by account. OAuth/Code accounts store the provider default endpoint
+  accounts carry their upstream URL prefix, including custom path segments, so
+  compatible third-party providers can vary by account. OAuth/Code accounts store the provider default endpoint
   automatically during binding, plus encrypted refresh tokens and structured
   `metadata` with plan/account details synced from the provider flow when
   available.

@@ -224,7 +224,7 @@ ANY    /v1beta/*                      # Gemini generateContent API 格式
 OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支持
 `standard` 和 `gemini_code`；Anthropic 支持 `standard` 和
 `claude_code`。渠道只表达供应商、协议和模型范围；上游接入点归属账号。
-API Key 账号可单独配置接入点，OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
+API Key 账号可单独配置接入点，接入点是包含 `/v1` 或其他兼容路由前缀的完整上游 URL；OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
 Web UI 不提供手工编辑入口。Web UI 直接按渠道展示，账号在渠道内以卡片管理；
 `channel_group` 不再作为用户可见的一级分组。
 
@@ -327,7 +327,7 @@ type Account struct {
     Name          string     `gorm:"size:100;not null"`
     Credentials   string     `gorm:"type:text;not null"`        // AES-256-GCM encrypted
     CredType      string     `gorm:"size:20;default:api_key"`   // api_key | oauth_token
-    Endpoint      string     `gorm:"size:500"`                  // upstream base URL for this account
+    Endpoint      string     `gorm:"size:500"`                  // upstream URL prefix for this account
     Weight        int        `gorm:"default:1"`
     Enabled       bool       `gorm:"default:true"`
     CooldownUntil *time.Time

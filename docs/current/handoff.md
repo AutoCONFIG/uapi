@@ -49,7 +49,8 @@ working state so the next agent can continue without extra user briefing.
 - Protocol/client variant is `channels.api_format`: `standard`, `responses`,
   `codex`, `gemini_code`, or `claude_code`.
 - Upstream endpoints are account-level configuration. API-key accounts can set
-  a custom endpoint; OAuth/Code accounts receive the provider default endpoint
+  a custom endpoint URL prefix, including `/v1` or vendor-specific path
+  segments; OAuth/Code accounts receive the provider default endpoint
   automatically when bound.
 - OAuth accounts store encrypted refresh tokens plus JSON `accounts.metadata`
   for provider account/project/plan fields.
