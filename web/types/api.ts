@@ -137,7 +137,7 @@ export type OAuthAuthURL = {
 
 export type OAuthStatus = {
   state: string;
-  provider: "openai" | "gemini" | "anthropic";
+  provider: "openai" | "gemini" | "anthropic" | "antigravity";
   channel_id: string;
   status: "pending" | "completed" | "error" | "bound";
   ready_to_bind: boolean;

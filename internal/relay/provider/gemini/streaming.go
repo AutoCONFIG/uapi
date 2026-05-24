@@ -528,3 +528,9 @@ func mapOpenAIFinishReasonToGemini(reason string) string {
 		return "STOP"
 	}
 }
+
+// StreamLineConverter returns a stateful converter for Gemini-shaped SSE chunks.
+func StreamLineConverter() func([]byte, string) []byte {
+	state := &geminiStreamState{}
+	return state.convertLine
+}

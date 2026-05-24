@@ -16,6 +16,7 @@ const codeChannelDefaults: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com",
+  antigravity: "https://cloudcode-pa.googleapis.com",
 };
 
 type ChannelPreset = {
@@ -32,8 +33,10 @@ type ChannelPreset = {
 const codexModels = "gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2,gpt-image-2";
 const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview";
 const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
+const antigravityModels = "gemini-3-pro-preview,gemini-3-pro-high,gemini-3-flash-preview,claude-sonnet-4-5-thinking,claude-opus-4-5-thinking";
 
 const channelPresets: ChannelPreset[] = [
+  { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: codeChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
   { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: codeChannelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
   { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: codeChannelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
   { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: codeChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
@@ -43,7 +46,7 @@ const channelPresets: ChannelPreset[] = [
   { id: "anthropic_messages", label: "Anthropic Messages API", type: "anthropic", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.anthropic, models: "", note: "Anthropic Messages API" },
 ];
 
-const defaultPreset = channelPresets[4];
+const defaultPreset = channelPresets[5];
 
 function createInitialDraft(preset: ChannelPreset = defaultPreset) {
   return { name: "", preset: preset.id, type: preset.type, models: preset.models, apiFormat: preset.apiFormat };
@@ -76,11 +79,12 @@ function composeEndpoint(baseURL: string, path: string, defaultPath: string): st
 }
 
 function isCodeChannel(channel: Pick<Channel, "api_format">): boolean {
-  return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code";
+  return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code" || channel.api_format === "antigravity";
 }
 
 function presetTitleLines(preset: ChannelPreset): [string, string] {
   const map: Record<string, [string, string]> = {
+    antigravity: ["Google", "Antigravity"],
     codex: ["OpenAI", "Codex"],
     gemini_code: ["Google", "Gemini Code"],
     claude_code: ["Anthropic", "Claude Code"],
@@ -131,13 +135,14 @@ export function AdminChannelConsole() {
 
 
   function presetForChannel(channel: Channel): ChannelPreset {
-    if (channel.api_format === "codex") return channelPresets[0];
-    if (channel.api_format === "gemini_code") return channelPresets[1];
-    if (channel.api_format === "claude_code") return channelPresets[2];
-    if (channel.type === "openai" && channel.api_format === "responses") return channelPresets[3];
-    if (channel.type === "openai") return channelPresets[4];
-    if (channel.type === "gemini") return channelPresets[5];
-    if (channel.type === "anthropic") return channelPresets[6];
+    if (channel.api_format === "antigravity") return channelPresets[0];
+    if (channel.api_format === "codex") return channelPresets[1];
+    if (channel.api_format === "gemini_code") return channelPresets[2];
+    if (channel.api_format === "claude_code") return channelPresets[3];
+    if (channel.type === "openai" && channel.api_format === "responses") return channelPresets[4];
+    if (channel.type === "openai") return channelPresets[5];
+    if (channel.type === "gemini") return channelPresets[6];
+    if (channel.type === "anthropic") return channelPresets[7];
     return { id: channel.type, label: channel.type.toUpperCase(), type: channel.type, apiFormat: channel.api_format || "standard", auth: "apikey", endpoint: channel.endpoint, models: "", note: channel.type };
   }
 
@@ -378,7 +383,7 @@ export function AdminChannelConsole() {
       setOauthMode(started.mode);
       setOauthUserCode(started.user_code || "");
       setOauthAuthURL(started.auth_url);
-      setOauthStatus({ state: started.state, provider: selected.type as "openai" | "gemini" | "anthropic", channel_id: selected.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
+      setOauthStatus({ state: started.state, provider: selected.type as OAuthStatus["provider"], channel_id: selected.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
       setCredNotice(started.mode === "manual_callback" ? "登录页已打开，完成后把本地回调 URL 或认证 JSON 粘贴回来。" : "认证页面已打开，完成后会自动绑定。");
       window.open(started.auth_url, "_blank", "noopener,noreferrer");
     } catch (err) {

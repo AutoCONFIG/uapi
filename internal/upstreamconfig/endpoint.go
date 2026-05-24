@@ -17,6 +17,8 @@ func DefaultEndpoint(providerType, apiFormat string) string {
 			return "https://generativelanguage.googleapis.com"
 		}
 		return "https://generativelanguage.googleapis.com/v1beta"
+	case "antigravity":
+		return "https://daily-cloudcode-pa.googleapis.com"
 	default:
 		return ""
 	}

@@ -379,6 +379,8 @@ func channelUpstreamFormat(ch *db.Channel) provider.Format {
 		return provider.FormatAnthropic
 	case "gemini":
 		return provider.FormatGemini
+	case "antigravity":
+		return provider.FormatAntigravity
 	default:
 		return provider.FormatOpenAIChatCompletions
 	}

@@ -20,6 +20,7 @@ const (
 	FormatAnthropic             Format = "anthropic"
 	FormatGemini                Format = "gemini"
 	FormatGeminiCode            Format = "gemini_code"
+	FormatAntigravity           Format = "antigravity"
 )
 
 type InternalRequest struct {

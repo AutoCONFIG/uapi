@@ -15,7 +15,7 @@ import (
 	internalcrypto "github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
+	"github.com/AutoCONFIG/uapi/internal/oauthprovider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
@@ -75,15 +75,12 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	if provider == "" {
 		provider = strings.ToLower(channel.Type)
 	}
-	if provider != "openai" && provider != "gemini" && provider != "anthropic" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth is supported for openai, gemini and anthropic channels")
+	oauthProv, ok := oauthprovider.Get(provider)
+	if !ok {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "unsupported oauth provider")
 		return
 	}
-	if provider != strings.ToLower(channel.Type) {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth provider must match channel type")
-		return
-	}
-	if !channelAllowsOAuthProvider(channel, provider) {
+	if !oauthProv.ChannelAllowed(channel) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching Code channel format")
 		return
 	}
@@ -103,15 +100,15 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	clientSecret := strings.TrimSpace(req.ClientSecret)
 	tokenURL := strings.TrimSpace(req.TokenURL)
 	if clientID == "" {
-		clientID = defaultOAuthClientID(provider)
+		clientID = oauthProv.DefaultClientID()
 	}
 	if clientSecret == "" {
-		clientSecret = defaultOAuthClientSecret(provider)
+		clientSecret = oauthProv.DefaultClientSecret()
 	}
 	if tokenURL == "" {
-		tokenURL = defaultOAuthTokenURL(provider)
+		tokenURL = oauthProv.DefaultTokenURL()
 	}
-	if !oauthTokenURLMatchesProvider(provider, tokenURL) {
+	if !oauthProv.TokenURLAllowed(tokenURL) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token_url does not match provider")
 		return
 	}
@@ -149,17 +146,14 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 
 	redirectURI := h.oauthRedirectURI(ctx)
 	mode := "browser"
-	if provider == "openai" {
-		redirectURI = openai.DefaultRedirectURI
+	if oauthProv.ManualCallback() {
+		redirectURI = oauthProv.DefaultRedirectURI()
 		mode = "manual_callback"
-	} else if provider == "gemini" {
+	}
+	if provider == "gemini" {
 		redirectURI = geminiLoopbackRedirectURI()
 		verifier = ""
 		challenge = ""
-		mode = "manual_callback"
-	} else if provider == "anthropic" {
-		redirectURI = anthropic.DefaultRedirectURI
-		mode = "manual_callback"
 	}
 	authURL := buildProviderAuthURL(provider, clientID, redirectURI, challenge, state)
 
@@ -239,16 +233,17 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 		h.applyOAuthJSONImport(state, imported)
 		session = h.getOAuthSession(state)
 		if imported.AccessToken != "" || imported.IDToken != "" {
-			if session.Provider != "gemini" {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Gemini Code")
+			if session.Provider != "gemini" && session.Provider != "antigravity" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth code channels")
 				return
 			}
 			if imported.AccessToken == "" || imported.RefreshToken == "" {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "gemini oauth_json requires access_token and refresh_token")
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "google oauth_json requires access_token and refresh_token")
 				return
 			}
 			credential := imported.AccessToken
 			metadata := importedMetadata(imported)
+			metadata["oauth_provider"] = session.Provider
 			h.completeOAuthSession(state, credential, imported.RefreshToken, imported.Expiry, metadata, "")
 			logger.Infof("admin.oauth", "oauth json import completed", logger.F("provider", session.Provider), logger.F("channel_id", session.ChannelID.String()), logger.F("has_refresh_token", imported.RefreshToken != ""), logger.F("has_expiry", imported.Expiry != nil))
 			h.jsonResponse(ctx, 200, h.oauthStatusDTO(h.getOAuthSession(state)))
@@ -278,29 +273,13 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 }
 
 func channelAllowsOAuthProvider(channel db.Channel, provider string) bool {
-	switch strings.ToLower(provider) {
-	case "openai":
-		return strings.EqualFold(channel.Type, "openai") && channel.APIFormat == "codex"
-	case "gemini":
-		return strings.EqualFold(channel.Type, "gemini") && channel.APIFormat == "gemini_code"
-	case "anthropic":
-		return strings.EqualFold(channel.Type, "anthropic") && channel.APIFormat == "claude_code"
-	default:
-		return false
-	}
+	oauthProv, ok := oauthprovider.Get(provider)
+	return ok && oauthProv.ChannelAllowed(channel)
 }
 
 func oauthTokenURLMatchesProvider(provider, tokenURL string) bool {
-	switch strings.ToLower(provider) {
-	case "openai":
-		return tokenURLIs(tokenURL, "https://auth.openai.com/oauth/token")
-	case "gemini":
-		return tokenURLIs(tokenURL, "https://oauth2.googleapis.com/token")
-	case "anthropic":
-		return tokenURLIs(tokenURL, "https://platform.claude.com/v1/oauth/token")
-	default:
-		return false
-	}
+	oauthProv, ok := oauthprovider.Get(provider)
+	return ok && oauthProv.TokenURLAllowed(tokenURL)
 }
 
 func sanitizeOAuthError(err error) string {
@@ -643,17 +622,11 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 		TokenURL: session.TokenURL,
 		Metadata: session.Metadata,
 	}
-	if session.Provider == "anthropic" {
-		if metadata, err := anthropic.FetchAccountMetadata(session.Credential, strings.Fields(anthropic.DefaultScope)); err == nil {
+	if oauthProv, ok := oauthprovider.Get(session.Provider); ok {
+		if metadata, err := oauthProv.SyncMetadata(session.Credential, account.Metadata); err == nil {
 			account.Metadata = mergeMetadata(account.Metadata, metadata)
 		} else {
-			logger.Warnf("admin.oauth", "anthropic metadata sync failed", logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
-		}
-	} else if session.Provider == "gemini" {
-		if metadata, err := gemini.FetchCodeAssistMetadata(session.Credential, geminiProjectID(account.Metadata)); err == nil {
-			account.Metadata = mergeMetadata(account.Metadata, metadata)
-		} else {
-			logger.Warnf("admin.oauth", "gemini code metadata sync failed", logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
+			logger.Warnf("admin.oauth", "oauth metadata sync failed", logger.F("provider", session.Provider), logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
 		}
 	}
 	account.ID = uuid.New()
@@ -797,125 +770,39 @@ func (h *Handler) writeOAuthCallbackPage(ctx *fasthttp.RequestCtx, status int, m
 }
 
 func oauthPKCE(provider string) (verifier, challenge string, err error) {
-	switch provider {
-	case "openai":
-		verifier, err = openai.GenerateCodeVerifier()
-		if err != nil {
-			return "", "", err
-		}
-		return verifier, openai.GenerateCodeChallenge(verifier), nil
-	case "gemini":
-		verifier, err = gemini.GenerateCodeVerifier()
-		if err != nil {
-			return "", "", err
-		}
-		return verifier, gemini.GenerateCodeChallenge(verifier), nil
-	case "anthropic":
-		verifier, err = anthropic.GenerateCodeVerifier()
-		if err != nil {
-			return "", "", err
-		}
-		return verifier, anthropic.GenerateCodeChallenge(verifier), nil
-	default:
+	oauthProv, ok := oauthprovider.Get(provider)
+	if !ok {
 		return "", "", fmt.Errorf("unsupported provider")
 	}
+	return oauthProv.PKCE()
 }
 
 func buildProviderAuthURL(provider, clientID, redirectURI, challenge, state string) string {
-	if provider == "gemini" {
-		return gemini.BuildAuthURL(clientID, redirectURI, challenge, state)
+	oauthProv, ok := oauthprovider.Get(provider)
+	if !ok {
+		return ""
 	}
-	if provider == "anthropic" {
-		return anthropic.BuildAuthURL(clientID, redirectURI, challenge, state)
-	}
-	return openai.BuildAuthURL(clientID, redirectURI, challenge, state)
-}
-
-func defaultOAuthClientID(provider string) string {
-	if provider == "gemini" {
-		return gemini.DefaultClientID
-	}
-	if provider == "anthropic" {
-		return anthropic.DefaultClientID
-	}
-	return openai.DefaultClientID
-}
-
-func defaultOAuthClientSecret(provider string) string {
-	if provider == "gemini" {
-		return gemini.DefaultClientSecret
-	}
-	return ""
-}
-
-func defaultOAuthTokenURL(provider string) string {
-	if provider == "gemini" {
-		return gemini.DefaultTokenURL
-	}
-	if provider == "anthropic" {
-		return anthropic.DefaultTokenURL
-	}
-	return openai.DefaultTokenURL
+	return oauthProv.BuildAuthURL(clientID, redirectURI, challenge, state)
 }
 
 func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshToken string, expiry *time.Time, metadata map[string]interface{}, err error) {
-	switch session.Provider {
-	case "openai":
-		tokens, err := openai.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID)
-		if err != nil {
-			return "", "", nil, nil, err
-		}
-		credential = tokens.AccessToken
-		if tokens.IDToken != "" {
-			if parsed, err := openai.ParseIDTokenMetadata(tokens.IDToken); err == nil {
-				metadata = parsed
-			}
-		}
-		if usage, err := openai.FetchCodexUsage(tokens.AccessToken, openAIAccountID(metadata), openAIFedRAMP(metadata)); err == nil {
-			if metadata == nil {
-				metadata = map[string]interface{}{}
-			}
-			metadata["codex_usage"] = usage
-		}
-		if tokens.IDToken != "" {
-			if exchanged, err := openai.ExchangeForAPIKey(session.TokenURL, tokens.IDToken, session.ClientID); err == nil && exchanged != "" {
-				credential = exchanged
-			}
-		}
-		exp := time.Now().Add(8 * 24 * time.Hour)
-		if tokens.ExpiresIn > 0 {
-			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
-		}
-		return credential, tokens.RefreshToken, &exp, metadata, nil
-	case "gemini":
-		tokens, err := gemini.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID, session.ClientSecret)
-		if err != nil {
-			return "", "", nil, nil, err
-		}
-		exp := time.Now().Add(time.Hour)
-		if tokens.ExpiresIn > 0 {
-			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
-		}
-		if parsed, err := gemini.FetchCodeAssistMetadata(tokens.AccessToken, ""); err == nil {
-			metadata = parsed
-		}
-		return tokens.AccessToken, tokens.RefreshToken, &exp, metadata, nil
-	case "anthropic":
-		tokens, err := anthropic.ExchangeCode(session.TokenURL, code, session.RedirectURI, session.CodeVerifier, session.ClientID, session.State)
-		if err != nil {
-			return "", "", nil, nil, err
-		}
-		exp := time.Now().Add(time.Hour)
-		if tokens.ExpiresIn > 0 {
-			exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
-		}
-		if parsed, err := anthropic.FetchAccountMetadata(tokens.AccessToken, strings.Fields(tokens.Scope)); err == nil {
-			metadata = parsed
-		}
-		return tokens.AccessToken, tokens.RefreshToken, &exp, metadata, nil
-	default:
+	oauthProv, ok := oauthprovider.Get(session.Provider)
+	if !ok {
 		return "", "", nil, nil, fmt.Errorf("unsupported provider")
 	}
+	result, err := oauthProv.Exchange(oauthprovider.ExchangeRequest{
+		Code: code, RedirectURI: session.RedirectURI, CodeVerifier: session.CodeVerifier,
+		ClientID: session.ClientID, ClientSecret: session.ClientSecret, TokenURL: session.TokenURL, State: session.State,
+	})
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	metadata = result.Metadata
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["oauth_provider"] = session.Provider
+	return result.Credential, result.RefreshToken, result.Expiry, metadata, nil
 }
 
 func geminiProjectID(metadata map[string]interface{}) string {

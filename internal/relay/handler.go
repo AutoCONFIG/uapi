@@ -13,6 +13,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/google/uuid"
@@ -402,6 +403,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		} else {
 			upstreamFormat = provider.FormatGemini
 		}
+	case "antigravity":
+		upstreamFormat = provider.FormatAntigravity
 	default:
 		upstreamFormat = provider.FormatOpenAIChatCompletions
 	}
@@ -1778,6 +1781,8 @@ func getAdaptor(channelType string) provider.Adaptor {
 		return &anthropic.AnthropicAdaptor{}
 	case "gemini":
 		return &gemini.GeminiAdaptor{}
+	case "antigravity":
+		return &antigravity.AntigravityAdaptor{}
 	default:
 		return nil
 	}
@@ -1816,7 +1821,7 @@ func channelSupportsModel(ch db.Channel, model string) bool {
 }
 
 func isCodeAPIFormat(format string) bool {
-	return format == "codex" || format == "gemini_code" || format == "claude_code"
+	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
 }
 
 func permissionForFormat(format provider.Format) string {

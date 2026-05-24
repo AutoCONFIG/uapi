@@ -224,3 +224,8 @@ func mapInternalFinishReason(reason string) string {
 		return "STOP"
 	}
 }
+
+// ResponseToInternal exposes Gemini response parsing for providers with Gemini-shaped responses.
+func ResponseToInternal(body []byte) (*provider.InternalResponse, error) {
+	return geminiResponseToInternal(body)
+}

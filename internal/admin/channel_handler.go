@@ -203,6 +203,8 @@ func validChannelFormatForType(channelType, apiFormat string) bool {
 		return apiFormat == "" || apiFormat == "standard" || apiFormat == "gemini_code"
 	case "anthropic":
 		return apiFormat == "" || apiFormat == "standard" || apiFormat == "claude_code"
+	case "antigravity":
+		return apiFormat == "antigravity"
 	default:
 		return false
 	}

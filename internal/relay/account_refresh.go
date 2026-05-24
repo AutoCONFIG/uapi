@@ -13,7 +13,9 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthprovider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"golang.org/x/sync/singleflight"
@@ -51,7 +53,7 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 		return v.(string), nil
 	}
 
-	if isGoogleOAuthTokenURL(account.TokenURL) && shouldSyncGeminiCodeSetup(account.Metadata) {
+	if oauthProviderKey(account) == "gemini" && isGoogleOAuthTokenURL(account.TokenURL) && shouldSyncGeminiCodeSetup(account.Metadata) {
 		credential, err := crypto.Decrypt(account.Credentials)
 		if err != nil {
 			return "", err
@@ -133,6 +135,10 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	}
 	if strings.TrimSpace(refreshToken) == "" {
 		return "", fmt.Errorf("oauth account %s has no refresh token", account.ID)
+	}
+
+	if oauthProviderKey(account) == "antigravity" {
+		return refreshAntigravityOAuthToken(account, database, refreshToken)
 	}
 
 	data := url.Values{
@@ -272,7 +278,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		}
 	} else if isOpenAIOAuthTokenURL(account.TokenURL) && account.Metadata != nil {
 		updates["metadata"] = account.Metadata
-	} else if isGoogleOAuthTokenURL(account.TokenURL) {
+	} else if oauthProviderKey(account) == "gemini" && isGoogleOAuthTokenURL(account.TokenURL) {
 		projectID := geminiProjectID(account.Metadata)
 		if metadata, err := gemini.FetchCodeAssistMetadata(credential, projectID); err == nil {
 			updates["metadata"] = metadata
@@ -288,6 +294,90 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	}
 
 	return credential, nil
+}
+
+func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refreshToken string) (string, error) {
+	clientSecret := ""
+	if account.ClientSecret != "" {
+		decrypted, err := crypto.Decrypt(account.ClientSecret)
+		if err != nil {
+			return "", fmt.Errorf("decrypt client secret: %w", err)
+		}
+		clientSecret = decrypted
+	}
+	result, err := antigravity.RefreshToken(account.TokenURL, refreshToken, account.ClientID, clientSecret)
+	if err != nil {
+		return "", err
+	}
+	credential := result.AccessToken
+	newExpiry := time.Now().Add(time.Hour)
+	if result.ExpiresIn > 0 {
+		newExpiry = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+	}
+	newCreds, encErr := crypto.Encrypt(credential)
+	if encErr != nil {
+		return "", fmt.Errorf("encrypt refreshed credentials: %w", encErr)
+	}
+	if account.Metadata == nil {
+		account.Metadata = map[string]interface{}{}
+	}
+	account.Metadata["oauth_provider"] = "antigravity"
+	account.Metadata["oauth_last_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
+	updates := map[string]interface{}{
+		"credentials":  newCreds,
+		"token_expiry": newExpiry,
+		"metadata":     account.Metadata,
+	}
+	account.Credentials = newCreds
+	account.TokenExpiry = &newExpiry
+	if result.RefreshToken != "" {
+		newRefresh, encErr := crypto.Encrypt(result.RefreshToken)
+		if encErr != nil {
+			logger.Warnf("relay.oauth", "encrypt refreshed antigravity refresh token failed", logger.F("account_id", account.ID.String()), logger.Err(encErr))
+		} else {
+			updates["refresh_token"] = newRefresh
+			account.RefreshToken = newRefresh
+		}
+	}
+	if oauthProv, ok := oauthprovider.Get("antigravity"); ok {
+		if metadata, err := oauthProv.SyncMetadata(credential, account.Metadata); err == nil {
+			if metadata == nil {
+				metadata = map[string]interface{}{}
+			}
+			metadata["oauth_last_refresh_at"] = account.Metadata["oauth_last_refresh_at"]
+			metadata["oauth_provider"] = "antigravity"
+			updates["metadata"] = metadata
+			account.Metadata = metadata
+		} else {
+			logger.Warnf("relay.oauth", "sync antigravity oauth metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		}
+	}
+	if database != nil {
+		if err := database.Model(&db.Account{}).Where("id = ?", account.ID).Updates(updates).Error; err != nil {
+			logger.Warnf("relay.oauth", "persist refreshed antigravity credentials failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		}
+	}
+	return credential, nil
+}
+
+func oauthProviderKey(account *db.Account) string {
+	if account != nil && account.Metadata != nil {
+		if value, ok := account.Metadata["oauth_provider"].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	if account != nil {
+		if isOpenAIOAuthTokenURL(account.TokenURL) {
+			return "openai"
+		}
+		if isAnthropicOAuthTokenURL(account.TokenURL) {
+			return "anthropic"
+		}
+		if isGoogleOAuthTokenURL(account.TokenURL) {
+			return "gemini"
+		}
+	}
+	return ""
 }
 
 func shouldSyncGeminiCodeSetup(metadata map[string]interface{}) bool {
@@ -306,7 +396,7 @@ func shouldSyncGeminiCodeSetup(metadata map[string]interface{}) bool {
 }
 
 func ensureOAuthAccountReady(account *db.Account) error {
-	if account == nil || account.CredType != "oauth_token" || !isGoogleOAuthTokenURL(account.TokenURL) || account.Metadata == nil {
+	if account == nil || account.CredType != "oauth_token" || oauthProviderKey(account) != "gemini" || !isGoogleOAuthTokenURL(account.TokenURL) || account.Metadata == nil {
 		return nil
 	}
 	if status, _ := account.Metadata["setup_status"].(string); status == "validation_required" {

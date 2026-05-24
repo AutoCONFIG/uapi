@@ -452,3 +452,14 @@ func buildGeminiToolConfig(tc *provider.InternalToolChoice) interface{} {
 		}
 	}
 }
+
+// InternalToGeminiBody exposes the Gemini request serializer for providers that
+// share Gemini's content schema but use a different transport envelope.
+func InternalToGeminiBody(req *provider.InternalRequest) ([]byte, error) {
+	return internalToGemini(req)
+}
+
+// CodeAssistProjectID returns the project id discovered for Code Assist style accounts.
+func CodeAssistProjectID(account *db.Account) string {
+	return codeAssistProjectID(account)
+}

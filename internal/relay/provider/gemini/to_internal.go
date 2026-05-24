@@ -482,3 +482,8 @@ func parseGeminiToolConfig(tc map[string]interface{}) (*provider.InternalToolCho
 func joinStrings(parts []string) string {
 	return strings.Join(parts, "\n")
 }
+
+// RequestToInternal exposes Gemini request parsing for providers with Gemini-shaped requests.
+func RequestToInternal(body []byte) (*provider.InternalRequest, error) {
+	return geminiToInternal(body)
+}

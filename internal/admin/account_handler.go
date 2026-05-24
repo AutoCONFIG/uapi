@@ -94,7 +94,7 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 }
 
 func isCodeAPIFormat(format string) bool {
-	return format == "codex" || format == "gemini_code" || format == "claude_code"
+	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
 }
 
 func oauthAccountMatchesCodeChannel(acc db.Account, ch db.Channel) bool {
@@ -105,9 +105,11 @@ func oauthAccountMatchesCodeChannel(acc db.Account, ch db.Channel) bool {
 	case "codex":
 		return tokenURLIs(acc.TokenURL, "https://auth.openai.com/oauth/token")
 	case "gemini_code":
-		return tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token")
+		return tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token") && accountOAuthProvider(acc) != "antigravity"
 	case "claude_code":
 		return tokenURLIs(acc.TokenURL, "https://platform.claude.com/v1/oauth/token")
+	case "antigravity":
+		return accountOAuthProvider(acc) == "antigravity"
 	default:
 		return true
 	}
@@ -120,6 +122,24 @@ func codeOAuthAccountRequiresCodeChannel(acc db.Account) bool {
 	return tokenURLIs(acc.TokenURL, "https://auth.openai.com/oauth/token") ||
 		tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token") ||
 		tokenURLIs(acc.TokenURL, "https://platform.claude.com/v1/oauth/token")
+}
+
+func accountOAuthProvider(acc db.Account) string {
+	if acc.Metadata != nil {
+		if provider, ok := acc.Metadata["oauth_provider"].(string); ok && strings.TrimSpace(provider) != "" {
+			return strings.ToLower(strings.TrimSpace(provider))
+		}
+	}
+	switch {
+	case tokenURLIs(acc.TokenURL, "https://auth.openai.com/oauth/token"):
+		return "openai"
+	case tokenURLIs(acc.TokenURL, "https://platform.claude.com/v1/oauth/token"):
+		return "anthropic"
+	case tokenURLIs(acc.TokenURL, "https://oauth2.googleapis.com/token"):
+		return "gemini"
+	default:
+		return ""
+	}
 }
 
 func tokenURLIs(rawURL, expectedURL string) bool {
