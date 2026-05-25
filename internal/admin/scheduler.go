@@ -22,7 +22,7 @@ func CleanupOldLogs(database *gorm.DB, retentionDays int) error {
 // StartLogCleanup runs periodic log cleanup.
 func CleanupOldRedeemCodes(database *gorm.DB, retentionDays int) error {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
-	return database.Where("status IN ? AND updated_at < ?", []string{"used", "expired"}, cutoff).Delete(&db.RedeemCode{}).Error
+	return database.Where("status = ? AND updated_at < ?", "used", cutoff).Delete(&db.RedeemCode{}).Error
 }
 
 func StartLogCleanup(database *gorm.DB, cfg *config.Config) {

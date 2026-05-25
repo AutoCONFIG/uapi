@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type React from "react";
+import { useEffect, useRef } from "react";
 import {
   BarChart3,
   Blocks,
@@ -99,13 +100,19 @@ function TopNav({ title, variant }: { title: string; variant: AppShellVariant })
 }
 
 function NavGroup({ items, pathname }: { items: NavItem[]; pathname: string }) {
+  const activeRef = useRef<HTMLAnchorElement | null>(null);
+
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  }, [pathname]);
+
   return (
     <nav className="nav-section" aria-label="主导航">
       {items.map((item) => {
         const Icon = item.icon;
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
         return (
-          <Link className={`nav-link${active ? " active" : ""}`} href={item.href} key={item.href}>
+          <Link className={`nav-link${active ? " active" : ""}`} href={item.href} key={item.href} ref={active ? activeRef : undefined}>
             <Icon />
             <span>{item.label}</span>
           </Link>

@@ -114,7 +114,7 @@ with `web/nginx.conf` when testing large uploads locally.
 
 ## OAuth Completion Flow
 
-Code channel OAuth currently uses provider-specific manual callback redirect
+OAuth channels currently use provider-specific manual callback redirect
 URIs that match the official clients. The admin UI starts the session, opens the
 provider URL, then completes the session with
 `POST /api/admin/channels/oauth/complete` using either the returned callback URL

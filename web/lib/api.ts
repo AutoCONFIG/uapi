@@ -17,6 +17,7 @@ import type {
   PaginatedResponse,
   Plan,
   Profile,
+  PublicSettings,
   Subscription,
   UsageLogItem,
   UsageLogs,
@@ -113,7 +114,24 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 }
 
+async function uploadForm<T>(path: string, token: string, body: FormData): Promise<T> {
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}${path}`, { method: "POST", headers, body });
+  const payload = (await response.json()) as ApiEnvelope<T>;
+  if (!response.ok || payload.code !== 0) {
+    const error = new Error(payload.message || "Request failed");
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
+  }
+  return payload.data as T;
+}
+
 export const authStorage = { storeAuth, clearAuth };
+
+export const publicApi = {
+  settings: () => request<PublicSettings>("/api/public/settings"),
+};
 
 export const userApi = {
   register: (body: { email: string; username: string; password: string }) =>
@@ -153,9 +171,9 @@ export const adminApi = {
   dashboard: (token: string) => request<Dashboard>("/api/admin/dashboard", { token }),
   accessPolicies: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<AccessPolicy>>(`/api/admin/access-policies?page=${page}&limit=${limit}`, { token }),
-  createAccessPolicy: (token: string, body: { name: string; allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number; enabled?: boolean }) =>
+  createAccessPolicy: (token: string, body: { allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number; enabled?: boolean }) =>
     request<AccessPolicy>("/api/admin/access-policies", { method: "POST", token, body }),
-  updateAccessPolicy: (token: string, id: string, body: Partial<{ name: string; allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number; enabled: boolean }>) =>
+  updateAccessPolicy: (token: string, id: string, body: Partial<{ allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number; enabled: boolean }>) =>
     request<AccessPolicy>(`/api/admin/access-policies?id=${id}`, { method: "PUT", token, body }),
   deleteAccessPolicy: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/access-policies?id=${id}`, { method: "DELETE", token }),
@@ -236,9 +254,14 @@ export const adminApi = {
     request<PaginatedResponse<AuditLogEntry>>(`/api/admin/audit-logs?page=${page}&limit=${limit}`, { token }),
   settings: (token: string) => request<AdminSettings>("/api/admin/settings", { token }),
   updateSettings: (token: string, body: Partial<AdminSettings>) => request<AdminSettings>("/api/admin/settings", { method: "PUT", token, body }),
+  uploadWallpaper: (token: string, file: File) => {
+    const body = new FormData();
+    body.set("file", file);
+    return uploadForm<AdminSettings>("/api/admin/settings/wallpaper", token, body);
+  },
   redeemCodes: (token: string, page = 1, limit = 20, status = "active") =>
     request<PaginatedResponse<RedeemCode>>(`/api/admin/redeem-codes?page=${page}&limit=${limit}&status=${encodeURIComponent(status)}`, { token }),
-  createRedeemCode: (token: string, body: { code?: string; plan_id: string; expires_at?: string }) =>
+  createRedeemCode: (token: string, body: { code?: string; plan_id: string; max_uses?: number }) =>
     request<RedeemCode>("/api/admin/redeem-codes", { method: "POST", token, body }),
   deleteRedeemCode: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/redeem-codes?id=${id}`, { method: "DELETE", token }),

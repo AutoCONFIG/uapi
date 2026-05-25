@@ -61,8 +61,8 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
 		return
 	}
-	if isCodeAPIFormat(ch.APIFormat) {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channels require OAuth credentials")
+	if isOAuthAPIFormat(ch.APIFormat) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channels require OAuth credentials")
 		return
 	}
 	encrypted, err := crypto.Encrypt(req.Credentials)
@@ -93,11 +93,11 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, acc)
 }
 
-func isCodeAPIFormat(format string) bool {
+func isOAuthAPIFormat(format string) bool {
 	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
 }
 
-func oauthAccountMatchesCodeChannel(acc db.Account, ch db.Channel) bool {
+func oauthAccountMatchesOAuthChannel(acc db.Account, ch db.Channel) bool {
 	if acc.CredType != "oauth_token" {
 		return false
 	}
@@ -115,7 +115,7 @@ func oauthAccountMatchesCodeChannel(acc db.Account, ch db.Channel) bool {
 	}
 }
 
-func codeOAuthAccountRequiresCodeChannel(acc db.Account) bool {
+func oauthAccountRequiresOAuthChannel(acc db.Account) bool {
 	if acc.CredType != "oauth_token" {
 		return false
 	}
@@ -270,17 +270,17 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
 			return
 		}
-		if isCodeAPIFormat(target.APIFormat) && existing.CredType != "oauth_token" {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channels require OAuth credentials")
+		if isOAuthAPIFormat(target.APIFormat) && existing.CredType != "oauth_token" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channels require OAuth credentials")
 			return
 		}
-		if codeOAuthAccountRequiresCodeChannel(existing) && !isCodeAPIFormat(target.APIFormat) {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code OAuth credentials can only be assigned to Code channels")
+		if oauthAccountRequiresOAuthChannel(existing) && !isOAuthAPIFormat(target.APIFormat) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth credentials can only be assigned to OAuth channels")
 			return
 		}
-		if isCodeAPIFormat(target.APIFormat) {
-			if !oauthAccountMatchesCodeChannel(existing, target) {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth credential provider does not match Code channel")
+		if isOAuthAPIFormat(target.APIFormat) {
+			if !oauthAccountMatchesOAuthChannel(existing, target) {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth credential provider does not match OAuth channel")
 				return
 			}
 		}
@@ -296,8 +296,8 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel not found")
 			return
 		}
-		if isCodeAPIFormat(target.APIFormat) {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "Code channel credentials must be updated through OAuth")
+		if isOAuthAPIFormat(target.APIFormat) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channel credentials must be updated through OAuth")
 			return
 		}
 		encrypted, err := crypto.Encrypt(req.Credentials)

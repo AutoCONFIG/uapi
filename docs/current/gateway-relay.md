@@ -95,7 +95,7 @@ The model set is the local database intersection of:
 Model-list endpoints do not call upstream providers during downstream client
 requests. Admins explicitly refresh a channel's local model catalog through
 `POST /api/admin/channels/models/sync?id=<channel_id>`. API-key channels may use
-upstream model-list APIs during that admin sync action; Code/OAuth channels use
+upstream model-list APIs during that admin sync action; OAuth channels use
 provider-specific normalization based on local official-client or reference
 implementations.
 

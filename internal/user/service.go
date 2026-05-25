@@ -87,6 +87,13 @@ func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
 			}
 			return err
 		}
+		if s.maxKeysPerUser > 0 {
+			var err error
+			_, err = createUserTokenTx(tx, newUser.ID.String(), &CreateKeyRequest{Name: "默认密钥"})
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -220,30 +227,16 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 	if name == "" {
 		return nil, errors.New("name is required")
 	}
-	expiresAt, err := parseOptionalTime(req.ExpiresAt)
-	if err != nil {
-		return nil, err
-	}
 	var token db.Token
-	err = s.db.Transaction(func(tx *gorm.DB) error {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var keyCount int64
 		tx.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
 		if keyCount >= int64(s.maxKeysPerUser) {
 			return errors.New("maximum number of API keys reached")
 		}
-		keyUUID := uuid.New().String()
-		key := "sk-relay-" + strings.ReplaceAll(keyUUID, "-", "")
-		token = db.Token{
-			UserID:      userID,
-			Name:        name,
-			Key:         key,
-			Enabled:     true,
-			IPWhitelist: normalizeCSV(req.IPWhitelist),
-			ExpiresAt:   expiresAt,
-			Models:      normalizeCSV(req.Models),
-			Permissions: normalizeCSV(req.Permissions),
-		}
-		if err := tx.Create(&token).Error; err != nil {
+		var err error
+		token, err = createUserTokenTx(tx, userID, req)
+		if err != nil {
 			return err
 		}
 		return s.attachActivePlanToNewTokenTx(tx, userID, &token)
@@ -262,6 +255,32 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 		Permissions: token.Permissions,
 		CreatedAt:   token.CreatedAt.Format(time.RFC3339),
 	}, nil
+}
+
+func createUserTokenTx(tx *gorm.DB, userID string, req *CreateKeyRequest) (db.Token, error) {
+	expiresAt, err := parseOptionalTime(req.ExpiresAt)
+	if err != nil {
+		return db.Token{}, err
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "默认密钥"
+	}
+	keyUUID := uuid.New().String()
+	token := db.Token{
+		UserID:      userID,
+		Name:        name,
+		Key:         "sk-relay-" + strings.ReplaceAll(keyUUID, "-", ""),
+		Enabled:     true,
+		IPWhitelist: normalizeCSV(req.IPWhitelist),
+		ExpiresAt:   expiresAt,
+		Models:      normalizeCSV(req.Models),
+		Permissions: normalizeCSV(req.Permissions),
+	}
+	if err := tx.Create(&token).Error; err != nil {
+		return db.Token{}, err
+	}
+	return token, nil
 }
 
 func (s *Service) attachActivePlanToNewTokenTx(tx *gorm.DB, userID string, token *db.Token) error {
@@ -284,9 +303,7 @@ func (s *Service) attachActivePlanToNewTokenTx(tx *gorm.DB, userID string, token
 		return err
 	}
 
-	now := time.Now()
-	expiresAt := now.AddDate(0, 0, plan.DurationDays)
-	tokenPlan := db.TokenPlan{TokenID: token.ID, PlanID: plan.ID, WindowUsage: "{}", WindowResetAt: "{}", StartsAt: now, ExpiresAt: expiresAt}
+	tokenPlan := db.TokenPlan{TokenID: token.ID, PlanID: plan.ID, WindowUsage: "{}", WindowResetAt: "{}", StartsAt: existing.StartsAt, ExpiresAt: existing.ExpiresAt}
 	return tx.Create(&tokenPlan).Error
 }
 
@@ -517,13 +534,9 @@ func (s *Service) Subscribe(userID, planID string) error {
 			return err
 		}
 
-		// Attach subscription to ALL active tokens for this user.
-		var tokens []db.Token
-		if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID).Find(&tokens).Error; err != nil {
+		tokens, err := s.activeTokensOrCreateDefaultTx(tx, userID)
+		if err != nil {
 			return errors.New("failed to find API keys")
-		}
-		if len(tokens) == 0 {
-			return errors.New("no API key found")
 		}
 		for _, t := range tokens {
 			tokenPlan := db.TokenPlan{
@@ -548,9 +561,15 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var redeemCode db.RedeemCode
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("code = ? AND status = ? AND expires_at > ?", code, "active", time.Now()).
+			Where("code = ? AND status = ?", code, "active").
 			First(&redeemCode).Error; err != nil {
-			return errors.New("invalid or expired code")
+			return errors.New("invalid or used code")
+		}
+		if redeemCode.MaxUses <= 0 {
+			redeemCode.MaxUses = 1
+		}
+		if redeemCode.UsedCount >= redeemCode.MaxUses {
+			return errors.New("invalid or used code")
 		}
 		var plan db.Plan
 		if err := tx.Where("id = ? AND enabled = true AND deleted_at IS NULL", redeemCode.PlanID).First(&plan).Error; err != nil {
@@ -578,12 +597,9 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 			Update("expires_at", now).Error; err != nil {
 			return err
 		}
-		var tokens []db.Token
-		if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID).Find(&tokens).Error; err != nil {
+		tokens, err := s.activeTokensOrCreateDefaultTx(tx, userID)
+		if err != nil {
 			return errors.New("failed to find API keys")
-		}
-		if len(tokens) == 0 {
-			return errors.New("no API key found")
 		}
 		startsAt := now
 		expiresAt := startsAt.AddDate(0, 0, plan.DurationDays)
@@ -594,7 +610,10 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		}
 		redeemCode.UsedBy = &userID
 		redeemCode.UsedAt = &now
-		redeemCode.Status = "used"
+		redeemCode.UsedCount++
+		if redeemCode.UsedCount >= redeemCode.MaxUses {
+			redeemCode.Status = "used"
+		}
 		if err := tx.Save(&redeemCode).Error; err != nil {
 			return err
 		}
@@ -605,6 +624,24 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		return nil, err
 	}
 	return subscription, nil
+}
+
+func (s *Service) activeTokensOrCreateDefaultTx(tx *gorm.DB, userID string) ([]db.Token, error) {
+	var tokens []db.Token
+	if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID).Find(&tokens).Error; err != nil {
+		return nil, err
+	}
+	if len(tokens) > 0 {
+		return tokens, nil
+	}
+	if s.maxKeysPerUser <= 0 {
+		return nil, errors.New("maximum number of API keys reached")
+	}
+	token, err := createUserTokenTx(tx, userID, &CreateKeyRequest{Name: "默认密钥"})
+	if err != nil {
+		return nil, err
+	}
+	return []db.Token{token}, nil
 }
 
 func (s *Service) issueTokenPair(userID, username, passwordHash string) (*LoginResponse, error) {

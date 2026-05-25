@@ -14,7 +14,7 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 - **管理后台** — 渠道/账号凭据、节点、用户、套餐、日志、系统设置和操作审计
 - **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
 - **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
-- **Code 客户端接入** — 支持 Codex、Gemini Code、Claude Code、Antigravity 等 OAuth 登录、账号元数据同步和自动刷新
+- **OAuth 渠道接入** — 支持 Codex、Gemini Code、Claude Code、Antigravity 等 OAuth 登录、账号元数据同步和自动刷新
 - **本地模型目录** — 下游模型列表从本地渠道配置读取，管理员可手动同步上游模型并设置模型重定向
 - **流式转发** — SSE 流式响应透明转发，支持流式转非流式
 
@@ -138,7 +138,7 @@ docker compose up -d --build
 - [前端文档](docs/current/frontend.md)
 - [平台设计](docs/current/platform-design.md)
 - [阶段范围与路线](docs/current/roadmap.md)
-- [Code 渠道对齐](docs/current/code-channels.md)
+- [OAuth 渠道对齐](docs/current/oauth-channels.md)
 
 ## License
 

@@ -13,8 +13,9 @@ type RedeemCode struct {
 	Value     int64      `json:"-"`
 	UsedBy    *string    `gorm:"size:36;index" json:"used_by,omitempty"`
 	UsedAt    *time.Time `json:"used_at,omitempty"`
-	Status    string     `gorm:"size:20;default:active" json:"status"` // active, used, expired
-	ExpiresAt time.Time  `gorm:"not null" json:"expires_at"`
+	MaxUses   int        `gorm:"default:1" json:"max_uses"`
+	UsedCount int        `gorm:"default:0" json:"used_count"`
+	Status    string     `gorm:"size:20;default:active" json:"status"` // active, used
 }
 
 func (RedeemCode) TableName() string { return "redeem_codes" }

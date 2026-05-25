@@ -1848,13 +1848,13 @@ func modelInList(model, list string) bool {
 }
 
 func channelSupportsModel(ch db.Channel, model string) bool {
-	if strings.TrimSpace(ch.Models) == "" && isCodeAPIFormat(ch.APIFormat) {
+	if strings.TrimSpace(ch.Models) == "" && isOAuthAPIFormat(ch.APIFormat) {
 		return false
 	}
 	return modelalias.Supports(model, ch.Models, ch.ModelAliases)
 }
 
-func isCodeAPIFormat(format string) bool {
+func isOAuthAPIFormat(format string) bool {
 	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
 }
 

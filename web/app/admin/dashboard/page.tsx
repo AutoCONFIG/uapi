@@ -41,7 +41,7 @@ export default function AdminDashboardPage() {
         <MetricCard label="活跃凭证" value={dashboard ? String(dashboard.active_accounts) : "—"} foot="账号池" />
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <section className="card">
+        <section className="card dashboard-health-card">
           <div className="card-pad">
             <h2>渠道健康</h2>
             <p className="muted" style={{ margin: 0 }}>按渠道类型和可用性观察当前状态。</p>

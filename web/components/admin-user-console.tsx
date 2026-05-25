@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Ban, KeyRound, Package, Search, Trash2, Undo2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Ban, Clipboard, KeyRound, Package, Search, Trash2, Undo2 } from "lucide-react";
 import { StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Plan, User } from "@/types/api";
@@ -28,9 +28,21 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
   const [users, setUsers] = useState(initialUsers);
   const [passwordResult, setPasswordResult] = useState<{ email: string; password: string } | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [query, setQuery] = useState("");
   const [plans, setPlans] = useState<Plan[]>([]);
   const [assigning, setAssigning] = useState<UserRow | null>(null);
   const [planDraft, setPlanDraft] = useState({ plan_id: "", starts_at: "", expires_at: "" });
+
+  const visibleUsers = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return users;
+    return users.filter((user) => (
+      user.email.toLowerCase().includes(keyword) ||
+      user.status.toLowerCase().includes(keyword) ||
+      user.id.toLowerCase().includes(keyword)
+    ));
+  }, [query, users]);
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
@@ -48,11 +60,13 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     const nextStatus = row.status === "disabled" ? "active" : "disabled";
     const token = window.localStorage.getItem("uapi.admin.token");
     setError("");
+    setNotice("");
 
     if (token && isUUID(row.id)) {
       try {
         const updated = await adminApi.updateUser(token, row.id, { status: nextStatus as User["status"] });
         setUsers((current) => current.map((user) => (user.id === row.id ? fromApiUser(updated) : user)));
+        setNotice(`${row.email} 已${nextStatus === "disabled" ? "封禁" : "解封"}。`);
         return;
       } catch (err) {
         setError(err instanceof Error ? err.message : "更新用户失败");
@@ -65,11 +79,14 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         user.id === row.id ? { ...user, status: nextStatus } : user,
       ),
     );
+    setNotice(`${row.email} 已${nextStatus === "disabled" ? "封禁" : "解封"}。`);
   }
 
   async function deleteUser(row: UserRow) {
     const token = window.localStorage.getItem("uapi.admin.token");
     setError("");
+    setNotice("");
+    if (!confirm(`确认删除用户 ${row.email}？此操作不可撤销。`)) return;
 
     if (token && isUUID(row.id)) {
       try {
@@ -78,6 +95,7 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         if (passwordResult?.email === row.email) {
           setPasswordResult(null);
         }
+        setNotice(`${row.email} 已删除。`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "删除用户失败");
       }
@@ -86,6 +104,8 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
 
   function openAssignPlan(row: UserRow) {
     const firstPlan = plans[0];
+    setError("");
+    setNotice("");
     setAssigning(row);
     setPlanDraft({ plan_id: firstPlan?.id || "", starts_at: "", expires_at: "" });
   }
@@ -94,12 +114,14 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token || !assigning) return;
     setError("");
+    setNotice("");
     try {
       await adminApi.updateUser(token, assigning.id, {
         plan_id: planDraft.plan_id,
         plan_starts_at: planDraft.starts_at ? new Date(planDraft.starts_at).toISOString() : undefined,
         plan_expires_at: planDraft.expires_at ? new Date(planDraft.expires_at).toISOString() : undefined,
       });
+      setNotice(`${assigning.email} 的套餐已更新。`);
       setAssigning(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "分配套餐失败");
@@ -110,6 +132,8 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     const token = window.localStorage.getItem("uapi.admin.token");
     const password = generatePassword();
     setError("");
+    setNotice("");
+    if (!confirm(`确认为 ${row.email} 随机重置密码？旧密码会立即失效。`)) return;
 
     if (!token || !isUUID(row.id)) {
       setError("认证无效");
@@ -118,9 +142,16 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     try {
       await adminApi.updateUser(token, row.id, { new_password: password });
       setPasswordResult({ email: row.email, password });
+      setNotice(`${row.email} 的密码已重置。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "重置密码失败");
     }
+  }
+
+  async function copyPassword() {
+    if (!passwordResult) return;
+    await navigator.clipboard?.writeText(passwordResult.password);
+    setNotice("新密码已复制。");
   }
 
   return (
@@ -132,7 +163,10 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
             管理员可封禁、删除用户，或生成一次性随机密码交给用户重新登录。
           </p>
         </div>
-        <button className="btn" type="button"><Search /> 搜索</button>
+        <div className="toolbar-search">
+          <Search />
+          <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、状态或 ID" />
+        </div>
       </section>
 
       {passwordResult ? (
@@ -141,9 +175,14 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
             <h3>已为 {passwordResult.email} 生成新密码</h3>
             <p className="muted">前端仅展示一次。真实接入后，后端应保存哈希并写入系统审计。</p>
           </div>
-          <code>{passwordResult.password}</code>
+          <div className="credential-pill">
+            <KeyRound />
+            <code>{passwordResult.password}</code>
+            <button onClick={copyPassword} title="复制新密码" type="button"><Clipboard /></button>
+          </div>
         </section>
       ) : null}
+      {notice ? <p className="form-success" style={{ marginTop: 16 }}>{notice}</p> : null}
       {error ? <p className="form-error" style={{ marginTop: 16 }}>{error}</p> : null}
 
       {assigning ? (
@@ -175,7 +214,7 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
               </tr>
             </thead>
             <tbody>
-              {users.map((row) => {
+              {visibleUsers.map((row) => {
                 const disabled = row.status === "disabled";
                 return (
                   <tr key={row.email}>

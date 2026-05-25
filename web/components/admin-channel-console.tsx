@@ -12,7 +12,7 @@ const channelDefaults: Record<string, string> = {
   gemini: "https://generativelanguage.googleapis.com/v1beta",
 };
 
-const codeChannelDefaults: Record<string, string> = {
+const oauthChannelDefaults: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com",
@@ -36,10 +36,10 @@ const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-202
 const antigravityModels = "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-pro-high,gemini-3-pro-low,gemini-pro-agent,gemini-3.1-pro-low,gemini-3-flash,gemini-3-flash-agent,gemini-3.1-flash-lite,gpt-oss-120b-medium";
 
 const channelPresets: ChannelPreset[] = [
-  { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: codeChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
-  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: codeChannelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
-  { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: codeChannelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
-  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: codeChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
+  { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: oauthChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
+  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: oauthChannelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
+  { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: oauthChannelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
+  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: oauthChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
   { id: "openai_responses_api", label: "OpenAI Responses API", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
   { id: "openai_chat_completions", label: "OpenAI Chat Completions API", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions API" },
   { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent API" },
@@ -78,8 +78,12 @@ function composeEndpoint(baseURL: string, path: string, defaultPath: string): st
   return route ? `${base}/${route}` : base;
 }
 
-function isCodeChannel(channel: Pick<Channel, "api_format">): boolean {
+function isOAuthChannel(channel: Pick<Channel, "api_format">): boolean {
   return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code" || channel.api_format === "antigravity";
+}
+
+function supportsModelSync(channel: Pick<Channel, "api_format">): boolean {
+  return !channel.api_format || channel.api_format === "standard" || channel.api_format === "responses" || channel.api_format === "antigravity";
 }
 
 function presetTitleLines(preset: ChannelPreset): [string, string] {
@@ -189,7 +193,7 @@ export function AdminChannelConsole() {
 
   useEffect(() => {
     if (!selected) return;
-    setCredentialMode(isCodeChannel(selected) ? "oauth" : "apikey");
+    setCredentialMode(isOAuthChannel(selected) ? "oauth" : "apikey");
     const endpoint = splitEndpoint("", defaultEndpointForChannel(selected));
     setApiKeyName(`${selected.type}-account-${channelAccounts(selected.id).length + 1}`);
     setApiKeyValue("");
@@ -326,7 +330,7 @@ export function AdminChannelConsole() {
   }
 
   async function syncChannelModels(channel: Channel) {
-    if (!token || modelSyncing) return;
+    if (!token || modelSyncing || !supportsModelSync(channel)) return;
     setModelSyncing(true);
     setCredError("");
     setCredNotice("");
@@ -602,7 +606,7 @@ export function AdminChannelConsole() {
                 </div>
                 <div className="channel-head-actions">
                   <button className="btn" onClick={() => setChannelEditOpen(true)} type="button"><Pencil /> 编辑渠道</button>
-                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0} onClick={() => syncChannelModels(selected)} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
+                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0 || !supportsModelSync(selected)} onClick={() => syncChannelModels(selected)} title={supportsModelSync(selected) ? "从上游同步模型" : "此 OAuth 渠道使用预置模型列表"} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
                   <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
                 </div>
               </div>
@@ -644,7 +648,7 @@ export function AdminChannelConsole() {
                       <div className="account-card-actions">
                         <button className="btn subtle" onClick={() => { setSelectedAccountID(account.id); setExportPassword(""); setExportData(null); setAccountEditOpen(true); }} type="button"><Pencil /> 编辑</button>
                         <button className="btn subtle" onClick={() => patchAccount(account.id, { enabled: !account.enabled })} type="button">{account.enabled ? "停用" : "启用"}</button>
-                        <button className="btn danger" onClick={() => deleteAccount(account.id)} title="删除账号" type="button"><X /></button>
+                        <button className="btn danger icon-only" onClick={() => deleteAccount(account.id)} title="删除账号" type="button"><X /></button>
                       </div>
                     </article>
                   );
@@ -777,7 +781,7 @@ export function AdminChannelConsole() {
                     const value = e.target.value.trim();
                     if (value !== selected.models) patchChannel(selected.id, { models: value });
                   }} placeholder="模型列表，留空表示不限制" />
-                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0} onClick={() => syncChannelModels(selected)} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "从上游获取"}</button>
+                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0 || !supportsModelSync(selected)} onClick={() => syncChannelModels(selected)} title={supportsModelSync(selected) ? "从上游同步模型" : "此 OAuth 渠道使用预置模型列表"} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "从上游获取"}</button>
                 </div>
                 <textarea className="input wide" defaultValue={selected.model_aliases || ""} key={`drawer-model-aliases-${selected.id}`} onBlur={(e) => {
                   const value = e.target.value.trim();
@@ -810,14 +814,14 @@ export function AdminChannelConsole() {
               <div className="credential-editor account-create-panel">
                 <div className="section-head">
                   <div><h2>新增账号</h2><p className="muted">账号添加后归入当前渠道，由 Gateway 统一调度。</p></div>
-                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isCodeChannel(selected) ? (
+                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isOAuthChannel(selected) ? (
                     <div className="segmented">
                       <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> 密钥</button>
                     </div>
                   ) : null}
                 </div>
 
-                {isCodeChannel(selected) ? (
+                {isOAuthChannel(selected) ? (
                   <OAuthPanel
                     channel={selected}
                     loading={credLoading}
@@ -879,7 +883,7 @@ export function AdminChannelConsole() {
               </div>
 
 
-              {draft.type === "openai" && !isCodeChannel({ api_format: draft.apiFormat } as Channel) ? (
+              {draft.type === "openai" && !isOAuthChannel({ api_format: draft.apiFormat } as Channel) ? (
                 <div className="field">
                   <label>API 类型</label>
                   <div className="segmented">
@@ -1115,17 +1119,28 @@ function OAuthPanel({
     ? "http://localhost:1455/auth/callback?code=...&state=..."
     : channel.type === "gemini"
       ? "http://127.0.0.1:1456/oauth2callback?code=...&state=..."
-      : "https://platform.claude.com/oauth/code/callback?code=...&state=...";
+      : channel.type === "antigravity"
+        ? "http://localhost:51121/oauth-callback?code=...&state=..."
+        : "https://platform.claude.com/oauth/code/callback?code=...&state=...";
   const jsonPlaceholder = channel.type === "openai"
     ? "{\"callback_url\":\"http://localhost:1455/auth/callback?code=...&state=...\"}"
     : channel.type === "gemini"
       ? "{\"access_token\":\"ya29...\",\"refresh_token\":\"1//...\",\"expiry_date\":1710000000000}"
-      : "{\"callback_url\":\"https://platform.claude.com/oauth/code/callback?code=...&state=...\"}";
+      : channel.type === "antigravity"
+        ? "{\"access_token\":\"ya29...\",\"refresh_token\":\"1//...\",\"expiry_date\":1710000000000}"
+        : "{\"callback_url\":\"https://platform.claude.com/oauth/code/callback?code=...&state=...\"}";
+  const providerHint = channel.type === "openai"
+    ? "按 Codex OAuth 方式认证。"
+    : channel.type === "gemini"
+      ? "按 Gemini Code OAuth 方式认证。"
+      : channel.type === "antigravity"
+        ? "按 Antigravity OAuth 方式认证。"
+        : "按 Claude Code OAuth 方式认证。";
 
   if (!status) {
     return (
       <div className="oauth-inline">
-        <p className="muted">{channel.type === "openai" ? "按 Codex 客户端方式认证。" : channel.type === "gemini" ? "按 Gemini Code 客户端方式认证。" : "按 Claude Code 客户端方式认证。"}</p>
+        <p className="muted">{providerHint}</p>
         <button className="btn primary" disabled={loading} onClick={onStart} type="button">{loading ? "正在生成" : "开始 OAuth"}</button>
       </div>
     );

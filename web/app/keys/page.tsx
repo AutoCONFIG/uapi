@@ -51,6 +51,7 @@ export default function KeysPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [copiedKeyID, setCopiedKeyID] = useState("");
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.user.token");
@@ -108,12 +109,19 @@ export default function KeysPage() {
 
   async function deleteKey(row: DisplayKey) {
     const token = window.localStorage.getItem("uapi.user.token");
+    if (!confirm(`确认删除 ${row.name}？删除后使用该 Key 的客户端会立即失效。`)) return;
     if (token && row.id) {
       try {
         await userApi.deleteKey(token, row.id);
         setItems((current) => current.filter((item) => item.id !== row.id));
       } catch { /* leave row visible */ }
     }
+  }
+
+  async function copyKey(row: DisplayKey) {
+    await navigator.clipboard?.writeText(row.key);
+    setCopiedKeyID(row.id || row.key);
+    window.setTimeout(() => setCopiedKeyID((current) => current === (row.id || row.key) ? "" : current), 1400);
   }
 
   return (
@@ -135,7 +143,7 @@ export default function KeysPage() {
               <code>{key.key}</code>
               <div className="key-meta"><span>模型</span><strong>{key.models || "全部"}</strong><span>{key.expiresAt ? new Date(key.expiresAt).toLocaleDateString() : "永不过期"}</span></div>
               <div className="row-actions">
-                <button className="btn icon-only" onClick={() => navigator.clipboard?.writeText(key.key)} title="复制" type="button"><Copy /></button>
+                <button className="btn icon-only" onClick={() => copyKey(key)} title={copiedKeyID === (key.id || key.key) ? "已复制" : "复制"} type="button"><Copy /></button>
                 <button className="btn danger icon-only" onClick={() => deleteKey(key)} title="删除" type="button"><Trash2 /></button>
               </div>
             </article>

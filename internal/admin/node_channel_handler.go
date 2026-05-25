@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -78,6 +79,10 @@ func (h *Handler) createNodeChannel(ctx *fasthttp.RequestCtx) {
 	binding := db.NodeChannel{RelayNodeID: req.RelayNodeID, ChannelID: req.ChannelID, Weight: req.Weight, Enabled: enabled}
 	binding.ID = uuid.New()
 	if err := h.db.Create(&binding).Error; err != nil {
+		if strings.Contains(err.Error(), "idx_node_channel_active") || strings.Contains(err.Error(), "duplicate key") {
+			h.jsonError(ctx, fasthttp.StatusConflict, "node already bound to this channel")
+			return
+		}
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}

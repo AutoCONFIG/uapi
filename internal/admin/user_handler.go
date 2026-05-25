@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -176,7 +177,11 @@ func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, pla
 			return err
 		}
 		if len(tokens) == 0 {
-			return errors.New("user has no API key")
+			token, err := createDefaultUserTokenTx(tx, userID.String())
+			if err != nil {
+				return err
+			}
+			tokens = []db.Token{token}
 		}
 		for _, token := range tokens {
 			tokenPlan := db.TokenPlan{
@@ -193,4 +198,18 @@ func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, pla
 		}
 		return nil
 	})
+}
+
+func createDefaultUserTokenTx(tx *gorm.DB, userID string) (db.Token, error) {
+	keyUUID := uuid.New().String()
+	token := db.Token{
+		UserID:  userID,
+		Name:    "默认密钥",
+		Key:     "sk-relay-" + strings.ReplaceAll(keyUUID, "-", ""),
+		Enabled: true,
+	}
+	if err := tx.Create(&token).Error; err != nil {
+		return db.Token{}, err
+	}
+	return token, nil
 }

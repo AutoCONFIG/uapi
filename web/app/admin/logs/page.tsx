@@ -63,15 +63,15 @@ export default function LogsPage() {
         title="调用日志"
         description="查看所有中转请求的模型、状态、Token 用量和延迟。"
       />
-      <section className="card card-pad" style={{ marginBottom: 12 }}>
-        <div className="grid grid-5">
+      <section className="card card-pad log-filter-panel" style={{ marginBottom: 12 }}>
+        <div className="log-filter-grid">
           <div className="field"><label>用户</label><input className="input" value={filters.user} onChange={(e) => setFilters((cur) => ({ ...cur, user: e.target.value }))} placeholder="邮箱 / 用户名 / ID" /></div>
           <div className="field"><label>IP</label><input className="input" value={filters.ip} onChange={(e) => setFilters((cur) => ({ ...cur, ip: e.target.value }))} placeholder="127.0.0.1" /></div>
           <div className="field"><label>模型</label><input className="input" value={filters.model} onChange={(e) => setFilters((cur) => ({ ...cur, model: e.target.value }))} placeholder="model" /></div>
           <div className="field"><label>开始时间</label><input className="input" type="datetime-local" value={filters.start} onChange={(e) => setFilters((cur) => ({ ...cur, start: e.target.value }))} /></div>
           <div className="field"><label>结束时间</label><input className="input" type="datetime-local" value={filters.end} onChange={(e) => setFilters((cur) => ({ ...cur, end: e.target.value }))} /></div>
+          <div className="row-actions log-filter-actions"><button className="btn primary" onClick={applyFilters} type="button">查询</button><button className="btn" onClick={clearFilters} type="button">重置</button></div>
         </div>
-        <div className="row-actions"><button className="btn primary" onClick={applyFilters} type="button">查询</button><button className="btn" onClick={clearFilters} type="button">重置</button></div>
       </section>
       <section className="card">
         <div className="table-wrap">

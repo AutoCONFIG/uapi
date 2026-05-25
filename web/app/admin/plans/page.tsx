@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Save, Trash2 } from "lucide-react";
+import { Copy, Plus, Save, Trash2 } from "lucide-react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { AccessPolicy, Plan, RedeemCode } from "@/types/api";
 
 type PolicyDraft = {
-  name: string;
   allowed_models: string;
   max_concurrency: string;
   hourly_limit: string;
@@ -15,8 +14,7 @@ type PolicyDraft = {
   monthly_limit: string;
 };
 
-const emptyPolicyDraft = (name = ""): PolicyDraft => ({
-  name,
+const emptyPolicyDraft = (): PolicyDraft => ({
   allowed_models: "",
   max_concurrency: "0",
   hourly_limit: "0",
@@ -24,10 +22,9 @@ const emptyPolicyDraft = (name = ""): PolicyDraft => ({
   monthly_limit: "0",
 });
 
-function draftFromPolicy(policy?: AccessPolicy, fallbackName = ""): PolicyDraft {
-  if (!policy) return emptyPolicyDraft(fallbackName);
+function draftFromPolicy(policy?: AccessPolicy): PolicyDraft {
+  if (!policy) return emptyPolicyDraft();
   return {
-    name: policy.name,
     allowed_models: policy.allowed_models || "",
     max_concurrency: String(policy.max_concurrency || 0),
     hourly_limit: String(policy.hourly_limit || 0),
@@ -38,7 +35,6 @@ function draftFromPolicy(policy?: AccessPolicy, fallbackName = ""): PolicyDraft 
 
 function policyBody(draft: PolicyDraft) {
   return {
-    name: draft.name.trim(),
     allowed_models: draft.allowed_models.trim(),
     max_concurrency: Number(draft.max_concurrency || 0),
     hourly_limit: Number(draft.hourly_limit || 0),
@@ -65,9 +61,11 @@ export default function AdminPlansPage() {
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>(emptyPolicyDraft());
   const [editingPolicies, setEditingPolicies] = useState<Record<string, PolicyDraft>>({});
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [copiedCodeID, setCopiedCodeID] = useState("");
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
   const [redeemStatus, setRedeemStatus] = useState("active");
-  const [redeemDraft, setRedeemDraft] = useState({ code: "", plan_id: "", expires_at: "" });
+  const [redeemDraft, setRedeemDraft] = useState({ code: "", plan_id: "", max_uses: "1" });
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
@@ -90,6 +88,7 @@ export default function AdminPlansPage() {
     setDraft({ name: "", type: "count_based", token_quota: 0, duration_days: 30, enabled: true });
     setPolicyDraft(emptyPolicyDraft());
     setError("");
+    setNotice("");
     setCreating(true);
   }
 
@@ -99,9 +98,9 @@ export default function AdminPlansPage() {
     if (!token) return;
     setSaving(true);
     setError("");
+    setNotice("");
     try {
-      const policyName = policyDraft.name.trim() || `${draft.name.trim()} 限制策略`;
-      const createdPolicy = await adminApi.createAccessPolicy(token, policyBody({ ...policyDraft, name: policyName }));
+      const createdPolicy = await adminApi.createAccessPolicy(token, policyBody(policyDraft));
       const createdPlan = await adminApi.createPlan(token, {
         name: draft.name.trim(),
         type: draft.type,
@@ -116,6 +115,7 @@ export default function AdminPlansPage() {
       setPolicies((cur) => [createdPolicy, ...cur]);
       setPlans((cur) => [createdPlan, ...cur]);
       setCreating(false);
+      setNotice(`套餐 ${createdPlan.name} 已创建。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
@@ -127,18 +127,21 @@ export default function AdminPlansPage() {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
     const currentPolicy = plan.policy_id ? policyByID.get(plan.policy_id) : undefined;
-    const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy, `${plan.name} 限制策略`);
+    const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy);
     setSaving(true);
     setError("");
+    setNotice("");
     try {
       if (currentPolicy) {
         const updated = await adminApi.updateAccessPolicy(token, currentPolicy.id, policyBody(currentDraft));
         setPolicies((cur) => cur.map((policy) => policy.id === updated.id ? updated : policy));
+        setNotice(`${plan.name} 的策略已保存。`);
       } else {
         const created = await adminApi.createAccessPolicy(token, policyBody(currentDraft));
         const updatedPlan = await adminApi.updatePlan(token, plan.id, { policy_id: created.id });
         setPolicies((cur) => [created, ...cur]);
         setPlans((cur) => cur.map((item) => item.id === plan.id ? updatedPlan : item));
+        setNotice(`${plan.name} 已绑定新策略。`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
@@ -150,9 +153,12 @@ export default function AdminPlansPage() {
   async function deletePlan(id: string) {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
+    const plan = plans.find((item) => item.id === id);
+    if (!confirm(`确认删除套餐 ${plan?.name || id}？已有订阅记录不会被物理删除，但新用户将不可再选择。`)) return;
     try {
       await adminApi.deletePlan(token, id);
       setPlans((cur) => cur.filter((p) => p.id !== id));
+      setNotice("套餐已删除。");
     } catch { /* ignore */ }
   }
 
@@ -167,7 +173,7 @@ export default function AdminPlansPage() {
 
   function rowDraft(plan: Plan) {
     const policy = plan.policy_id ? policyByID.get(plan.policy_id) : undefined;
-    return editingPolicies[plan.id] || draftFromPolicy(policy, `${plan.name} 限制策略`);
+    return editingPolicies[plan.id] || draftFromPolicy(policy);
   }
 
   function setRowDraft(planID: string, next: PolicyDraft) {
@@ -188,16 +194,22 @@ export default function AdminPlansPage() {
       setError("请先选择兑换套餐");
       return;
     }
+    if (Number(redeemDraft.max_uses || 1) < 1) {
+      setError("兑换次数必须大于 0");
+      return;
+    }
     setSaving(true);
     setError("");
+    setNotice("");
     try {
       const created = await adminApi.createRedeemCode(token, {
         code: redeemDraft.code.trim() || undefined,
         plan_id: redeemDraft.plan_id,
-        expires_at: redeemDraft.expires_at ? new Date(redeemDraft.expires_at).toISOString() : undefined,
+        max_uses: Number(redeemDraft.max_uses || 1),
       });
       setRedeemCodes((cur) => [created, ...cur]);
-      setRedeemDraft({ code: "", plan_id: "", expires_at: "" });
+      setRedeemDraft({ code: "", plan_id: "", max_uses: "1" });
+      setNotice(`兑换码 ${created.code} 已创建。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建兑换码失败");
     } finally {
@@ -208,8 +220,17 @@ export default function AdminPlansPage() {
   async function deleteRedeemCode(id: string) {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
+    const item = redeemCodes.find((code) => code.id === id);
+    if (!confirm(`确认删除兑换码 ${item?.code || id}？`)) return;
     await adminApi.deleteRedeemCode(token, id);
     setRedeemCodes((cur) => cur.filter((item) => item.id !== id));
+    setNotice("兑换码已删除。");
+  }
+
+  async function copyRedeemCode(item: RedeemCode) {
+    await navigator.clipboard?.writeText(item.code);
+    setCopiedCodeID(item.id);
+    window.setTimeout(() => setCopiedCodeID((current) => current === item.id ? "" : current), 1400);
   }
 
   return (
@@ -249,10 +270,6 @@ export default function AdminPlansPage() {
                 <label>有效天数</label>
                 <input className="input" type="number" min={1} value={draft.duration_days} onChange={(e) => setDraft((d) => ({ ...d, duration_days: Number(e.target.value) }))} />
               </div>
-              <div className="field">
-                <label>策略名称</label>
-                <input className="input" value={policyDraft.name} onChange={(e) => setPolicyDraft((d) => ({ ...d, name: e.target.value }))} placeholder="留空使用套餐名称" />
-              </div>
             </div>
             <div className="grid grid-2" style={{ marginTop: 8 }}>
               <div className="field"><label>允许模型</label><input className="input" value={policyDraft.allowed_models} onChange={(e) => setPolicyDraft((d) => ({ ...d, allowed_models: e.target.value }))} placeholder="留空不限制" /></div>
@@ -270,8 +287,9 @@ export default function AdminPlansPage() {
         </div>
       ) : null}
       {error && !creating ? <p className="form-error">{error}</p> : null}
+      {notice && !creating ? <p className="form-success">{notice}</p> : null}
       <section className="card">
-        <div className="table-wrap">
+        <div className="table-wrap plans-table-wrap">
           <table>
             <thead><tr><th>套餐</th><th>额度</th><th>有效期</th><th>限制策略</th><th>状态</th><th></th></tr></thead>
             <tbody>
@@ -283,21 +301,22 @@ export default function AdminPlansPage() {
                     <td><strong>{p.name}</strong><div className="muted" style={{ fontSize: 12 }}>{p.type === "count_based" ? "按次数" : "按 Token"}</div></td>
                     <td>{formatQuota(p.token_quota)}</td>
                     <td>{p.duration_days || 30} 天</td>
-                    <td style={{ minWidth: 520 }}>
-                      <div className="grid grid-2">
-                        <div className="field"><label>策略名称</label><input className="input" value={draftRow.name} onChange={(e) => setRowDraft(p.id, { ...draftRow, name: e.target.value })} /></div>
-                        <div className="field"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
-                        <div className="field"><label>最大并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
-                        <div className="field"><label>小时/周/月</label><div className="input-row"><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div></div>
+                    <td className="plan-policy-cell">
+                      <div className="plan-policy-editor">
+                        <div className="field compact-field plan-policy-models"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
+                        <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
+                        <div className="field compact-field"><label>小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
+                        <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
+                        <div className="field compact-field"><label>月</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
+                        <button className="btn plan-policy-save" disabled={saving} onClick={() => savePolicy(p)} title={policy ? "保存策略" : "创建并绑定策略"}><Save /> {policy ? "保存" : "绑定"}</button>
                       </div>
-                      <button className="btn" disabled={saving} onClick={() => savePolicy(p)} style={{ marginTop: 8 }}><Save /> {policy ? "保存策略" : "创建并绑定策略"}</button>
                     </td>
-                    <td>
-                      <button className="btn" style={{ padding: "2px 8px" }} onClick={() => togglePlan(p)}>
+                    <td className="plan-status-cell">
+                      <button className="btn plan-table-action" onClick={() => togglePlan(p)} type="button">
                         <StatusBadge value={p.enabled ? "enabled" : "disabled"} />
                       </button>
                     </td>
-                    <td><button className="btn" style={{ padding: "2px 8px" }} onClick={() => deletePlan(p.id)}><Trash2 size={14} /></button></td>
+                    <td className="plan-delete-cell"><button className="btn danger icon-only plan-table-action" onClick={() => deletePlan(p.id)} title="删除套餐" type="button"><Trash2 /></button></td>
                   </tr>
                 );
               })}
@@ -307,39 +326,73 @@ export default function AdminPlansPage() {
             </tbody>
           </table>
         </div>
+        <div className="plan-mobile-list">
+          {plans.map((p) => {
+            const draftRow = rowDraft(p);
+            const policy = p.policy_id ? policyByID.get(p.policy_id) : undefined;
+            return (
+              <article className="plan-mobile-card" key={`mobile-${p.id}`}>
+                <div className="plan-mobile-head">
+                  <div>
+                    <strong>{p.name}</strong>
+                    <span>{p.type === "count_based" ? "按次数" : "按 Token"} · {formatQuota(p.token_quota)} · {p.duration_days || 30} 天</span>
+                  </div>
+                  <StatusBadge value={p.enabled ? "enabled" : "disabled"} />
+                </div>
+                <div className="plan-mobile-policy">
+                  <div className="field compact-field"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
+                  <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
+                  <div className="field compact-field"><label>小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
+                  <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
+                  <div className="field compact-field"><label>月</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
+                </div>
+                <div className="plan-mobile-actions">
+                  <button className="btn" disabled={saving} onClick={() => savePolicy(p)} type="button"><Save /> {policy ? "保存策略" : "绑定策略"}</button>
+                  <button className="btn" onClick={() => togglePlan(p)} type="button">{p.enabled ? "停用" : "启用"}</button>
+                  <button className="btn danger icon-only" onClick={() => deletePlan(p.id)} title="删除套餐" type="button"><Trash2 /></button>
+                </div>
+              </article>
+            );
+          })}
+          {plans.length === 0 && !loading ? <EmptyPlanMobile /> : null}
+        </div>
       </section>
 
-      <section className="card card-pad" style={{ marginTop: 16 }}>
-        <div className="section-head">
+      <section className="card card-pad redeem-panel" style={{ marginTop: 16 }}>
+        <div className="section-head redeem-head">
           <div>
             <h2>兑换码</h2>
-            <p className="muted">兑换码绑定套餐，用户兑换后按套餐有效期生效。</p>
+            <p className="muted">兑换码绑定套餐，套餐有效期从用户兑换成功时开始计算。</p>
           </div>
-          <select className="input" style={{ maxWidth: 160 }} value={redeemStatus} onChange={(e) => setRedeemStatus(e.target.value)}>
+          <select className="input redeem-status-filter" value={redeemStatus} onChange={(e) => setRedeemStatus(e.target.value)}>
             <option value="active">可用</option>
             <option value="used">已用</option>
-            <option value="expired">过期</option>
             <option value="all">全部</option>
           </select>
         </div>
-        <div className="grid grid-4">
-          <div className="field"><label>兑换码</label><input className="input" value={redeemDraft.code} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, code: e.target.value }))} placeholder="留空自动生成" /></div>
-          <div className="field"><label>套餐</label><select className="input" value={redeemDraft.plan_id} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, plan_id: e.target.value }))}><option value="">选择套餐</option>{plans.map((plan) => <option value={plan.id} key={plan.id}>{plan.name} · {plan.duration_days || 30} 天</option>)}</select></div>
-          <div className="field"><label>过期时间</label><input className="input" type="datetime-local" value={redeemDraft.expires_at} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, expires_at: e.target.value }))} /></div>
-          <div className="form-row-action"><button className="btn primary" disabled={saving} onClick={createRedeemCode} type="button"><Plus /> 新增兑换码</button></div>
+        <div className="redeem-create-row">
+          <div className="field compact-field redeem-code-field"><label>兑换码</label><input className="input" value={redeemDraft.code} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, code: e.target.value }))} placeholder="留空自动生成" /></div>
+          <div className="field compact-field redeem-plan-field"><label>套餐</label><select className="input" value={redeemDraft.plan_id} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, plan_id: e.target.value }))}><option value="">选择套餐</option>{plans.map((plan) => <option value={plan.id} key={plan.id}>{plan.name} · {plan.duration_days || 30} 天</option>)}</select></div>
+          <div className="field compact-field redeem-uses-field"><label>次数</label><input className="input" type="number" min={1} value={redeemDraft.max_uses} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, max_uses: e.target.value }))} /></div>
+          <button className="btn primary redeem-create-button" disabled={saving} onClick={createRedeemCode} type="button"><Plus /> 新增</button>
         </div>
         <div className="table-wrap" style={{ marginTop: 12 }}>
           <table>
-            <thead><tr><th>兑换码</th><th>套餐</th><th>状态</th><th>使用者</th><th>过期时间</th><th></th></tr></thead>
+            <thead><tr><th>兑换码</th><th>套餐</th><th>状态</th><th>使用次数</th><th>最近使用者</th><th></th></tr></thead>
             <tbody>
               {redeemCodes.map((item) => (
                 <tr key={item.id}>
                   <td><code>{item.code}</code></td>
                   <td>{plans.find((plan) => plan.id === item.plan_id)?.name || item.plan_id}</td>
                   <td><StatusBadge value={item.status} /></td>
+                  <td>{item.used_count || 0} / {item.max_uses || 1}</td>
                   <td className="muted" style={{ fontSize: 12 }}>{item.used_by || "-"}</td>
-                  <td>{new Date(item.expires_at).toLocaleString()}</td>
-                  <td><button className="btn danger" onClick={() => deleteRedeemCode(item.id)} type="button"><Trash2 size={14} /></button></td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="btn icon-only" onClick={() => copyRedeemCode(item)} title={copiedCodeID === item.id ? "已复制" : "复制兑换码"} type="button"><Copy /></button>
+                      <button className="btn danger icon-only" onClick={() => deleteRedeemCode(item.id)} title="删除兑换码" type="button"><Trash2 /></button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {redeemCodes.length === 0 ? <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 18 }}>暂无兑换码</td></tr> : null}
@@ -349,4 +402,8 @@ export default function AdminPlansPage() {
       </section>
     </AppShell>
   );
+}
+
+function EmptyPlanMobile() {
+  return <div className="empty-state"><strong>暂无套餐</strong></div>;
 }

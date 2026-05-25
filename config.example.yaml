@@ -39,3 +39,6 @@ logging:
   level: "info"
   retention_days: 180
   redeem_code_retention_days: 180
+
+ui:
+  background: "aurora"

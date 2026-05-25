@@ -179,10 +179,10 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
 		return false, "load accounts failed"
 	}
-	if !isCodeAPIFormat(apiFormat) {
+	if !isOAuthAPIFormat(apiFormat) {
 		for _, acc := range accounts {
-			if codeOAuthAccountRequiresCodeChannel(acc) {
-				return false, "Code OAuth credentials can only be assigned to Code channels"
+			if oauthAccountRequiresOAuthChannel(acc) {
+				return false, "OAuth credentials can only be assigned to OAuth channels"
 			}
 		}
 		return true, ""
@@ -190,10 +190,10 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 	target := db.Channel{APIFormat: apiFormat}
 	for _, acc := range accounts {
 		if acc.CredType != "oauth_token" {
-			return false, "Code channels require OAuth credentials"
+			return false, "OAuth channels require OAuth credentials"
 		}
-		if !oauthAccountMatchesCodeChannel(acc, target) {
-			return false, "OAuth credential provider does not match Code channel"
+		if !oauthAccountMatchesOAuthChannel(acc, target) {
+			return false, "OAuth credential provider does not match OAuth channel"
 		}
 	}
 	return true, ""

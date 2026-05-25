@@ -26,16 +26,15 @@ working state so the next agent can continue without extra user briefing.
 - `docs/current/roadmap.md` is the staged scope and no-legacy-burden source of
   truth. Stage 1 and Stage 2 are planned product direction; Stage 3 is a
   candidate pool only and must not be implemented until explicitly selected.
-- `docs/current/code-channels.md` is the current source of truth for Codex,
-  Gemini Code, Claude Code, and standard provider API alignment.
+- `docs/current/oauth-channels.md` is the current source of truth for OAuth-backed Codex, Gemini Code, Claude Code, Antigravity, and standard provider API alignment.
 - Runtime logging is documented in `docs/current/platform-design.md`; backend
   logs are structured JSON from `internal/logger`, controlled by
   `logging.level` in config. Current local development config uses `debug`;
   production should normally use `info` or `warn`. The logger has a global
   redaction fallback for common credential fields and token-shaped strings, but
   handlers should still avoid logging full request bodies or credentials.
-- Code channel model presets and provider quota/usage metadata display are
-  documented in `docs/current/code-channels.md`; the old
+- OAuth channel model presets and provider quota/usage metadata display are
+  documented in `docs/current/oauth-channels.md`; the old
   `docs/reference/cli-auth-reference.md` is only a pointer to avoid stale auth
   guidance.
 - `docs/api-reference/` is retained as protocol-standard reference material for
@@ -71,8 +70,8 @@ working state so the next agent can continue without extra user briefing.
   enabled Claude Code/Gemini Code OAuth account gets a timer based on provider
   `token_expiry`, with stable jitter between 60 and 5 minutes before expiry;
   Codex keeps the official client's expired-token/8-day refresh rule.
-- Code channel behavior must be checked against the local upstream official
-  client sources listed in `docs/current/code-channels.md` before changing auth,
+- OAuth channel behavior must be checked against the local upstream official
+  client sources listed in `docs/current/oauth-channels.md` before changing auth,
   refresh, metadata, or request-shaping logic.
 - Protocol conversion rule: same-protocol HTTP bodies and SSE streams are
   preserved raw where possible (raw preservation). Cross-protocol requests/responses
@@ -347,7 +346,7 @@ gateway behavior.
 
 Gateway/Relay architecture is now implemented for the current production target:
 single Gateway/control plane plus one or more execution-only Relay nodes. The
-implemented path includes account-to-node bindings, Gateway scheduling of
+implemented path includes channel-level node bindings, Gateway scheduling of
 `relay_node + channel + account`, Relay config pull into memory, HMAC-only Relay
 execution, and usage-event settlement by `request_id`.
 

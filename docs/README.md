@@ -29,8 +29,8 @@ the specific current document that matches the task.
   phase.
 - [current/gateway-relay.md](current/gateway-relay.md): current Gateway/Relay
   control-plane architecture and implementation status.
-- [current/code-channels.md](current/code-channels.md): Codex, Gemini Code,
-  Claude Code, and standard provider API source alignment.
+- [current/oauth-channels.md](current/oauth-channels.md): OAuth-backed Codex, Gemini Code,
+  Claude Code, Antigravity, and standard provider API source alignment.
 - [api-reference/README.md](api-reference/README.md): official API reference
   corpus for OpenAI Chat Completions API, OpenAI Responses API, Gemini API, and
   Anthropic Messages API.

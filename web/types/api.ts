@@ -33,6 +33,13 @@ export type User = {
 export type AdminSettings = {
   log_retention_days: number;
   redeem_code_retention_days: number;
+  background: "aurora" | "silk" | "mesh" | "topography" | "noir" | "custom";
+  wallpaper_url?: string;
+};
+
+export type PublicSettings = {
+  background: AdminSettings["background"];
+  wallpaper_url?: string;
 };
 
 export type RedeemCode = {
@@ -41,8 +48,9 @@ export type RedeemCode = {
   plan_id: string;
   used_by?: string;
   used_at?: string;
-  status: "active" | "used" | "expired";
-  expires_at: string;
+  max_uses: number;
+  used_count: number;
+  status: "active" | "used";
   created_at: string;
   updated_at?: string;
 };
@@ -233,7 +241,6 @@ export type NodeChannel = {
 
 export type AccessPolicy = {
   id: string;
-  name: string;
   allowed_models: string;
   max_concurrency: number;
   hourly_limit: number;

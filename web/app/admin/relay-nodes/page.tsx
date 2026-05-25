@@ -15,6 +15,7 @@ export default function RelayNodesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [expandedNodeID, setExpandedNodeID] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [form, setForm] = useState({ name: "local-relay", base_url: "http://relay:8081", region: "local", egress_ip: "", weight: "0", max_concurrency: "0" });
   const [quickBind, setQuickBind] = useState<Record<string, { channel_id: string; weight: string }>>({});
 
@@ -45,7 +46,7 @@ export default function RelayNodesPage() {
           return next;
         });
       })
-      .catch(() => {})
+      .catch((err) => setError(err instanceof Error ? err.message : "加载节点失败"))
       .finally(() => setLoading(false));
   }
 
@@ -61,6 +62,7 @@ export default function RelayNodesPage() {
     if (!adminToken) return;
     setSaving(true);
     setError("");
+    setNotice("");
     try {
       const created = await adminApi.createRelayNode(adminToken, {
         name: form.name.trim() || "local-relay",
@@ -76,6 +78,7 @@ export default function RelayNodesPage() {
       setQuickBind((cur) => ({ ...cur, [created.id]: { channel_id: "", weight: "0" } }));
       setForm({ name: "", base_url: "", region: "", egress_ip: "", weight: "0", max_concurrency: "0" });
       setCreateOpen(false);
+      setNotice(`节点 ${created.name} 已创建。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
@@ -86,28 +89,44 @@ export default function RelayNodesPage() {
   async function patchNode(id: string, body: Partial<RelayNode>) {
     const adminToken = token();
     if (!adminToken) return;
+    setError("");
+    setNotice("");
     try {
       const updated = await adminApi.updateRelayNode(adminToken, id, body);
       setNodes((cur) => cur.map((node) => node.id === id ? updated : node));
-    } catch { /* keep current state */ }
+      setNotice(`节点 ${updated.name} 已更新。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新节点失败");
+    }
   }
 
   async function deleteNode(id: string) {
     const adminToken = token();
     if (!adminToken) return;
     if (!confirm("确认删除该节点？关联绑定也会失效。")) return;
+    setError("");
+    setNotice("");
     try {
+      const nodeName = nodes.find((node) => node.id === id)?.name || id.slice(0, 8);
       await adminApi.deleteRelayNode(adminToken, id);
       setNodes((cur) => cur.filter((node) => node.id !== id));
       setBindings((cur) => cur.filter((item) => item.relay_node_id !== id));
-    } catch { /* keep current state */ }
+      setNotice(`节点 ${nodeName} 已删除。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除节点失败");
+    }
   }
 
   async function createBinding(nodeID: string) {
     const adminToken = token();
     const draft = quickBind[nodeID];
     if (!adminToken || !draft?.channel_id) return;
-    if (nodeBindings(nodeID).some((item) => item.channel_id === draft.channel_id)) return;
+    setError("");
+    setNotice("");
+    if (nodeBindings(nodeID).some((item) => item.channel_id === draft.channel_id)) {
+      setError("该节点已绑定此渠道");
+      return;
+    }
     try {
       const created = await adminApi.createNodeChannel(adminToken, {
         relay_node_id: nodeID,
@@ -117,7 +136,10 @@ export default function RelayNodesPage() {
       });
       setBindings((cur) => [created, ...cur]);
       setQuickBind((cur) => ({ ...cur, [nodeID]: { channel_id: "", weight: "0" } }));
-    } catch { /* keep current state */ }
+      setNotice(`${channelName(created.channel_id)} 已绑定到节点。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "新增绑定失败");
+    }
   }
 
   async function autoBalanceBindings() {
@@ -126,6 +148,7 @@ export default function RelayNodesPage() {
     if (!confirm("确认自动均分绑定？现有节点绑定会被替换。")) return;
     setSaving(true);
     setError("");
+    setNotice("");
     try {
       await Promise.all(bindings.map((binding) => adminApi.deleteNodeChannel(adminToken, binding.id)));
       const created = await Promise.all(channels.map((channel, index) => adminApi.createNodeChannel(adminToken, {
@@ -135,6 +158,7 @@ export default function RelayNodesPage() {
         enabled: true,
       })));
       setBindings(created);
+      setNotice(`已为 ${created.length} 个渠道重新均分绑定。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "自动均分失败");
     } finally {
@@ -145,10 +169,15 @@ export default function RelayNodesPage() {
   async function patchBinding(id: string, body: Partial<NodeChannel>) {
     const adminToken = token();
     if (!adminToken) return;
+    setError("");
+    setNotice("");
     try {
       const updated = await adminApi.updateNodeChannel(adminToken, id, body);
       setBindings((cur) => cur.map((item) => item.id === id ? updated : item));
-    } catch { /* keep current state */ }
+      setNotice(`${channelName(updated.channel_id)} 绑定已更新。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新绑定失败");
+    }
   }
 
   const channelName = (id: string) => channels.find((channel) => channel.id === id)?.name || id.slice(0, 8);
@@ -165,10 +194,16 @@ export default function RelayNodesPage() {
   async function deleteChannelBinding(bindingIDs: string[]) {
     const adminToken = token();
     if (!adminToken) return;
+    if (!confirm(`确认删除 ${bindingIDs.length} 个渠道绑定？`)) return;
+    setError("");
+    setNotice("");
     try {
       await Promise.all(bindingIDs.map((id) => adminApi.deleteNodeChannel(adminToken, id)));
       setBindings((cur) => cur.filter((item) => !bindingIDs.includes(item.id)));
-    } catch { /* keep current state */ }
+      setNotice("渠道绑定已删除。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除绑定失败");
+    }
   }
 
   return (
@@ -184,6 +219,8 @@ export default function RelayNodesPage() {
         <div className="ops-stat"><span>可用绑定</span><strong>{stats.enabledBindings} / {bindings.length}</strong></div>
         <div className="ops-stat"><span>活跃权重</span><strong>{stats.totalWeight}</strong></div>
       </section>
+      {notice ? <p className="form-success" style={{ marginTop: 16 }}>{notice}</p> : null}
+      {error && !createOpen ? <p className="form-error" style={{ marginTop: 16 }}>{error}</p> : null}
 
       {createOpen ? (
         <div className="drawer-backdrop" onClick={() => setCreateOpen(false)} role="presentation">

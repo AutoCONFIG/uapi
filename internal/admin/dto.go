@@ -112,7 +112,6 @@ type UpdateAccountRequest struct {
 // --- Access Policy DTOs ---
 
 type CreateAccessPolicyRequest struct {
-	Name           string `json:"name"`
 	AllowedModels  string `json:"allowed_models"`
 	MaxConcurrency int    `json:"max_concurrency"`
 	HourlyLimit    int    `json:"hourly_limit"`
@@ -122,7 +121,6 @@ type CreateAccessPolicyRequest struct {
 }
 
 type UpdateAccessPolicyRequest struct {
-	Name           *string `json:"name,omitempty"`
 	AllowedModels  *string `json:"allowed_models,omitempty"`
 	MaxConcurrency *int    `json:"max_concurrency,omitempty"`
 	HourlyLimit    *int    `json:"hourly_limit,omitempty"`

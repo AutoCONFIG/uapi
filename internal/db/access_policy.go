@@ -8,7 +8,6 @@ import (
 
 type AccessPolicy struct {
 	Base
-	Name           string `gorm:"size:100;not null;uniqueIndex" json:"name"`
 	AllowedModels  string `gorm:"type:text" json:"allowed_models"`
 	MaxConcurrency int    `gorm:"default:0" json:"max_concurrency"`
 	HourlyLimit    int    `gorm:"default:0" json:"hourly_limit"`

@@ -17,6 +17,7 @@ func TestValidChannelFormatForType(t *testing.T) {
 		{"anthropic", ""},
 		{"anthropic", "standard"},
 		{"anthropic", "claude_code"},
+		{"antigravity", "antigravity"},
 	}
 	for _, tc := range valid {
 		if !validChannelFormatForType(tc.typ, tc.format) {
@@ -33,6 +34,8 @@ func TestValidChannelFormatForType(t *testing.T) {
 		{"openai", "gemini_code"},
 		{"anthropic", "responses"},
 		{"anthropic", "codex"},
+		{"antigravity", "standard"},
+		{"antigravity", "gemini_code"},
 		{"unknown", "standard"},
 	}
 	for _, tc := range invalid {

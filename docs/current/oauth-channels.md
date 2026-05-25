@@ -1,13 +1,14 @@
-# Code Channel Source Alignment
+# OAuth Channel Source Alignment
 
-This document is the active source of truth for Codex, Gemini Code, and Claude
-Code channel behavior. These channels must be implemented from the local
-official client source trees first; public API docs are used only to normalize
-the standard non-Code API formats.
+This document is the active source of truth for OAuth-backed Codex, Gemini Code,
+Claude Code, and Antigravity channel behavior. These channels must be
+implemented from the local official client source trees first; public API docs
+are used only to normalize the standard API-key formats.
 
 ## Channel Model
 
-- `channels.type` is the provider family: `openai`, `gemini`, or `anthropic`.
+- `channels.type` is the provider family: `openai`, `gemini`, `anthropic`, or
+  `antigravity`.
 - `channels.api_format` selects the transport variant:
   - `codex`: Codex login and OpenAI Responses-style model requests.
   - `gemini_code`: Gemini Code login and Code Assist API requests.
@@ -21,18 +22,18 @@ the standard non-Code API formats.
 - OAuth/API credentials are stored as `accounts` under a channel. API-key
   accounts carry their upstream URL prefix. The UI splits it into Base URL and
   route prefix, with blank route prefix falling back to the provider standard
-  path, so compatible third-party providers can vary by account. OAuth/Code accounts store the provider default endpoint
-  automatically during binding, plus encrypted refresh tokens and structured
-  `metadata` with plan/account details synced from the provider flow when
+  path, so compatible third-party providers can vary by account. OAuth accounts
+  store the provider default endpoint automatically during binding, plus encrypted
+  refresh tokens and structured `metadata` with plan/account details synced from the provider flow when
   available.
 - OAuth credentials refresh on use, matching the upstream client lifecycle.
-  Codex follows the official client's on-use proactive rule: refresh when the access token is
-  expired or when the last refresh is older than 8 days. Claude Code and Gemini
-  Code refresh when the provider token is near expiry. The gateway process also
-  schedules conservative idle maintenance for Claude Code and Gemini Code
-  accounts so rarely used accounts do not expire silently; Codex keeps the official client's
-  on-use proactive refresh rule.
-- Admin channel creation pre-fills Code channel model allow-lists from the local
+  Codex follows the official client's on-use proactive rule: refresh when the
+  access token is expired or when the last refresh is older than 8 days.
+  Claude Code and Gemini Code refresh when the provider token is near expiry.
+  The gateway process also schedules conservative idle maintenance for Claude Code and Gemini Code
+  accounts so rarely used accounts do not expire silently; Codex keeps the
+  official client's on-use proactive refresh rule.
+- Admin channel creation pre-fills OAuth channel model allow-lists from the local
   upstream model source files. Operators can still edit the list per channel.
 
 ## OpenAI / Codex
@@ -63,15 +64,15 @@ Implemented alignment:
   auth headers, matching the local backend-client usage path. When available,
   the response is stored as `metadata.codex_usage`.
 - Codex upstream requests are routed through the OpenAI Responses converter.
-- Code channels are OAuth credential channels. Admin API-key credential creation
-  is rejected for `codex`, `gemini_code`, and `claude_code` channels so regular
-  API Base URL/API Key channels cannot be accidentally routed through Code
-  protocol adaptors. Updating `credentials` directly is also rejected for Code
+- OAuth channels are credential channels backed by provider OAuth. Admin API-key
+  credential creation is rejected for `codex`, `gemini_code`, `claude_code`, and
+  `antigravity` channels so regular API Base URL/API Key channels cannot be
+  accidentally routed through OAuth-only protocol adaptors. Updating `credentials` directly is also rejected for OAuth
   channel accounts; token changes must go through the OAuth refresh/import
   paths so refresh tokens, expiry, metadata, and provider lifecycle stay
-  consistent. Moving OAuth accounts across Code channel families is rejected
+  consistent. Moving OAuth accounts across OAuth channel families is rejected
   unless the account's OAuth token URL matches the target provider.
-- Codex channel model presets are sourced from
+- Codex OAuth channel model presets are sourced from
   `upstream/codex/codex-rs/models-manager/models.json` and currently include
   `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, and
   `gpt-image-2`.

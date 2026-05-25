@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
-	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
@@ -13,9 +12,9 @@ import (
 )
 
 type CreateRedeemCodeRequest struct {
-	Code      string    `json:"code"`
-	PlanID    uuid.UUID `json:"plan_id"`
-	ExpiresAt string    `json:"expires_at"`
+	Code    string    `json:"code"`
+	PlanID  uuid.UUID `json:"plan_id"`
+	MaxUses int       `json:"max_uses"`
 }
 
 func (h *Handler) HandleRedeemCodes(ctx *fasthttp.RequestCtx) {
@@ -35,8 +34,6 @@ func (h *Handler) listRedeemCodes(ctx *fasthttp.RequestCtx) {
 	page, limit := h.parsePagination(ctx)
 	offset := (page - 1) * limit
 	status := strings.TrimSpace(string(ctx.QueryArgs().Peek("status")))
-	now := time.Now()
-	h.db.Model(&db.RedeemCode{}).Where("status = ? AND expires_at <= ?", "active", now).Update("status", "expired")
 	query := h.db.Model(&db.RedeemCode{})
 	if status != "" && status != "all" {
 		query = query.Where("status = ?", status)
@@ -61,31 +58,30 @@ func (h *Handler) createRedeemCode(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "plan_id is required")
 		return
 	}
+	maxUses := req.MaxUses
+	if maxUses == 0 {
+		maxUses = 1
+	}
+	if maxUses < 1 {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "max_uses must be greater than 0")
+		return
+	}
 	var plan db.Plan
 	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", req.PlanID).First(&plan).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "plan not found")
 		return
 	}
-	expiresAt := time.Now().AddDate(0, 1, 0)
-	if strings.TrimSpace(req.ExpiresAt) != "" {
-		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(req.ExpiresAt))
-		if err != nil || !parsed.After(time.Now()) {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "expires_at must be a future RFC3339 time")
-			return
-		}
-		expiresAt = parsed
-	}
 	code := strings.TrimSpace(req.Code)
 	if code == "" {
 		code = randomRedeemCode()
 	}
-	item := db.RedeemCode{Code: code, PlanID: req.PlanID, Value: plan.TokenQuota, Status: "active", ExpiresAt: expiresAt}
+	item := db.RedeemCode{Code: code, PlanID: req.PlanID, Value: plan.TokenQuota, MaxUses: maxUses, UsedCount: 0, Status: "active"}
 	item.ID = uuid.New()
 	if err := h.db.Create(&item).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreateCtx(h.db, "redeem_code", item.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"code": item.Code, "plan_id": item.PlanID, "plan_name": plan.Name, "expires_at": item.ExpiresAt})
+	auditCreateCtx(h.db, "redeem_code", item.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"code": item.Code, "plan_id": item.PlanID, "plan_name": plan.Name, "max_uses": item.MaxUses})
 	h.jsonResponse(ctx, 200, item)
 }
 

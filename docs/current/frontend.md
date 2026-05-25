@@ -56,26 +56,28 @@ The UI treats channels as the single top-level object for upstream access. Accou
 API keys, and OAuth credentials are represented as credentials within a channel rather
 than as a separate primary navigation item. The old `/admin/accounts` route is only
 a legacy-link explanation page and should not be used for new workflows. The admin
-UI should not expose standalone token management in the first-stage product surface.
+UI should not expose standalone admin-side API key management in the
+first-stage product surface.
 
 The `/admin/channels` page treats each channel as a top-level item. The left rail
 lists channels directly, while the right side shows the selected channel's account
 cards and drawer-based channel/account editing.
 
-The channel drawer and create drawer support three provider families:
-OpenAI, Gemini, and Anthropic. Channels define provider family, protocol variant,
-and model scope only. API-key accounts carry their own upstream endpoint. The UI edits it as Base URL
-plus a route prefix; leaving the route prefix blank uses the provider standard
-path such as `/v1` or `/v1beta`, while compatible providers can use paths like
-`/api/openai` or `/compatible/v2`. Code/OAuth
-accounts do not expose endpoint editing in the UI; the backend stores the
+The channel drawer and create drawer support OpenAI, Gemini, Anthropic, and
+Antigravity OAuth provider families. Channels define provider family, protocol
+variant,
+and model scope only. API-key accounts carry their own upstream endpoint. The UI
+edits it as Base URL plus a route prefix; leaving the route prefix blank uses the
+provider standard path such as `/v1` or `/v1beta`, while compatible providers can
+use paths like `/api/openai` or `/compatible/v2`. OAuth accounts do not
+expose endpoint editing in the UI; the backend stores the
 provider default endpoint on the account when OAuth binding completes. OpenAI
 also exposes the `standard` Chat Completions and `responses` API format switch.
-Code login buttons create Codex, Gemini Code, or Claude Code OAuth channels. The
-backend returns a provider authorization URL, the UI polls callback status by
-`state` where possible, and a completed session is bound as an `oauth_token`
+OAuth channel buttons create Codex, Gemini Code, Claude Code, or Antigravity
+OAuth channels. The backend returns a provider authorization URL, the UI polls
+callback status by `state` where possible, and a completed session is bound as an `oauth_token`
 account inside the channel. OAuth account metadata is shown in the credential
-list when available. Code channel presets pre-fill model allow-lists from the
+list when available. OAuth channel presets pre-fill model allow-lists from the
 local upstream client source trees, and the credential list displays provider
 quota or credit metadata when the backend has synced it.
 
@@ -85,8 +87,9 @@ backend to sync models from the selected upstream account/channel, but downstrea
 are edited on the channel as one mapping per line in `upstream=public` form.
 
 The `/keys` page is for normal users. A normal user defaults to one API key, and
-the key can be viewed/copied after creation. Admins should not use admin-side
-token management to generate their own downstream keys. Optional key fields are
+the key can be viewed/copied after creation. Admins should create a normal user
+account when they need downstream API access; the first-stage admin UI does not
+provide an admin-side API key management surface. Optional key fields are
 `ip_whitelist`, `expires_at`, `models`, and `permissions`. Permissions map to
 relay entry points: `chat`, `responses`, `messages`, `gemini`, and `images`.
 

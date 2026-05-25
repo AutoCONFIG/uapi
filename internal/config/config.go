@@ -20,6 +20,7 @@ type Config struct {
 	Gateway  GatewayConfig  `yaml:"gateway"`
 	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	UI       UIConfig       `yaml:"ui"`
 	User     UserConfig     `yaml:"user"`
 	WS       WSServerConfig `yaml:"ws"`
 }
@@ -95,6 +96,11 @@ type LoggingConfig struct {
 	Level                   string `yaml:"level"`
 	RetentionDays           int    `yaml:"retention_days"`
 	RedeemCodeRetentionDays int    `yaml:"redeem_code_retention_days"`
+}
+
+type UIConfig struct {
+	Background    string `yaml:"background"`
+	WallpaperPath string `yaml:"wallpaper_path,omitempty"`
 }
 
 // Initialized returns true if an admin password has been set (setup completed).
@@ -188,6 +194,9 @@ func defaultConfig() *Config {
 			Level:                   "info",
 			RetentionDays:           180,
 			RedeemCodeRetentionDays: 180,
+		},
+		UI: UIConfig{
+			Background: "aurora",
 		},
 		Auth: AuthConfig{
 			AccessTokenExpiry:  "15m",

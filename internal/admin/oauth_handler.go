@@ -81,7 +81,7 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if !oauthProv.ChannelAllowed(channel) {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching Code channel format")
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching OAuth channel format")
 		return
 	}
 
@@ -234,7 +234,7 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 		session = h.getOAuthSession(state)
 		if imported.AccessToken != "" || imported.IDToken != "" {
 			if session.Provider != "gemini" && session.Provider != "antigravity" {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth code channels")
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth channels")
 				return
 			}
 			if imported.AccessToken == "" || imported.RefreshToken == "" {
@@ -575,7 +575,7 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if !channelAllowsOAuthProvider(channel, session.Provider) {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth account can only be bound to the matching Code channel format")
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth account can only be bound to the matching OAuth channel format")
 		return
 	}
 

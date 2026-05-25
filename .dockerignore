@@ -1,4 +1,7 @@
 upstream/
+assets/
+docs/
+web/
 web/node_modules/
 web/.next/
 web/out/
@@ -7,5 +10,10 @@ web/out/
 *.swo
 *~
 .env
+config.yaml
+config.*.yaml
+!config.example.yaml
+!config.gateway.example.yaml
+!config.relay.example.yaml
 .vscode/
 AGENTS.md

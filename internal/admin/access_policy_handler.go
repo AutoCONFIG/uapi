@@ -41,10 +41,6 @@ func (h *Handler) createAccessPolicy(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "name is required")
-		return
-	}
 	if msg := validatePolicyLimits(req.MaxConcurrency, req.HourlyLimit, req.WeeklyLimit, req.MonthlyLimit); msg != "" {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
 		return
@@ -54,7 +50,6 @@ func (h *Handler) createAccessPolicy(ctx *fasthttp.RequestCtx) {
 		enabled = *req.Enabled
 	}
 	policy := db.AccessPolicy{
-		Name:           strings.TrimSpace(req.Name),
 		AllowedModels:  strings.TrimSpace(req.AllowedModels),
 		MaxConcurrency: req.MaxConcurrency,
 		HourlyLimit:    req.HourlyLimit,
@@ -67,7 +62,7 @@ func (h *Handler) createAccessPolicy(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreateCtx(h.db, "access_policy", policy.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": policy.Name, "allowed_models": policy.AllowedModels, "max_concurrency": policy.MaxConcurrency})
+	auditCreateCtx(h.db, "access_policy", policy.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"allowed_models": policy.AllowedModels, "max_concurrency": policy.MaxConcurrency})
 	h.jsonResponse(ctx, 200, policy)
 }
 
@@ -88,14 +83,6 @@ func (h *Handler) updateAccessPolicy(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	updates := map[string]interface{}{"updated_at": time.Now()}
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "name is required")
-			return
-		}
-		updates["name"] = name
-	}
 	if req.AllowedModels != nil {
 		updates["allowed_models"] = strings.TrimSpace(*req.AllowedModels)
 	}

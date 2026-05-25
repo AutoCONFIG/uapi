@@ -17,7 +17,7 @@ UAPI 是一个**面向公众的高性能 AI API 中转平台**。用户注册账
 核心能力：
 - 透明代理 + 格式转换（OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API 四种格式互转，客户端可用任一原生格式接入）
 - 渠道管理（分组、上游凭据、账号元数据、加权轮询、故障冷却、OAuth 自动刷新）
-- Code 客户端渠道（Codex、Gemini Code、Claude Code）按本地官方客户端源码对齐；具体源文件见 `docs/current/code-channels.md`
+- OAuth 渠道（Codex、Gemini Code、Claude Code、Antigravity）按本地官方客户端源码对齐；具体源文件见 `docs/current/oauth-channels.md`
 - 双模式计费（次数窗口限额 + Token 额度扣费）
 - 用户注册/登录/套餐购买/API Key 管理
 - 管理员后台（渠道/账号凭据、节点、用户、套餐、日志、系统设置）
@@ -223,19 +223,19 @@ GET    /v1beta/models                 # Gemini 兼容模型列表；只读本地
 ANY    /v1beta/*                      # Gemini generateContent API 格式
 ```
 
-### 渠道和 Code 客户端
+### 渠道和 OAuth 客户端
 
 渠道用 `type` 表示供应商家族，用 `api_format` 表示具体协议变体。
 OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支持
 `standard` 和 `gemini_code`；Anthropic 支持 `standard` 和
-`claude_code`。渠道只表达供应商、协议和模型范围；上游接入点归属账号。
-API Key 账号可单独配置接入点；Web UI 拆成 Base URL 和路径前缀两个输入，路径留空时使用 `/v1` 或 `/v1beta` 等标准路由，保存到后端时仍合成为完整上游 URL。OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
+`claude_code`；Antigravity 使用 `antigravity`。渠道只表达供应商、协议和模型范围；上游接入点归属账号。
+API Key 账号可单独配置接入点；Web UI 拆成 Base URL 和路径前缀两个输入，路径留空时使用 `/v1` 或 `/v1beta` 等标准路由，保存到后端时仍合成为完整上游 URL。OAuth 账号在绑定时由后端写入供应商默认接入点，
 Web UI 不提供手工编辑入口。Web UI 直接按渠道展示，账号在渠道内以卡片管理；
 `channel_group` 不再作为用户可见的一级分组。
 
 模型列表是本地控制面数据。`channels.models` 保存规范化后的上游模型 ID，`channels.model_aliases` 保存“上游模型=对外模型”的映射。下游 `/v1/models` 和 `/v1beta/models` 只读取本地数据库并结合用户套餐过滤，不在请求时访问上游。管理员需要刷新模型时，通过渠道页面调用 `POST /api/admin/channels/models/sync?id=<channel_id>` 手动同步。
 
-Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客户端源码对齐：
+OAuth 渠道的客户端行为不从公开 API 猜测，必须从本地 upstream 官方客户端源码对齐：
 
 - Codex: `upstream/codex/codex-rs/login/src/*`
 - Gemini Code: `upstream/gemini-cli/packages/core/src/code_assist/*`
@@ -243,7 +243,7 @@ Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客
   `upstream/claude-code/src/services/api/client.ts`,
   `upstream/claude-code/src/utils/http.ts`
 
-完整对齐清单见 `docs/current/code-channels.md`。
+完整对齐清单见 `docs/current/oauth-channels.md`。
 
 ### 中间件链
 
@@ -368,12 +368,14 @@ type Token struct {
 ```go
 type RedeemCode struct {
     Base
-    Code      string     `gorm:"size:100;uniqueIndex;not null"`
-    Value     int64      `gorm:"not null"`
-    UsedBy    *string    `gorm:"size:36;index"`
+    Code      string    `gorm:"size:100;uniqueIndex;not null"`
+    PlanID    uuid.UUID `gorm:"type:uuid;index"`
+    Value     int64
+    UsedBy    *string   `gorm:"size:36;index"`
     UsedAt    *time.Time
-    Status    string     `gorm:"size:20;default:active"`  // active, used, expired
-    ExpiresAt time.Time  `gorm:"not null"`
+    MaxUses   int       `gorm:"default:1"`
+    UsedCount int       `gorm:"default:0"`
+    Status    string    `gorm:"size:20;default:active"` // active, used
 }
 ```
 
@@ -429,7 +431,7 @@ channel/account/model/project 等非密钥上下文。
 3. `GET /api/admin/channels/oauth/status` 供前端轮询 callback 状态。
 4. `POST /api/admin/channels/oauth/bind` 由已登录管理员把完成的 session 保存为 `accounts.cred_type = oauth_token`。
 
-Code 渠道认证和刷新细节以 `docs/current/code-channels.md` 为准。当前规则包括：Codex 在 token 过期或上次刷新超过 8 天时刷新；Gemini Code 和 Claude Code 在距过期 5 分钟内刷新，并由 Gateway 侧 idle maintenance 做保底维护。
+OAuth 渠道认证和刷新细节以 `docs/current/oauth-channels.md` 为准。当前规则包括：Codex 在 token 过期或上次刷新超过 8 天时刷新；Gemini Code 和 Claude Code 在距过期 5 分钟内刷新，并由 Gateway 侧 idle maintenance 做保底维护。
 
 ### Relay 中的刷新逻辑
 

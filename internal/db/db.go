@@ -41,5 +41,22 @@ func Init(dsn string) (*gorm.DB, error) {
 	if err := db.AutoMigrate(AllModels...); err != nil {
 		return nil, fmt.Errorf("auto migrate: %w", err)
 	}
+	if err := migrateNodeChannelIndexes(db); err != nil {
+		return nil, err
+	}
 	return db, nil
+}
+
+func migrateNodeChannelIndexes(db *gorm.DB) error {
+	if err := db.Exec(`DROP INDEX IF EXISTS idx_node_channel`).Error; err != nil {
+		return fmt.Errorf("drop legacy node channel index: %w", err)
+	}
+	if err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_node_channel_active
+		ON node_channels (relay_node_id, channel_id)
+		WHERE deleted_at IS NULL
+	`).Error; err != nil {
+		return fmt.Errorf("create active node channel index: %w", err)
+	}
+	return nil
 }
