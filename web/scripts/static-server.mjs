@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)), "out");
 const port = Number(process.env.PORT || 3000);
+const host = process.env.HOST || "127.0.0.1";
 
 const types = {
   ".css": "text/css; charset=utf-8",
@@ -20,7 +21,12 @@ const types = {
 };
 
 function resolvePath(urlPath) {
-  const decoded = decodeURIComponent(urlPath.split("?")[0]);
+  let decoded = "/";
+  try {
+    decoded = decodeURIComponent(urlPath.split("?")[0]);
+  } catch {
+    decoded = "/";
+  }
   const clean = normalize(decoded).replace(/^(\.\.[/\\])+/, "");
   const relative = clean === "/" ? "index.html" : clean.replace(/^[/\\]/, "");
   if (relative.endsWith("/")) return join(root, relative, "index.html");
@@ -30,14 +36,17 @@ function resolvePath(urlPath) {
 
 createServer(async (req, res) => {
   let filePath = resolvePath(req.url || "/");
+  let statusCode = 200;
   try {
     await stat(filePath);
   } catch {
     filePath = join(root, "404.html");
+    statusCode = 404;
   }
 
+  res.statusCode = statusCode;
   res.setHeader("Content-Type", types[extname(filePath)] || "application/octet-stream");
   createReadStream(filePath).pipe(res);
-}).listen(port, "127.0.0.1", () => {
-  console.log(`static server ready: http://127.0.0.1:${port}`);
+}).listen(port, host, () => {
+  console.log(`static server ready: http://${host}:${port}`);
 });

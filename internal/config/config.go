@@ -100,6 +100,7 @@ type LoggingConfig struct {
 
 type UIConfig struct {
 	Background    string `yaml:"background"`
+	PublicBaseURL string `yaml:"public_base_url,omitempty"`
 	WallpaperPath string `yaml:"wallpaper_path,omitempty"`
 }
 

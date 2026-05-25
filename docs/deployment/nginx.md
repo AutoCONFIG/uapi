@@ -1,8 +1,9 @@
 # UAPI Nginx Reverse Proxy Configuration
 
-UAPI is designed to run behind an nginx reverse proxy with HTTPS. In the current
-deployment shape, nginx serves the exported Next.js frontend from `web/out` and
-proxies backend traffic to the Go API server.
+UAPI is designed to run behind an nginx reverse proxy with HTTPS. In the
+production Docker layout, the web container serves the exported Next.js frontend
+on `127.0.0.1:3000`, and nginx proxies backend traffic to the Go API server on
+`127.0.0.1:8080`.
 
 ## Basic Configuration
 
@@ -19,8 +20,6 @@ server {
     ssl_certificate     /etc/ssl/certs/relay.example.com.pem;
     ssl_certificate_key /etc/ssl/private/relay.example.com.key;
 
-    root /opt/uapi/web/out;
-    index index.html;
     client_max_body_size 256m;
 
     # Backend health check.
@@ -32,9 +31,13 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # Static frontend export.
+    # Frontend static server.
     location / {
-        try_files $uri $uri/ /index.html;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # Go API server. config.example.yaml uses port 8080.

@@ -34,11 +34,13 @@ export type AdminSettings = {
   log_retention_days: number;
   redeem_code_retention_days: number;
   background: "aurora" | "silk" | "mesh" | "topography" | "noir" | "custom";
+  public_base_url?: string;
   wallpaper_url?: string;
 };
 
 export type PublicSettings = {
   background: AdminSettings["background"];
+  public_base_url?: string;
   wallpaper_url?: string;
 };
 

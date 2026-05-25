@@ -17,6 +17,10 @@ function shortID(value?: string) {
   return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 }
 
+function tokenTotal(row: UsageLogItem) {
+  return row.total_tokens || row.prompt_tokens + row.completion_tokens;
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -94,8 +98,17 @@ export default function LogsPage() {
                   <td>{row.is_stream ? "流式" : "普通"}</td>
                   <td><StatusBadge value={String(row.status_code)} /></td>
                   <td>
-                    <strong>{formatTokens(row.total_tokens || row.prompt_tokens + row.completion_tokens)}</strong>
-                    <div className="muted" style={{ fontSize: 12 }}>入 {formatTokens(row.prompt_tokens)} / 出 {formatTokens(row.completion_tokens)}</div>
+                    {tokenTotal(row) > 0 ? (
+                      <>
+                        <strong>{formatTokens(tokenTotal(row))}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>入 {formatTokens(row.prompt_tokens)} / 出 {formatTokens(row.completion_tokens)}</div>
+                      </>
+                    ) : (
+                      <>
+                        <strong>{row.status_code >= 400 ? "未产生" : "未返回"}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>{row.status_code >= 400 ? "失败请求" : "上游未提供 usage"}</div>
+                      </>
+                    )}
                   </td>
                   <td>{row.latency_ms}ms</td>
                 </tr>

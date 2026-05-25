@@ -5,6 +5,11 @@ The repository publishes two Docker images to GitHub Container Registry:
 - `ghcr.io/<github-owner>/uapi`
 - `ghcr.io/<github-owner>/uapi-web`
 
+For this repository, the image names are:
+
+- `ghcr.io/autoconfig/uapi`
+- `ghcr.io/autoconfig/uapi-web`
+
 The workflow is `.github/workflows/docker-publish.yml`.
 
 ## Publish
@@ -34,6 +39,13 @@ docker pull ghcr.io/<github-owner>/uapi:latest
 docker pull ghcr.io/<github-owner>/uapi-web:latest
 ```
 
+For `AutoCONFIG/UAPI`:
+
+```bash
+docker pull ghcr.io/autoconfig/uapi:latest
+docker pull ghcr.io/autoconfig/uapi-web:latest
+```
+
 If the packages are private, log in first with a GitHub token that has `read:packages`:
 
 ```bash
@@ -42,17 +54,26 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
 
 ## Deploy With Compose
 
-Copy `config.example.yaml` to `config.yaml`, edit the secrets and database DSN, then run:
+Copy `config.gateway.example.yaml` to `config.yaml`, copy `config.relay.example.yaml` to `config.relay.yaml`, edit the secrets and database DSN, then run:
 
 ```bash
-export GHCR_OWNER=<github-owner-in-lowercase>
 export UAPI_TAG=latest
-docker compose -f docker-compose.ghcr.yaml pull
-docker compose -f docker-compose.ghcr.yaml up -d
+docker compose pull
+docker compose up -d
 ```
 
-`docker-compose.ghcr.yaml` keeps local runtime files mounted:
+`docker-compose.yaml` uses GHCR images and exposes native service ports. It does not include an nginx reverse proxy inside the containers.
 
 - `./config.yaml:/app/config.yaml`
 - `./assets:/app/assets`
 - `pgdata:/var/lib/postgresql/data`
+
+Default ports:
+
+- Frontend static server: `${WEB_PORT:-3000}:3000`
+- Gateway/API for the host reverse proxy: `${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080`
+- Relay node: `${RELAY_PORT:-8081}:8081`
+
+For the Relay service, fill `gateway.control_url`, `gateway.relay_node_id`, `gateway.internal_secret`, and `security.encryption_key` in `config.relay.yaml`.
+
+Use `docker-compose.dev.yaml` for local development. It still builds locally and keeps the nginx reverse proxy for convenient frontend/API testing.

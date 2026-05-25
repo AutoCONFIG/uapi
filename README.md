@@ -43,35 +43,32 @@ make build
 
 ### Docker Compose 部署
 
-默认单机部署，运行 PostgreSQL、Gateway/API、本机 Relay 和前端。只有前端 `80` 端口暴露到宿主机，数据库、Gateway 内部端口和本机 Relay 都不对外暴露：
+开发调试使用 `docker-compose.dev.yaml`，会本地构建后端和前端，并保留前端 nginx 反代，方便用一个入口测试页面和 API：
 
 ```bash
 cp config.example.yaml config.yaml
 # 首次启动会自动写入随机 jwt_secret/encryption_key/internal_secret
-docker compose up -d --build
+docker compose -f docker-compose.dev.yaml up -d --build
 ```
 
-同一台机器模拟 Gateway/Relay 分离：
+生产部署使用默认 `docker-compose.yaml`，从 GitHub Container Registry 拉取镜像，不在容器内提供 nginx 反代。前端、Gateway/API 和 Relay 节点按原生端口映射出来，服务器层 nginx/Caddy/Traefik 自行反代：
 
 ```bash
-cp config.gateway.example.yaml config.gateway.yaml
-# 首次启动会自动写入随机 jwt_secret/encryption_key/internal_secret
-docker compose -f docker-compose.gateway.yaml up -d --build
-
+cp config.gateway.example.yaml config.yaml
 cp config.relay.example.yaml config.relay.yaml
-# 在后台创建 Relay Node，base_url 填 http://relay:8081
-# 把 Gateway 的 security.encryption_key、gateway.internal_secret
-# 以及节点 ID 写入 config.relay.yaml
-docker compose -f docker-compose.relay.yaml up -d --build
+export UAPI_TAG=latest
+docker compose pull
+docker compose up -d
 ```
 
-远端机器运行 Relay，不需要 PostgreSQL/Redis；此时 Relay 需要对 Gateway 可达：
+独立 Relay 节点部署：
 
 ```bash
 cp config.relay.example.yaml config.relay.yaml
+# 在后台创建 Relay Node，base_url 填该 Relay 机器可被 Gateway 访问的地址，例如 https://relay.example.com
 # 编辑 gateway.control_url、gateway.relay_node_id，并复制 Gateway 的
 # gateway.internal_secret 与 security.encryption_key
-docker compose -f docker-compose.relay.remote.yaml up -d --build
+docker compose -f docker-compose.relay.yaml up -d --build
 ```
 
 ### 启动前端
@@ -126,7 +123,8 @@ docs/              项目文档
 推荐优先使用 Docker Compose：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 架构细节见 [docs/current/gateway-relay.md](docs/current/gateway-relay.md)。Nginx/Systemd 方式见 [docs/deployment/nginx.md](docs/deployment/nginx.md)。

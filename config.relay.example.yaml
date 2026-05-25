@@ -14,7 +14,7 @@ gateway:
   cache_ttl: "5s"
   internal_secret: "relay-example-internal-secret-32c"
   require_internal: true
-  control_url: "http://uapi:8080" # same-host split; remote relay: change to https://your-gateway-host
+  control_url: "https://gateway.example.com"
   relay_node_id: "12345678-1234-4234-8234-123456789abc"
   config_pull_interval: "5s"
 

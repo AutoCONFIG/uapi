@@ -41,3 +41,7 @@ logging:
 
 user:
   max_keys_per_user: 1
+
+ui:
+  background: "aurora"
+  public_base_url: ""

@@ -32,6 +32,7 @@ export default function AdminSettingsPage() {
   const [logRetention, setLogRetention] = useState(180);
   const [redeemRetention, setRedeemRetention] = useState(180);
   const [background, setBackground] = useState<AdminSettings["background"]>("aurora");
+  const [publicBaseURL, setPublicBaseURL] = useState("");
   const [wallpaperURL, setWallpaperURL] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
@@ -44,6 +45,7 @@ export default function AdminSettingsPage() {
       setLogRetention(settings.log_retention_days);
       setRedeemRetention(settings.redeem_code_retention_days);
       setBackground(settings.background);
+      setPublicBaseURL(settings.public_base_url || "");
       setWallpaperURL(settings.wallpaper_url || "");
       applyBackground(settings);
     }).catch(() => undefined);
@@ -59,10 +61,12 @@ export default function AdminSettingsPage() {
         log_retention_days: logRetention,
         redeem_code_retention_days: redeemRetention,
         background,
+        public_base_url: publicBaseURL.trim(),
       });
       setLogRetention(updated.log_retention_days);
       setRedeemRetention(updated.redeem_code_retention_days);
       setBackground(updated.background);
+      setPublicBaseURL(updated.public_base_url || "");
       setWallpaperURL(updated.wallpaper_url || "");
       applyBackground(updated);
       setMessage("设置已保存");
@@ -98,8 +102,13 @@ export default function AdminSettingsPage() {
         <div className="settings-stack">
           <section className="card card-pad settings-section">
             <div>
-              <h2>运行参数</h2>
-              <p className="muted">控制后台清理周期和数据保留策略。</p>
+              <h2>站点参数</h2>
+              <p className="muted">配置公开访问地址、后台清理周期和数据保留策略。</p>
+            </div>
+            <div className="field">
+              <label>公开访问地址</label>
+              <input className="input" value={publicBaseURL} onChange={(e) => setPublicBaseURL(e.target.value)} placeholder="https://uapi.hyhy.fun" />
+              <span className="muted" style={{ fontSize: 12 }}>用于用户侧快速接入等需要展示真实域名的地方，留空则使用当前浏览器地址。</span>
             </div>
             <div className="grid grid-2">
               <div className="field">

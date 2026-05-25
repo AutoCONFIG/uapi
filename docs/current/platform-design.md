@@ -501,13 +501,12 @@ Go Server (单进程，fasthttp)
 PostgreSQL (本地或远程)
 
 多 Relay 节点部署：
-同机分离测试使用 `docker-compose.gateway.yaml` + `docker-compose.relay.yaml`，二者共享 `uapi-net`，Relay 不暴露宿主机端口，后台节点 `base_url` 填 `http://relay:8081`。
-
-远端 Relay 机器使用 `docker-compose.relay.remote.yaml` + `config.relay.yaml`：
+远端 Relay 机器使用 `docker-compose.relay.yaml` + `config.relay.yaml`：
   - `server.mode: relay`
   - `gateway.require_internal: true`
   - `gateway.control_url` 指向 Gateway 可访问地址
   - `gateway.relay_node_id` 填管理后台创建的节点 ID
+  - 后台节点 `base_url` 填该 Relay 机器可被 Gateway 访问的地址
 Relay 节点不启动 PostgreSQL/Redis，只保留内存运行时配置和短期状态。
 ```
 

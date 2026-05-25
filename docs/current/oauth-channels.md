@@ -200,6 +200,6 @@ gofmt -w internal/relay internal/admin internal/db
 go test ./...
 go vet ./...
 npm --prefix web run build
-docker compose up -d --build
-docker compose ps
+docker compose -f docker-compose.dev.yaml up -d --build
+docker compose -f docker-compose.dev.yaml ps
 ```

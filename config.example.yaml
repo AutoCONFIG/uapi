@@ -42,3 +42,4 @@ logging:
 
 ui:
   background: "aurora"
+  public_base_url: ""

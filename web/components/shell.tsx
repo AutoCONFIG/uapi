@@ -31,7 +31,6 @@ const userNav: NavItem[] = [
   { href: "/overview", label: "总览", icon: LayoutDashboard },
   { href: "/keys", label: "密钥管理", icon: KeyRound },
   { href: "/usage", label: "用量", icon: BarChart3 },
-  { href: "/logs", label: "调用日志", icon: FileText },
   { href: "/plans", label: "套餐", icon: WalletCards },
   { href: "/settings", label: "设置", icon: Settings },
 ];

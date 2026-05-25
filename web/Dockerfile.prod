@@ -1,0 +1,15 @@
+FROM node:22-alpine AS builder
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN NEXT_PUBLIC_API_BASE_URL="" npm run build
+
+FROM node:22-alpine
+WORKDIR /app
+ENV HOST=0.0.0.0
+ENV PORT=3000
+COPY --from=builder /build/out ./out
+COPY scripts/static-server.mjs ./scripts/static-server.mjs
+EXPOSE 3000
+CMD ["node", "scripts/static-server.mjs"]

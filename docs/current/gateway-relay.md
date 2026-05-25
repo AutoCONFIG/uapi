@@ -151,12 +151,12 @@ The binary supports three modes via `server.mode`:
 
 Recommended Docker layout:
 
-- Default single machine: `docker-compose.yaml` runs PostgreSQL, Gateway/control API, local in-process Relay, and the static frontend. Only the web container publishes port `80`; PostgreSQL, Gateway `8080`, and Relay internals stay inside Docker.
-- Same-machine split test: `docker-compose.gateway.yaml` plus `docker-compose.relay.yaml` share the internal `uapi-net` network. Relay publishes no host port; Gateway reaches it as `http://relay:8081`.
-- Remote Relay machine: `docker-compose.relay.remote.yaml` runs only the Relay binary with `server.mode: relay` and publishes `8081` for Gateway-to-Relay traffic.
+- Production: `docker-compose.yaml` pulls GHCR images and exposes native ports without an in-container nginx reverse proxy. The web service publishes `3000`, Gateway/API is available on host loopback `8080` for the host reverse proxy, and Relay publishes `8081`.
+- Local development: `docker-compose.dev.yaml` builds locally and keeps the nginx reverse proxy for convenient frontend/API testing.
+- Remote Relay node: `docker-compose.relay.yaml` runs only the Relay binary with `server.mode: relay` and publishes `8081` for Gateway-to-Relay traffic.
 
-Before starting split or remote Relay compose files, copy
-`config.relay.example.yaml` to `config.relay.yaml` and fill
+Before starting a Relay node, copy `config.relay.example.yaml` to
+`config.relay.yaml` and fill
 `gateway.control_url`, `gateway.relay_node_id`, `gateway.internal_secret`, and
 the shared encryption key. `config.relay.yaml` is intentionally ignored by git.
 

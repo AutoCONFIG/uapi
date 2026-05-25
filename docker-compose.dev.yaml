@@ -7,10 +7,43 @@ services:
       POSTGRES_USER: uapi
       POSTGRES_PASSWORD: uapi_dev
       POSTGRES_DB: uapi
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uapi -d uapi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  uapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uapi-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./assets:/app/assets
+    expose:
+      - "8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: uapi-web
+    restart: unless-stopped
+    depends_on:
+      - uapi
+    ports:
+      - "80:80"
 
 volumes:
   pgdata:
+
+networks:
+  default:
+    name: uapi-net

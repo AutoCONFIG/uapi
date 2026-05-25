@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ type AdminSettingsResponse struct {
 	LogRetentionDays        int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays int    `json:"redeem_code_retention_days"`
 	Background              string `json:"background"`
+	PublicBaseURL           string `json:"public_base_url,omitempty"`
 	WallpaperURL            string `json:"wallpaper_url,omitempty"`
 }
 
@@ -22,11 +24,13 @@ type UpdateAdminSettingsRequest struct {
 	LogRetentionDays        *int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays *int    `json:"redeem_code_retention_days"`
 	Background              *string `json:"background"`
+	PublicBaseURL           *string `json:"public_base_url"`
 }
 
 type PublicSettingsResponse struct {
-	Background   string `json:"background"`
-	WallpaperURL string `json:"wallpaper_url,omitempty"`
+	Background    string `json:"background"`
+	PublicBaseURL string `json:"public_base_url,omitempty"`
+	WallpaperURL  string `json:"wallpaper_url,omitempty"`
 }
 
 func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
@@ -65,6 +69,15 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 			h.cfg.UI.Background = background
 			changes["background"] = background
 		}
+		if req.PublicBaseURL != nil {
+			publicBaseURL, ok := normalizePublicBaseURL(*req.PublicBaseURL)
+			if !ok {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "public_base_url must be a valid http or https URL")
+				return
+			}
+			h.cfg.UI.PublicBaseURL = publicBaseURL
+			changes["public_base_url"] = publicBaseURL
+		}
 		if len(changes) == 0 {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")
 			return
@@ -89,6 +102,7 @@ func (h *Handler) settingsResponse() AdminSettingsResponse {
 		LogRetentionDays:        h.cfg.Logging.RetentionDays,
 		RedeemCodeRetentionDays: h.cfg.Logging.RedeemCodeRetentionDays,
 		Background:              background,
+		PublicBaseURL:           h.cfg.UI.PublicBaseURL,
 		WallpaperURL:            h.wallpaperURL(),
 	}
 }
@@ -102,7 +116,7 @@ func (h *Handler) HandlePublicSettings(ctx *fasthttp.RequestCtx) {
 	if background == "" {
 		background = "aurora"
 	}
-	h.jsonResponse(ctx, 200, PublicSettingsResponse{Background: background, WallpaperURL: h.wallpaperURL()})
+	h.jsonResponse(ctx, 200, PublicSettingsResponse{Background: background, PublicBaseURL: h.cfg.UI.PublicBaseURL, WallpaperURL: h.wallpaperURL()})
 }
 
 func normalizeBackground(value string) string {
@@ -114,6 +128,18 @@ func normalizeBackground(value string) string {
 	default:
 		return ""
 	}
+}
+
+func normalizePublicBaseURL(value string) (string, bool) {
+	trimmed := strings.TrimRight(strings.TrimSpace(value), "/")
+	if trimmed == "" {
+		return "", true
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", false
+	}
+	return trimmed, true
 }
 
 func (h *Handler) HandleWallpaperUpload(ctx *fasthttp.RequestCtx) {

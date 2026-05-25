@@ -382,8 +382,8 @@ func (s *Service) GetUsage(userID string) (*UsageSummaryResponse, error) {
 		Select("model, COUNT(*) as requests, COALESCE(SUM(total_tokens), 0) as total_tokens").
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
 		Group("model").
-		Order("total_tokens DESC").
-		Limit(12).
+		Order("COUNT(*) DESC").
+		Limit(10).
 		Scan(&byModel).Error; err != nil {
 		return nil, err
 	}
