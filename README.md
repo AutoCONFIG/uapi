@@ -51,12 +51,10 @@ cp config.example.yaml config.yaml
 docker compose -f docker-compose.dev.yaml up -d --build
 ```
 
-生产部署使用默认 `docker-compose.yaml`，从 GitHub Container Registry 拉取镜像，不在容器内提供 nginx 反代。前端、Gateway/API 和 Relay 节点按原生端口映射出来，服务器层 nginx/Caddy/Traefik 自行反代：
+生产部署使用默认 `docker-compose.yaml`，从 GitHub Container Registry 拉取镜像。单机部署只暴露两个本机回环端口：`127.0.0.1:3000` 给前端页面，`127.0.0.1:8080` 给 Gateway/API。服务器层 nginx/Caddy/Traefik 负责按路径分流：页面走 web，`/api`、`/v1`、`/v1beta` 和 `/internal/relay` 走 Gateway：
 
 ```bash
-cp config.gateway.example.yaml config.yaml
-cp config.relay.example.yaml config.relay.yaml
-export UAPI_TAG=latest
+cp config.example.yaml config.yaml
 docker compose pull
 docker compose up -d
 ```

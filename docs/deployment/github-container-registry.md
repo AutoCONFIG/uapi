@@ -54,15 +54,14 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
 
 ## Deploy With Compose
 
-Copy `config.gateway.example.yaml` to `config.yaml`, copy `config.relay.example.yaml` to `config.relay.yaml`, edit the secrets and database DSN, then run:
+Copy `config.example.yaml` to `config.yaml`, edit the secrets and database DSN, then run:
 
 ```bash
-export UAPI_TAG=latest
 docker compose pull
 docker compose up -d
 ```
 
-`docker-compose.yaml` uses GHCR images and exposes native service ports. It does not include an nginx reverse proxy inside the containers.
+`docker-compose.yaml` uses GHCR images and exposes only loopback host ports for the frontend and Gateway. It does not publish PostgreSQL or a standalone Relay service.
 
 - `./config.yaml:/app/config.yaml`
 - `./assets:/app/assets`
@@ -70,10 +69,9 @@ docker compose up -d
 
 Default ports:
 
-- Frontend static server: `${WEB_PORT:-3000}:3000`
-- Gateway/API for the host reverse proxy: `${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080`
-- Relay node: `${RELAY_PORT:-8081}:8081`
+- Frontend static server: `127.0.0.1:3000:3000`
+- Gateway/API for the host reverse proxy: `127.0.0.1:8080:8080`
 
-For the Relay service, fill `gateway.control_url`, `gateway.relay_node_id`, `gateway.internal_secret`, and `security.encryption_key` in `config.relay.yaml`.
+For a remote Relay service, use `docker-compose.relay.yaml` separately and fill `gateway.control_url`, `gateway.relay_node_id`, `gateway.internal_secret`, and `security.encryption_key` in `config.relay.yaml`.
 
 Use `docker-compose.dev.yaml` for local development. It still builds locally and keeps the nginx reverse proxy for convenient frontend/API testing.

@@ -18,6 +18,7 @@ security:
   encryption_key: ""
   admin_username: "admin"
   admin_password_hash: ""  # 留空则首次启动自动生成
+  trusted_proxies: []
 
 auth:
   access_token_expiry: "15m"
@@ -32,8 +33,7 @@ gateway:
   relay_node_id: ""        # Relay 节点自身 ID，在管理后台创建节点后获得
   config_pull_interval: "5s"
 
-ws:
-  max_message_size_mb: 256
+billing: {}
 
 logging:
   level: "info"
@@ -43,3 +43,18 @@ logging:
 ui:
   background: "aurora"
   public_base_url: ""
+
+user:
+  max_keys_per_user: 1
+
+ws:
+  host: ""
+  port: 0
+  max_message_size_mb: 256
+  pool_idle_timeout_seconds: 0
+  pool_max_conn_lifetime: 0
+  pool_max_total_conns: 0
+  pool_max_idle_per_key: 0
+  stream_idle_timeout_seconds: 0
+  max_connections: 0
+  allowed_origins: []

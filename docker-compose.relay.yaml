@@ -8,4 +8,4 @@ services:
     volumes:
       - ./config.relay.yaml:/app/config.yaml:ro
     ports:
-      - "${RELAY_PORT:-8081}:8081"
+      - "8081:8081"

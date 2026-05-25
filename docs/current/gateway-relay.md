@@ -151,7 +151,7 @@ The binary supports three modes via `server.mode`:
 
 Recommended Docker layout:
 
-- Production: `docker-compose.yaml` pulls GHCR images and exposes native ports without an in-container nginx reverse proxy. The web service publishes `3000`, Gateway/API is available on host loopback `8080` for the host reverse proxy, and Relay publishes `8081`.
+- Production: `docker-compose.yaml` pulls GHCR images and exposes only loopback ports: `127.0.0.1:3000` for the frontend and `127.0.0.1:8080` for Gateway/API traffic. It does not publish PostgreSQL or a standalone Relay service.
 - Local development: `docker-compose.dev.yaml` builds locally and keeps the nginx reverse proxy for convenient frontend/API testing.
 - Remote Relay node: `docker-compose.relay.yaml` runs only the Relay binary with `server.mode: relay` and publishes `8081` for Gateway-to-Relay traffic.
 

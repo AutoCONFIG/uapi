@@ -8,6 +8,7 @@ server:
 security:
   jwt_secret: "relay-example-jwt-secret-32-chars"
   encryption_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  trusted_proxies: []
 
 gateway:
   gateway_id: "relay-node"
@@ -19,8 +20,20 @@ gateway:
   config_pull_interval: "5s"
 
 ws:
+  host: ""
+  port: 0
   max_message_size_mb: 256
+  pool_idle_timeout_seconds: 0
+  pool_max_conn_lifetime: 0
+  pool_max_total_conns: 0
+  pool_max_idle_per_key: 0
+  stream_idle_timeout_seconds: 0
+  max_connections: 0
+  allowed_origins: []
+
+billing: {}
 
 logging:
   level: "info"
   retention_days: 180
+  redeem_code_retention_days: 180
