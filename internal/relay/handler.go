@@ -11,6 +11,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/modelalias"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
@@ -358,6 +359,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
 	}
+	upstreamModel := modelalias.UpstreamName(req.Model, targetChannel.ModelAliases)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
 
 	// 7. Pre-consume billing
 	estimatedTokens := req.MaxTokens
@@ -412,7 +417,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	sameFormat := clientFormat == upstreamFormat
 	rawGeminiSameFormat := sameFormat && clientFormat == provider.FormatGemini
 	if !rawGeminiSameFormat {
-		body = injectModelIfMissing(body, req.Model)
+		if upstreamModel != req.Model {
+			body = setRequestModel(body, upstreamModel)
+		} else {
+			body = injectModelIfMissing(body, req.Model)
+		}
 	}
 
 	forceStreamActive := targetChannel.ForceStream && !req.Stream
@@ -423,10 +432,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	// 8. Build upstream request
 	adaptor.Init(targetChannel, account)
-	adaptor.SetRequestParams(req.Model, effectiveStream)
+	adaptor.SetRequestParams(upstreamModel, effectiveStream)
 	upstreamURL, err := adaptor.GetRequestURL(path)
 	if err != nil {
-		go r.finishFailureUsageWithError(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens, "build url failed", tokenPlanID)
+		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens, "build url failed", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 		ctx.Error(`{"error":"build url failed"}`, fasthttp.StatusInternalServerError)
 		return
 	}
@@ -457,7 +466,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		var err error
 		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
 		if err != nil {
-			go r.finishFailureUsageWithError(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
 			return
 		}
@@ -563,17 +572,17 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 		result := streamAndForward(upResp.BodyStream(), reader, tracker, inputConvert, outputConvert, sendDone)
 		if result.err != nil {
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
-			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		if result.failed {
 			logger.Warnf("relay.stream", "upstream stream reported failure")
-			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		if !result.finalized {
 			logger.Warnf("relay.stream", "stream ended without terminal event")
-			go r.finishFailureUsageWithError(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		{
@@ -601,7 +610,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
-		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens)
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
 	}()
 }
 
@@ -696,7 +705,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		logger.F("completion_tokens", ct),
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
-	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens)
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 }
 
@@ -750,7 +759,7 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	ctx.SetBody(respBody)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.images", "image request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
-	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens)
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
 }
 
 func (c *channelCache) get() []db.Channel {
@@ -855,7 +864,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 
 	if respBody == nil {
 		r.releaseLocalConcurrency(token.ID.String(), claims)
-		go r.finishFailureUsageWithError(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", tokenPlanID)
+		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 		ctx.Error(`{"error":"all retries exhausted"}`, fasthttp.StatusServiceUnavailable)
 		return
 	}
@@ -924,9 +933,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		// Gateway-authenticated requests did not acquire the Relay-local
 		// concurrency limiter; Gateway owns that slot and releases it when this
 		// response completes.
-		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens)
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
 	} else {
-		go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode)
+		go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, clientIPForLog(ctx, r.trustedProxies))
 	}
 }
 
@@ -1452,13 +1461,13 @@ func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTo
 
 func (r *Relayer) refundAndErrorWithStatus(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, tokenPlanIDs...)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
 	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, statusCode)
 }
 
 func (r *Relayer) finishFailedBuffered(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, tokenPlanIDs...)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
 }
 
 // normalizeErrorResponse converts an upstream error body into the client's expected format.
@@ -1587,7 +1596,7 @@ func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTok
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.SetBody(normalizedBody)
-	go r.finishFailureUsageWithError(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), tokenPlanIDs...)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
 }
 
 func injectStreamTrue(body []byte) []byte {
@@ -1596,6 +1605,22 @@ func injectStreamTrue(body []byte) []byte {
 		return body
 	}
 	bodyMap["stream"] = true
+	result, err := json.Marshal(bodyMap)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+func setRequestModel(body []byte, model string) []byte {
+	if model == "" {
+		return body
+	}
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(body, &bodyMap); err != nil {
+		return body
+	}
+	bodyMap["model"] = model
 	result, err := json.Marshal(bodyMap)
 	if err != nil {
 		return body
@@ -1742,6 +1767,15 @@ func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string, trustedProxies
 
 // clientIPCandidates returns candidate client IPs for whitelist matching.
 // Forwarded headers are only considered when the direct connection IP is a trusted proxy.
+
+func clientIPForLog(ctx *fasthttp.RequestCtx, trustedProxies []string) string {
+	candidates := clientIPCandidates(ctx, trustedProxies)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[len(candidates)-1]
+}
+
 func clientIPCandidates(ctx *fasthttp.RequestCtx, trustedProxies []string) []string {
 	remoteIP := ctx.RemoteIP().String()
 	candidates := []string{remoteIP}
@@ -1817,7 +1851,7 @@ func channelSupportsModel(ch db.Channel, model string) bool {
 	if strings.TrimSpace(ch.Models) == "" && isCodeAPIFormat(ch.APIFormat) {
 		return false
 	}
-	return modelInList(model, ch.Models)
+	return modelalias.Supports(model, ch.Models, ch.ModelAliases)
 }
 
 func isCodeAPIFormat(format string) bool {
@@ -1853,16 +1887,21 @@ func permissionInList(permission, list string) bool {
 	return false
 }
 
-func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int) {
-	r.writeLogWithError(tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode, "")
+func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, clientIPs ...string) {
+	r.writeLogWithError(tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode, "", clientIPs...)
 }
 
-func (r *Relayer) writeLogWithError(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, errorMessage string) {
+func (r *Relayer) writeLogWithError(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, errorMessage string, clientIPs ...string) {
 	if r.db == nil {
 		return
 	}
+	clientIP := ""
+	if len(clientIPs) > 0 {
+		clientIP = strings.TrimSpace(clientIPs[0])
+	}
 	logEntry := db.Log{
 		TokenID:          toUUID(tokenID),
+		ClientIP:         clientIP,
 		ChannelID:        toUUID(channelID),
 		AccountID:        toUUID(accountID),
 		Model:            model,
@@ -1879,12 +1918,12 @@ func (r *Relayer) writeLogWithError(tokenID, channelID, accountID interface{}, m
 	}
 }
 
-func (r *Relayer) finishUsage(claims *internalauth.Claims, tokenID, tokenPlanID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int) {
+func (r *Relayer) finishUsage(claims *internalauth.Claims, tokenID, tokenPlanID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int, fallbackClientIPs ...string) {
 	planID := requestTokenPlanID(claims, tokenPlanID)
 	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode, estTokens) == nil {
 		return
 	}
-	r.writeLog(tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode)
+	r.writeLog(tokenID, channelID, accountID, model, isStream, pt, ct, start, statusCode, firstClientIP(clientIPFromClaims(claims), fallbackClientIPs...))
 	if r.billing != nil {
 		go func() {
 			if err := r.billing.DBTransactionRefundAndSettle(toUUID(tokenID).String(), planID, estTokens, pt, ct, 0, 0, model); err != nil {
@@ -1902,11 +1941,15 @@ func (r *Relayer) finishFailureUsage(claims *internalauth.Claims, tokenID, chann
 }
 
 func (r *Relayer) finishFailureUsageWithError(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, start time.Time, statusCode int, estTokens int, errorMessage string, tokenPlanIDs ...uuid.UUID) {
+	r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, channelID, accountID, model, isStream, start, statusCode, estTokens, errorMessage, "", tokenPlanIDs...)
+}
+
+func (r *Relayer) finishFailureUsageWithErrorAndClientIP(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, start time.Time, statusCode int, estTokens int, errorMessage string, fallbackClientIP string, tokenPlanIDs ...uuid.UUID) {
 	planID := requestTokenPlanID(claims, firstUUID(tokenPlanIDs))
 	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, isStream, 0, 0, start, statusCode, estTokens) == nil {
 		return
 	}
-	r.writeLogWithError(tokenID, channelID, accountID, model, isStream, 0, 0, start, statusCode, errorMessage)
+	r.writeLogWithError(tokenID, channelID, accountID, model, isStream, 0, 0, start, statusCode, errorMessage, firstClientIP(clientIPFromClaims(claims), fallbackClientIP))
 	if r.billing != nil {
 		go func() {
 			if err := r.billing.DBTransactionRefund(toUUID(tokenID).String(), planID, estTokens); err != nil {
@@ -1917,6 +1960,25 @@ func (r *Relayer) finishFailureUsageWithError(claims *internalauth.Claims, token
 			}
 		}()
 	}
+}
+
+func clientIPFromClaims(claims *internalauth.Claims) string {
+	if claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.ClientIP)
+}
+
+func firstClientIP(primary string, fallbacks ...string) string {
+	if primary = strings.TrimSpace(primary); primary != "" {
+		return primary
+	}
+	for _, fallback := range fallbacks {
+		if fallback = strings.TrimSpace(fallback); fallback != "" {
+			return fallback
+		}
+	}
+	return ""
 }
 
 func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int) error {
@@ -1936,6 +1998,7 @@ func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channel
 		"estimated_tokens":  estTokens,
 		"status_code":       statusCode,
 		"latency_ms":        time.Since(start).Milliseconds(),
+		"client_ip":         claims.ClientIP,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

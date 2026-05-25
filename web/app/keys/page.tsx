@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import { AppShell, EmptyState, PageHead, StatusBadge } from "@/components/shell";
 import { userApi } from "@/lib/api";
@@ -60,8 +60,6 @@ export default function KeysPage() {
       .catch(() => {});
   }, []);
 
-  const permissionValue = useMemo(() => permissions.join(","), [permissions]);
-
   function togglePermission(value: string) {
     setPermissions((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   }
@@ -79,7 +77,7 @@ export default function KeysPage() {
         ip_whitelist: ipWhitelist,
         expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,
         models,
-        permissions: permissionValue,
+        permissions: permissions.join(","),
       });
       setItems((current) => [fromApiKey(created), ...current]);
       setOpen(false);
@@ -121,18 +119,12 @@ export default function KeysPage() {
   return (
     <AppShell title="密钥管理">
       <PageHead
-        title="密钥管理"
-        description="为生产、测试和自动化任务拆分密钥，减少泄露后的影响面。"
+        title="当前密钥"
+        description="普通用户默认保留一个可用 Key，创建后可再次查看和复制。"
         action={items.length === 0 ? <button className="btn primary" onClick={() => setOpen(true)} type="button"><Plus /> 新建密钥</button> : undefined}
       />
 
       <section className="surface">
-        <div className="stat-bar">
-          <span className="stat-chip"><span>全部密钥</span><strong>{items.length}</strong></span>
-          <span className="stat-chip"><span>启用中</span><strong>{items.filter((item) => item.status === "已启用").length}</strong></span>
-          <span className="stat-chip"><span>受限密钥</span><strong>{items.filter((item) => item.models || item.ipWhitelist || item.expiresAt).length}</strong></span>
-        </div>
-
         <div className="key-list">
           {items.length > 0 ? items.map((key) => (
             <article className="key-row" key={key.id || key.key}>
@@ -141,7 +133,6 @@ export default function KeysPage() {
                 <div className="key-meta"><span>创建 {key.created}</span><StatusBadge value={key.status} /></div>
               </div>
               <code>{key.key}</code>
-              <div className="key-meta"><span>权限</span><strong>{key.permissions || "全部"}</strong></div>
               <div className="key-meta"><span>模型</span><strong>{key.models || "全部"}</strong><span>{key.expiresAt ? new Date(key.expiresAt).toLocaleDateString() : "永不过期"}</span></div>
               <div className="row-actions">
                 <button className="btn icon-only" onClick={() => navigator.clipboard?.writeText(key.key)} title="复制" type="button"><Copy /></button>
@@ -159,8 +150,8 @@ export default function KeysPage() {
           <section aria-modal="true" className="modal" role="dialog">
             <div className="modal-head">
               <div>
-                <p className="eyebrow">新建密钥</p>
                 <h2>新建密钥</h2>
+                <p className="muted" style={{ margin: 0, fontSize: 13 }}>创建后可在当前页面再次查看完整 Key。</p>
               </div>
               <button className="btn" disabled={loading} onClick={closeCreate} type="button">关闭</button>
             </div>

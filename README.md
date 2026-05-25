@@ -9,12 +9,13 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 - **多供应商支持** — OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API，统一转为内部格式并按需互转
 - **OpenAI 兼容接口** — 下游客户端只需对接 `/v1/chat/completions`，即可路由到任意供应商
 - **多账号池 & 加权轮询** — 同一渠道可挂载多个上游账号，按权重自动调度
-- **API Key 管理** — 用户自助创建密钥，支持 IP 白名单、过期时间、模型限制和端点权限
+- **API Key 管理** — 普通用户默认一个密钥，支持查看、复制、IP 白名单、过期时间、模型限制和端点权限
 - **用量计费** — 预扣费 / 结算 / 退款，按 token 精确计量
-- **管理后台** — 渠道管理、账号管理、用户管理、套餐管理、操作审计
+- **管理后台** — 渠道/账号凭据、节点、用户、套餐、日志、系统设置和操作审计
 - **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
 - **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
-- **Code 客户端接入** — 支持 Codex、Gemini Code、Claude Code 的 OAuth 登录、账号元数据同步和自动刷新
+- **Code 客户端接入** — 支持 Codex、Gemini Code、Claude Code、Antigravity 等 OAuth 登录、账号元数据同步和自动刷新
+- **本地模型目录** — 下游模型列表从本地渠道配置读取，管理员可手动同步上游模型并设置模型重定向
 - **流式转发** — SSE 流式响应透明转发，支持流式转非流式
 
 ## 快速开始
@@ -136,6 +137,7 @@ docker compose up -d --build
 - [项目交接文档](docs/current/handoff.md)
 - [前端文档](docs/current/frontend.md)
 - [平台设计](docs/current/platform-design.md)
+- [阶段范围与路线](docs/current/roadmap.md)
 - [Code 渠道对齐](docs/current/code-channels.md)
 
 ## License

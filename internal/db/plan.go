@@ -1,6 +1,8 @@
 package db
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 )
 
@@ -14,6 +16,7 @@ type Plan struct {
 	CompletionRatio string     `gorm:"type:jsonb" json:"completion_ratio"`
 	TokenQuota      int64      `json:"token_quota"`
 	Enabled         bool       `gorm:"default:true" json:"enabled"`
+	DurationDays    int        `gorm:"default:30" json:"duration_days"`
 }
 
 func (Plan) TableName() string { return "plans" }
@@ -22,9 +25,11 @@ type TokenPlan struct {
 	Base
 	TokenID       uuid.UUID `gorm:"type:uuid;index;not null" json:"token_id"`
 	PlanID        uuid.UUID `gorm:"type:uuid;index;not null" json:"plan_id"`
-	WindowUsage   string    `gorm:"type:jsonb" json:"window_usage"`
-	WindowResetAt string    `gorm:"type:jsonb" json:"window_reset_at"`
+	WindowUsage   string    `gorm:"type:jsonb;default:'{}'" json:"window_usage"`
+	WindowResetAt string    `gorm:"type:jsonb;default:'{}'" json:"window_reset_at"`
 	UsedQuota     int64     `gorm:"default:0" json:"used_quota"`
+	StartsAt      time.Time `gorm:"index" json:"starts_at"`
+	ExpiresAt     time.Time `gorm:"index" json:"expires_at"`
 }
 
 func (TokenPlan) TableName() string { return "token_plans" }

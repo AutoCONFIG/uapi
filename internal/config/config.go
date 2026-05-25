@@ -92,8 +92,9 @@ type UserConfig struct {
 }
 
 type LoggingConfig struct {
-	Level         string `yaml:"level"`
-	RetentionDays int    `yaml:"retention_days"`
+	Level                   string `yaml:"level"`
+	RetentionDays           int    `yaml:"retention_days"`
+	RedeemCodeRetentionDays int    `yaml:"redeem_code_retention_days"`
 }
 
 // Initialized returns true if an admin password has been set (setup completed).
@@ -184,8 +185,9 @@ func defaultConfig() *Config {
 			SSLMode: "disable",
 		},
 		Logging: LoggingConfig{
-			Level:         "info",
-			RetentionDays: 180,
+			Level:                   "info",
+			RetentionDays:           180,
+			RedeemCodeRetentionDays: 180,
 		},
 		Auth: AuthConfig{
 			AccessTokenExpiry:  "15m",

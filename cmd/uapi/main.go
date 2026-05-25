@@ -11,6 +11,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/server"
 	"github.com/AutoCONFIG/uapi/internal/user"
 	"gorm.io/gorm"
@@ -26,6 +27,7 @@ func main() {
 	}
 	logger.Configure(cfg.Logging.Level)
 	log := logger.Component("main")
+	antigravity.StartVersionUpdater(nil)
 
 	if err := crypto.Init(cfg.Security.EncryptionKey); err != nil {
 		log.Error("init crypto failed", logger.Err(err))
@@ -56,7 +58,7 @@ func main() {
 		}
 		log.Info("account pools loaded")
 
-		admin.StartLogCleanup(database, cfg.Logging.RetentionDays)
+		admin.StartLogCleanup(database, cfg)
 
 		accessTokenExpiry := 15 * time.Minute
 		if cfg.Auth.AccessTokenExpiry != "" {

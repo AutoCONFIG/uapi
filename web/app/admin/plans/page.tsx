@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Plus, Save, Trash2 } from "lucide-react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
-import type { AccessPolicy, Plan } from "@/types/api";
+import type { AccessPolicy, Plan, RedeemCode } from "@/types/api";
 
 type PolicyDraft = {
   name: string;
@@ -61,10 +61,13 @@ export default function AdminPlansPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState({ name: "", type: "count_based", token_quota: 0, enabled: true });
+  const [draft, setDraft] = useState({ name: "", type: "count_based", token_quota: 0, duration_days: 30, enabled: true });
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>(emptyPolicyDraft());
   const [editingPolicies, setEditingPolicies] = useState<Record<string, PolicyDraft>>({});
   const [error, setError] = useState("");
+  const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
+  const [redeemStatus, setRedeemStatus] = useState("active");
+  const [redeemDraft, setRedeemDraft] = useState({ code: "", plan_id: "", expires_at: "" });
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
@@ -72,17 +75,19 @@ export default function AdminPlansPage() {
     Promise.all([
       adminApi.plans(token, 1, 100).then((data) => data.items).catch(() => []),
       adminApi.accessPolicies(token, 1, 100).then((data) => data.items).catch(() => []),
-    ]).then(([planItems, policyItems]) => {
+      adminApi.redeemCodes(token, 1, 50, redeemStatus).then((data) => data.items).catch(() => []),
+    ]).then(([planItems, policyItems, codeItems]) => {
       setPlans(planItems);
       setPolicies(policyItems);
+      setRedeemCodes(codeItems);
       setLoading(false);
     });
-  }, []);
+  }, [redeemStatus]);
 
   const policyByID = useMemo(() => new Map(policies.map((policy) => [policy.id, policy])), [policies]);
 
   function openCreate() {
-    setDraft({ name: "", type: "count_based", token_quota: 0, enabled: true });
+    setDraft({ name: "", type: "count_based", token_quota: 0, duration_days: 30, enabled: true });
     setPolicyDraft(emptyPolicyDraft());
     setError("");
     setCreating(true);
@@ -102,6 +107,7 @@ export default function AdminPlansPage() {
         type: draft.type,
         policy_id: createdPolicy.id,
         token_quota: draft.token_quota,
+        duration_days: draft.duration_days,
         limits: "{}",
         model_ratios: "{}",
         completion_ratio: "{}",
@@ -168,6 +174,44 @@ export default function AdminPlansPage() {
     setEditingPolicies((cur) => ({ ...cur, [planID]: next }));
   }
 
+  async function loadRedeemCodes(status = redeemStatus) {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    const data = await adminApi.redeemCodes(token, 1, 50, status);
+    setRedeemCodes(data.items ?? []);
+  }
+
+  async function createRedeemCode() {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    if (!redeemDraft.plan_id) {
+      setError("请先选择兑换套餐");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const created = await adminApi.createRedeemCode(token, {
+        code: redeemDraft.code.trim() || undefined,
+        plan_id: redeemDraft.plan_id,
+        expires_at: redeemDraft.expires_at ? new Date(redeemDraft.expires_at).toISOString() : undefined,
+      });
+      setRedeemCodes((cur) => [created, ...cur]);
+      setRedeemDraft({ code: "", plan_id: "", expires_at: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建兑换码失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteRedeemCode(id: string) {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    await adminApi.deleteRedeemCode(token, id);
+    setRedeemCodes((cur) => cur.filter((item) => item.id !== id));
+  }
+
   return (
     <AppShell title="套餐管理" variant="admin">
       <PageHead
@@ -202,6 +246,10 @@ export default function AdminPlansPage() {
                 <input className="input" type="number" value={draft.token_quota} onChange={(e) => setDraft((d) => ({ ...d, token_quota: Number(e.target.value) }))} />
               </div>
               <div className="field">
+                <label>有效天数</label>
+                <input className="input" type="number" min={1} value={draft.duration_days} onChange={(e) => setDraft((d) => ({ ...d, duration_days: Number(e.target.value) }))} />
+              </div>
+              <div className="field">
                 <label>策略名称</label>
                 <input className="input" value={policyDraft.name} onChange={(e) => setPolicyDraft((d) => ({ ...d, name: e.target.value }))} placeholder="留空使用套餐名称" />
               </div>
@@ -225,7 +273,7 @@ export default function AdminPlansPage() {
       <section className="card">
         <div className="table-wrap">
           <table>
-            <thead><tr><th>套餐</th><th>额度</th><th>限制策略</th><th>状态</th><th></th></tr></thead>
+            <thead><tr><th>套餐</th><th>额度</th><th>有效期</th><th>限制策略</th><th>状态</th><th></th></tr></thead>
             <tbody>
               {plans.map((p) => {
                 const draftRow = rowDraft(p);
@@ -234,6 +282,7 @@ export default function AdminPlansPage() {
                   <tr key={p.id}>
                     <td><strong>{p.name}</strong><div className="muted" style={{ fontSize: 12 }}>{p.type === "count_based" ? "按次数" : "按 Token"}</div></td>
                     <td>{formatQuota(p.token_quota)}</td>
+                    <td>{p.duration_days || 30} 天</td>
                     <td style={{ minWidth: 520 }}>
                       <div className="grid grid-2">
                         <div className="field"><label>策略名称</label><input className="input" value={draftRow.name} onChange={(e) => setRowDraft(p.id, { ...draftRow, name: e.target.value })} /></div>
@@ -253,8 +302,47 @@ export default function AdminPlansPage() {
                 );
               })}
               {plans.length === 0 && !loading && (
-                <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 24 }}>{loading ? "加载中…" : "暂无套餐"}</td></tr>
+                <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 24 }}>{loading ? "加载中…" : "暂无套餐"}</td></tr>
               )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="card card-pad" style={{ marginTop: 16 }}>
+        <div className="section-head">
+          <div>
+            <h2>兑换码</h2>
+            <p className="muted">兑换码绑定套餐，用户兑换后按套餐有效期生效。</p>
+          </div>
+          <select className="input" style={{ maxWidth: 160 }} value={redeemStatus} onChange={(e) => setRedeemStatus(e.target.value)}>
+            <option value="active">可用</option>
+            <option value="used">已用</option>
+            <option value="expired">过期</option>
+            <option value="all">全部</option>
+          </select>
+        </div>
+        <div className="grid grid-4">
+          <div className="field"><label>兑换码</label><input className="input" value={redeemDraft.code} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, code: e.target.value }))} placeholder="留空自动生成" /></div>
+          <div className="field"><label>套餐</label><select className="input" value={redeemDraft.plan_id} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, plan_id: e.target.value }))}><option value="">选择套餐</option>{plans.map((plan) => <option value={plan.id} key={plan.id}>{plan.name} · {plan.duration_days || 30} 天</option>)}</select></div>
+          <div className="field"><label>过期时间</label><input className="input" type="datetime-local" value={redeemDraft.expires_at} onChange={(e) => setRedeemDraft((cur) => ({ ...cur, expires_at: e.target.value }))} /></div>
+          <div className="form-row-action"><button className="btn primary" disabled={saving} onClick={createRedeemCode} type="button"><Plus /> 新增兑换码</button></div>
+        </div>
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table>
+            <thead><tr><th>兑换码</th><th>套餐</th><th>状态</th><th>使用者</th><th>过期时间</th><th></th></tr></thead>
+            <tbody>
+              {redeemCodes.map((item) => (
+                <tr key={item.id}>
+                  <td><code>{item.code}</code></td>
+                  <td>{plans.find((plan) => plan.id === item.plan_id)?.name || item.plan_id}</td>
+                  <td><StatusBadge value={item.status} /></td>
+                  <td className="muted" style={{ fontSize: 12 }}>{item.used_by || "-"}</td>
+                  <td>{new Date(item.expires_at).toLocaleString()}</td>
+                  <td><button className="btn danger" onClick={() => deleteRedeemCode(item.id)} type="button"><Trash2 size={14} /></button></td>
+                </tr>
+              ))}
+              {redeemCodes.length === 0 ? <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 18 }}>暂无兑换码</td></tr> : null}
             </tbody>
           </table>
         </div>

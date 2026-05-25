@@ -648,7 +648,7 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 	if h.OAuthIdle != nil {
 		h.OAuthIdle.ScheduleAccount(&account)
 	}
-	auditCreate(h.db, "account", account.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "account", account.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": account.Name, "channel_id": account.ChannelID, "cred_type": account.CredType, "oauth_provider": session.Provider})
 	logger.Infof("admin.oauth", "oauth account bound", logger.F("provider", session.Provider), logger.F("channel_id", account.ChannelID.String()), logger.F("account_id", account.ID.String()), logger.F("enabled", account.Enabled))
 	h.jsonResponse(ctx, 200, account)
 }

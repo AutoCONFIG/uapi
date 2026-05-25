@@ -15,8 +15,8 @@ Primary surfaces:
 - Public auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
 - Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
-  `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
-  `/admin/audit-logs`
+  `/admin/users`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`,
+  `/admin/settings`
 
 The user console does not expose admin navigation. The admin console does not expose
 user self-service navigation. Admins who want to use the API should create a normal
@@ -35,8 +35,9 @@ The frontend calls the implemented backend routes:
   `/api/admin/setup`
 - Admin CRUD: `/api/admin/access-policies` for plan-composed policy resources,
   `/api/admin/relay-nodes`, `/api/admin/channels`, `/api/admin/accounts`,
-  `/api/admin/users`, `/api/admin/tokens`, `/api/admin/plans`,
-  `/api/admin/logs`, `/api/admin/audit-logs`
+  `/api/admin/users`, `/api/admin/plans`, `/api/admin/logs`,
+  `/api/admin/audit-logs`, `/api/admin/settings`, and `/api/admin/redeem-codes`
+- Admin model sync: `POST /api/admin/channels/models/sync?id=<channel_id>`
 - Admin channel OAuth: `POST /api/admin/channels/oauth/auth-url`,
   `POST /api/admin/channels/oauth/complete`,
   `GET /api/admin/channels/oauth/status`, and
@@ -53,8 +54,9 @@ it keeps local fallback accounts so the UI remains navigable without the Go API 
 
 The UI treats channels as the single top-level object for upstream access. Accounts,
 API keys, and OAuth credentials are represented as credentials within a channel rather
-than as a separate primary navigation item. The old `/admin/accounts` route remains as
-a compatibility page only.
+than as a separate primary navigation item. The old `/admin/accounts` route is only
+a legacy-link explanation page and should not be used for new workflows. The admin
+UI should not expose standalone token management in the first-stage product surface.
 
 The `/admin/channels` page treats each channel as a top-level item. The left rail
 lists channels directly, while the right side shows the selected channel's account
@@ -77,9 +79,16 @@ list when available. Code channel presets pre-fill model allow-lists from the
 local upstream client source trees, and the credential list displays provider
 quota or credit metadata when the backend has synced it.
 
-The `/keys` page creates user API keys with optional `ip_whitelist`, `expires_at`,
-`models`, and `permissions`. Permissions map to relay entry points: `chat`,
-`responses`, `messages`, `gemini`, and `images`.
+Channel model lists are local control-plane data. The channel page can ask the
+backend to sync models from the selected upstream account/channel, but downstream
+`/v1/models` and `/v1beta/models` should remain fast local reads. Model aliases
+are edited on the channel as one mapping per line in `upstream=public` form.
+
+The `/keys` page is for normal users. A normal user defaults to one API key, and
+the key can be viewed/copied after creation. Admins should not use admin-side
+token management to generate their own downstream keys. Optional key fields are
+`ip_whitelist`, `expires_at`, `models`, and `permissions`. Permissions map to
+relay entry points: `chat`, `responses`, `messages`, `gemini`, and `images`.
 
 The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
 `/api/user/usage` and `/api/user/usage/logs`, while preserving static preview
@@ -91,9 +100,10 @@ fallback rows when the API server is unavailable.
 The frontend manages Gateway/Control Plane state. It does not manage Relay nodes
 directly as independent authorities. Relay nodes are execution workers configured
 through Gateway. The `/admin/relay-nodes` page is the current management surface
-for node address, region, egress IP, weight, max concurrency, and status. Future
-Gateway work should add access policies and account-to-node bindings here rather
-than adding separate Relay administration.
+for node address, region, egress IP, weight, max concurrency, and status. Node
+bindings are channel-level. The node page should describe this as binding nodes
+to channels; Gateway expands the selected channels to their enabled accounts at
+runtime.
 
 ## Known Backend Gaps
 

@@ -1,19 +1,23 @@
 import type {
   Account,
+  AdminSettings,
   AccessPolicy,
   ApiEnvelope,
   ApiKey,
   AuditLogEntry,
   Channel,
+  ChannelModelSync,
   Dashboard,
   LoginResponse,
   NodeChannel,
   OAuthAuthURL,
   OAuthStatus,
+  RedeemCode,
   RelayNode,
   PaginatedResponse,
   Plan,
   Profile,
+  Subscription,
   UsageLogItem,
   UsageLogs,
   UsageSummary,
@@ -137,7 +141,7 @@ export const userApi = {
   plans: (token: string) => request<Plan[]>("/api/user/plans", { token }),
   subscribe: (token: string, planID: string) =>
     request<void>(`/api/user/subscription/${planID}`, { method: "POST", token }),
-  redeem: (token: string, code: string) => request<{ value: number }>("/api/user/redeem", { method: "POST", token, body: { code } }),
+  redeem: (token: string, code: string) => request<Subscription>("/api/user/redeem", { method: "POST", token, body: { code } }),
 };
 
 export const adminApi = {
@@ -178,6 +182,7 @@ export const adminApi = {
     type: string;
     group?: string;
     models?: string;
+    model_aliases?: string;
     priority?: number;
     api_format?: string;
     force_stream?: boolean;
@@ -187,6 +192,8 @@ export const adminApi = {
     request<Channel>(`/api/admin/channels?id=${id}`, { method: "PUT", token, body }),
   deleteChannel: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/channels?id=${id}`, { method: "DELETE", token }),
+  syncChannelModels: (token: string, id: string) =>
+    request<ChannelModelSync>(`/api/admin/channels/models/sync?id=${id}`, { method: "POST", token }),
   startChannelOAuth: (token: string, body: {
     channel_id: string;
     provider?: string;
@@ -212,28 +219,35 @@ export const adminApi = {
     request<{ deleted: boolean }>(`/api/admin/accounts?id=${id}`, { method: "DELETE", token }),
   exportAccount: (token: string, body: { id: string; password: string }) =>
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
-  tokens: (token: string, page = 1, limit = 20) =>
-    request<PaginatedResponse<ApiKey>>(`/api/admin/tokens?page=${page}&limit=${limit}`, { token }),
-  deleteToken: (token: string, id: string) =>
-    request<{ deleted: boolean }>(`/api/admin/tokens?id=${id}`, { method: "DELETE", token }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; limits?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; enabled?: boolean }) =>
+  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; limits?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; duration_days?: number; enabled?: boolean }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; limits: string; model_ratios: string; completion_ratio: string; token_quota: number; enabled: boolean }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; limits: string; model_ratios: string; completion_ratio: string; token_quota: number; duration_days: number; enabled: boolean }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),
-  logs: (token: string, page = 1, limit = 20) =>
-    request<PaginatedResponse<UsageLogItem>>(`/api/admin/logs?page=${page}&limit=${limit}`, { token }),
+  logs: (token: string, page = 1, limit = 20, filters: { user?: string; ip?: string; model?: string; start?: string; end?: string } = {}) => {
+    const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+    Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value); });
+    return request<PaginatedResponse<UsageLogItem>>(`/api/admin/logs?${query.toString()}`, { token });
+  },
   auditLogs: (token: string, page = 1, limit = 20) =>
-    request<PaginatedResponse<{ id: number; action: string; target_type: string; target_id: string; actor: string; created_at: string }>>(`/api/admin/audit-logs?page=${page}&limit=${limit}`, { token }),
+    request<PaginatedResponse<AuditLogEntry>>(`/api/admin/audit-logs?page=${page}&limit=${limit}`, { token }),
+  settings: (token: string) => request<AdminSettings>("/api/admin/settings", { token }),
+  updateSettings: (token: string, body: Partial<AdminSettings>) => request<AdminSettings>("/api/admin/settings", { method: "PUT", token, body }),
+  redeemCodes: (token: string, page = 1, limit = 20, status = "active") =>
+    request<PaginatedResponse<RedeemCode>>(`/api/admin/redeem-codes?page=${page}&limit=${limit}&status=${encodeURIComponent(status)}`, { token }),
+  createRedeemCode: (token: string, body: { code?: string; plan_id: string; expires_at?: string }) =>
+    request<RedeemCode>("/api/admin/redeem-codes", { method: "POST", token, body }),
+  deleteRedeemCode: (token: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/admin/redeem-codes?id=${id}`, { method: "DELETE", token }),
   users: (token: string, page = 1, limit = 20, status?: "active" | "disabled") => {
     const query = new URLSearchParams({ page: String(page), limit: String(limit) });
     if (status) query.set("status", status);
     return request<PaginatedResponse<User>>(`/api/admin/users?${query.toString()}`, { token });
   },
-  updateUser: (token: string, id: string, body: Partial<Pick<User, "status" | "balance">> & { new_password?: string }) =>
+  updateUser: (token: string, id: string, body: Partial<Pick<User, "status" | "balance">> & { new_password?: string; plan_id?: string; plan_starts_at?: string; plan_expires_at?: string }) =>
     request<User>(`/api/admin/users?id=${id}`, { method: "PUT", token, body }),
   deleteUser: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/users?id=${id}`, { method: "DELETE", token }),

@@ -2,12 +2,14 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // ListUsers returns a paginated list of users.
@@ -64,6 +66,10 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "new_password must be at least 8 characters")
 		return
 	}
+	if req.PlanStartsAt != nil && req.PlanExpiresAt != nil && !req.PlanExpiresAt.After(*req.PlanStartsAt) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "plan_expires_at must be after plan_starts_at")
+		return
+	}
 	var existing db.User
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
@@ -84,20 +90,28 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 		}
 		updates["password_hash"] = string(hash)
 	}
-	if len(updates) == 0 {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")
-		return
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now()
+		if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
+			h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
+			return
+		}
 	}
-	updates["updated_at"] = time.Now()
-	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
-		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
+	if req.PlanID != nil {
+		if err := h.assignUserPlan(ctx, existing.ID, *req.PlanID, req.PlanStartsAt, req.PlanExpiresAt); err != nil {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if len(updates) == 0 && req.PlanID == nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")
 		return
 	}
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
 		return
 	}
-	auditUpdate(h.db, "user", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "user", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -123,6 +137,60 @@ func (h *Handler) DeleteUser(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	auditDelete(h.db, "user", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "user", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
+}
+
+func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, planID uuid.UUID, startsAtReq, expiresAtReq *time.Time) error {
+	now := time.Now()
+	if planID == uuid.Nil {
+		return h.db.Model(&db.TokenPlan{}).
+			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID.String()).
+			Where("token_plans.expires_at > ?", now).
+			Update("expires_at", now).Error
+	}
+	var plan db.Plan
+	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", planID).First(&plan).Error; err != nil {
+		return errors.New("plan not found")
+	}
+	startsAt := now
+	if startsAtReq != nil {
+		startsAt = *startsAtReq
+	}
+	expiresAt := startsAt.AddDate(0, 0, plan.DurationDays)
+	if expiresAtReq != nil {
+		expiresAt = *expiresAtReq
+	}
+	if !expiresAt.After(startsAt) {
+		return errors.New("plan_expires_at must be after plan_starts_at")
+	}
+	return h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&db.TokenPlan{}).
+			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID.String()).
+			Where("token_plans.expires_at > ?", now).
+			Update("expires_at", now).Error; err != nil {
+			return err
+		}
+		var tokens []db.Token
+		if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID.String()).Find(&tokens).Error; err != nil {
+			return err
+		}
+		if len(tokens) == 0 {
+			return errors.New("user has no API key")
+		}
+		for _, token := range tokens {
+			tokenPlan := db.TokenPlan{
+				TokenID:       token.ID,
+				PlanID:        plan.ID,
+				WindowUsage:   "{}",
+				WindowResetAt: "{}",
+				StartsAt:      startsAt,
+				ExpiresAt:     expiresAt,
+			}
+			if err := tx.Create(&tokenPlan).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

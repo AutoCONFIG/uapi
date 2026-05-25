@@ -66,16 +66,17 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	ch := db.Channel{
-		Name:        req.Name,
-		Type:        req.Type,
-		Group:       normalizeChannelGroup(req.Group),
-		Endpoint:    channelEndpointOrDefault(req.Type, req.APIFormat),
-		Models:      req.Models,
-		Priority:    req.Priority,
-		APIFormat:   req.APIFormat,
-		ForceStream: req.ForceStream,
-		AffinityTTL: req.AffinityTTL,
-		Enabled:     true,
+		Name:         req.Name,
+		Type:         req.Type,
+		Group:        normalizeChannelGroup(req.Group),
+		Endpoint:     channelEndpointOrDefault(req.Type, req.APIFormat),
+		Models:       req.Models,
+		ModelAliases: req.ModelAliases,
+		Priority:     req.Priority,
+		APIFormat:    req.APIFormat,
+		ForceStream:  req.ForceStream,
+		AffinityTTL:  req.AffinityTTL,
+		Enabled:      true,
 	}
 	ch.ID = uuid.New()
 	if err := h.db.Create(&ch).Error; err != nil {
@@ -85,7 +86,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 	if h.RefreshPool != nil {
 		h.RefreshPool(ch.ID.String())
 	}
-	auditCreate(h.db, "channel", ch.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "channel", ch.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": ch.Name, "type": ch.Type, "group": ch.Group, "api_format": ch.APIFormat})
 	h.jsonResponse(ctx, 200, ch)
 }
 
@@ -135,6 +136,9 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.Models != nil {
 		updates["models"] = *req.Models
 	}
+	if req.ModelAliases != nil {
+		updates["model_aliases"] = *req.ModelAliases
+	}
 	if req.Priority != nil {
 		updates["priority"] = *req.Priority
 	}
@@ -166,7 +170,7 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if h.RefreshPool != nil {
 		h.RefreshPool(existing.ID.String())
 	}
-	auditUpdate(h.db, "channel", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "channel", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -230,6 +234,6 @@ func (h *Handler) deleteChannel(ctx *fasthttp.RequestCtx) {
 	if h.RemovePool != nil {
 		h.RemovePool(id.String())
 	}
-	auditDelete(h.db, "channel", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "channel", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

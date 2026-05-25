@@ -51,7 +51,7 @@ export default function PlansPage() {
     if (!token || !redeemCode.trim()) return;
     try {
       const result = await userApi.redeem(token, redeemCode.trim());
-      setRedeemMsg(`充值成功，增加 ${result.value} 额度`);
+      setRedeemMsg(`兑换成功，当前套餐：${result.plan_name}`);
       setRedeemCode("");
       const pr = await userApi.profile(token);
       setProfile(pr);
@@ -67,7 +67,7 @@ export default function PlansPage() {
     <AppShell title="套餐">
       <PageHead
         title="套餐和充值"
-        description="查看当前套餐、额度和可用升级项。兑换码用于手动充值或活动额度。"
+        description="查看当前套餐、额度和可用升级项。兑换码用于兑换指定套餐。"
         action={
           <button className="btn" onClick={() => setShowRedeem(!showRedeem)}><Gift /> 兑换码</button>
         }

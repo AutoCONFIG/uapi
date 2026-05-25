@@ -14,6 +14,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/modelalias"
 	"github.com/AutoCONFIG/uapi/internal/relay"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -48,8 +49,6 @@ type Gateway struct {
 
 	tokenMu    sync.Mutex
 	tokenCache *tokenLRUCache
-	modelMu    sync.Mutex
-	modelCache map[string]modelDiscoveryCacheEntry
 }
 
 type nodeState struct {
@@ -63,11 +62,12 @@ type nodeState struct {
 }
 
 type routeCandidate struct {
-	Node          *nodeState
-	ChannelID     uuid.UUID
-	AccountID     uuid.UUID
-	AccountWeight int
-	ChannelModels string
+	Node           *nodeState
+	ChannelID      uuid.UUID
+	AccountID      uuid.UUID
+	AccountWeight  int
+	ChannelModels  string
+	ChannelAliases string
 }
 
 type tokenCacheEntry struct {
@@ -198,7 +198,6 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 		limiter:        concLimiter,
 		trustedProxies: trustedProxies,
 		tokenCache:     newTokenLRUCache(defaultTokenCacheSize),
-		modelCache:     make(map[string]modelDiscoveryCacheEntry),
 		client: &fasthttp.Client{
 			ReadTimeout:                   0,
 			WriteTimeout:                  30 * time.Second,
@@ -472,10 +471,11 @@ func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticated
 
 func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDiscoveryItem, error) {
 	var rows []struct {
-		Models string
+		Models       string
+		ModelAliases string
 	}
 	if err := g.db.Table("channels").
-		Select("DISTINCT channels.models").
+		Select("DISTINCT channels.models, channels.model_aliases").
 		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
 		Where("channels.enabled = true AND channels.deleted_at IS NULL AND channels.models <> ''").
 		Scan(&rows).Error; err != nil {
@@ -489,7 +489,7 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 	allowedSet := csvSet(allowed)
 	seen := map[string]modelDiscoveryItem{}
 	for _, row := range rows {
-		for _, model := range csvList(row.Models) {
+		for _, model := range modelalias.PublicList(row.Models, row.ModelAliases) {
 			if len(allowedSet) > 0 {
 				if _, ok := allowedSet[model]; !ok {
 					continue
@@ -497,20 +497,6 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 			}
 			seen[model] = modelDiscoveryItem{ID: model, OwnedBy: "uapi"}
 		}
-	}
-	for _, model := range g.discoverStandardModels() {
-		if len(allowedSet) > 0 {
-			if _, ok := allowedSet[model.ID]; !ok {
-				continue
-			}
-		}
-		if existing, ok := seen[model.ID]; ok {
-			if existing.OwnedBy == "" || existing.OwnedBy == "uapi" {
-				seen[model.ID] = model
-			}
-			continue
-		}
-		seen[model.ID] = model
 	}
 	models := make([]modelDiscoveryItem, 0, len(seen))
 	for _, model := range seen {
@@ -595,7 +581,7 @@ func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
 	bestScore := math.MaxFloat64
 	for _, route := range g.routes {
 		node := route.Node
-		if !modelInList(model, route.ChannelModels) {
+		if !modelalias.Supports(model, route.ChannelModels, route.ChannelAliases) {
 			continue
 		}
 		if now.Before(node.FailUntil) {
@@ -656,12 +642,13 @@ func (g *Gateway) reloadLocked() {
 		AccountID      uuid.UUID
 		AccountWeight  int
 		ChannelModels  string
+		ChannelAliases string
 	}
 	err := g.db.Table("relay_nodes").
 		Select(`relay_nodes.id AS node_id, relay_nodes.name AS node_name, relay_nodes.base_url,
 			relay_nodes.weight AS node_weight, relay_nodes.max_concurrency,
 			node_channels.channel_id, accounts.id AS account_id, node_channels.weight AS account_weight,
-			channels.models AS channel_models`).
+			channels.models AS channel_models, channels.model_aliases AS channel_aliases`).
 		Joins("JOIN node_channels ON node_channels.relay_node_id = relay_nodes.id AND node_channels.enabled = true AND node_channels.deleted_at IS NULL").
 		Joins("JOIN channels ON channels.id = node_channels.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
 		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
@@ -702,11 +689,12 @@ func (g *Gateway) reloadLocked() {
 		state.Weight = row.NodeWeight
 		state.MaxConcurrency = row.MaxConcurrency
 		nextRoutes = append(nextRoutes, &routeCandidate{
-			Node:          state,
-			ChannelID:     row.ChannelID,
-			AccountID:     row.AccountID,
-			AccountWeight: row.AccountWeight,
-			ChannelModels: row.ChannelModels,
+			Node:           state,
+			ChannelID:      row.ChannelID,
+			AccountID:      row.AccountID,
+			AccountWeight:  row.AccountWeight,
+			ChannelModels:  row.ChannelModels,
+			ChannelAliases: row.ChannelAliases,
 		})
 	}
 	g.nodes = nextNodes
@@ -866,7 +854,7 @@ func (g *Gateway) clientIP(ctx *fasthttp.RequestCtx) string {
 	if len(ips) == 0 {
 		return ""
 	}
-	return ips[0]
+	return ips[len(ips)-1]
 }
 
 func modelInList(model, list string) bool {

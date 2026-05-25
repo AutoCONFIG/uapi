@@ -9,7 +9,9 @@ the specific current document that matches the task.
 - `current/`: active product, frontend, backend, and architecture notes. Use
   these files for implementation decisions.
 - `api-reference/`: official upstream API reference documents organized by the
-  four protocol surfaces implemented by UAPI.
+  four protocol surfaces implemented by UAPI. This corpus is kept to validate
+  protocol behavior and avoid non-standard relay interfaces; it is not business
+  roadmap scope.
 - `deployment/`: deployment and operations notes.
 - `reference/`: stable background references. These can explain upstream tools
   or external behavior, but they are not product requirements by themselves.
@@ -22,6 +24,9 @@ the specific current document that matches the task.
   backend API alignment.
 - [current/platform-design.md](current/platform-design.md): platform design,
   architecture, data models, and relay engine.
+- [current/roadmap.md](current/roadmap.md): staged product scope, upstream
+  project takeaways, and explicit no-legacy-burden rule for the pre-release
+  phase.
 - [current/gateway-relay.md](current/gateway-relay.md): current Gateway/Relay
   control-plane architecture and implementation status.
 - [current/code-channels.md](current/code-channels.md): Codex, Gemini Code,
@@ -34,5 +39,7 @@ the specific current document that matches the task.
 
 - Keep `current/` aligned with implemented behavior before ending a major work
   session.
+- Before first production release, remove or rewrite obsolete behavior instead
+  of preserving compatibility layers that create historical burden.
 - Prefer adding cross-links from this index instead of scattering "start here"
   instructions across many files.

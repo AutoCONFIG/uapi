@@ -215,7 +215,7 @@ func (h *WSHandler) planPolicyID(tokenID uuid.UUID) (*uuid.UUID, error) {
 	if err := h.db.Table("token_plans").
 		Select("plans.policy_id").
 		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
-		Where("token_plans.token_id = ?", tokenID).
+		Where("token_plans.token_id = ? AND token_plans.starts_at <= ? AND token_plans.expires_at > ?", tokenID, time.Now(), time.Now()).
 		Order("token_plans.created_at DESC").
 		Limit(1).
 		Scan(&row).Error; err != nil {

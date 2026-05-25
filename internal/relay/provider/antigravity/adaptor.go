@@ -63,10 +63,11 @@ func (a *AntigravityAdaptor) ToInternal(body []byte) (*provider.InternalRequest,
 }
 
 func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	model := req.Model
-	if model == "" {
-		model = a.model
+	clientModel := req.Model
+	if clientModel == "" {
+		clientModel = a.model
 	}
+	model := UpstreamModelID(clientModel)
 	reqCopy := *req
 	reqCopy.Model = model
 	gemBody, err := gemini.InternalToGeminiBody(&reqCopy)

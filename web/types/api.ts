@@ -30,6 +30,23 @@ export type User = {
   updated_at?: string;
 };
 
+export type AdminSettings = {
+  log_retention_days: number;
+  redeem_code_retention_days: number;
+};
+
+export type RedeemCode = {
+  id: string;
+  code: string;
+  plan_id: string;
+  used_by?: string;
+  used_at?: string;
+  status: "active" | "used" | "expired";
+  expires_at: string;
+  created_at: string;
+  updated_at?: string;
+};
+
 export type ApiKey = {
   id: string;
   user_id?: string;
@@ -70,6 +87,15 @@ export type UsageLogItem = {
   id: number;
   created_at: string;
   model: string;
+  user_id?: string;
+  username?: string;
+  user_email?: string;
+  client_ip?: string;
+  channel_id?: string;
+  channel_name?: string;
+  account_id?: string;
+  account_name?: string;
+  account_cred_type?: string;
   is_stream: boolean;
   prompt_tokens: number;
   completion_tokens: number;
@@ -86,13 +112,30 @@ export type UsageLogs = {
   logs: UsageLogItem[];
 };
 
+
+export type Subscription = {
+  plan_id: string;
+  plan_name: string;
+  plan_type: string;
+  starts_at: string;
+  expires_at: string;
+  status: string;
+};
+
 export type Plan = {
   id: string;
   name: string;
   type: string;
   policy_id?: string;
   token_quota: number;
+  duration_days: number;
   enabled: boolean;
+};
+
+export type ChannelModelSync = {
+  channel: Channel;
+  models: string[];
+  count: number;
 };
 
 export type Channel = {
@@ -103,6 +146,7 @@ export type Channel = {
   endpoint: string;
   enabled: boolean;
   models: string;
+  model_aliases: string;
   priority: number;
   api_format: string;
   force_stream: boolean;
@@ -149,10 +193,13 @@ export type OAuthStatus = {
 
 export type AuditLogEntry = {
   id: number;
+  user: string;
   action: string;
-  target_type: string;
-  target_id: string;
-  actor: string;
+  resource: string;
+  resource_id: string;
+  old_value?: string;
+  new_value?: string;
+  ip_address?: string;
   created_at: string;
 };
 

@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type React from "react";
 import {
-  Activity,
   BarChart3,
   Blocks,
   FileText,
@@ -16,7 +15,6 @@ import {
   Package,
   Route,
   Settings,
-  Shield,
   UserRound,
   Users,
   WalletCards,
@@ -32,6 +30,7 @@ const userNav: NavItem[] = [
   { href: "/overview", label: "总览", icon: LayoutDashboard },
   { href: "/keys", label: "密钥管理", icon: KeyRound },
   { href: "/usage", label: "用量", icon: BarChart3 },
+  { href: "/logs", label: "调用日志", icon: FileText },
   { href: "/plans", label: "套餐", icon: WalletCards },
   { href: "/settings", label: "设置", icon: Settings },
 ];
@@ -41,10 +40,10 @@ const adminNav: NavItem[] = [
   { href: "/admin/relay-nodes", label: "节点管理", icon: Network },
   { href: "/admin/channels", label: "渠道管理", icon: Route },
   { href: "/admin/users", label: "用户管理", icon: Users },
-  { href: "/admin/tokens", label: "令牌管理", icon: Shield },
   { href: "/admin/plans", label: "套餐管理", icon: Package },
   { href: "/admin/logs", label: "调用日志", icon: FileText },
   { href: "/admin/audit-logs", label: "系统审计", icon: UserRound },
+  { href: "/admin/settings", label: "系统设置", icon: Settings },
 ];
 
 type AppShellVariant = "user" | "admin";
@@ -91,9 +90,6 @@ function TopNav({ title, variant }: { title: string; variant: AppShellVariant })
       </Link>
       <NavGroup items={variant === "admin" ? adminNav : userNav} pathname={pathname} />
       <div className="topbar-actions">
-        <span className="badge green">
-          <Activity size={14} /> 系统正常
-        </span>
         <Link className="btn" href="/login" title="退出" onClick={clearStoredAuth}>
           <LogOut /> 退出
         </Link>
@@ -125,14 +121,14 @@ export function PageHead({
   action,
 }: {
   title: string;
-  description: string;
+  description?: string;
   action?: React.ReactNode;
 }) {
   return (
     <div className="page-head">
       <div className="page-title-block">
         <h1>{title}</h1>
-        <p className="lede">{description}</p>
+        {description ? <p className="lede">{description}</p> : null}
       </div>
       {action ? <div className="page-actions">{action}</div> : null}
     </div>

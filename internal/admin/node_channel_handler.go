@@ -81,7 +81,7 @@ func (h *Handler) createNodeChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreate(h.db, "node_account", binding.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "node_channel", binding.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"relay_node_id": binding.RelayNodeID, "channel_id": binding.ChannelID, "weight": binding.Weight})
 	h.jsonResponse(ctx, 200, binding)
 }
 
@@ -134,7 +134,7 @@ func (h *Handler) updateNodeChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
 		return
 	}
-	auditUpdate(h.db, "node_account", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "node_channel", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -157,7 +157,7 @@ func (h *Handler) deleteNodeChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	auditDelete(h.db, "node_account", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "node_channel", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
 

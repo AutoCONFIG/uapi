@@ -89,7 +89,7 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 	if h.OAuthIdle != nil {
 		h.OAuthIdle.ScheduleAccount(&acc)
 	}
-	auditCreate(h.db, "account", acc.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "account", acc.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": acc.Name, "channel_id": acc.ChannelID, "endpoint": acc.Endpoint, "weight": acc.Weight})
 	h.jsonResponse(ctx, 200, acc)
 }
 
@@ -238,7 +238,7 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 		data["type"] = "api_key"
 		data["api_key"] = credential
 	}
-	auditCreate(h.db, "account_export", acc.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "account_export", acc.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"account_id": acc.ID, "name": acc.Name})
 	h.jsonResponse(ctx, 200, data)
 }
 
@@ -353,7 +353,7 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 	if h.OAuthIdle != nil {
 		h.OAuthIdle.ScheduleAccount(&existing)
 	}
-	auditUpdate(h.db, "account", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -391,6 +391,6 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 			h.RefreshPool(acc.ChannelID.String())
 		}
 	}
-	auditDelete(h.db, "account", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

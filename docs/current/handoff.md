@@ -23,6 +23,9 @@ working state so the next agent can continue without extra user briefing.
 - `docs/README.md` is the documentation index.
 - `docs/current/` is the source of truth for active implementation work.
 - `docs/current/gateway-relay.md` is the current source of truth for Gateway/Relay control-plane architecture.
+- `docs/current/roadmap.md` is the staged scope and no-legacy-burden source of
+  truth. Stage 1 and Stage 2 are planned product direction; Stage 3 is a
+  candidate pool only and must not be implemented until explicitly selected.
 - `docs/current/code-channels.md` is the current source of truth for Codex,
   Gemini Code, Claude Code, and standard provider API alignment.
 - Runtime logging is documented in `docs/current/platform-design.md`; backend
@@ -35,6 +38,9 @@ working state so the next agent can continue without extra user briefing.
   documented in `docs/current/code-channels.md`; the old
   `docs/reference/cli-auth-reference.md` is only a pointer to avoid stale auth
   guidance.
+- `docs/api-reference/` is retained as protocol-standard reference material for
+  OpenAI Chat Completions, OpenAI Responses, Gemini, and Anthropic Messages. It
+  prevents non-standard interface drift and is not business-roadmap clutter.
 - `docs/deployment/` contains deployment and operations notes.
 - `docs/reference/` contains background reference material only.
 
@@ -74,6 +80,11 @@ working state so the next agent can continue without extra user briefing.
   fields without target-protocol equivalents are logged with warning and skipped
   (unless they would invalidate core prompt/tool flow), and only malformed input or
   missing required fields cause explicit conversion errors.
+- Downstream model-list endpoints are local database reads. They use configured
+  channel models plus channel model aliases and the user's active plan policy.
+  They must not call upstream providers on client requests. Admins use
+  `POST /api/admin/channels/models/sync?id=<channel_id>` when they want to sync
+  a channel's local model catalog.
 
 ## Frontend
 
@@ -99,10 +110,10 @@ Main routes:
 - Auth: `/`, `/login`, `/register`, `/forgot-password`
 - User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
 - Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
-  `/admin/users`, `/admin/tokens`, `/admin/plans`, `/admin/logs`,
-  `/admin/audit-logs`
-- `/admin/accounts` is a compatibility page only. Accounts are conceptually folded
-  into channels.
+  `/admin/users`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`,
+  `/admin/settings`
+- `/admin/accounts` is a legacy-link explanation page only. Accounts are
+  conceptually folded into channels and should not regain primary navigation.
 
 Login behavior:
 
@@ -244,8 +255,10 @@ POST   /api/admin/channels/oauth/complete
 GET    /api/admin/channels/oauth/status
 POST   /api/admin/channels/oauth/bind
 CRUD   /api/admin/accounts   # credential export is POST-only and requires admin password
-CRUD   /api/admin/tokens
+CRUD   /api/admin/tokens   # internal/admin API only; no first-stage admin UI
 CRUD   /api/admin/plans
+CRUD   /api/admin/redeem-codes
+GET/PUT /api/admin/settings
 GET    /api/admin/users
 PUT    /api/admin/users
 DELETE /api/admin/users
@@ -270,8 +283,8 @@ GET    /v1beta/models          # Gemini 格式模型列表
 
 The current target is single Gateway as the control authority and one or more Relay
 execution nodes. Frontend/admin users manage Gateway only. Gateway owns users,
-API keys, access policies, channels, accounts, Relay nodes, account-node bindings,
-scheduling, and billing. Relay nodes should become execution-only workers that
+API keys, plan-bound access policies, channels, accounts, Relay nodes,
+channel-level node bindings, scheduling, and billing. Relay nodes should become execution-only workers that
 accept Gateway-signed requests, execute the selected channel/account, and report
 usage back to Gateway. Remote Relay nodes do not require PostgreSQL or Redis; they
 pull assigned runtime config into process memory and keep the request hot path
@@ -328,7 +341,7 @@ gateway behavior.
   request limits, and max concurrency from the plan page.
 - `web/app/admin/relay-nodes/page.tsx`: Relay node management is available for
   node address, region, egress IP, weight, max concurrency, status, and
-  account-node bindings.
+  channel-level node bindings.
 
 ## Known Remaining Gaps
 
@@ -386,8 +399,8 @@ Also verify static routes after `npm --prefix web run serve:static`:
 - `/`, `/login/`, `/register/`, `/forgot-password/`
 - `/overview/`, `/keys/`, `/usage/`, `/plans/`, `/settings/`
 - `/admin/`, `/admin/dashboard/`, `/admin/channels/`, `/admin/users/`,
-  `/admin/tokens/`, `/admin/plans/`, `/admin/logs/`, `/admin/audit-logs/`,
-  `/admin/accounts/`
+  `/admin/plans/`, `/admin/logs/`, `/admin/audit-logs/`,
+  `/admin/settings/`, `/admin/accounts/`
 
 Known dependency note:
 

@@ -266,12 +266,12 @@ func (h *Handler) RedeemCode(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	value, err := h.service.RedeemCode(userID, req.Code)
+	subscription, err := h.service.RedeemCode(userID, req.Code)
 	if err != nil {
 		sendError(ctx, 400, err.Error())
 		return
 	}
-	sendSuccess(ctx, map[string]interface{}{"value": value})
+	sendSuccess(ctx, subscription)
 }
 
 func (h *Handler) ListPlans(ctx *fasthttp.RequestCtx) {

@@ -51,6 +51,10 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "name and type are required")
 		return
 	}
+	durationDays := req.DurationDays
+	if durationDays <= 0 {
+		durationDays = 30
+	}
 	p := db.Plan{
 		Name:            req.Name,
 		Type:            req.Type,
@@ -60,13 +64,14 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		CompletionRatio: req.CompletionRatio,
 		TokenQuota:      req.TokenQuota,
 		Enabled:         req.Enabled,
+		DurationDays:    durationDays,
 	}
 	p.ID = uuid.New()
 	if err := h.db.Create(&p).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreate(h.db, "plan", p.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "plan", p.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": p.Name, "type": p.Type, "token_quota": p.TokenQuota, "policy_id": p.PolicyID, "duration_days": p.DurationDays})
 	h.jsonResponse(ctx, 200, p)
 }
 
@@ -112,6 +117,13 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
+	if req.DurationDays != nil {
+		if *req.DurationDays <= 0 {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "duration_days must be greater than 0")
+			return
+		}
+		updates["duration_days"] = *req.DurationDays
+	}
 	updates["updated_at"] = time.Now()
 	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
@@ -121,7 +133,7 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
 		return
 	}
-	auditUpdate(h.db, "plan", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "plan", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -142,6 +154,6 @@ func (h *Handler) deletePlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	auditDelete(h.db, "plan", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "plan", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

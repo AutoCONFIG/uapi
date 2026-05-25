@@ -10,6 +10,7 @@ type Log struct {
 	ID               int64     `gorm:"primaryKey;autoIncrement" json:"id"`
 	CreatedAt        time.Time `gorm:"index" json:"created_at"`
 	TokenID          uuid.UUID `gorm:"type:uuid;index" json:"token_id"`
+	ClientIP         string    `gorm:"size:50;index" json:"client_ip,omitempty"`
 	ChannelID        uuid.UUID `gorm:"type:uuid;index" json:"channel_id"`
 	AccountID        uuid.UUID `gorm:"type:uuid;index" json:"account_id"`
 	Model            string    `gorm:"size:100;index" json:"model"`

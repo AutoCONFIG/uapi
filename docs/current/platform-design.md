@@ -8,10 +8,11 @@ status: current-baseline
 
 > This document is the current platform baseline. For exact implemented routes,
 > verification commands, and known gaps, read `docs/current/handoff.md` first.
+> For staged scope and no-legacy-burden rules, read `docs/current/roadmap.md`.
 
 ## 1. 项目定位
 
-UAPI 是一个**面向公众的 AI API 中转平台**。用户注册账号后购买套餐，获取 API Key 调用 OpenAI/Anthropic/Gemini 等上游服务。管理员管理渠道、上游凭据、计费等后台功能。
+UAPI 是一个**面向公众的高性能 AI API 中转平台**。用户注册账号后购买套餐，获取 API Key 调用 OpenAI/Anthropic/Gemini 等上游服务。管理员管理渠道、上游凭据、套餐、日志和必要控制面。
 
 核心能力：
 - 透明代理 + 格式转换（OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API 四种格式互转，客户端可用任一原生格式接入）
@@ -19,7 +20,8 @@ UAPI 是一个**面向公众的 AI API 中转平台**。用户注册账号后购
 - Code 客户端渠道（Codex、Gemini Code、Claude Code）按本地官方客户端源码对齐；具体源文件见 `docs/current/code-channels.md`
 - 双模式计费（次数窗口限额 + Token 额度扣费）
 - 用户注册/登录/套餐购买/API Key 管理
-- 管理员后台（渠道/用户/令牌/计费管理）
+- 管理员后台（渠道/账号凭据、节点、用户、套餐、日志、系统设置）
+- 本地模型目录（渠道模型配置、手动上游同步、模型重定向；下游模型列表不实时访问上游）
 - 结构化运行日志（全局分级 stdout JSON）和可查询调用日志
 - 前后端完全分离；Gateway 统一承载控制与调度，Relay 节点只执行转发
 
@@ -115,11 +117,11 @@ web/
 │       ├── relay-nodes/page.tsx
 │       ├── channels/page.tsx
 │       ├── users/page.tsx
-│       ├── tokens/page.tsx
 │       ├── plans/page.tsx
 │       ├── logs/page.tsx
 │       ├── audit-logs/page.tsx
-│       └── accounts/page.tsx      # 兼容页
+│       ├── settings/page.tsx
+│       └── accounts/page.tsx      # 旧链接说明页，账号实际归入渠道
 ├── components/
 │   ├── login-form.tsx             # 登录表单（user + admin 双模式）
 │   ├── shell.tsx                  # 导航外壳
@@ -139,7 +141,7 @@ web/
 ```
 注册 → 登录 → 控制台
                 ├── 总览：用量概览 + API 快速开始代码块
-                ├── API 密钥：创建/删除/复制，一目了然
+                ├── API 密钥：默认一个 Key，创建后可再次查看/复制
                 ├── 用量：图表 + 请求明细表
                 ├── 套餐：当前套餐状态 + 可购套餐 + 兑换码入口
                 └── 设置：修改密码 / 邮箱
@@ -190,18 +192,21 @@ GET    /api/admin/init-status         # 初始化状态
 POST   /api/admin/setup              # 首次初始化，返回 AT/RT
 
 GET    /api/admin/dashboard           # 仪表盘统计
-CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用
+CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用；不是独立产品页面
 CRUD   /api/admin/relay-nodes
 CRUD   /api/admin/node-channels         # 节点-渠道绑定；保留路径名，字段为 channel_id
 CRUD   /api/admin/channels            # 渠道管理
+POST   /api/admin/channels/models/sync # 管理员手动从上游同步模型到本地渠道配置
 POST   /api/admin/channels/oauth/auth-url  # 创建 OAuth 授权 URL（admin JWT）
 GET    /api/admin/channels/oauth/callback  # Provider callback（公开回调，state 校验）
 POST   /api/admin/channels/oauth/complete  # 手动 callback/token JSON 完成认证
 GET    /api/admin/channels/oauth/status    # 查询 OAuth session 状态（admin JWT）
 POST   /api/admin/channels/oauth/bind      # 绑定完成的 session 为 oauth_token account
 CRUD   /api/admin/accounts            # 账号管理；凭据导出必须二次校验管理员密码
-CRUD   /api/admin/tokens              # 令牌管理
+CRUD   /api/admin/tokens              # 内部 API；管理界面不提供管理员生成/使用用户 Key 的入口
 CRUD   /api/admin/plans               # 套餐管理
+CRUD   /api/admin/redeem-codes        # 套餐兑换码
+GET/PUT /api/admin/settings           # 系统设置，例如日志/兑换码保留时间
 GET    /api/admin/users               # 用户列表
 PUT    /api/admin/users               # 用户管理
 DELETE /api/admin/users               # 用户管理
@@ -211,10 +216,10 @@ GET    /api/admin/audit-logs          # 系统审计
 # ── Gateway / Relay API（Gateway 鉴权调度，Relay 执行） ──
 ANY    /v1/chat/completions           # OpenAI Chat Completions API 格式
 ANY    /v1/responses                  # OpenAI Responses API 格式
-GET    /v1/models                     # OpenAI/Anthropic 兼容模型列表
+GET    /v1/models                     # OpenAI/Anthropic 兼容模型列表；只读本地模型目录
 ANY    /v1/images/*                   # OpenAI 兼容图片端点，需上游渠道支持
 ANY    /v1/messages                   # Anthropic Messages API 格式
-GET    /v1beta/models                 # Gemini 兼容模型列表
+GET    /v1beta/models                 # Gemini 兼容模型列表；只读本地模型目录
 ANY    /v1beta/*                      # Gemini generateContent API 格式
 ```
 
@@ -227,6 +232,8 @@ OpenAI 支持 `standard` Chat Completions、`responses` 和 `codex`；Gemini 支
 API Key 账号可单独配置接入点；Web UI 拆成 Base URL 和路径前缀两个输入，路径留空时使用 `/v1` 或 `/v1beta` 等标准路由，保存到后端时仍合成为完整上游 URL。OAuth/Code 账号在绑定时由后端写入供应商默认接入点，
 Web UI 不提供手工编辑入口。Web UI 直接按渠道展示，账号在渠道内以卡片管理；
 `channel_group` 不再作为用户可见的一级分组。
+
+模型列表是本地控制面数据。`channels.models` 保存规范化后的上游模型 ID，`channels.model_aliases` 保存“上游模型=对外模型”的映射。下游 `/v1/models` 和 `/v1beta/models` 只读取本地数据库并结合用户套餐过滤，不在请求时访问上游。管理员需要刷新模型时，通过渠道页面调用 `POST /api/admin/channels/models/sync?id=<channel_id>` 手动同步。
 
 Code 客户端行为不从公开 API 猜测，必须从本地 upstream 官方客户端源码对齐：
 

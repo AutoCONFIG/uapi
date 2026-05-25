@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,11 +28,108 @@ const (
 	DailyAPIEndpoint = "https://daily-cloudcode-pa.googleapis.com"
 	APIVersion       = "v1internal"
 
-	FallbackVersion       = "1.21.9"
-	NodeAPIClientUA       = "google-api-nodejs-client/10.3.0"
-	GoogAPIClientUA       = "gl-node/22.21.1"
-	OAuthProviderMetadata = "antigravity"
+	AntigravityReleasesURL = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
+	FallbackVersion        = "2.0.1"
+	VersionCacheTTL        = 6 * time.Hour
+	VersionFetchTimeout    = 10 * time.Second
+	NodeAPIClientUA        = "google-api-nodejs-client/10.3.0"
+	GoogAPIClientUA        = "gl-node/22.21.1"
+	OAuthProviderMetadata  = "antigravity"
 )
+
+type antigravityRelease struct {
+	Version     string `json:"version"`
+	ExecutionID string `json:"execution_id"`
+}
+
+var (
+	cachedAntigravityVersion = FallbackVersion
+	antigravityVersionMu     sync.RWMutex
+	antigravityVersionExpiry time.Time
+	antigravityUpdaterOnce   sync.Once
+)
+
+func StartVersionUpdater(ctx context.Context) {
+	antigravityUpdaterOnce.Do(func() {
+		go runVersionUpdater(ctx)
+	})
+}
+
+func runVersionUpdater(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshAntigravityVersion(ctx)
+	ticker := time.NewTicker(VersionCacheTTL / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshAntigravityVersion(ctx)
+		}
+	}
+}
+
+func refreshAntigravityVersion(ctx context.Context) {
+	version, err := fetchAntigravityLatestVersion(ctx)
+	antigravityVersionMu.Lock()
+	defer antigravityVersionMu.Unlock()
+	now := time.Now()
+	if err == nil {
+		cachedAntigravityVersion = version
+		antigravityVersionExpiry = now.Add(VersionCacheTTL)
+		return
+	}
+	if cachedAntigravityVersion == "" || now.After(antigravityVersionExpiry) {
+		cachedAntigravityVersion = FallbackVersion
+		antigravityVersionExpiry = now.Add(VersionCacheTTL)
+	}
+}
+
+func LatestVersion() string {
+	antigravityVersionMu.RLock()
+	if cachedAntigravityVersion != "" && time.Now().Before(antigravityVersionExpiry) {
+		version := cachedAntigravityVersion
+		antigravityVersionMu.RUnlock()
+		return version
+	}
+	antigravityVersionMu.RUnlock()
+	return FallbackVersion
+}
+
+func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, VersionFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, AntigravityReleasesURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build antigravity releases request: %w", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch antigravity releases: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("antigravity releases API returned status %d", resp.StatusCode)
+	}
+	var releases []antigravityRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", fmt.Errorf("decode antigravity releases response: %w", err)
+	}
+	if len(releases) == 0 {
+		return "", errors.New("antigravity releases API returned empty list")
+	}
+	version := strings.TrimSpace(releases[0].Version)
+	if version == "" {
+		return "", errors.New("antigravity releases API returned empty version")
+	}
+	return version, nil
+}
 
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -255,7 +353,7 @@ func onboardUser(ctx context.Context, accessToken, tierID string) (string, error
 		"tier_id": tierID,
 		"metadata": map[string]string{
 			"ide_type":    "ANTIGRAVITY",
-			"ide_version": FallbackVersion,
+			"ide_version": LatestVersion(),
 			"ide_name":    "antigravity",
 		},
 	})
@@ -337,23 +435,13 @@ func defaultTierID(loadRes map[string]interface{}) string {
 	return "free-tier"
 }
 
-func NativeOAuthUserAgent() string { return "vscode/1.X.X (Antigravity/" + FallbackVersion + ")" }
+func NativeOAuthUserAgent() string { return "vscode/1.X.X (Antigravity/" + LatestVersion() + ")" }
 
-func RequestUserAgent() string { return antigravityBaseUA() }
+func AntigravityUserAgent() string { return "antigravity/" + LatestVersion() + " darwin/arm64" }
 
-func LoadCodeAssistUserAgent() string { return antigravityBaseUA() + " " + NodeAPIClientUA }
+func RequestUserAgent() string { return AntigravityUserAgent() }
 
-func antigravityBaseUA() string {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
-	if goos == "darwin" {
-		goos = "darwin"
-	}
-	if goarch == "amd64" {
-		goarch = "x64"
-	}
-	return "antigravity/" + FallbackVersion + " " + goos + "/" + goarch
-}
+func LoadCodeAssistUserAgent() string { return AntigravityUserAgent() + " " + NodeAPIClientUA }
 
 func compactBody(body []byte) string {
 	text := strings.TrimSpace(string(body))

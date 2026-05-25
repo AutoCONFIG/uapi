@@ -68,6 +68,6 @@ func (h *Handler) deleteToken(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	auditDelete(h.db, "token", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "token", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }

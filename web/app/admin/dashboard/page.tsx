@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Network, Package, Route, Users } from "lucide-react";
+import { FileText, Network, Package, Route, Users } from "lucide-react";
 import { AppShell, MetricCard, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Channel, Dashboard } from "@/types/api";
@@ -33,15 +33,12 @@ export default function AdminDashboardPage() {
 
   return (
     <AppShell title="总览" variant="admin">
-      <PageHead
-        title="平台运营总览"
-        description="集中查看中转流量、渠道健康、账号池和错误率。"
-      />
+      <PageHead title="运营总览" />
       <div className="grid grid-4">
         <MetricCard label="总请求" value={dashboard ? formatNumber(dashboard.total_requests) : "—"} foot="累计" />
         <MetricCard label="总 Token" value={dashboard ? formatNumber(dashboard.total_tokens) : "—"} foot="计费用量" tone="green" />
-        <MetricCard label="活跃渠道" value={dashboard ? String(dashboard.active_channels) : "—"} foot="providers" tone="green" />
-        <MetricCard label="活跃凭证" value={dashboard ? String(dashboard.active_accounts) : "—"} foot="inside channels" />
+        <MetricCard label="活跃渠道" value={dashboard ? String(dashboard.active_channels) : "—"} foot="可调度" tone="green" />
+        <MetricCard label="活跃凭证" value={dashboard ? String(dashboard.active_accounts) : "—"} foot="账号池" />
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <section className="card">
@@ -85,11 +82,11 @@ export default function AdminDashboardPage() {
             </a>
             <a className="quick-card" href="/admin/relay-nodes">
               <Network />
-              <span><strong>节点</strong>配置节点权重和账号绑定</span>
+              <span><strong>节点绑定</strong>配置节点权重和渠道绑定</span>
             </a>
-            <a className="quick-card" href="/admin/tokens">
-              <KeyRound />
-              <span><strong>平台令牌</strong>创建和绑定策略</span>
+            <a className="quick-card" href="/admin/logs">
+              <FileText />
+              <span><strong>调用日志</strong>查看请求状态、Token 和延迟</span>
             </a>
             <a className="quick-card" href="/admin/users">
               <Users />

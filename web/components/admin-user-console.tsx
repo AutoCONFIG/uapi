@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Ban, KeyRound, Search, Trash2, Undo2 } from "lucide-react";
+import { Ban, KeyRound, Package, Search, Trash2, Undo2 } from "lucide-react";
 import { StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
-import type { User } from "@/types/api";
+import type { Plan, User } from "@/types/api";
 
 type UserRow = {
   id: string;
@@ -28,16 +28,20 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
   const [users, setUsers] = useState(initialUsers);
   const [passwordResult, setPasswordResult] = useState<{ email: string; password: string } | null>(null);
   const [error, setError] = useState("");
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [assigning, setAssigning] = useState<UserRow | null>(null);
+  const [planDraft, setPlanDraft] = useState({ plan_id: "", starts_at: "", expires_at: "" });
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
 
     adminApi.users(token)
-      .then((response) => setUsers(response.items.map(fromApiUser)))
+      .then((response) => setUsers((response.items ?? []).map(fromApiUser)))
       .catch(() => {
         // Keep static preview data when the Go API is not available.
       });
+    adminApi.plans(token, 1, 100).then((response) => setPlans(response.items ?? [])).catch(() => undefined);
   }, []);
 
   async function toggleBan(row: UserRow) {
@@ -77,6 +81,28 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
       } catch (err) {
         setError(err instanceof Error ? err.message : "删除用户失败");
       }
+    }
+  }
+
+  function openAssignPlan(row: UserRow) {
+    const firstPlan = plans[0];
+    setAssigning(row);
+    setPlanDraft({ plan_id: firstPlan?.id || "", starts_at: "", expires_at: "" });
+  }
+
+  async function assignPlan() {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token || !assigning) return;
+    setError("");
+    try {
+      await adminApi.updateUser(token, assigning.id, {
+        plan_id: planDraft.plan_id,
+        plan_starts_at: planDraft.starts_at ? new Date(planDraft.starts_at).toISOString() : undefined,
+        plan_expires_at: planDraft.expires_at ? new Date(planDraft.expires_at).toISOString() : undefined,
+      });
+      setAssigning(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "分配套餐失败");
     }
   }
 
@@ -120,6 +146,21 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
       ) : null}
       {error ? <p className="form-error" style={{ marginTop: 16 }}>{error}</p> : null}
 
+      {assigning ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setAssigning(null)}>
+          <section aria-modal="true" className="modal" role="dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head"><h2>分配套餐</h2><button className="btn" onClick={() => setAssigning(null)} type="button">关闭</button></div>
+            <p className="muted">{assigning.email}</p>
+            <div className="grid grid-3">
+              <div className="field"><label>套餐</label><select className="input" value={planDraft.plan_id} onChange={(e) => setPlanDraft((cur) => ({ ...cur, plan_id: e.target.value }))}>{plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name} · {plan.duration_days || 30} 天</option>)}</select></div>
+              <div className="field"><label>生效时间</label><input className="input" type="datetime-local" value={planDraft.starts_at} onChange={(e) => setPlanDraft((cur) => ({ ...cur, starts_at: e.target.value }))} /></div>
+              <div className="field"><label>过期时间</label><input className="input" type="datetime-local" value={planDraft.expires_at} onChange={(e) => setPlanDraft((cur) => ({ ...cur, expires_at: e.target.value }))} /></div>
+            </div>
+            <div className="form-actions"><button className="btn" onClick={() => setAssigning(null)} type="button">取消</button><button className="btn primary" onClick={assignPlan} type="button">确认分配</button></div>
+          </section>
+        </div>
+      ) : null}
+
       <section className="card" style={{ marginTop: 16 }}>
         <div className="table-wrap">
           <table>
@@ -147,6 +188,9 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
                       <div className="row-actions">
                         <button className="btn" onClick={() => toggleBan(row)} title={disabled ? "解封" : "封禁"} type="button">
                           {disabled ? <Undo2 /> : <Ban />}
+                        </button>
+                        <button className="btn" onClick={() => openAssignPlan(row)} title="分配套餐" type="button">
+                          <Package />
                         </button>
                         <button className="btn" onClick={() => resetPassword(row)} title="随机重置密码" type="button">
                           <KeyRound />

@@ -10,27 +10,29 @@ import (
 
 // CreateChannelRequest is the request DTO for creating a channel.
 type CreateChannelRequest struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Group       string `json:"group"`
-	Models      string `json:"models"`
-	Priority    int    `json:"priority"`
-	APIFormat   string `json:"api_format"`
-	ForceStream bool   `json:"force_stream"`
-	AffinityTTL int    `json:"affinity_ttl"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Group        string `json:"group"`
+	Models       string `json:"models"`
+	ModelAliases string `json:"model_aliases"`
+	Priority     int    `json:"priority"`
+	APIFormat    string `json:"api_format"`
+	ForceStream  bool   `json:"force_stream"`
+	AffinityTTL  int    `json:"affinity_ttl"`
 }
 
 // UpdateChannelRequest is the request DTO for updating a channel.
 type UpdateChannelRequest struct {
-	Name        *string `json:"name,omitempty"`
-	Type        *string `json:"type,omitempty"`
-	Group       *string `json:"group,omitempty"`
-	Models      *string `json:"models,omitempty"`
-	Priority    *int    `json:"priority,omitempty"`
-	APIFormat   *string `json:"api_format,omitempty"`
-	ForceStream *bool   `json:"force_stream,omitempty"`
-	AffinityTTL *int    `json:"affinity_ttl,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	Type         *string `json:"type,omitempty"`
+	Group        *string `json:"group,omitempty"`
+	Models       *string `json:"models,omitempty"`
+	ModelAliases *string `json:"model_aliases,omitempty"`
+	Priority     *int    `json:"priority,omitempty"`
+	APIFormat    *string `json:"api_format,omitempty"`
+	ForceStream  *bool   `json:"force_stream,omitempty"`
+	AffinityTTL  *int    `json:"affinity_ttl,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
 }
 
 // StartOAuthRequest asks the backend to create a provider authorization URL.
@@ -141,6 +143,7 @@ type CreatePlanRequest struct {
 	CompletionRatio string     `json:"completion_ratio"`
 	TokenQuota      int64      `json:"token_quota"`
 	Enabled         bool       `json:"enabled"`
+	DurationDays    int        `json:"duration_days"`
 }
 
 // UpdatePlanRequest is the request DTO for updating a plan.
@@ -153,15 +156,19 @@ type UpdatePlanRequest struct {
 	CompletionRatio *string    `json:"completion_ratio,omitempty"`
 	TokenQuota      *int64     `json:"token_quota,omitempty"`
 	Enabled         *bool      `json:"enabled,omitempty"`
+	DurationDays    *int       `json:"duration_days,omitempty"`
 }
 
 // --- User DTOs ---
 
 // UpdateUserRequest is the request DTO for updating a user.
 type UpdateUserRequest struct {
-	Status      *string `json:"status,omitempty"`
-	Balance     *int64  `json:"balance,omitempty"`
-	NewPassword *string `json:"new_password,omitempty"`
+	Status        *string    `json:"status,omitempty"`
+	Balance       *int64     `json:"balance,omitempty"`
+	NewPassword   *string    `json:"new_password,omitempty"`
+	PlanID        *uuid.UUID `json:"plan_id,omitempty"`
+	PlanStartsAt  *time.Time `json:"plan_starts_at,omitempty"`
+	PlanExpiresAt *time.Time `json:"plan_expires_at,omitempty"`
 }
 
 // --- Relay Node DTOs ---

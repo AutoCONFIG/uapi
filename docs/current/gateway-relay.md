@@ -9,9 +9,9 @@ UAPI uses a single Gateway as the control authority and one or more Relay nodes 
 ```text
 Frontend / Admin UI
   -> Gateway / Control Plane
-      - users, API keys, access policies
+      - users, API keys, plan-bound access policies
       - channels and upstream accounts
-      - relay nodes and account-to-node bindings
+      - relay nodes and node-to-channel bindings
       - request auth, limits, scheduling, billing
   -> PostgreSQL
 
@@ -33,10 +33,11 @@ Current scale target:
 Gateway is the only configuration authority:
 
 - User API key authentication.
-- Access policy checks: allowed models, hourly/weekly/monthly request limits, max concurrency.
+- Plan-bound access policy checks: allowed models, hourly/weekly/monthly request limits, max concurrency.
 - Channel and account management.
 - Relay node management.
-- Account-to-node bindings and weights.
+- Node-to-channel bindings and weights. Runtime scheduling expands each bound
+  channel to the channel's enabled accounts.
 - Request scheduling: choose `relay_node + channel + account`.
 - Billing pre-check / pre-consume.
 - Usage event ingestion and final settlement.
@@ -63,9 +64,9 @@ Target request flow:
 ```text
 1. Client calls /v1/chat/completions with Bearer sk-...
 2. Gateway authenticates the API key.
-3. Gateway applies access policy limits.
-4. Gateway parses the model and endpoint format.
-5. Gateway selects a channel, account, and Relay node using enabled account-node bindings.
+3. Gateway applies the active plan's access policy limits.
+4. Gateway parses the endpoint format and resolves public model aliases to upstream model names.
+5. Gateway selects a Relay node, bound channel, and enabled account.
 6. Gateway pre-consumes estimated quota and creates a request_id.
 7. Gateway forwards the request to Relay with an internal HMAC signature and selected channel/account IDs.
 8. Relay verifies the Gateway signature.
@@ -83,29 +84,25 @@ Model listing endpoints are handled by Gateway directly:
   `{data:[...]}` for SDKs that use Anthropic's auth header.
 - `GET /v1beta/models` returns Gemini-compatible `{models:[...]}`.
 
-The model set is the intersection of:
+The model set is the local database intersection of:
 
-- models configured on enabled channels that have at least one enabled account;
-- models discovered from enabled regular API-key channels by calling native
-  upstream model-list endpoints and falling back to OpenAI-compatible
-  `/v1/models`;
+- public model names derived from `channels.models` and `channels.model_aliases`
+  on enabled channels that have at least one enabled account;
 - the current API key's active subscription plan policy (`token_plans` ->
   `plans.policy_id` -> `access_policies.allowed_models`) when a plan policy is
   configured.
 
-For regular API channels, an empty channel `models` field means the channel does
-not impose a local model allow-list and may route any model that passes the
-downstream token and plan-policy checks. This matches the admin UI placeholder "留空表示不限制"
-and lets regular API-key channels rely on upstream model discovery. Code
-channels still use explicit preset/configured models because their upstream Code
-client paths do not expose a regular model-list endpoint.
+Model-list endpoints do not call upstream providers during downstream client
+requests. Admins explicitly refresh a channel's local model catalog through
+`POST /api/admin/channels/models/sync?id=<channel_id>`. API-key channels may use
+upstream model-list APIs during that admin sync action; Code/OAuth channels use
+provider-specific normalization based on local official-client or reference
+implementations.
 
-This is intentional for Code channels because Codex/Gemini Code/Claude Code do
-not expose a stable public model-list endpoint equivalent to regular provider
-APIs. Their available model set is represented by UAPI channel configuration,
-which is initially pre-filled from the local official client source presets.
-Regular OpenAI/Gemini/Anthropic API-key channels are discovered from upstream
-with a short cache.
+`channels.model_aliases` maps upstream model IDs to public model IDs, one
+mapping per line in `upstream=public` form. Downstream clients see only the
+public model. Gateway accepts the public name, schedules against the matching
+channel/account, and Relay rewrites to the upstream model before forwarding.
 
 ## Config Sync
 
@@ -178,7 +175,9 @@ It intentionally does not limit:
 - Streaming.
 - Endpoint type (`chat`, `responses`, `messages`, `gemini`).
 
-Policies are bound to plans, not API keys. The runtime source of truth is the
+Policies are bound to plans, not API keys. A normal user should have one API key by default; admin users manage business
+resources and should not create or use downstream API keys. The runtime source
+of truth is the
 active token subscription (`token_plans`) and the subscribed plan's
 `plans.policy_id`. API keys keep only their own security fields such as
 `tokens.models`, `tokens.permissions`, expiry, and IP whitelist; they do not
@@ -221,7 +220,8 @@ Implemented now:
 - Gateway skeleton for `/v1/*` and `/v1beta/*`.
 - Relay node model and admin CRUD.
 - Admin relay node management page.
-- Account-to-node bindings and weights.
+- Node-to-channel bindings and weights. Runtime scheduling expands each bound
+  channel to the channel's enabled accounts.
 - Gateway-side user API key authentication and pre-consume for remote-node mode.
 - Gateway selection of `relay_node + channel + account`.
 - Gateway-to-Relay internal HMAC signatures.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, Trash2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
@@ -33,7 +33,7 @@ type ChannelPreset = {
 const codexModels = "gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2,gpt-image-2";
 const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview";
 const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
-const antigravityModels = "gemini-3-pro-preview,gemini-3-pro-high,gemini-3-flash-preview,claude-sonnet-4-5-thinking,claude-opus-4-5-thinking";
+const antigravityModels = "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-pro-high,gemini-3-pro-low,gemini-pro-agent,gemini-3.1-pro-low,gemini-3-flash,gemini-3-flash-agent,gemini-3.1-flash-lite,gpt-oss-120b-medium";
 
 const channelPresets: ChannelPreset[] = [
   { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: codeChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
@@ -116,6 +116,7 @@ export function AdminChannelConsole() {
   const [apiKeyBaseURL, setApiKeyBaseURL] = useState("");
   const [apiKeyPath, setApiKeyPath] = useState("");
   const [credLoading, setCredLoading] = useState(false);
+  const [modelSyncing, setModelSyncing] = useState(false);
   const [credError, setCredError] = useState("");
   const [credNotice, setCredNotice] = useState("");
   const [oauthChannel, setOauthChannel] = useState<Channel | null>(null);
@@ -321,6 +322,22 @@ export function AdminChannelConsole() {
       setChannels((cur) => cur.map((item) => item.id === id ? updated : item));
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "更新渠道失败");
+    }
+  }
+
+  async function syncChannelModels(channel: Channel) {
+    if (!token || modelSyncing) return;
+    setModelSyncing(true);
+    setCredError("");
+    setCredNotice("");
+    try {
+      const result = await adminApi.syncChannelModels(token, channel.id);
+      setChannels((cur) => cur.map((item) => item.id === channel.id ? result.channel : item));
+      setCredNotice(`已从上游获取 ${result.count} 个模型。`);
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : "获取上游模型失败");
+    } finally {
+      setModelSyncing(false);
     }
   }
 
@@ -585,6 +602,7 @@ export function AdminChannelConsole() {
                 </div>
                 <div className="channel-head-actions">
                   <button className="btn" onClick={() => setChannelEditOpen(true)} type="button"><Pencil /> 编辑渠道</button>
+                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0} onClick={() => syncChannelModels(selected)} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
                   <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
                 </div>
               </div>
@@ -754,10 +772,17 @@ export function AdminChannelConsole() {
                   const value = e.target.value.trim();
                   if (value && value !== selected.name) patchChannel(selected.id, { name: value });
                 }} placeholder="渠道名称" />
-                <input className="input wide" defaultValue={selected.models} key={`drawer-models-${selected.id}`} onBlur={(e) => {
+                <div className="model-sync-row">
+                  <input className="input wide" defaultValue={selected.models} key={`drawer-models-${selected.id}`} onBlur={(e) => {
+                    const value = e.target.value.trim();
+                    if (value !== selected.models) patchChannel(selected.id, { models: value });
+                  }} placeholder="模型列表，留空表示不限制" />
+                  <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0} onClick={() => syncChannelModels(selected)} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "从上游获取"}</button>
+                </div>
+                <textarea className="input wide" defaultValue={selected.model_aliases || ""} key={`drawer-model-aliases-${selected.id}`} onBlur={(e) => {
                   const value = e.target.value.trim();
-                  if (value !== selected.models) patchChannel(selected.id, { models: value });
-                }} placeholder="模型列表，留空表示不限制" />
+                  if (value !== (selected.model_aliases || "")) patchChannel(selected.id, { model_aliases: value });
+                }} placeholder={"模型重定向，每行 上游模型=对外模型，例如 gemini-pro-agent=gemini-3.1-pro"} rows={4} />
               </div>
             </div>
           </aside>

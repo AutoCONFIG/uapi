@@ -67,7 +67,7 @@ func (h *Handler) createAccessPolicy(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreate(h.db, "access_policy", policy.ID, h.getAdminUser(ctx))
+	auditCreateCtx(h.db, "access_policy", policy.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": policy.Name, "allowed_models": policy.AllowedModels, "max_concurrency": policy.MaxConcurrency})
 	h.jsonResponse(ctx, 200, policy)
 }
 
@@ -138,7 +138,7 @@ func (h *Handler) updateAccessPolicy(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "reload failed")
 		return
 	}
-	auditUpdate(h.db, "access_policy", id, h.getAdminUser(ctx))
+	auditUpdateCtx(h.db, "access_policy", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -161,7 +161,7 @@ func (h *Handler) deleteAccessPolicy(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	auditDelete(h.db, "access_policy", id, h.getAdminUser(ctx))
+	auditDeleteCtx(h.db, "access_policy", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
 

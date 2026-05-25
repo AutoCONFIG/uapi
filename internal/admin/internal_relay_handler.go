@@ -51,6 +51,7 @@ type UsageEventRequest struct {
 	EstimatedTokens  int       `json:"estimated_tokens"`
 	StatusCode       int       `json:"status_code"`
 	LatencyMs        int64     `json:"latency_ms"`
+	ClientIP         string    `json:"client_ip"`
 }
 
 type RelayAccountUpdateRequest struct {
@@ -226,7 +227,7 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 		if existing.Settled {
 			return nil
 		}
-		logEntry := db.Log{TokenID: req.TokenID, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
+		logEntry := db.Log{TokenID: req.TokenID, ClientIP: req.ClientIP, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
 		if err := tx.Create(&logEntry).Error; err != nil {
 			return err
 		}

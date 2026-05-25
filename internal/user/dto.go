@@ -88,6 +88,7 @@ type UsageLogItem struct {
 	ID               int64  `json:"id"`
 	CreatedAt        string `json:"created_at"`
 	Model            string `json:"model"`
+	ClientIP         string `json:"client_ip,omitempty"`
 	IsStream         bool   `json:"is_stream"`
 	PromptTokens     int64  `json:"prompt_tokens"`
 	CompletionTokens int64  `json:"completion_tokens"`
@@ -105,10 +106,12 @@ type UsageLogsResponse struct {
 }
 
 type SubscriptionResponse struct {
-	PlanID   string `json:"plan_id"`
-	PlanName string `json:"plan_name"`
-	PlanType string `json:"plan_type"`
-	Status   string `json:"status"`
+	PlanID    string `json:"plan_id"`
+	PlanName  string `json:"plan_name"`
+	PlanType  string `json:"plan_type"`
+	StartsAt  string `json:"starts_at"`
+	ExpiresAt string `json:"expires_at"`
+	Status    string `json:"status"`
 }
 
 type RedeemRequest struct {
