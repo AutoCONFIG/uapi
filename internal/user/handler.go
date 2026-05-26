@@ -234,25 +234,6 @@ func (h *Handler) GetSubscription(ctx *fasthttp.RequestCtx) {
 	sendSuccess(ctx, sub)
 }
 
-func (h *Handler) Subscribe(ctx *fasthttp.RequestCtx) {
-	userID := getUserID(ctx)
-	if userID == "" {
-		sendError(ctx, 401, "unauthorized")
-		return
-	}
-
-	planID, ok := ctx.UserValue("planID").(string)
-	if !ok || planID == "" {
-		sendError(ctx, 400, "missing plan ID")
-		return
-	}
-	if err := h.service.Subscribe(userID, planID); err != nil {
-		sendError(ctx, 400, err.Error())
-		return
-	}
-	sendSuccess(ctx, nil)
-}
-
 func (h *Handler) RedeemCode(ctx *fasthttp.RequestCtx) {
 	userID := getUserID(ctx)
 	if userID == "" {
@@ -272,15 +253,6 @@ func (h *Handler) RedeemCode(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	sendSuccess(ctx, subscription)
-}
-
-func (h *Handler) ListPlans(ctx *fasthttp.RequestCtx) {
-	plans, err := h.service.ListPlans()
-	if err != nil {
-		sendError(ctx, 500, err.Error())
-		return
-	}
-	sendSuccess(ctx, plans)
 }
 
 // getUserID extracts the user ID from JWT claims set in the context

@@ -243,9 +243,7 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/user/usage", userAuth(s.userHandler.GetUsage))
 	r.GET("/api/user/usage/logs", userAuth(s.userHandler.GetUsageLogs))
 	r.GET("/api/user/subscription", userAuth(s.userHandler.GetSubscription))
-	r.POST("/api/user/subscription/:planID", userAuth(s.userHandler.Subscribe))
 	r.POST("/api/user/redeem", userAuth(s.userHandler.RedeemCode))
-	r.GET("/api/user/plans", userAuth(s.userHandler.ListPlans))
 
 	s.router = r
 }

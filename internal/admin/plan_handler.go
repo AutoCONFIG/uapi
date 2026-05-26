@@ -51,6 +51,14 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "name and type are required")
 		return
 	}
+	if req.Type != "count_based" && req.Type != "token_based" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "type must be count_based or token_based")
+		return
+	}
+	if req.TokenQuota < 0 {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "token_quota must be >= 0")
+		return
+	}
 	durationDays := req.DurationDays
 	if durationDays <= 0 {
 		durationDays = 30
@@ -59,7 +67,6 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		Name:            req.Name,
 		Type:            req.Type,
 		PolicyID:        req.PolicyID,
-		Limits:          req.Limits,
 		ModelRatios:     req.ModelRatios,
 		CompletionRatio: req.CompletionRatio,
 		TokenQuota:      req.TokenQuota,
@@ -97,13 +104,14 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		updates["name"] = *req.Name
 	}
 	if req.Type != nil {
+		if *req.Type != "count_based" && *req.Type != "token_based" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "type must be count_based or token_based")
+			return
+		}
 		updates["type"] = *req.Type
 	}
 	if req.PolicyID != nil {
 		updates["policy_id"] = *req.PolicyID
-	}
-	if req.Limits != nil {
-		updates["limits"] = *req.Limits
 	}
 	if req.ModelRatios != nil {
 		updates["model_ratios"] = *req.ModelRatios
@@ -112,6 +120,10 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		updates["completion_ratio"] = *req.CompletionRatio
 	}
 	if req.TokenQuota != nil {
+		if *req.TokenQuota < 0 {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "token_quota must be >= 0")
+			return
+		}
 		updates["token_quota"] = *req.TokenQuota
 	}
 	if req.Enabled != nil {

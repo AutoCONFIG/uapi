@@ -65,7 +65,7 @@ export default function AuditLogsPage() {
     <AppShell title="系统审计" variant="admin">
       <PageHead
         title="系统审计"
-        description="记录管理员和系统对渠道、用户余额、账号池的关键变更。"
+        description="记录管理员和系统对渠道、用户套餐、账号池的关键变更。"
       />
       <section className="card">
         <div className="table-wrap">

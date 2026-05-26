@@ -45,7 +45,6 @@ type ProfileResponse struct {
 	Email     string `json:"email"`
 	Username  string `json:"username"`
 	Status    string `json:"status"`
-	Balance   int64  `json:"balance"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -106,12 +105,24 @@ type UsageLogsResponse struct {
 }
 
 type SubscriptionResponse struct {
-	PlanID    string `json:"plan_id"`
-	PlanName  string `json:"plan_name"`
-	PlanType  string `json:"plan_type"`
-	StartsAt  string `json:"starts_at"`
-	ExpiresAt string `json:"expires_at"`
-	Status    string `json:"status"`
+	PlanID         string               `json:"plan_id"`
+	PlanName       string               `json:"plan_name"`
+	PlanType       string               `json:"plan_type"`
+	TokenQuota     int64                `json:"token_quota"`
+	UsedQuota      int64                `json:"used_quota"`
+	RemainingQuota int64                `json:"remaining_quota"`
+	Windows        []SubscriptionWindow `json:"windows"`
+	StartsAt       string               `json:"starts_at"`
+	ExpiresAt      string               `json:"expires_at"`
+	Status         string               `json:"status"`
+}
+
+type SubscriptionWindow struct {
+	Type      string `json:"type"`
+	Limit     int    `json:"limit"`
+	Used      int    `json:"used"`
+	Remaining int    `json:"remaining"`
+	ResetAt   string `json:"reset_at"`
 }
 
 type RedeemRequest struct {

@@ -156,9 +156,7 @@ export const userApi = {
   usage: (token: string) => request<UsageSummary>("/api/user/usage", { token }),
   usageLogs: (token: string, page = 1, limit = 20) =>
     request<UsageLogs>(`/api/user/usage/logs?page=${page}&limit=${limit}`, { token }),
-  plans: (token: string) => request<Plan[]>("/api/user/plans", { token }),
-  subscribe: (token: string, planID: string) =>
-    request<void>(`/api/user/subscription/${planID}`, { method: "POST", token }),
+  subscription: (token: string) => request<Subscription>("/api/user/subscription", { token }),
   redeem: (token: string, code: string) => request<Subscription>("/api/user/redeem", { method: "POST", token, body: { code } }),
 };
 
@@ -239,9 +237,9 @@ export const adminApi = {
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; limits?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; duration_days?: number; enabled?: boolean }) =>
+  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; duration_days?: number; enabled?: boolean }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; limits: string; model_ratios: string; completion_ratio: string; token_quota: number; duration_days: number; enabled: boolean }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; model_ratios: string; completion_ratio: string; token_quota: number; duration_days: number; enabled: boolean }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),
@@ -270,7 +268,7 @@ export const adminApi = {
     if (status) query.set("status", status);
     return request<PaginatedResponse<User>>(`/api/admin/users?${query.toString()}`, { token });
   },
-  updateUser: (token: string, id: string, body: Partial<Pick<User, "status" | "balance">> & { new_password?: string; plan_id?: string; plan_starts_at?: string; plan_expires_at?: string }) =>
+  updateUser: (token: string, id: string, body: Partial<Pick<User, "status">> & { new_password?: string; plan_id?: string; plan_starts_at?: string; plan_expires_at?: string }) =>
     request<User>(`/api/admin/users?id=${id}`, { method: "PUT", token, body }),
   deleteUser: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/users?id=${id}`, { method: "DELETE", token }),

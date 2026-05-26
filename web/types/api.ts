@@ -16,7 +16,6 @@ export type Profile = {
   email: string;
   username: string;
   status: string;
-  balance: number;
   created_at: string;
 };
 
@@ -25,7 +24,6 @@ export type User = {
   email: string;
   username: string;
   status: "active" | "disabled";
-  balance: number;
   created_at: string;
   updated_at?: string;
 };
@@ -127,9 +125,21 @@ export type Subscription = {
   plan_id: string;
   plan_name: string;
   plan_type: string;
+  token_quota: number;
+  used_quota: number;
+  remaining_quota: number;
+  windows: SubscriptionWindow[];
   starts_at: string;
   expires_at: string;
   status: string;
+};
+
+export type SubscriptionWindow = {
+  type: "hour" | "week" | "month";
+  limit: number;
+  used: number;
+  remaining: number;
+  reset_at: string;
 };
 
 export type Plan = {

@@ -29,8 +29,13 @@ The frontend calls the implemented backend routes:
 - User auth: `POST /api/user/register`, `POST /api/user/login`,
   `POST /api/user/refresh`
 - User console: `/api/user/profile`, `/api/user/keys`, `/api/user/usage`,
-  `/api/user/usage/logs`, `/api/user/subscription`, `/api/user/plans`,
+  `/api/user/usage/logs`, `/api/user/subscription`, `/api/user/redeem`,
   `/api/user/password`, `/api/user/email`
+
+`/api/user/subscription` is the user-facing source for the current plan name,
+plan validity, remaining total quota, and hourly/weekly/monthly usage-window
+remaining quota. The unit follows the plan type: requests for `count_based`,
+tokens for `token_based`; `0` means no remaining quota, not unlimited.
 - Admin auth/setup: `/api/admin/login`, `/api/admin/init-status`,
   `/api/admin/setup`
 - Admin CRUD: `/api/admin/access-policies` for plan-composed policy resources,

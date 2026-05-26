@@ -230,10 +230,8 @@ POST   /api/user/keys
 DELETE /api/user/keys/:keyID
 GET    /api/user/usage
 GET    /api/user/usage/logs
-GET    /api/user/subscription
-POST   /api/user/subscription/:planID
+GET    /api/user/subscription  # 当前套餐、总额度、小时/周/月窗口剩余
 POST   /api/user/redeem
-GET    /api/user/plans
 ```
 
 ### Admin API (short access JWT + long refresh JWT)

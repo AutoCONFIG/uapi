@@ -8,6 +8,7 @@ export default function SetupPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [checkingInit, setCheckingInit] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -17,9 +18,14 @@ export default function SetupPage() {
         const status = await adminApi.initStatus();
         if (!cancelled && status.initialized) {
           router.replace("/login");
+          return;
         }
       } catch {
         // Let setup submission show the concrete API error if the backend is unavailable.
+      } finally {
+        if (!cancelled) {
+          setCheckingInit(false);
+        }
       }
     }
 
@@ -28,6 +34,10 @@ export default function SetupPage() {
       cancelled = true;
     };
   }, [router]);
+
+  if (checkingInit) {
+    return null;
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // WSHandler handles WebSocket connections for the /v1/responses endpoint.
@@ -154,11 +154,15 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 	if h.billing != nil {
 		if err := h.billing.CheckLimit(tokenID); err != nil {
 			h.concLimiter.Release(tokenID)
-			ctx.Error(`{"error":"rate limit exceeded"}`, 429)
+			status := fasthttp.StatusTooManyRequests
+			if errors.Is(err, ErrNoActiveSubscription) {
+				status = fasthttp.StatusPaymentRequired
+			}
+			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
 			return
 		}
 		if token.UserID != "" {
-			if err := h.billing.CheckUserBalance(token.UserID, tokenID); err != nil {
+			if err := h.billing.CheckUserPlan(token.UserID, tokenID); err != nil {
 				h.concLimiter.Release(tokenID)
 				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, 402)
 				return
@@ -314,10 +318,6 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 			}
 			sess.SetTurnRelease(func() { h.concLimiter.Release(limitKey) })
 		}
-		if err := h.checkWSPolicyWindows(sess.policy.id, sess.tokenID); err != nil {
-			WriteWSErrorSession(sess, 429, "policy_limit", err.Error())
-			return
-		}
 	}
 
 	// Resolve channel and account (reuse relayer logic)
@@ -334,7 +334,11 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 		planID, err := h.billing.PreConsume(sess.tokenID, model, estTokens)
 		if err != nil {
 			logger.Component("relay.ws").Warn("billing pre-consume error", logger.F("token_id", sess.tokenID), logger.F("model", model), logger.Err(err))
-			WriteWSErrorSession(sess, 429, "billing_error", "pre-consume failed")
+			code := 429
+			if errors.Is(err, ErrNoActiveSubscription) {
+				code = 402
+			}
+			WriteWSErrorSession(sess, code, "billing_error", err.Error())
 			return
 		}
 		tokenPlanID = planID
@@ -355,69 +359,6 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	if h.httpBridgeFallback(sess, msg, ch, account, adaptor, creds, model, estTokens, tokenPlanID, start) {
 		releaseTurn = false
 	}
-}
-
-func (h *WSHandler) checkWSPolicyWindows(policyID, tokenID string) error {
-	pid, err := uuid.Parse(policyID)
-	if err != nil {
-		return err
-	}
-	tid, err := uuid.Parse(tokenID)
-	if err != nil {
-		return err
-	}
-	var policy db.AccessPolicy
-	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", pid).First(&policy).Error; err != nil {
-		return err
-	}
-	windows := []struct {
-		typeName string
-		limit    int
-		start    time.Time
-	}{
-		{"hour", policy.HourlyLimit, wsCurrentHour()},
-		{"week", policy.WeeklyLimit, wsCurrentWeek()},
-		{"month", policy.MonthlyLimit, wsCurrentMonth()},
-	}
-	return h.db.Transaction(func(tx *gorm.DB) error {
-		for _, w := range windows {
-			if w.limit <= 0 {
-				continue
-			}
-			var usage db.PolicyUsageWindow
-			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", pid, tid, w.typeName, w.start).
-				First(&usage).Error
-			if err != nil {
-				if err != gorm.ErrRecordNotFound {
-					return err
-				}
-				newUsage := db.PolicyUsageWindow{
-					ID:          uuid.New(),
-					PolicyID:    pid,
-					TokenID:     tid,
-					WindowType:  w.typeName,
-					WindowStart: w.start,
-					UsedCount:   0,
-				}
-				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newUsage).Error; err != nil {
-					return err
-				}
-				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-					Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", pid, tid, w.typeName, w.start).
-					First(&usage).Error; err != nil {
-					return err
-				}
-			}
-			if usage.UsedCount >= w.limit {
-				return fmt.Errorf("%s request limit exceeded", w.typeName)
-			}
-			if err := tx.Model(&usage).Update("used_count", gorm.Expr("used_count + 1")).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 func wsCurrentHour() time.Time {

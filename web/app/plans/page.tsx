@@ -1,50 +1,45 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, Gift } from "lucide-react";
+import { CalendarDays, Check, Gift, ShieldCheck, WalletCards } from "lucide-react";
 import { AppShell, PageHead } from "@/components/shell";
 import { userApi } from "@/lib/api";
-import type { Plan, Profile } from "@/types/api";
+import type { Subscription, SubscriptionWindow } from "@/types/api";
 
-function formatQuota(quota: number): string {
-  if (quota >= 1_000_000) return `${(quota / 1_000_000).toFixed(1)}M tokens`;
-  if (quota >= 1_000) return `${(quota / 1_000).toFixed(1)}K tokens`;
-  return `${quota} tokens`;
+function formatQuota(value: number, type?: string): string {
+  const suffix = type === "count_based" ? " 次" : " tokens";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M${suffix}`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K${suffix}`;
+  return `${value}${suffix}`;
+}
+
+function quotaText(subscription: Subscription, key: "remaining_quota" | "token_quota" | "used_quota"): string {
+  return formatQuota(subscription[key], subscription.plan_type);
+}
+
+function windowLabel(type: SubscriptionWindow["type"]): string {
+  return ({ hour: "本小时", week: "本周", month: "本月" } as const)[type] || type;
+}
+
+function percent(used: number, limit: number): number {
+  if (limit <= 0) return 100;
+  return Math.min(100, Math.max(0, (used / limit) * 100));
 }
 
 export default function PlansPage() {
-  const [plans, setPlans] = useState<Plan[]>([]);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [loading, setLoading] = useState(true);
-  const [subscribing, setSubscribing] = useState<string | null>(null);
   const [redeemCode, setRedeemCode] = useState("");
   const [redeemMsg, setRedeemMsg] = useState("");
-  const [showRedeem, setShowRedeem] = useState(false);
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.user.token");
     if (!token) { setLoading(false); return; }
-    Promise.all([
-      userApi.plans(token).catch(() => []),
-      userApi.profile(token).catch(() => null),
-    ]).then(([p, pr]) => {
-      setPlans(p);
-      setProfile(pr);
+    userApi.subscription(token).catch(() => null).then((sub) => {
+      setSubscription(sub);
       setLoading(false);
     });
   }, []);
-
-  async function subscribe(planID: string) {
-    const token = window.localStorage.getItem("uapi.user.token");
-    if (!token) return;
-    setSubscribing(planID);
-    try {
-      await userApi.subscribe(token, planID);
-      const pr = await userApi.profile(token);
-      setProfile(pr);
-    } catch { /* ignore */ }
-    setSubscribing(null);
-  }
 
   async function redeem() {
     const token = window.localStorage.getItem("uapi.user.token");
@@ -53,68 +48,125 @@ export default function PlansPage() {
       const result = await userApi.redeem(token, redeemCode.trim());
       setRedeemMsg(`兑换成功，当前套餐：${result.plan_name}`);
       setRedeemCode("");
-      const pr = await userApi.profile(token);
-      setProfile(pr);
+      const sub = await userApi.subscription(token).catch(() => result);
+      setSubscription(sub);
     } catch (err) {
       setRedeemMsg(err instanceof Error ? err.message : "兑换失败");
     }
   }
 
-  const balance = profile?.balance ?? 0;
-  const usedPercent = balance > 0 ? Math.min(100, 42) : 0;
+  const expiresAt = subscription?.expires_at ? new Date(subscription.expires_at) : null;
+  const startsAt = subscription?.starts_at ? new Date(subscription.starts_at) : null;
 
   return (
     <AppShell title="套餐">
       <PageHead
-        title="套餐和充值"
-        description="查看当前套餐、额度和可用升级项。兑换码用于兑换指定套餐。"
-        action={
-          <button className="btn" onClick={() => setShowRedeem(!showRedeem)}><Gift /> 兑换码</button>
-        }
+        title="套餐权益"
+        description="套餐由管理员分配，或通过兑换码领取。普通用户不能直接浏览和选择后台套餐。"
       />
-      {showRedeem && (
-        <section className="card card-pad" style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <div className="field" style={{ flex: 1, margin: 0 }}>
+      <div className="grid grid-2">
+        <section className="card card-pad">
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+            <div>
+              <p className="muted" style={{ margin: 0 }}>当前套餐</p>
+              <h2 style={{ marginTop: 6 }}>{subscription?.plan_name || (loading ? "加载中..." : "暂无有效套餐")}</h2>
+            </div>
+            <span className={`badge ${subscription ? "green" : ""}`}>
+              {subscription ? <Check size={14} /> : <WalletCards size={14} />}
+              {subscription ? "已生效" : "待领取"}
+            </span>
+          </div>
+
+          {subscription ? (
+            <div className="grid grid-2" style={{ marginTop: 18 }}>
+              <div className="metric-card">
+                <span className="muted">计费类型</span>
+                <strong>{subscription.plan_type === "count_based" ? "按次数" : "按 Token"}</strong>
+              </div>
+              <div className="metric-card">
+                <span className="muted">到期时间</span>
+                <strong>{expiresAt ? expiresAt.toLocaleDateString() : "-"}</strong>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state" style={{ marginTop: 18 }}>
+              <strong>还没有可用套餐</strong>
+              <p>使用管理员发放的兑换码领取套餐，或等待管理员直接分配。</p>
+            </div>
+          )}
+
+          {startsAt && expiresAt && (
+            <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8, margin: "16px 0 0" }}>
+              <CalendarDays size={15} />
+              {startsAt.toLocaleDateString()} 至 {expiresAt.toLocaleDateString()}
+            </p>
+          )}
+        </section>
+
+        <section className="card card-pad">
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+            <div>
+              <p className="muted" style={{ margin: 0 }}>兑换码</p>
+              <h2 style={{ marginTop: 6 }}>领取套餐</h2>
+            </div>
+            <span className="badge"><Gift size={14} /> Code</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "end", marginTop: 18 }}>
+            <div className="field" style={{ margin: 0 }}>
               <label>兑换码</label>
               <input className="input" value={redeemCode} onChange={(e) => setRedeemCode(e.target.value)} placeholder="输入兑换码" />
             </div>
-            <button className="btn primary" onClick={redeem}>兑换</button>
+            <button className="btn primary" onClick={redeem} disabled={!redeemCode.trim()} type="button"><Gift /> 兑换</button>
           </div>
-          {redeemMsg && <p style={{ marginTop: 8, fontSize: 13 }} className={redeemMsg.includes("成功") ? "muted" : "form-error"}>{redeemMsg}</p>}
+          {redeemMsg && <p style={{ marginTop: 10, fontSize: 13 }} className={redeemMsg.includes("成功") ? "muted" : "form-error"}>{redeemMsg}</p>}
         </section>
-      )}
-      <div className="grid grid-3">
-        {plans.map((plan) => (
-          <section className="card card-pad" key={plan.id}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-              <h2>{plan.name}</h2>
-              {plan.enabled && <span className="badge green"><Check size={14} /> 可用</span>}
-            </div>
-            <p className="metric-value">{plan.type === "count_based" ? "按次数" : "按 Token"}</p>
-            <p className="muted">{formatQuota(plan.token_quota)}</p>
-            <button
-              className={`btn ${plan.enabled ? "primary" : ""}`}
-              style={{ width: "100%", marginTop: 12 }}
-              type="button"
-              disabled={!plan.enabled || subscribing === plan.id}
-              onClick={() => subscribe(plan.id)}
-            >
-              {subscribing === plan.id ? "订阅中…" : plan.enabled ? "选择套餐" : "暂不可用"}
-            </button>
-          </section>
-        ))}
-        {plans.length === 0 && !loading && (
-          <section className="card card-pad">
-            <p className="muted" style={{ textAlign: "center" }}>{loading ? "加载中…" : "暂无可用套餐"}</p>
-          </section>
-        )}
       </div>
-      <section className="card card-pad" style={{ marginTop: 16 }}>
-        <h2>额度使用</h2>
-        <div className="progress"><span style={{ width: `${usedPercent}%` }} /></div>
-        <p className="muted" style={{ margin: "10px 0 0" }}>余额 {formatQuota(balance)}</p>
-      </section>
+
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <section className="card card-pad">
+          <h2>套餐额度</h2>
+          {subscription ? (
+            <>
+              <p className="metric-value" style={{ marginBottom: 0 }}>{quotaText(subscription, "remaining_quota")}</p>
+              <div className="progress" style={{ marginTop: 12 }}>
+                <span style={{ width: `${percent(subscription.used_quota, subscription.token_quota)}%` }} />
+              </div>
+              <p className="muted" style={{ margin: "8px 0 0" }}>
+                已用 {quotaText(subscription, "used_quota")} / 总额 {quotaText(subscription, "token_quota")}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="metric-value" style={{ marginBottom: 0 }}>未开通</p>
+              <p className="muted" style={{ margin: "8px 0 0" }}>没有有效套餐时，API Key 不能调用模型接口。</p>
+            </>
+          )}
+        </section>
+        <section className="card card-pad">
+          <h2>窗口限制</h2>
+          {subscription?.windows?.length ? (
+            <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+              {subscription.windows.map((item) => (
+                <div key={item.type}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13 }}>
+                    <strong>{windowLabel(item.type)}</strong>
+                    <span className="muted">剩余 {formatQuota(item.remaining, subscription.plan_type)} / {formatQuota(item.limit, subscription.plan_type)}</span>
+                  </div>
+                  <div className="progress" style={{ marginTop: 8 }}>
+                    <span style={{ width: `${percent(item.used, item.limit)}%` }} />
+                  </div>
+                  <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>重置 {new Date(item.reset_at).toLocaleString()}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 0" }}>
+              <ShieldCheck size={16} />
+              {subscription ? "当前套餐没有配置小时、周、月使用窗口。" : "管理员分配或兑换码兑换后，套餐会自动绑定到你的 API Key。"}
+            </p>
+          )}
+        </section>
+      </div>
     </AppShell>
   );
 }

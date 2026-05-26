@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -173,6 +174,7 @@ type authenticatedToken struct {
 	token     db.Token
 	policy    db.AccessPolicy
 	hasPolicy bool
+	planType  string
 }
 
 type relayRequest struct {
@@ -240,6 +242,10 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 	token := authInfo.token
 	tokenID := token.ID.String()
+	estimatedTokens := req.MaxTokens
+	if estimatedTokens <= 0 {
+		estimatedTokens = 1000
+	}
 	limitKey := tokenID
 	if authInfo.hasPolicy && authInfo.policy.MaxConcurrency > 0 {
 		limitKey = authInfo.policy.ID.String()
@@ -255,13 +261,6 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 	defer g.limiter.Release(limitKey)
 
-	if authInfo.hasPolicy {
-		if err := g.checkPolicyWindows(authInfo.policy, token.ID); err != nil {
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusTooManyRequests)
-			return
-		}
-	}
-
 	route, releaseNode, ok := g.pickRoute(req.Model)
 	if !ok {
 		g.fallback(ctx)
@@ -274,24 +273,36 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		}
 	}()
 
-	estimatedTokens := req.MaxTokens
-	if estimatedTokens <= 0 {
-		estimatedTokens = 1000
-	}
+	prechargedTokenPlanID := uuid.Nil
 	if g.billing != nil {
 		if err := g.billing.CheckLimit(tokenID); err != nil {
-			ctx.Error(`{"error":"rate limit exceeded"}`, fasthttp.StatusTooManyRequests)
+			status := fasthttp.StatusTooManyRequests
+			if errors.Is(err, relay.ErrNoActiveSubscription) {
+				status = fasthttp.StatusPaymentRequired
+			}
+			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
 			return
 		}
 		if token.UserID != "" {
-			if err := g.billing.CheckUserBalance(token.UserID, tokenID); err != nil {
+			if err := g.billing.CheckUserPlan(token.UserID, tokenID); err != nil {
 				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusPaymentRequired)
 				return
 			}
 		}
-		if _, err := g.billing.PreConsume(tokenID, req.Model, estimatedTokens); err != nil {
-			logger.Warnf("gateway.billing", "pre-consume failed", logger.F("token_id", tokenID), logger.Err(err))
+		tokenPlanID, err := g.billing.PreConsume(tokenID, req.Model, estimatedTokens)
+		if err != nil {
+			status := fasthttp.StatusTooManyRequests
+			if errors.Is(err, relay.ErrNoActiveSubscription) {
+				status = fasthttp.StatusPaymentRequired
+			}
+			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			return
 		}
+		if tokenPlanID == uuid.Nil {
+			ctx.Error(`{"error":"no active subscription"}`, fasthttp.StatusPaymentRequired)
+			return
+		}
+		prechargedTokenPlanID = tokenPlanID
 	}
 	precharged := g.billing != nil
 
@@ -302,7 +313,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	if err := g.buildRequest(ctx, upReq, node.BaseURL); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
-			go g.billing.Refund(tokenID, estimatedTokens)
+			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
 		}
 		ctx.Error(`{"error":"gateway build request failed"}`, fasthttp.StatusBadGateway)
 		return
@@ -316,6 +327,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		Model:           req.Model,
 		EstimatedTokens: estimatedTokens,
 		Precharged:      precharged,
+		TokenPlanID:     prechargedTokenPlanID.String(),
 		ClientIP:        g.clientIP(ctx),
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
@@ -323,7 +335,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}, time.Now()); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
-			go g.billing.Refund(tokenID, estimatedTokens)
+			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
 		}
 		ctx.Error(`{"error":"gateway signing failed"}`, fasthttp.StatusInternalServerError)
 		return
@@ -336,7 +348,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		releaseNode(true)
 		releaseNode = nil
 		if precharged {
-			go g.billing.Refund(tokenID, estimatedTokens)
+			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
 		}
 		// Fallback to local relayer when external relay fails
 		if g.fallback != nil {
@@ -461,12 +473,12 @@ func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticated
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	policy, hasPolicy, err := g.loadPolicy(token)
+	policy, hasPolicy, planType, err := g.loadPolicy(token)
 	if err != nil {
 		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy}, true
+	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy, planType: planType}, true
 }
 
 func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDiscoveryItem, error) {
@@ -528,7 +540,7 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	policy, hasPolicy, err := g.loadPolicy(token)
+	policy, hasPolicy, planType, err := g.loadPolicy(token)
 	if err != nil {
 		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
@@ -546,7 +558,7 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy}, true
+	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy, planType: planType}, true
 }
 
 func (g *Gateway) getToken(key string) (db.Token, error) {

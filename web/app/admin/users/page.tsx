@@ -6,7 +6,7 @@ export default function UsersPage() {
     <AppShell title="用户管理" variant="admin">
       <PageHead
         title="用户管理"
-        description="管理用户状态、余额和密码重置。"
+        description="管理用户状态、套餐分配和密码重置。"
       />
       <AdminUserConsole initialUsers={[]} />
     </AppShell>

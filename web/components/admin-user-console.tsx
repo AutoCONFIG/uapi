@@ -10,7 +10,6 @@ type UserRow = {
   id: string;
   email: string;
   status: string;
-  balance: string;
   keys: number;
   joined: string;
 };
@@ -207,7 +206,6 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
               <tr>
                 <th>邮箱</th>
                 <th>状态</th>
-                <th>余额</th>
                 <th>Key 数</th>
                 <th>注册时间</th>
                 <th>操作</th>
@@ -220,7 +218,6 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
                   <tr key={row.email}>
                     <td>{row.email}</td>
                     <td><StatusBadge value={row.status} /></td>
-                    <td>{row.balance}</td>
                     <td>{row.keys}</td>
                     <td>{row.joined}</td>
                     <td>
@@ -255,16 +252,9 @@ function fromApiUser(user: User): UserRow {
     id: user.id,
     email: user.email,
     status: user.status,
-    balance: formatBalance(user.balance),
     keys: 0,
     joined: user.created_at ? new Date(user.created_at).toISOString().slice(0, 10) : "-",
   };
-}
-
-function formatBalance(value: number) {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
 }
 
 function isUUID(value: string) {

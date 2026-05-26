@@ -33,7 +33,7 @@ Current scale target:
 Gateway is the only configuration authority:
 
 - User API key authentication.
-- Plan-bound access policy checks: allowed models, hourly/weekly/monthly request limits, max concurrency.
+- Plan-bound access policy checks: allowed models, hourly/weekly/monthly usage windows, max concurrency.
 - Channel and account management.
 - Relay node management.
 - Node-to-channel bindings and weights. Runtime scheduling expands each bound
@@ -165,10 +165,15 @@ the shared encryption key. `config.relay.yaml` is intentionally ignored by git.
 Access Policy first version includes only:
 
 - Allowed models.
-- Hourly request limit.
-- Weekly request limit.
-- Monthly request limit.
+- Hourly usage window.
+- Weekly usage window.
+- Monthly usage window.
 - Max concurrency (per plan policy when the active subscription plan has a policy; otherwise per-token).
+
+Window semantics depend on the plan type: `count_based` increments each window by
+1 per accepted request, while `token_based` increments by the pre-consumed token
+estimate and is corrected on settlement/refund. A configured window value of `0`
+means zero available quota, not unlimited.
 
 It intentionally does not limit:
 

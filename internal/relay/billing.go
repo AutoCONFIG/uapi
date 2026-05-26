@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
-	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,6 +15,8 @@ import (
 type BillingService struct {
 	db *gorm.DB
 }
+
+var ErrNoActiveSubscription = errors.New("no active subscription")
 
 func NewBillingService(database *gorm.DB) *BillingService {
 	return &BillingService{db: database}
@@ -26,7 +27,7 @@ func (b *BillingService) CheckLimit(tokenID string) error {
 	var tp db.TokenPlan
 	if err := latestActiveTokenPlan(b.db, tokenID).First(&tp).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil // no plan = unlimited
+			return ErrNoActiveSubscription
 		}
 		return err
 	}
@@ -34,7 +35,7 @@ func (b *BillingService) CheckLimit(tokenID string) error {
 	var plan db.Plan
 	if err := b.db.First(&plan, "id = ? AND enabled = true AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil // plan removed = no rate limit
+			return ErrNoActiveSubscription
 		}
 		return err
 	}
@@ -45,54 +46,18 @@ func (b *BillingService) CheckLimit(tokenID string) error {
 	case "token_based":
 		return b.checkTokenLimit(&tp, &plan)
 	}
-	return nil
+	return fmt.Errorf("unsupported plan type: %s", plan.Type)
 }
 
 func (b *BillingService) checkCountLimit(tp *db.TokenPlan, plan *db.Plan) error {
-	limits, err := parseMap(plan.Limits)
-	if err != nil {
-		return fmt.Errorf("parse limits: %w", err)
-	}
-	usage, err := parseMap(tp.WindowUsage)
-	if err != nil {
-		return fmt.Errorf("parse usage: %w", err)
-	}
-	resets, err := parseMap(tp.WindowResetAt)
-	if err != nil {
-		return fmt.Errorf("parse resets: %w", err)
-	}
-	now := time.Now()
-
-	for window, maxCount := range limits {
-		maxCountFloat, ok := toFloat(maxCount)
-		if !ok {
-			continue
-		}
-		maxCountInt := int(maxCountFloat)
-		currentUsage := 0
-		if u, ok := usage[window]; ok {
-			if f, ok := toFloat(u); ok {
-				currentUsage = int(f)
-			}
-		}
-
-		if resetAtStr, hasReset := resets[window]; hasReset {
-			if s, ok := resetAtStr.(string); ok {
-				if resetAt, err := time.Parse(time.RFC3339, s); err == nil && now.After(resetAt) {
-					currentUsage = 0
-				}
-			}
-		}
-
-		if currentUsage >= maxCountInt {
-			return fmt.Errorf("rate limit exceeded for window %s", window)
-		}
+	if tp.UsedQuota >= plan.TokenQuota {
+		return fmt.Errorf("count quota exceeded")
 	}
 	return nil
 }
 
 func (b *BillingService) checkTokenLimit(tp *db.TokenPlan, plan *db.Plan) error {
-	if plan.TokenQuota > 0 && tp.UsedQuota >= plan.TokenQuota {
+	if tp.UsedQuota >= plan.TokenQuota {
 		return fmt.Errorf("token quota exceeded")
 	}
 	return nil
@@ -107,7 +72,7 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 			Scopes(scopeLatestActiveTokenPlan(tokenID)).
 			First(&tp).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return DebitUserBalanceForTokenTx(tx, tokenID, estimatedTokens)
+				return ErrNoActiveSubscription
 			}
 			return err
 		}
@@ -115,7 +80,7 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		var plan db.Plan
 		if err := tx.First(&plan, "id = ? AND enabled = true AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return DebitUserBalanceForTokenTx(tx, tokenID, estimatedTokens)
+				return ErrNoActiveSubscription
 			}
 			return err
 		}
@@ -125,99 +90,38 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		case "token_based":
 			return b.preConsumeTokensTx(tx, &tp, &plan, estimatedTokens)
 		}
-		return nil
+		return fmt.Errorf("unsupported plan type: %s", plan.Type)
 	})
 	return planID, err
 }
 
 func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan) error {
-	usage, err := parseMap(tp.WindowUsage)
-	if err != nil {
-		return fmt.Errorf("parse usage: %w", err)
+	if tp.UsedQuota+1 > plan.TokenQuota {
+		return fmt.Errorf("count quota exceeded")
 	}
-	resets, err := parseMap(tp.WindowResetAt)
-	if err != nil {
-		return fmt.Errorf("parse resets: %w", err)
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, 1, true); err != nil {
+		return err
 	}
-	limits, err := parseMap(plan.Limits)
-	if err != nil {
-		return fmt.Errorf("parse limits: %w", err)
-	}
-	now := time.Now()
-
-	for window, maxCount := range limits {
-		maxCountFloat, ok := toFloat(maxCount)
-		if !ok {
-			continue
-		}
-		maxCountInt := int(maxCountFloat)
-
-		// Reset window if expired
-		if resetAtStr, hasReset := resets[window]; hasReset {
-			if s, ok := resetAtStr.(string); ok {
-				if resetAt, err := time.Parse(time.RFC3339, s); err == nil && now.After(resetAt) {
-					usage[window] = float64(0)
-				}
-			}
-		}
-		if _, ok := usage[window]; !ok {
-			usage[window] = float64(0)
-		}
-
-		// Re-check limit inside transaction with row lock held
-		if f, ok := toFloat(usage[window]); ok && int(f) >= maxCountInt {
-			return fmt.Errorf("rate limit exceeded for window %s", window)
-		}
-
-		if f, ok := toFloat(usage[window]); ok {
-			usage[window] = f + 1
-		} else {
-			usage[window] = float64(1)
-		}
-
-		if _, hasReset := resets[window]; !hasReset {
-			duration := parseWindowDuration(window)
-			resets[window] = now.Add(duration).Format(time.RFC3339)
-		}
-	}
-
-	usageJSON, err := json.Marshal(usage)
-	if err != nil {
-		return fmt.Errorf("marshal usage: %w", err)
-	}
-	resetsJSON, err := json.Marshal(resets)
-	if err != nil {
-		return fmt.Errorf("marshal resets: %w", err)
-	}
-	return tx.Model(tp).Updates(map[string]interface{}{
-		"window_usage":    string(usageJSON),
-		"window_reset_at": string(resetsJSON),
-	}).Error
+	return tx.Model(tp).Update("used_quota", gorm.Expr("used_quota + 1")).Error
 }
 
 func (b *BillingService) preConsumeTokensTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan, amount int) error {
-	if plan.TokenQuota > 0 && tp.UsedQuota+int64(amount) > plan.TokenQuota {
+	if amount <= 0 {
+		amount = 1
+	}
+	if tp.UsedQuota+int64(amount) > plan.TokenQuota {
 		return fmt.Errorf("token quota exceeded")
 	}
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, amount, true); err != nil {
+		return err
+	}
 	return tx.Model(tp).Update("used_quota", gorm.Expr("used_quota + ?", amount)).Error
-}
-
-// RefundAndSettle atomically refunds the pre-consumed estimate and settles actual usage.
-// This prevents the race where Refund runs after Settle, undoing legitimate billing.
-func (b *BillingService) RefundAndSettle(tokenID string, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
-	return b.db.Transaction(func(tx *gorm.DB) error {
-		return RefundAndSettleTx(tx, tokenID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
-	})
 }
 
 func (b *BillingService) DBTransactionRefundAndSettle(tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
 		return RefundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
 	})
-}
-
-func RefundAndSettleTx(tx *gorm.DB, tokenID string, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
-	return RefundAndSettleTxForPlan(tx, tokenID, uuid.Nil, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
 }
 
 func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
@@ -228,16 +132,7 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	const cacheReadRatio = 0.1
 
 	if tokenPlanID == uuid.Nil {
-		actual := promptTokens + completionTokens +
-			int(float64(cacheCreationTokens)*cacheCreationRatio) +
-			int(float64(cacheReadTokens)*cacheReadRatio)
-		if actual <= 0 {
-			actual = estTokens
-		}
-		if err := CreditUserBalanceForTokenTx(tx, tokenID, estTokens); err != nil {
-			return err
-		}
-		return DebitUserBalanceForTokenTx(tx, tokenID, actual)
+		return ErrNoActiveSubscription
 	}
 	var tp db.TokenPlan
 	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
@@ -257,6 +152,7 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	if err := tx.First(&plan, planQuery, tp.PlanID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Plan deleted mid-request — best-effort refund of estimate
+			_ = applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, -estTokens, false)
 			_ = tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error
 			return nil
 		}
@@ -289,68 +185,13 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	cacheEquivalent := int(float64(cacheCreationTokens)*cacheCreationRatio) +
 		int(float64(cacheReadTokens)*cacheReadRatio)
 	actual := int(float64(promptTokens+cacheEquivalent) + float64(completionTokens)*ratio)
-	if actual > 0 {
-		return tx.Model(&tp).Update("used_quota", gorm.Expr("used_quota + ?", actual)).Error
+	if actual <= 0 {
+		actual = estTokens
 	}
-	return nil
-}
-
-func DebitUserBalanceForTokenTx(tx *gorm.DB, tokenID string, amount int) error {
-	if amount <= 0 {
-		return nil
-	}
-	var token db.Token
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND enabled = true AND deleted_at IS NULL", tokenID).First(&token).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, actual-estTokens, false); err != nil {
 		return err
 	}
-	if token.Unlimited || token.UserID == "" {
-		return nil
-	}
-	// Atomic check-and-update: only deduct if balance is sufficient
-	result := tx.Model(&db.User{}).
-		Where("id = ? AND status = 'active' AND deleted_at IS NULL AND balance >= ?", token.UserID, amount).
-		Update("balance", gorm.Expr("balance - ?", amount))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("insufficient user balance")
-	}
-	return nil
-}
-
-func CreditUserBalanceForTokenTx(tx *gorm.DB, tokenID string, amount int) error {
-	if amount <= 0 {
-		return nil
-	}
-	var token db.Token
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND deleted_at IS NULL", tokenID).First(&token).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-	if token.Unlimited || token.UserID == "" {
-		return nil
-	}
-	var user db.User
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND status = 'active' AND deleted_at IS NULL", token.UserID).First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-	return tx.Model(&user).Update("balance", gorm.Expr("balance + ?", amount)).Error
-}
-
-// Refund returns pre-consumed tokens on failure or after actual usage is settled.
-func (b *BillingService) Refund(tokenID string, amount int) error {
-	return b.db.Transaction(func(tx *gorm.DB) error {
-		return RefundTx(tx, tokenID, amount)
-	})
+	return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota + ?)", actual-estTokens)).Error
 }
 
 func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UUID, amount int) error {
@@ -359,13 +200,9 @@ func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UU
 	})
 }
 
-func RefundTx(tx *gorm.DB, tokenID string, amount int) error {
-	return RefundTxForPlan(tx, tokenID, uuid.Nil, amount)
-}
-
 func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount int) error {
 	if tokenPlanID == uuid.Nil {
-		return CreditUserBalanceForTokenTx(tx, tokenID, amount)
+		return ErrNoActiveSubscription
 	}
 	var tp db.TokenPlan
 	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
@@ -393,8 +230,88 @@ func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount 
 	case "count_based":
 		return nil
 	default:
+		if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, -amount, false); err != nil {
+			return err
+		}
 		return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
 	}
+}
+
+func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, tokenID uuid.UUID, delta int, enforce bool) error {
+	if policyID == nil || *policyID == uuid.Nil || delta == 0 {
+		return nil
+	}
+	var policy db.AccessPolicy
+	if err := tx.Where("id = ? AND enabled = true AND deleted_at IS NULL", *policyID).First(&policy).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNoActiveSubscription
+		}
+		return err
+	}
+	now := time.Now().UTC()
+	windows := []struct {
+		name  string
+		limit int
+		start time.Time
+	}{
+		{name: "hour", limit: policy.HourlyLimit, start: fixedHour(now)},
+		{name: "week", limit: policy.WeeklyLimit, start: fixedWeek(now)},
+		{name: "month", limit: policy.MonthlyLimit, start: fixedMonth(now)},
+	}
+	for _, window := range windows {
+		var usage db.PolicyUsageWindow
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", policy.ID, tokenID, window.name, window.start).
+			First(&usage).Error
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			usage = db.PolicyUsageWindow{
+				ID:          uuid.New(),
+				PolicyID:    policy.ID,
+				TokenID:     tokenID,
+				WindowType:  window.name,
+				WindowStart: window.start,
+				UsedCount:   0,
+			}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&usage).Error; err != nil {
+				return err
+			}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", policy.ID, tokenID, window.name, window.start).
+				First(&usage).Error; err != nil {
+				return err
+			}
+		}
+		next := usage.UsedCount + delta
+		if enforce && delta > 0 && next > window.limit {
+			return fmt.Errorf("%s usage limit exceeded", window.name)
+		}
+		if next < 0 {
+			next = 0
+		}
+		if err := tx.Model(&usage).Update("used_count", next).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fixedHour(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+}
+
+func fixedWeek(now time.Time) time.Time {
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
+}
+
+func fixedMonth(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 func latestActiveTokenPlan(tx *gorm.DB, tokenID string) *gorm.DB {
@@ -410,9 +327,8 @@ func scopeLatestActiveTokenPlan(tokenID string) func(*gorm.DB) *gorm.DB {
 	}
 }
 
-// CheckUserBalance verifies the user has a positive balance. Returns error if insufficient.
-// Users with an active plan on the specific token being used skip the balance check since plans have their own quota enforcement.
-func (b *BillingService) CheckUserBalance(userID string, tokenID string) error {
+// CheckUserPlan verifies the user is active and the token has an active plan.
+func (b *BillingService) CheckUserPlan(userID string, tokenID string) error {
 	var user db.User
 	if err := b.db.Where("id = ? AND status = 'active' AND deleted_at IS NULL", userID).First(&user).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -420,18 +336,12 @@ func (b *BillingService) CheckUserBalance(userID string, tokenID string) error {
 		}
 		return err
 	}
-
-	// If the specific token has an active plan, skip balance check — plan quotas are enforced separately
 	var tp db.TokenPlan
 	if err := latestActiveTokenPlan(b.db.Model(&db.TokenPlan{}), tokenID).First(&tp).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("check plan: %w", err)
 	}
-	if tp.ID != uuid.Nil {
-		return nil
-	}
-
-	if user.Balance <= 0 {
-		return fmt.Errorf("insufficient user balance")
+	if tp.ID == uuid.Nil {
+		return ErrNoActiveSubscription
 	}
 	return nil
 }
@@ -459,29 +369,5 @@ func toFloat(v interface{}) (float64, bool) {
 		return float64(n), true
 	default:
 		return 0, false
-	}
-}
-
-func parseWindowDuration(window string) time.Duration {
-	if len(window) < 2 {
-		return time.Hour
-	}
-	var val int
-	var unit string
-	fmt.Sscanf(window, "%d%s", &val, &unit)
-	switch unit {
-	case "h":
-		return time.Duration(val) * time.Hour
-	case "d":
-		return time.Duration(val) * 24 * time.Hour
-	case "w":
-		return time.Duration(val) * 7 * 24 * time.Hour
-	case "m":
-		return time.Duration(val) * time.Minute
-	default:
-		if unit == "" || val <= 0 {
-			logger.Warnf("relay.billing", "invalid window duration defaulting to 1h", logger.F("window", window))
-		}
-		return time.Hour
 	}
 }

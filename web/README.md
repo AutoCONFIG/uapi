@@ -18,7 +18,7 @@ See `docs/current/frontend.md` for current product and backend alignment notes.
 The client currently follows the backend routes implemented in `internal/server/server.go`:
 
 - User auth: `/api/user/register`, `/api/user/login`, `/api/user/refresh`
-- User console: `/api/user/profile`, `/api/user/keys`, `/api/user/usage`, `/api/user/plans`
+- User console: `/api/user/profile`, `/api/user/keys`, `/api/user/usage`, `/api/user/subscription`, `/api/user/redeem`
 - Admin: `/api/admin/*`
 - Relay traffic: `/v1/*`
 

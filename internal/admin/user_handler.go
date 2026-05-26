@@ -42,7 +42,7 @@ func (h *Handler) ListUsers(ctx *fasthttp.RequestCtx) {
 	})
 }
 
-// UpdateUser updates a user's status and/or balance.
+// UpdateUser updates a user's status, password, and/or plan assignment.
 func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 	if string(ctx.Method()) != "PUT" {
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
@@ -79,9 +79,6 @@ func (h *Handler) UpdateUser(ctx *fasthttp.RequestCtx) {
 	updates := map[string]interface{}{}
 	if req.Status != nil {
 		updates["status"] = *req.Status
-	}
-	if req.Balance != nil {
-		updates["balance"] = *req.Balance
 	}
 	if req.NewPassword != nil {
 		hash, err := bcrypt.GenerateFromPassword([]byte(*req.NewPassword), bcrypt.DefaultCost)
@@ -185,12 +182,10 @@ func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, pla
 		}
 		for _, token := range tokens {
 			tokenPlan := db.TokenPlan{
-				TokenID:       token.ID,
-				PlanID:        plan.ID,
-				WindowUsage:   "{}",
-				WindowResetAt: "{}",
-				StartsAt:      startsAt,
-				ExpiresAt:     expiresAt,
+				TokenID:   token.ID,
+				PlanID:    plan.ID,
+				StartsAt:  startsAt,
+				ExpiresAt: expiresAt,
 			}
 			if err := tx.Create(&tokenPlan).Error; err != nil {
 				return err

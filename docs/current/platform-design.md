@@ -12,14 +12,14 @@ status: current-baseline
 
 ## 1. 项目定位
 
-UAPI 是一个**面向公众的高性能 AI API 中转平台**。用户注册账号后购买套餐，获取 API Key 调用 OpenAI/Anthropic/Gemini 等上游服务。管理员管理渠道、上游凭据、套餐、日志和必要控制面。
+UAPI 是一个**面向公众的高性能 AI API 中转平台**。用户注册账号后通过管理员分配或兑换码领取套餐，获取 API Key 调用 OpenAI/Anthropic/Gemini 等上游服务。管理员管理渠道、上游凭据、套餐、日志和必要控制面。
 
 核心能力：
 - 透明代理 + 格式转换（OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API 四种格式互转，客户端可用任一原生格式接入）
 - 渠道管理（分组、上游凭据、账号元数据、加权轮询、故障冷却、OAuth 自动刷新）
 - OAuth 渠道（Codex、Gemini Code、Claude Code、Antigravity）按本地官方客户端源码对齐；具体源文件见 `docs/current/oauth-channels.md`
 - 双模式计费（次数窗口限额 + Token 额度扣费）
-- 用户注册/登录/套餐购买/API Key 管理
+- 用户注册/登录/套餐领取/API Key 管理
 - 管理员后台（渠道/账号凭据、节点、用户、套餐、日志、系统设置）
 - 本地模型目录（渠道模型配置、手动上游同步、模型重定向；下游模型列表不实时访问上游）
 - 结构化运行日志（全局分级 stdout JSON）和可查询调用日志
@@ -109,7 +109,7 @@ web/
 │   ├── overview/page.tsx          # 总览：用量 + 快速开始代码
 │   ├── keys/page.tsx              # API 密钥管理
 │   ├── usage/page.tsx             # 用量统计（图表 + 明细）
-│   ├── plans/page.tsx             # 套餐浏览/购买
+│   ├── plans/page.tsx             # 当前套餐 + 兑换码领取
 │   ├── settings/page.tsx          # 个人设置（密码/邮箱）
 │   └── admin/                     # 管理员后台
 │       ├── page.tsx               # 管理员入口
@@ -143,7 +143,7 @@ web/
                 ├── 总览：用量概览 + API 快速开始代码块
                 ├── API 密钥：默认一个 Key，创建后可再次查看/复制
                 ├── 用量：图表 + 请求明细表
-                ├── 套餐：当前套餐状态 + 可购套餐 + 兑换码入口
+                ├── 套餐：当前套餐状态 + 兑换码入口
                 └── 设置：修改密码 / 邮箱
 ```
 
@@ -180,9 +180,7 @@ DELETE /api/user/keys/:keyID          # 删除 API 密钥
 GET    /api/user/usage                # 用量统计（汇总）
 GET    /api/user/usage/logs           # 用量明细（分页）
 
-GET    /api/user/plans                # 套餐列表
-GET    /api/user/subscription         # 我的当前套餐
-POST   /api/user/subscription/:planID # 购买套餐
+GET    /api/user/subscription         # 我的当前套餐、总额度、小时/周/月窗口剩余
 POST   /api/user/redeem               # 兑换充值码
 
 # ── 管理员 API（admin JWT 认证） ──
@@ -321,7 +319,6 @@ type User struct {
     Username     string `gorm:"size:100;uniqueIndex;not null"`
     PasswordHash string `gorm:"size:255;not null"`
     Status       string `gorm:"size:20;default:active"`  // active, disabled
-    Balance      int64  `gorm:"default:0"`               // 余额（token 单位）
 }
 ```
 
@@ -470,11 +467,12 @@ Gateway 不可达时 Relay 会保留内存中的新凭证并记录 warning，但
 保持现有 PreConsume → Settle + Refund 模式，新增用户维度：
 
 - **Token 绑定用户**：每个 API Key 关联一个 User
-- **用户余额**：当前运行时在没有 active token plan 时只检查用户余额为正；
-  token_based 套餐实际扣减 `token_plans.used_quota`，不从 `users.balance`
-  扣费。后续接入支付/余额结算时需要再补用户余额扣减策略。
-- **充值码兑换**：充值码增加用户余额（支付接口后期接入）
-- **管理员调整**：管理员可直接调整用户余额
+- **套餐必需**：用户 API Key 必须存在有效 `token_plans` 绑定；没有 active plan 时模型接口拒绝调用。
+- **套餐计费**：`count_based` 套餐按请求数递增总额和小时/周/月窗口，`token_based` 套餐按 Token 数递增总额和窗口；调用权限和额度都以套餐为准。
+- **零值语义**：套餐总额或窗口配置为 `0` 时表示可用额度为 0，不表示不限制。
+- **套餐展示**：用户侧 `/api/user/subscription` 返回当前套餐总额、已用、剩余，以及套餐策略的小时/周/月窗口剩余额度和重置时间。
+- **兑换码领取**：兑换码绑定套餐，兑换成功后按套餐有效天数创建 `token_plans`。
+- **管理员分配**：管理员可以直接为用户分配或取消套餐。
 
 ## 8. 部署架构
 

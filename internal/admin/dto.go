@@ -136,7 +136,6 @@ type CreatePlanRequest struct {
 	Name            string     `json:"name"`
 	Type            string     `json:"type"`
 	PolicyID        *uuid.UUID `json:"policy_id"`
-	Limits          string     `json:"limits"`
 	ModelRatios     string     `json:"model_ratios"`
 	CompletionRatio string     `json:"completion_ratio"`
 	TokenQuota      int64      `json:"token_quota"`
@@ -149,7 +148,6 @@ type UpdatePlanRequest struct {
 	Name            *string    `json:"name,omitempty"`
 	Type            *string    `json:"type,omitempty"`
 	PolicyID        *uuid.UUID `json:"policy_id,omitempty"`
-	Limits          *string    `json:"limits,omitempty"`
 	ModelRatios     *string    `json:"model_ratios,omitempty"`
 	CompletionRatio *string    `json:"completion_ratio,omitempty"`
 	TokenQuota      *int64     `json:"token_quota,omitempty"`
@@ -162,7 +160,6 @@ type UpdatePlanRequest struct {
 // UpdateUserRequest is the request DTO for updating a user.
 type UpdateUserRequest struct {
 	Status        *string    `json:"status,omitempty"`
-	Balance       *int64     `json:"balance,omitempty"`
 	NewPassword   *string    `json:"new_password,omitempty"`
 	PlanID        *uuid.UUID `json:"plan_id,omitempty"`
 	PlanStartsAt  *time.Time `json:"plan_starts_at,omitempty"`

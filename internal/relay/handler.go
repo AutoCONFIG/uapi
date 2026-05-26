@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -291,12 +292,16 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}()
 	if r.billing != nil && !gatewayAuthenticated {
 		if err := r.billing.CheckLimit(token.ID.String()); err != nil {
-			ctx.Error(`{"error":"rate limit exceeded"}`, 429)
+			status := fasthttp.StatusTooManyRequests
+			if errors.Is(err, ErrNoActiveSubscription) {
+				status = fasthttp.StatusPaymentRequired
+			}
+			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
 			return
 		}
-		// Check user balance if token is linked to a user
+		// Check user status and require an active plan for user-linked tokens.
 		if token.UserID != "" {
-			if err := r.billing.CheckUserBalance(token.UserID, token.ID.String()); err != nil {
+			if err := r.billing.CheckUserPlan(token.UserID, token.ID.String()); err != nil {
 				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, 402)
 				return
 			}
@@ -386,7 +391,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		planID, err := r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens)
 		if err != nil {
 			logger.Warnf("relay.billing", "pre-consume failed", logger.F("token_id", token.ID.String()), logger.Err(err))
-			ctx.Error(`{"error":"pre-consume failed"}`, fasthttp.StatusTooManyRequests)
+			status := fasthttp.StatusTooManyRequests
+			if errors.Is(err, ErrNoActiveSubscription) {
+				status = fasthttp.StatusPaymentRequired
+			}
+			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
 			return
 		}
 		tokenPlanID = planID

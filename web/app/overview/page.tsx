@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Copy } from "lucide-react";
 import { AppShell, MetricCard, PageHead } from "@/components/shell";
 import { publicApi, userApi } from "@/lib/api";
-import type { ApiKey, Profile, PublicSettings, UsageSummary } from "@/types/api";
+import type { ApiKey, PublicSettings, Subscription, UsageSummary } from "@/types/api";
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + "B";
@@ -13,15 +13,9 @@ function formatNumber(n: number): string {
   return String(n);
 }
 
-function formatQuota(quota: number): string {
-  if (quota >= 1_000_000) return `${(quota / 1_000_000).toFixed(1)}M`;
-  if (quota >= 1_000) return `${(quota / 1_000).toFixed(1)}K`;
-  return String(quota);
-}
-
 export default function OverviewPage() {
-  const [profile, setProfile] = useState<Profile | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [loading, setLoading] = useState(true);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [publicSettings, setPublicSettings] = useState<PublicSettings | null>(null);
@@ -32,20 +26,19 @@ export default function OverviewPage() {
     if (!token) { setLoading(false); return; }
     setOrigin(window.location.origin);
     Promise.all([
-      userApi.profile(token).catch(() => null),
       userApi.usage(token).catch(() => null),
       userApi.keys(token).catch(() => []),
+      userApi.subscription(token).catch(() => null),
       publicApi.settings().catch(() => null),
-    ]).then(([p, u, k, settings]) => {
-      setProfile(p);
+    ]).then(([u, k, sub, settings]) => {
       setUsage(u);
       setKeys(k);
+      setSubscription(sub);
       setPublicSettings(settings);
       setLoading(false);
     });
   }, []);
 
-  const balance = profile?.balance ?? 0;
   const successRate = usage ? (usage.total_requests > 0 ? ((usage.total_requests - usage.failed_requests) / usage.total_requests * 100).toFixed(1) : "0") : "—";
   const activeKey = keys.find((item) => item.enabled) ?? keys[0];
   const endpoint = publicSettings?.public_base_url || origin || "http://localhost";
@@ -83,10 +76,10 @@ export default function OverviewPage() {
       </section>
 
       <div className="grid grid-4" style={{ marginTop: 16 }}>
-        <MetricCard label="可用余额" value={formatNumber(balance)} foot="Token 余额" tone="green" />
+        <MetricCard label="当前套餐" value={subscription?.plan_name ?? "未开通"} foot={subscription ? "已生效" : "需兑换或管理员分配"} tone={subscription ? "green" : "primary"} />
         <MetricCard label="总请求" value={usage ? formatNumber(usage.total_requests) : "—"} foot="累计" tone="primary" />
         <MetricCard label="成功率" value={`${successRate}%`} foot={usage ? `失败 ${usage.failed_requests}` : ""} tone="green" />
-        <MetricCard label="总 Token" value={usage ? formatNumber(usage.total_tokens) : "—"} foot={`${formatQuota(balance)} 余额`} />
+        <MetricCard label="总 Token" value={usage ? formatNumber(usage.total_tokens) : "—"} foot="累计用量" />
       </div>
 
       {topModels.length > 0 && (

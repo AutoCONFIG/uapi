@@ -45,7 +45,6 @@ function policyBody(draft: PolicyDraft) {
 }
 
 function formatQuota(value: number) {
-  if (!value) return "不限制";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
@@ -107,7 +106,6 @@ export default function AdminPlansPage() {
         policy_id: createdPolicy.id,
         token_quota: draft.token_quota,
         duration_days: draft.duration_days,
-        limits: "{}",
         model_ratios: "{}",
         completion_ratio: "{}",
         enabled: draft.enabled,
