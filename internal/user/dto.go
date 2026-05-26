@@ -105,16 +105,19 @@ type UsageLogsResponse struct {
 }
 
 type SubscriptionResponse struct {
-	PlanID         string               `json:"plan_id"`
-	PlanName       string               `json:"plan_name"`
-	PlanType       string               `json:"plan_type"`
-	TokenQuota     int64                `json:"token_quota"`
-	UsedQuota      int64                `json:"used_quota"`
-	RemainingQuota int64                `json:"remaining_quota"`
-	Windows        []SubscriptionWindow `json:"windows"`
-	StartsAt       string               `json:"starts_at"`
-	ExpiresAt      string               `json:"expires_at"`
-	Status         string               `json:"status"`
+	PlanID          string               `json:"plan_id"`
+	PlanName        string               `json:"plan_name"`
+	PlanType        string               `json:"plan_type"`
+	CountQuota      int64                `json:"count_quota"`
+	TokenQuota      int64                `json:"token_quota"`
+	UsedCount       int64                `json:"used_count"`
+	UsedTokens      int64                `json:"used_tokens"`
+	RemainingCount  int64                `json:"remaining_count"`
+	RemainingTokens int64                `json:"remaining_tokens"`
+	Windows         []SubscriptionWindow `json:"windows"`
+	StartsAt        string               `json:"starts_at"`
+	ExpiresAt       string               `json:"expires_at"`
+	Status          string               `json:"status"`
 }
 
 type SubscriptionWindow struct {

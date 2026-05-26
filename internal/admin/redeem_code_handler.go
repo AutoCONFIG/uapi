@@ -75,7 +75,7 @@ func (h *Handler) createRedeemCode(ctx *fasthttp.RequestCtx) {
 	if code == "" {
 		code = randomRedeemCode()
 	}
-	item := db.RedeemCode{Code: code, PlanID: req.PlanID, Value: plan.TokenQuota, MaxUses: maxUses, UsedCount: 0, Status: "active"}
+	item := db.RedeemCode{Code: code, PlanID: req.PlanID, MaxUses: maxUses, UsedCount: 0, Status: "active"}
 	item.ID = uuid.New()
 	if err := h.db.Create(&item).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")

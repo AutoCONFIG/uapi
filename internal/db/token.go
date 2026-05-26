@@ -14,7 +14,6 @@ type Token struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	Models      string     `gorm:"type:text" json:"models"`
 	Permissions string     `gorm:"type:text" json:"permissions"`
-	Unlimited   bool       `gorm:"default:false" json:"unlimited"`
 }
 
 func (Token) TableName() string { return "tokens" }

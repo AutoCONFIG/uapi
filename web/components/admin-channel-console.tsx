@@ -842,8 +842,10 @@ export function AdminChannelConsole() {
                     <input className="input" value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} placeholder={`${selected.type}-key-01`} />
                     <input className="input" value={apiKeyBaseURL} onChange={(e) => setApiKeyBaseURL(e.target.value)} placeholder="https://api.example.com" />
                     <input className="input" value={apiKeyPath} onChange={(e) => setApiKeyPath(e.target.value)} placeholder={defaultEndpointPath(selected)} />
-                    <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
-                    <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
+                    <div className="api-key-secret-row">
+                      <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
+                      <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
+                    </div>
                   </div>
                 ) : null}
                 {credNotice && credentialMode !== "oauth" ? <p className="form-success">{credNotice}</p> : null}

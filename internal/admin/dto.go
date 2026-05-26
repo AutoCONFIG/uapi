@@ -138,6 +138,7 @@ type CreatePlanRequest struct {
 	PolicyID        *uuid.UUID `json:"policy_id"`
 	ModelRatios     string     `json:"model_ratios"`
 	CompletionRatio string     `json:"completion_ratio"`
+	CountQuota      int64      `json:"count_quota"`
 	TokenQuota      int64      `json:"token_quota"`
 	Enabled         bool       `json:"enabled"`
 	DurationDays    int        `json:"duration_days"`
@@ -150,6 +151,7 @@ type UpdatePlanRequest struct {
 	PolicyID        *uuid.UUID `json:"policy_id,omitempty"`
 	ModelRatios     *string    `json:"model_ratios,omitempty"`
 	CompletionRatio *string    `json:"completion_ratio,omitempty"`
+	CountQuota      *int64     `json:"count_quota,omitempty"`
 	TokenQuota      *int64     `json:"token_quota,omitempty"`
 	Enabled         *bool      `json:"enabled,omitempty"`
 	DurationDays    *int       `json:"duration_days,omitempty"`

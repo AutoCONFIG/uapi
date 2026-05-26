@@ -356,7 +356,6 @@ type Token struct {
     ExpiresAt   *time.Time
     Models      string     `gorm:"type:text"`
     Permissions string     `gorm:"type:text"`
-    Unlimited   bool       `gorm:"default:false"`
 }
 ```
 
@@ -367,7 +366,6 @@ type RedeemCode struct {
     Base
     Code      string    `gorm:"size:100;uniqueIndex;not null"`
     PlanID    uuid.UUID `gorm:"type:uuid;index"`
-    Value     int64
     UsedBy    *string   `gorm:"size:36;index"`
     UsedAt    *time.Time
     MaxUses   int       `gorm:"default:1"`
@@ -467,7 +465,7 @@ Gateway 不可达时 Relay 会保留内存中的新凭证并记录 warning，但
 保持现有 PreConsume → Settle + Refund 模式，新增用户维度：
 
 - **Token 绑定用户**：每个 API Key 关联一个 User
-- **套餐必需**：用户 API Key 必须存在有效 `token_plans` 绑定；没有 active plan 时模型接口拒绝调用。
+- **套餐必需**：用户账号必须存在有效 `token_plans` 绑定；没有 active plan 时该用户的任意 API Key 都不能调用模型接口。
 - **套餐计费**：`count_based` 套餐按请求数递增总额和小时/周/月窗口，`token_based` 套餐按 Token 数递增总额和窗口；调用权限和额度都以套餐为准。
 - **零值语义**：套餐总额或窗口配置为 `0` 时表示可用额度为 0，不表示不限制。
 - **套餐展示**：用户侧 `/api/user/subscription` 返回当前套餐总额、已用、剩余，以及套餐策略的小时/周/月窗口剩余额度和重置时间。

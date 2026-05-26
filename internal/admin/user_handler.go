@@ -143,8 +143,7 @@ func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, pla
 	now := time.Now()
 	if planID == uuid.Nil {
 		return h.db.Model(&db.TokenPlan{}).
-			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID.String()).
-			Where("token_plans.expires_at > ?", now).
+			Where("user_id = ? AND expires_at > ?", userID.String(), now).
 			Update("expires_at", now).Error
 	}
 	var plan db.Plan
@@ -164,32 +163,18 @@ func (h *Handler) assignUserPlan(ctx *fasthttp.RequestCtx, userID uuid.UUID, pla
 	}
 	return h.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&db.TokenPlan{}).
-			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID.String()).
-			Where("token_plans.expires_at > ?", now).
+			Where("user_id = ? AND expires_at > ?", userID.String(), now).
 			Update("expires_at", now).Error; err != nil {
 			return err
 		}
-		var tokens []db.Token
-		if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID.String()).Find(&tokens).Error; err != nil {
+		tokenPlan := db.TokenPlan{
+			UserID:    userID.String(),
+			PlanID:    plan.ID,
+			StartsAt:  startsAt,
+			ExpiresAt: expiresAt,
+		}
+		if err := tx.Create(&tokenPlan).Error; err != nil {
 			return err
-		}
-		if len(tokens) == 0 {
-			token, err := createDefaultUserTokenTx(tx, userID.String())
-			if err != nil {
-				return err
-			}
-			tokens = []db.Token{token}
-		}
-		for _, token := range tokens {
-			tokenPlan := db.TokenPlan{
-				TokenID:   token.ID,
-				PlanID:    plan.ID,
-				StartsAt:  startsAt,
-				ExpiresAt: expiresAt,
-			}
-			if err := tx.Create(&tokenPlan).Error; err != nil {
-				return err
-			}
 		}
 		return nil
 	})

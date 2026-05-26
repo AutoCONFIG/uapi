@@ -238,7 +238,7 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 		if err != nil {
 			return err
 		}
-		return s.attachActivePlanToNewTokenTx(tx, userID, &token)
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -280,30 +280,6 @@ func createUserTokenTx(tx *gorm.DB, userID string, req *CreateKeyRequest) (db.To
 		return db.Token{}, err
 	}
 	return token, nil
-}
-
-func (s *Service) attachActivePlanToNewTokenTx(tx *gorm.DB, userID string, token *db.Token) error {
-	var existing db.TokenPlan
-	if err := tx.Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
-		Where("token_plans.starts_at <= ? AND token_plans.expires_at > ?", time.Now(), time.Now()).
-		Order("token_plans.created_at DESC").
-		First(&existing).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-
-	var plan db.Plan
-	if err := tx.Where("id = ? AND enabled = ? AND deleted_at IS NULL", existing.PlanID, true).First(&plan).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-
-	tokenPlan := db.TokenPlan{TokenID: token.ID, PlanID: plan.ID, StartsAt: existing.StartsAt, ExpiresAt: existing.ExpiresAt}
-	return tx.Create(&tokenPlan).Error
 }
 
 func (s *Service) DeleteKey(userID, keyID string) error {
@@ -455,8 +431,7 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 
 func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) {
 	var tokenPlan db.TokenPlan
-	if err := s.db.Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
-		Where("token_plans.starts_at <= ? AND token_plans.expires_at > ?", time.Now(), time.Now()).
+	if err := s.db.Where("user_id = ? AND starts_at <= ? AND expires_at > ?", userID, time.Now(), time.Now()).
 		Order("token_plans.created_at DESC").
 		First(&tokenPlan).Error; err != nil {
 		return nil, errors.New("no active subscription")
@@ -467,30 +442,37 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 		return nil, errors.New("plan not found")
 	}
 
-	remainingQuota := plan.TokenQuota - tokenPlan.UsedQuota
-	if remainingQuota < 0 {
-		remainingQuota = 0
+	remainingRequests := plan.CountQuota - tokenPlan.UsedCount
+	if remainingRequests < 0 {
+		remainingRequests = 0
 	}
-	windows, err := s.subscriptionWindows(tokenPlan.TokenID, plan.PolicyID)
+	remainingTokens := plan.TokenQuota - tokenPlan.UsedTokens
+	if remainingTokens < 0 {
+		remainingTokens = 0
+	}
+	windows, err := s.subscriptionWindows(userID, plan.PolicyID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &SubscriptionResponse{
-		PlanID:         tokenPlan.PlanID.String(),
-		PlanName:       plan.Name,
-		PlanType:       plan.Type,
-		TokenQuota:     plan.TokenQuota,
-		UsedQuota:      tokenPlan.UsedQuota,
-		RemainingQuota: remainingQuota,
-		Windows:        windows,
-		StartsAt:       tokenPlan.StartsAt.Format(time.RFC3339),
-		ExpiresAt:      tokenPlan.ExpiresAt.Format(time.RFC3339),
-		Status:         "active",
+		PlanID:          tokenPlan.PlanID.String(),
+		PlanName:        plan.Name,
+		PlanType:        plan.Type,
+		CountQuota:      plan.CountQuota,
+		TokenQuota:      plan.TokenQuota,
+		UsedCount:       tokenPlan.UsedCount,
+		UsedTokens:      tokenPlan.UsedTokens,
+		RemainingCount:  remainingRequests,
+		RemainingTokens: remainingTokens,
+		Windows:         windows,
+		StartsAt:        tokenPlan.StartsAt.Format(time.RFC3339),
+		ExpiresAt:       tokenPlan.ExpiresAt.Format(time.RFC3339),
+		Status:          "active",
 	}, nil
 }
 
-func (s *Service) subscriptionWindows(tokenID uuid.UUID, policyID *uuid.UUID) ([]SubscriptionWindow, error) {
+func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]SubscriptionWindow, error) {
 	if policyID == nil || *policyID == uuid.Nil {
 		return []SubscriptionWindow{}, nil
 	}
@@ -515,7 +497,7 @@ func (s *Service) subscriptionWindows(tokenID uuid.UUID, policyID *uuid.UUID) ([
 	windows := make([]SubscriptionWindow, 0, len(specs))
 	for _, spec := range specs {
 		var usage db.PolicyUsageWindow
-		err := s.db.Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", *policyID, tokenID, spec.name, spec.start).First(&usage).Error
+		err := s.db.Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start = ?", *policyID, userID, spec.name, spec.start).First(&usage).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
@@ -578,33 +560,25 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		currentErr := tx.Table("plans").
 			Select("plans.*").
 			Joins("JOIN token_plans ON token_plans.plan_id = plans.id").
-			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
-			Where("token_plans.starts_at <= ? AND token_plans.expires_at > ?", now, now).
+			Where("token_plans.user_id = ? AND token_plans.starts_at <= ? AND token_plans.expires_at > ?", userID, now, now).
 			Where("plans.enabled = true AND plans.deleted_at IS NULL").
 			Order("token_plans.created_at DESC").
 			First(&currentPlan).Error
 		if currentErr != nil && !errors.Is(currentErr, gorm.ErrRecordNotFound) {
 			return currentErr
 		}
-		if currentErr == nil && plan.TokenQuota <= currentPlan.TokenQuota {
+		if currentErr == nil && planEffectiveQuota(plan) <= planEffectiveQuota(currentPlan) {
 			return errors.New("can only upgrade to a higher quota plan")
 		}
 		if err := tx.Model(&db.TokenPlan{}).
-			Joins("JOIN tokens ON tokens.id = token_plans.token_id AND tokens.user_id = ? AND tokens.deleted_at IS NULL", userID).
-			Where("token_plans.expires_at > ?", now).
+			Where("user_id = ? AND expires_at > ?", userID, now).
 			Update("expires_at", now).Error; err != nil {
 			return err
 		}
-		tokens, err := s.activeTokensOrCreateDefaultTx(tx, userID)
-		if err != nil {
-			return errors.New("failed to find API keys")
-		}
 		startsAt := now
 		expiresAt := startsAt.AddDate(0, 0, plan.DurationDays)
-		for _, t := range tokens {
-			if err := tx.Create(&db.TokenPlan{TokenID: t.ID, PlanID: plan.ID, StartsAt: startsAt, ExpiresAt: expiresAt}).Error; err != nil {
-				return err
-			}
+		if err := tx.Create(&db.TokenPlan{UserID: userID, PlanID: plan.ID, StartsAt: startsAt, ExpiresAt: expiresAt}).Error; err != nil {
+			return err
 		}
 		redeemCode.UsedBy = &userID
 		redeemCode.UsedAt = &now
@@ -615,7 +589,7 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		if err := tx.Save(&redeemCode).Error; err != nil {
 			return err
 		}
-		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, TokenQuota: plan.TokenQuota, UsedQuota: 0, RemainingQuota: plan.TokenQuota, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
+		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, CountQuota: plan.CountQuota, TokenQuota: plan.TokenQuota, UsedCount: 0, UsedTokens: 0, RemainingCount: plan.CountQuota, RemainingTokens: plan.TokenQuota, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
 		return nil
 	})
 	if err != nil {
@@ -624,22 +598,11 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 	return subscription, nil
 }
 
-func (s *Service) activeTokensOrCreateDefaultTx(tx *gorm.DB, userID string) ([]db.Token, error) {
-	var tokens []db.Token
-	if err := tx.Where("user_id = ? AND deleted_at IS NULL", userID).Find(&tokens).Error; err != nil {
-		return nil, err
+func planEffectiveQuota(plan db.Plan) int64 {
+	if plan.Type == "count_based" {
+		return plan.CountQuota
 	}
-	if len(tokens) > 0 {
-		return tokens, nil
-	}
-	if s.maxKeysPerUser <= 0 {
-		return nil, errors.New("maximum number of API keys reached")
-	}
-	token, err := createUserTokenTx(tx, userID, &CreateKeyRequest{Name: "默认密钥"})
-	if err != nil {
-		return nil, err
-	}
-	return []db.Token{token}, nil
+	return plan.TokenQuota
 }
 
 func (s *Service) issueTokenPair(userID, username, passwordHash string) (*LoginResponse, error) {

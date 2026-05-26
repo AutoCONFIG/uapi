@@ -22,10 +22,10 @@ type PolicyUsageWindow struct {
 	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	PolicyID    uuid.UUID `gorm:"type:uuid;index;not null;uniqueIndex:idx_policy_window_token" json:"policy_id"`
-	TokenID     uuid.UUID `gorm:"type:uuid;index;not null;uniqueIndex:idx_policy_window_token" json:"token_id"`
-	WindowType  string    `gorm:"size:20;not null;uniqueIndex:idx_policy_window_token" json:"window_type"`
-	WindowStart time.Time `gorm:"not null;uniqueIndex:idx_policy_window_token" json:"window_start"`
+	PolicyID    uuid.UUID `gorm:"type:uuid;index;not null;uniqueIndex:idx_policy_window_user" json:"policy_id"`
+	UserID      string    `gorm:"size:36;index;not null;uniqueIndex:idx_policy_window_user" json:"user_id"`
+	WindowType  string    `gorm:"size:20;not null;uniqueIndex:idx_policy_window_user" json:"window_type"`
+	WindowStart time.Time `gorm:"not null;uniqueIndex:idx_policy_window_user" json:"window_start"`
 	UsedCount   int       `gorm:"default:0" json:"used_count"`
 }
 

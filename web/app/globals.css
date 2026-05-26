@@ -1666,8 +1666,20 @@ h3 {
 
 .api-key-editor {
   display: grid;
-  grid-template-columns: minmax(140px, 0.7fr) minmax(210px, 1fr) minmax(84px, 0.45fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1fr) minmax(90px, 0.35fr);
   gap: 10px;
+  max-width: 100%;
+}
+
+.api-key-secret-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.api-key-secret-row .btn {
+  min-width: 112px;
 }
 
 .endpoint-split-row {
@@ -3032,6 +3044,7 @@ tr:last-child td {
   .credential-console,
   .api-key-editor,
   .endpoint-split-row,
+  .api-key-secret-row,
   .model-sync-row {
     grid-template-columns: 1fr;
   }

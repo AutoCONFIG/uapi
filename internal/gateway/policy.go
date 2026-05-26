@@ -43,8 +43,9 @@ func (g *Gateway) planPolicyID(tokenID uuid.UUID) (*uuid.UUID, bool, string, err
 	}
 	if err := g.db.Table("token_plans").
 		Select("plans.id AS plan_id, plans.type AS plan_type, plans.policy_id").
+		Joins("JOIN tokens ON tokens.user_id = token_plans.user_id AND tokens.id = ? AND tokens.enabled = true AND tokens.deleted_at IS NULL", tokenID).
 		Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
-		Where("token_plans.token_id = ? AND token_plans.starts_at <= ? AND token_plans.expires_at > ?", tokenID, time.Now(), time.Now()).
+		Where("token_plans.starts_at <= ? AND token_plans.expires_at > ?", time.Now(), time.Now()).
 		Order("token_plans.created_at DESC").
 		Limit(1).
 		Scan(&row).Error; err != nil {

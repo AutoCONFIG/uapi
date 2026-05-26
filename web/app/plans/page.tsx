@@ -13,8 +13,19 @@ function formatQuota(value: number, type?: string): string {
   return `${value}${suffix}`;
 }
 
-function quotaText(subscription: Subscription, key: "remaining_quota" | "token_quota" | "used_quota"): string {
-  return formatQuota(subscription[key], subscription.plan_type);
+function quotaValues(subscription: Subscription) {
+  if (subscription.plan_type === "count_based") {
+    return {
+      total: subscription.count_quota,
+      used: subscription.used_count,
+      remaining: subscription.remaining_count,
+    };
+  }
+  return {
+    total: subscription.token_quota,
+    used: subscription.used_tokens,
+    remaining: subscription.remaining_tokens,
+  };
 }
 
 function windowLabel(type: SubscriptionWindow["type"]): string {
@@ -57,6 +68,7 @@ export default function PlansPage() {
 
   const expiresAt = subscription?.expires_at ? new Date(subscription.expires_at) : null;
   const startsAt = subscription?.starts_at ? new Date(subscription.starts_at) : null;
+  const quota = subscription ? quotaValues(subscription) : null;
 
   return (
     <AppShell title="套餐">
@@ -127,12 +139,12 @@ export default function PlansPage() {
           <h2>套餐额度</h2>
           {subscription ? (
             <>
-              <p className="metric-value" style={{ marginBottom: 0 }}>{quotaText(subscription, "remaining_quota")}</p>
+              <p className="metric-value" style={{ marginBottom: 0 }}>{formatQuota(quota?.remaining ?? 0, subscription.plan_type)}</p>
               <div className="progress" style={{ marginTop: 12 }}>
-                <span style={{ width: `${percent(subscription.used_quota, subscription.token_quota)}%` }} />
+                <span style={{ width: `${percent(quota?.used ?? 0, quota?.total ?? 0)}%` }} />
               </div>
               <p className="muted" style={{ margin: "8px 0 0" }}>
-                已用 {quotaText(subscription, "used_quota")} / 总额 {quotaText(subscription, "token_quota")}
+                已用 {formatQuota(quota?.used ?? 0, subscription.plan_type)} / 总额 {formatQuota(quota?.total ?? 0, subscription.plan_type)}
               </p>
             </>
           ) : (
@@ -162,7 +174,7 @@ export default function PlansPage() {
           ) : (
             <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 0" }}>
               <ShieldCheck size={16} />
-              {subscription ? "当前套餐没有配置小时、周、月使用窗口。" : "管理员分配或兑换码兑换后，套餐会自动绑定到你的 API Key。"}
+              {subscription ? "当前套餐没有配置小时、周、月使用窗口。" : "管理员分配或兑换码兑换后，套餐会绑定到你的账号。"}
             </p>
           )}
         </section>

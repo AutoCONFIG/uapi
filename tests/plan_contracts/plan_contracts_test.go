@@ -46,6 +46,7 @@ func TestZeroQuotaIsNotTreatedAsUnlimited(t *testing.T) {
 		"TokenQuota > 0",
 		"plan.TokenQuota > 0",
 		"token_quota <= 0",
+		"used_quota",
 		"no plan = unlimited",
 		"no rate limit",
 	}
@@ -54,8 +55,29 @@ func TestZeroQuotaIsNotTreatedAsUnlimited(t *testing.T) {
 			t.Fatalf("billing code still contains unlimited zero-quota pattern %q", pattern)
 		}
 	}
-	if !strings.Contains(billing, "tp.UsedQuota >= plan.TokenQuota") {
-		t.Fatal("billing code must deny used quota greater than or equal to plan quota, including zero quota")
+	if !strings.Contains(billing, "tp.UsedCount >= plan.CountQuota") {
+		t.Fatal("count billing must deny used count greater than or equal to count quota, including zero quota")
+	}
+	if !strings.Contains(billing, "tp.UsedTokens >= plan.TokenQuota") {
+		t.Fatal("token billing must deny used tokens greater than or equal to token quota, including zero quota")
+	}
+}
+
+func TestSubscriptionsAreUserScopedNotKeyScoped(t *testing.T) {
+	planModel := readRepoFile(t, "internal", "db", "plan.go")
+	if strings.Contains(planModel, "TokenID") || strings.Contains(planModel, `json:"token_id"`) {
+		t.Fatal("TokenPlan must be user-scoped, not API-key-scoped")
+	}
+	if !strings.Contains(planModel, "UserID") || !strings.Contains(planModel, `json:"user_id"`) {
+		t.Fatal("TokenPlan must expose user_id as the package owner")
+	}
+
+	policyModel := readRepoFile(t, "internal", "db", "access_policy.go")
+	if strings.Contains(policyModel, "TokenID") || strings.Contains(policyModel, `json:"token_id"`) {
+		t.Fatal("policy usage windows must be user-scoped, not API-key-scoped")
+	}
+	if !strings.Contains(policyModel, "UserID") || !strings.Contains(policyModel, `json:"user_id"`) {
+		t.Fatal("policy usage windows must expose user_id as the usage owner")
 	}
 }
 
@@ -69,6 +91,35 @@ func TestUserRoutesDoNotExposePlanCatalogOrSelfSubscribe(t *testing.T) {
 	for _, route := range []string{`"/api/user/subscription"`, `"/api/user/redeem"`} {
 		if !strings.Contains(server, route) {
 			t.Fatalf("expected user route to be registered: %s", route)
+		}
+	}
+}
+
+func TestInitialSchemaHasNoLegacyCompatibilityFields(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		path []string
+	}{
+		{name: "database init", path: []string{"internal", "db", "db.go"}},
+		{name: "token model", path: []string{"internal", "db", "token.go"}},
+		{name: "redeem code model", path: []string{"internal", "db", "redeem_code.go"}},
+	} {
+		content := readRepoFile(t, target.path...)
+		for _, pattern := range []string{
+			"DROP COLUMN",
+			"DROP TABLE",
+			"legacy",
+			"balance",
+			"Unlimited",
+			"unlimited",
+			"Value",
+			`json:"value"`,
+			"window_usage",
+			"window_reset_at",
+		} {
+			if strings.Contains(content, pattern) {
+				t.Fatalf("%s still contains compatibility or redundant field %q", target.name, pattern)
+			}
 		}
 	}
 }

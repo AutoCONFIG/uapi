@@ -88,7 +88,7 @@ The model set is the local database intersection of:
 
 - public model names derived from `channels.models` and `channels.model_aliases`
   on enabled channels that have at least one enabled account;
-- the current API key's active subscription plan policy (`token_plans` ->
+- the current API key owner's active subscription plan policy (`token_plans` ->
   `plans.policy_id` -> `access_policies.allowed_models`) when a plan policy is
   configured.
 
@@ -170,21 +170,25 @@ Access Policy first version includes only:
 - Monthly usage window.
 - Max concurrency (per plan policy when the active subscription plan has a policy; otherwise per-token).
 
-Window semantics depend on the plan type: `count_based` increments each window by
-1 per accepted request, while `token_based` increments by the pre-consumed token
-estimate and is corrected on settlement/refund. A configured window value of `0`
-means zero available quota, not unlimited.
+Plan total quota is split by type: `count_based` uses `plans.count_quota` and
+`token_plans.used_count`; `token_based` uses `plans.token_quota` and
+`token_plans.used_tokens`. The irrelevant plan quota column is written as `0`.
+Window semantics also depend on the plan type: `count_based` increments each
+window by 1 per accepted request, while `token_based` increments by the
+pre-consumed token estimate and is corrected on settlement/refund. A configured
+total or window value of `0` means zero available quota, not unlimited.
 
 It intentionally does not limit:
 
 - Streaming.
 - Endpoint type (`chat`, `responses`, `messages`, `gemini`).
 
-Policies are bound to plans, not API keys. A normal user should have one API key by default; admin users manage business
+Policies are bound to plans, and active plan ownership is bound to users, not
+API keys. Deleting or rotating an API key does not remove the user's package.
+A normal user should have one API key by default; admin users manage business
 resources and should not create or use downstream API keys. The runtime source
-of truth is the
-active token subscription (`token_plans`) and the subscribed plan's
-`plans.policy_id`. API keys keep only their own security fields such as
+of truth is the active user subscription (`token_plans.user_id`) and the
+subscribed plan's `plans.policy_id`. API keys keep only their own security fields such as
 `tokens.models`, `tokens.permissions`, expiry, and IP whitelist; they do not
 store or override policy IDs.
 

@@ -237,9 +237,9 @@ export const adminApi = {
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; model_ratios?: string; completion_ratio?: string; token_quota?: number; duration_days?: number; enabled?: boolean }) =>
+  createPlan: (token: string, body: { name: string; type: string; policy_id?: string; model_ratios?: string; completion_ratio?: string; count_quota?: number; token_quota?: number; duration_days?: number; enabled?: boolean }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; model_ratios: string; completion_ratio: string; token_quota: number; duration_days: number; enabled: boolean }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; policy_id: string; model_ratios: string; completion_ratio: string; count_quota: number; token_quota: number; duration_days: number; enabled: boolean }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),

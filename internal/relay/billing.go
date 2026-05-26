@@ -50,14 +50,14 @@ func (b *BillingService) CheckLimit(tokenID string) error {
 }
 
 func (b *BillingService) checkCountLimit(tp *db.TokenPlan, plan *db.Plan) error {
-	if tp.UsedQuota >= plan.TokenQuota {
+	if tp.UsedCount >= plan.CountQuota {
 		return fmt.Errorf("count quota exceeded")
 	}
 	return nil
 }
 
 func (b *BillingService) checkTokenLimit(tp *db.TokenPlan, plan *db.Plan) error {
-	if tp.UsedQuota >= plan.TokenQuota {
+	if tp.UsedTokens >= plan.TokenQuota {
 		return fmt.Errorf("token quota exceeded")
 	}
 	return nil
@@ -96,26 +96,26 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 }
 
 func (b *BillingService) incrementCountUsageTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan) error {
-	if tp.UsedQuota+1 > plan.TokenQuota {
+	if tp.UsedCount+1 > plan.CountQuota {
 		return fmt.Errorf("count quota exceeded")
 	}
-	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, 1, true); err != nil {
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, 1, true); err != nil {
 		return err
 	}
-	return tx.Model(tp).Update("used_quota", gorm.Expr("used_quota + 1")).Error
+	return tx.Model(tp).Update("used_count", gorm.Expr("used_count + 1")).Error
 }
 
 func (b *BillingService) preConsumeTokensTx(tx *gorm.DB, tp *db.TokenPlan, plan *db.Plan, amount int) error {
 	if amount <= 0 {
 		amount = 1
 	}
-	if tp.UsedQuota+int64(amount) > plan.TokenQuota {
+	if tp.UsedTokens+int64(amount) > plan.TokenQuota {
 		return fmt.Errorf("token quota exceeded")
 	}
-	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, amount, true); err != nil {
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, amount, true); err != nil {
 		return err
 	}
-	return tx.Model(tp).Update("used_quota", gorm.Expr("used_quota + ?", amount)).Error
+	return tx.Model(tp).Update("used_tokens", gorm.Expr("used_tokens + ?", amount)).Error
 }
 
 func (b *BillingService) DBTransactionRefundAndSettle(tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
@@ -136,7 +136,8 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	}
 	var tp db.TokenPlan
 	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
-	q = q.Where("id = ? AND token_id = ?", tokenPlanID, tokenID)
+	q = q.Joins("JOIN tokens ON tokens.user_id = token_plans.user_id AND tokens.id = ? AND tokens.deleted_at IS NULL", tokenID).
+		Where("token_plans.id = ?", tokenPlanID)
 	if err := q.First(&tp).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil // no plan = nothing to settle
@@ -152,8 +153,8 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	if err := tx.First(&plan, planQuery, tp.PlanID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Plan deleted mid-request — best-effort refund of estimate
-			_ = applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, -estTokens, false)
-			_ = tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error
+			_ = applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, -estTokens, false)
+			_ = tx.Model(&tp).Update("used_tokens", gorm.Expr("GREATEST(0, used_tokens - ?)", estTokens)).Error
 			return nil
 		}
 		return err
@@ -166,7 +167,7 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	}
 
 	// Token-based plans: refund the estimate then charge actual usage.
-	if err := tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", estTokens)).Error; err != nil {
+	if err := tx.Model(&tp).Update("used_tokens", gorm.Expr("GREATEST(0, used_tokens - ?)", estTokens)).Error; err != nil {
 		return err
 	}
 
@@ -188,10 +189,10 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	if actual <= 0 {
 		actual = estTokens
 	}
-	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, actual-estTokens, false); err != nil {
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, actual-estTokens, false); err != nil {
 		return err
 	}
-	return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota + ?)", actual-estTokens)).Error
+	return tx.Model(&tp).Update("used_tokens", gorm.Expr("GREATEST(0, used_tokens + ?)", actual-estTokens)).Error
 }
 
 func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UUID, amount int) error {
@@ -206,7 +207,8 @@ func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount 
 	}
 	var tp db.TokenPlan
 	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
-	q = q.Where("id = ? AND token_id = ?", tokenPlanID, tokenID)
+	q = q.Joins("JOIN tokens ON tokens.user_id = token_plans.user_id AND tokens.id = ? AND tokens.deleted_at IS NULL", tokenID).
+		Where("token_plans.id = ?", tokenPlanID)
 	if err := q.First(&tp).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil // no plan = nothing to refund
@@ -230,14 +232,14 @@ func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount 
 	case "count_based":
 		return nil
 	default:
-		if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.TokenID, -amount, false); err != nil {
+		if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, -amount, false); err != nil {
 			return err
 		}
-		return tx.Model(&tp).Update("used_quota", gorm.Expr("GREATEST(0, used_quota - ?)", amount)).Error
+		return tx.Model(&tp).Update("used_tokens", gorm.Expr("GREATEST(0, used_tokens - ?)", amount)).Error
 	}
 }
 
-func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, tokenID uuid.UUID, delta int, enforce bool) error {
+func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, delta int, enforce bool) error {
 	if policyID == nil || *policyID == uuid.Nil || delta == 0 {
 		return nil
 	}
@@ -261,7 +263,7 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, tokenID uuid.UUI
 	for _, window := range windows {
 		var usage db.PolicyUsageWindow
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", policy.ID, tokenID, window.name, window.start).
+			Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start = ?", policy.ID, userID, window.name, window.start).
 			First(&usage).Error
 		if err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -270,7 +272,7 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, tokenID uuid.UUI
 			usage = db.PolicyUsageWindow{
 				ID:          uuid.New(),
 				PolicyID:    policy.ID,
-				TokenID:     tokenID,
+				UserID:      userID,
 				WindowType:  window.name,
 				WindowStart: window.start,
 				UsedCount:   0,
@@ -279,7 +281,7 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, tokenID uuid.UUI
 				return err
 			}
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("policy_id = ? AND token_id = ? AND window_type = ? AND window_start = ?", policy.ID, tokenID, window.name, window.start).
+				Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start = ?", policy.ID, userID, window.name, window.start).
 				First(&usage).Error; err != nil {
 				return err
 			}
@@ -321,8 +323,9 @@ func latestActiveTokenPlan(tx *gorm.DB, tokenID string) *gorm.DB {
 func scopeLatestActiveTokenPlan(tokenID string) func(*gorm.DB) *gorm.DB {
 	return func(tx *gorm.DB) *gorm.DB {
 		return tx.
+			Joins("JOIN tokens ON tokens.user_id = token_plans.user_id AND tokens.id = ? AND tokens.enabled = true AND tokens.deleted_at IS NULL", tokenID).
 			Joins("JOIN plans ON plans.id = token_plans.plan_id AND plans.enabled = true AND plans.deleted_at IS NULL").
-			Where("token_plans.token_id = ? AND token_plans.starts_at <= ? AND token_plans.expires_at > ?", tokenID, time.Now(), time.Now()).
+			Where("token_plans.starts_at <= ? AND token_plans.expires_at > ?", time.Now(), time.Now()).
 			Order("token_plans.created_at DESC")
 	}
 }
