@@ -1,13 +1,33 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { adminApi, authStorage } from "@/lib/api";
 
 export default function SetupPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function redirectWhenAlreadyInitialized() {
+      try {
+        const status = await adminApi.initStatus();
+        if (!cancelled && status.initialized) {
+          router.replace("/login");
+        }
+      } catch {
+        // Let setup submission show the concrete API error if the backend is unavailable.
+      }
+    }
+
+    redirectWhenAlreadyInitialized();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

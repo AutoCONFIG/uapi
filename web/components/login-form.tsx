@@ -2,13 +2,33 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { adminApi, authStorage, userApi } from "@/lib/api";
 
 export function LoginForm() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function redirectToSetupWhenNeeded() {
+      try {
+        const status = await adminApi.initStatus();
+        if (!cancelled && !status.initialized) {
+          router.replace("/setup");
+        }
+      } catch {
+        // Keep the login form usable when the API is temporarily unavailable.
+      }
+    }
+
+    redirectToSetupWhenNeeded();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
