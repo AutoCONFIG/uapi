@@ -50,18 +50,14 @@ Window units follow the plan type: requests for `count_based`, tokens for
   `POST /api/admin/channels/oauth/bind`. Provider callbacks return to
   `GET /api/admin/channels/oauth/callback`.
 
-The unified login form tries user login first, then admin login. In static preview mode,
-it keeps local fallback accounts so the UI remains navigable without the Go API server:
-
-- Admin: `admin@example.com` / `admin123`
-- User: `user@example.com` / `user123456`
+The unified login form tries user login first, then admin login.
 
 ## Admin Channel Model
 
 The UI treats channels as the single top-level object for upstream access. Accounts,
 API keys, and OAuth credentials are represented as credentials within a channel rather
-than as a separate primary navigation item. The old `/admin/accounts` route is only
-a legacy-link explanation page and should not be used for new workflows. The admin
+than as a separate primary navigation item. The `/admin/accounts` route now
+redirects to `/admin/channels`. The admin
 UI should not expose standalone admin-side API key management in the
 first-stage product surface.
 
@@ -102,6 +98,12 @@ relay entry points: `chat`, `responses`, `messages`, `gemini`, and `images`.
 The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
 `/api/user/usage` and `/api/user/usage/logs`, while preserving static preview
 fallback rows when the API server is unavailable.
+
+Plan display is user-owned rather than API-key-owned. Deleting or rotating a
+key must not remove the user's package. The user plans page should show the
+active package and remaining count/token quota from `/api/user/subscription`;
+admin-created plans are not directly usable by normal users until assigned by
+an admin or redeemed with a redeem code.
 
 
 ## Gateway Management Surface

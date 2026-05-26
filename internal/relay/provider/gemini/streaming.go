@@ -111,6 +111,7 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 	}
 
 	var contentText string
+	var reasoningText string
 	var toolCalls []interface{}
 
 	for _, partRaw := range parts {
@@ -118,13 +119,17 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 		if !ok {
 			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming parts entries must be objects")
 		}
-		if err := validateGeminiPartKeys(part); err != nil {
+		if err := validateGeminiStreamPartKeys(part); err != nil {
 			return buildGeminiStreamError(s.roleID, s.model, err.Error())
 		}
 		handled := false
 		if text, ok := part["text"].(string); ok {
 			handled = true
-			contentText += text
+			if thought, _ := part["thought"].(bool); thought {
+				reasoningText += text
+			} else {
+				contentText += text
+			}
 		} else if _, exists := part["text"]; exists {
 			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming text part requires string text")
 		}
@@ -154,15 +159,45 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 					"arguments": args,
 				},
 			})
+		} else if _, exists := part["functionCall"]; exists {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming functionCall part requires object functionCall")
+		}
+		if fr, ok := part["functionResponse"].(map[string]interface{}); ok {
+			handled = true
+			contentText += geminiFunctionResponseText(fr)
+		} else if _, exists := part["functionResponse"]; exists {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming functionResponse part requires object functionResponse")
+		}
+		if cer, ok := part["codeExecutionResult"].(map[string]interface{}); ok {
+			handled = true
+			if output, _ := cer["output"].(string); output != "" {
+				contentText += output
+			}
+		} else if _, exists := part["codeExecutionResult"]; exists {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming codeExecutionResult part requires object codeExecutionResult")
+		}
+		if code, ok := part["executableCode"].(map[string]interface{}); ok {
+			handled = true
+			codeText, _ := code["code"].(string)
+			if codeText != "" {
+				lang, _ := code["language"].(string)
+				contentText += "```" + lang + "\n" + codeText + "\n```"
+			}
+		} else if _, exists := part["executableCode"]; exists {
+			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming executableCode part requires object executableCode")
 		}
 		if !handled {
-			return buildGeminiStreamError(s.roleID, s.model, "gemini streaming response part cannot be converted to non-gemini downstream formats")
+			continue
 		}
 	}
 
 	delta := map[string]interface{}{}
 	if contentText != "" {
 		delta["content"] = contentText
+	}
+	if reasoningText != "" {
+		delta["reasoning_content"] = reasoningText
+		delta["reasoning"] = reasoningText
 	}
 	if len(toolCalls) > 0 {
 		delta["tool_calls"] = toolCalls
@@ -183,6 +218,60 @@ func (s *geminiStreamState) convertChunk(chunk map[string]interface{}, model str
 	}
 
 	return result
+}
+
+func validateGeminiStreamPartKeys(part map[string]interface{}) error {
+	convertible := map[string]struct{}{
+		"text":                {},
+		"functionCall":        {},
+		"functionResponse":    {},
+		"codeExecutionResult": {},
+		"executableCode":      {},
+	}
+	ignoredMetadata := map[string]struct{}{
+		"thought":          {},
+		"thoughtSignature": {},
+		"videoMetadata":    {},
+	}
+	knownConvertible := 0
+	for key := range part {
+		if _, ok := convertible[key]; ok {
+			knownConvertible++
+			continue
+		}
+		if _, ok := ignoredMetadata[key]; ok {
+			continue
+		}
+		return fmt.Errorf("gemini streaming part field %q cannot be converted to non-gemini downstream formats", key)
+	}
+	if knownConvertible > 1 {
+		return fmt.Errorf("gemini streaming part must contain at most one convertible field")
+	}
+	return nil
+}
+
+func geminiFunctionResponseText(fr map[string]interface{}) string {
+	resp, ok := fr["response"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if content, ok := resp["content"].([]interface{}); ok {
+		var out string
+		for _, raw := range content {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := item["text"].(string); ok {
+				out += text
+			}
+		}
+		return out
+	}
+	if text, ok := resp["text"].(string); ok {
+		return text
+	}
+	return ""
 }
 
 func buildGeminiStreamError(id, model, message string) []byte {

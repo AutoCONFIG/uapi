@@ -88,9 +88,9 @@ The model set is the local database intersection of:
 
 - public model names derived from `channels.models` and `channels.model_aliases`
   on enabled channels that have at least one enabled account;
-- the current API key owner's active subscription plan policy (`token_plans` ->
-  `plans.policy_id` -> `access_policies.allowed_models`) when a plan policy is
-  configured.
+- the current API key owner's active user subscription (`token_plans.user_id`
+  -> `plans.policy_id` -> `access_policies.allowed_models`) when a plan policy
+  is configured.
 
 Model-list endpoints do not call upstream providers during downstream client
 requests. Admins explicitly refresh a channel's local model catalog through
@@ -168,7 +168,8 @@ Access Policy first version includes only:
 - Hourly usage window.
 - Weekly usage window.
 - Monthly usage window.
-- Max concurrency (per plan policy when the active subscription plan has a policy; otherwise per-token).
+- Max concurrency. Active plan policies are enforced at policy scope; the
+  fallback limiter is per API key only when no active policy limit exists.
 
 There is no separate plan-level total quota. The monthly policy window is the
 package quota because packages reset monthly. Window semantics depend on the
@@ -191,6 +192,9 @@ subscribed plan's `plans.policy_id`. API keys keep only their own security field
 `tokens.models`, `tokens.permissions`, expiry, and IP whitelist; they do not
 store or override policy IDs.
 
+The `token_plans` table name is historical. In current business logic it means
+user package subscription, not a package bound to one API key.
+
 ## Format Conversion
 
 Relay follows a Bifrost-style adapter pipeline and preserves raw bodies only
@@ -212,9 +216,17 @@ when the upstream and downstream are the same standard protocol:
 - Same-protocol streaming preserves the upstream SSE event body. OpenAI Chat Completions API
   streams only add a final `[DONE]` marker when the upstream omitted it; Gemini,
   Anthropic, and Responses streams keep native event fields and usage intact.
+- Gemini thought metadata is handled explicitly. `thoughtSignature` and
+  metadata-only thought parts are ignored for cross-protocol output, while
+  `thought: true` text maps to OpenAI-compatible `reasoning_content` and
+  `reasoning` fields where possible.
 - SSE normalization preserves `event:` names for converters and removes only the
   single optional space after `data:`. Do not trim the remaining payload: leading
   or trailing spaces may be valid JSON string content in multi-line SSE data.
+- Streaming clients intentionally use no whole-response read timeout. Instead,
+  UAPI wraps upstream streams with `server.stream_idle_timeout_seconds`
+  application-layer idle detection. This allows long healthy streams while
+  closing stalled upstream connections and freeing concurrency/quota state.
 - The `/v1/responses` WS HTTP-SSE bridge feeds a synthetic `[DONE]` to the
   OpenAI Chat Completions API-to-OpenAI Responses API converter at EOF when the upstream sent a terminal
   `finish_reason` but omitted `[DONE]`, matching the HTTP streaming path.
@@ -237,7 +249,7 @@ Implemented now:
 - Relay runtime config pull into in-memory channel/account pools.
 - Usage event reporting to Gateway and idempotent settlement by `request_id`;
   remote pre-consume also records `token_plan_id` so final settlement/refund
-  targets the same token-plan row that was pre-charged.
+  targets the same user subscription row that was pre-charged.
 - Relay-only runtime mode without PostgreSQL/Redis.
 - Local fallback to in-process Relay when there are no active remote Relay nodes.
 - In all-in-one deployments, `/v1/responses` WebSocket turns hold a per-session

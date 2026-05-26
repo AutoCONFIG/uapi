@@ -52,7 +52,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		affinity: affinity,
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
-		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies))
+		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies), relay.WithStreamIdleTimeout(time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second))
 		s.relayer.StartConfigPuller(cfg.Gateway.RelayNodeID, pullInterval)
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "gateway" {
@@ -60,7 +60,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		if s.relayer != nil {
 			fallback = s.relayer.HandleRelay
 		}
-		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies)
+		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second)
 		refreshPool := makeRefreshPool(database, pools)
 		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools))
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
@@ -277,7 +277,15 @@ func (s *Server) handleInternalAuth(next fasthttp.RequestHandler) fasthttp.Reque
 // Sets the admin username in the context for audit logging.
 func (s *Server) handleAdminAuth(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		// CORS — admin panel is same-origin, no wildcard
+		origin := string(ctx.Request.Header.Peek("Origin"))
+		if origin != "" {
+			if !s.originAllowed(origin) {
+				ctx.Error(`{"code":403,"message":"origin not allowed"}`, fasthttp.StatusForbidden)
+				return
+			}
+			ctx.Response.Header.Set("Access-Control-Allow-Origin", origin)
+			ctx.Response.Header.Set("Access-Control-Allow-Credentials", "true")
+		}
 		ctx.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		ctx.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if string(ctx.Method()) == "OPTIONS" {
@@ -291,6 +299,19 @@ func (s *Server) handleAdminAuth(next fasthttp.RequestHandler) fasthttp.RequestH
 		ctx.SetUserValue("admin_user", username)
 		next(ctx)
 	}
+}
+
+func (s *Server) originAllowed(origin string) bool {
+	allowed := s.cfg.Server.AllowedOrigins
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, o := range allowed {
+		if o == "*" || o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper functions

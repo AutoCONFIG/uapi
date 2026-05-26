@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Ban, Clipboard, KeyRound, Package, Search, Trash2, Undo2 } from "lucide-react";
 import { StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { isUUID } from "@/lib/format";
 import type { Plan, User } from "@/types/api";
 
 type UserRow = {
@@ -46,13 +47,15 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
+    let cancelled = false;
 
     adminApi.users(token)
-      .then((response) => setUsers((response.items ?? []).map(fromApiUser)))
-      .catch(() => {
-        // Keep static preview data when the Go API is not available.
-      });
-    adminApi.plans(token, 1, 100).then((response) => setPlans(response.items ?? [])).catch(() => undefined);
+      .then((response) => { if (!cancelled) setUsers((response.items ?? []).map(fromApiUser)); })
+      .catch(() => {});
+    adminApi.plans(token, 1, 100)
+      .then((response) => { if (!cancelled) setPlans(response.items ?? []); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
   }, []);
 
   async function toggleBan(row: UserRow) {
@@ -215,7 +218,7 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
               {visibleUsers.map((row) => {
                 const disabled = row.status === "disabled";
                 return (
-                  <tr key={row.email}>
+                  <tr key={row.id}>
                     <td>{row.email}</td>
                     <td><StatusBadge value={row.status} /></td>
                     <td>{row.keys}</td>
@@ -255,8 +258,4 @@ function fromApiUser(user: User): UserRow {
     keys: 0,
     joined: user.created_at ? new Date(user.created_at).toISOString().slice(0, 10) : "-",
   };
-}
-
-function isUUID(value: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }

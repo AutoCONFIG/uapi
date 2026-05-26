@@ -11,6 +11,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	ws "github.com/fasthttp/websocket"
 	"github.com/google/uuid"
@@ -100,7 +101,7 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 	}
 
 	// 1. Extract Bearer token from header or query param
-	tokenKey := extractBearerToken(ctx)
+	tokenKey := httputil.ExtractBearerToken(ctx, true)
 	if tokenKey == "" {
 		tokenKey = string(ctx.QueryArgs().Peek("token"))
 	}
@@ -122,14 +123,14 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 
 	// 3. IP whitelist check
 	if token.IPWhitelist != "" {
-		if !checkIPWhitelist(ctx, token.IPWhitelist, h.relayer.trustedProxies) {
+		if !httputil.CheckIPWhitelist(ctx, token.IPWhitelist, h.relayer.trustedProxies) {
 			ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 			return
 		}
 	}
 	policy, hasPolicy, err := h.loadWSPolicy(token)
 	if err != nil {
-		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
+		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
 		return
 	}
 	models := token.Models
@@ -158,13 +159,13 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 			if errors.Is(err, ErrNoActiveSubscription) {
 				status = fasthttp.StatusPaymentRequired
 			}
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, status)
 			return
 		}
 		if token.UserID != "" {
 			if err := h.billing.CheckUserPlan(token.UserID, tokenID); err != nil {
 				h.concLimiter.Release(tokenID)
-				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, 402)
+				ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, 402)
 				return
 			}
 		}
@@ -302,7 +303,7 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 		WriteWSErrorSession(sess, 403, "model_forbidden", "model not allowed for token")
 		return
 	}
-	if sess.permissions != "" && !permissionInList("responses", sess.permissions) {
+	if sess.permissions != "" && !httputil.PermissionInList("responses", sess.permissions) {
 		WriteWSErrorSession(sess, 403, "permission_forbidden", "responses permission not allowed")
 		return
 	}

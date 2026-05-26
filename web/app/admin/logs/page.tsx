@@ -3,14 +3,8 @@
 import { useEffect, useState } from "react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { formatTokens } from "@/lib/format";
 import type { UsageLogItem } from "@/types/api";
-
-function formatTokens(n?: number): string {
-  const value = Number(n ?? 0);
-  if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
-  if (value >= 1_000) return (value / 1_000).toFixed(1) + "K";
-  return String(value);
-}
 
 function shortID(value?: string) {
   if (!value) return "-";

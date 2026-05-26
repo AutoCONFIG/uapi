@@ -6,17 +6,18 @@ UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemin
 
 ## 特性
 
-- **多供应商支持** — OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API，统一转为内部格式并按需互转
+- **多供应商支持** — OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API；同协议保留原生结构，跨协议按需转换
 - **OpenAI 兼容接口** — 下游客户端只需对接 `/v1/chat/completions`，即可路由到任意供应商
 - **多账号池 & 加权轮询** — 同一渠道可挂载多个上游账号，按权重自动调度
 - **API Key 管理** — 普通用户默认一个密钥，支持查看、复制、IP 白名单、过期时间、模型限制和端点权限
-- **用量计费** — 预扣费 / 结算 / 退款，按 token 精确计量
+- **套餐额度** — 用户必须通过管理员分配或兑换码获得套餐；支持按请求次数窗口和按 Token 窗口计量，`0` 表示额度用尽而不是不限制
 - **管理后台** — 渠道/账号凭据、节点、用户、套餐、日志、系统设置和操作审计
 - **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
 - **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
 - **OAuth 渠道接入** — 支持 Codex、Gemini Code、Claude Code、Antigravity 等 OAuth 登录、账号元数据同步和自动刷新
 - **本地模型目录** — 下游模型列表从本地渠道配置读取，管理员可手动同步上游模型并设置模型重定向
 - **流式转发** — SSE 流式响应透明转发，支持流式转非流式
+- **流式稳定性** — 长流使用应用层 idle timeout，避免健康长推理被整体读超时杀掉，也避免卡死上游长期占用并发
 
 ## 快速开始
 
@@ -100,6 +101,7 @@ internal/
   config/          配置加载
 web/               Next.js 前端
 docs/              项目文档
+tests/             跨包/黑盒测试
 ```
 
 ## API 概览

@@ -4,14 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Copy } from "lucide-react";
 import { AppShell, MetricCard, PageHead } from "@/components/shell";
 import { publicApi, userApi } from "@/lib/api";
+import { formatNumber } from "@/lib/format";
 import type { ApiKey, PublicSettings, Subscription, UsageSummary } from "@/types/api";
-
-function formatNumber(n: number): string {
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + "B";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return String(n);
-}
 
 export default function OverviewPage() {
   const [usage, setUsage] = useState<UsageSummary | null>(null);

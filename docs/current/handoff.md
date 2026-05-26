@@ -111,7 +111,7 @@ Main routes:
 - Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
   `/admin/users`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`,
   `/admin/settings`
-- `/admin/accounts` is a legacy-link explanation page only. Accounts are
+- `/admin/accounts` redirects to `/admin/channels`. Accounts are
   conceptually folded into channels and should not regain primary navigation.
 
 Login behavior:
@@ -121,9 +121,7 @@ Login behavior:
 - It tries `/api/user/login` first.
 - If user login fails, it tries `/api/admin/login` using the email prefix as the
   admin username.
-- Static preview fallback accounts:
-  - Admin: `admin@example.com` / `admin123`
-  - User: `user@example.com` / `user123456`
+- No static preview fallback accounts are embedded.
 
 Navigation rules:
 
@@ -146,10 +144,10 @@ internal/
 │   ├── jwt.go                 # JWT generate/verify (dual: admin + user)
 │   └── middleware.go           # JWT auth middleware
 ├── gateway/                   # Gateway request auth, node scheduling, reverse proxy
+├── httputil/                  # Shared HTTP utilities (token extraction, IP whitelist, JSON escape, stream idle timeout)
 ├── internalauth/              # Gateway/Relay HMAC signing
 ├── relay/                     # Core relay execution engine
 │   ├── handler.go             # Dispatch/execution logic
-│   ├── handler_test.go        # Handler tests
 │   ├── account_refresh.go    # OAuth token auto-refresh
 │   ├── pool.go                # Weighted round-robin pool
 │   ├── affinity.go            # Channel affinity cache
@@ -210,6 +208,7 @@ internal/
 ├── crypto/                    # AES-256-GCM encryption
 └── config/
     └── config.go
+tests/                         # Cross-package/black-box tests for new coverage
 ```
 
 ## Implemented API Routes
@@ -300,7 +299,8 @@ gateway behavior.
   `models`, and `permissions`. API keys do not bind policies or packages
   directly; Gateway resolves access limits from the key owner's active user
   subscription (`token_plans.user_id` -> `plans.policy_id`) before scheduling
-  relay execution.
+  relay execution. The table name is historical; it should be read as the user
+  package subscription table, not as API-key package ownership.
 - `internal/user/service.go`: `CreateKeyRequest` accepts advanced key fields and
   returns them from key listing/creation responses.
 - `internal/user/dto.go` and `internal/user/service.go`: Usage endpoints return
@@ -314,6 +314,13 @@ gateway behavior.
 - `internal/relay/handler.go`: Upstream failures now persist a parsed
   `error_message` into request logs; Gemini Code 4xx/5xx logs include upstream
   model, project, enabled credit types, and a compact response body in stdout.
+- `internal/relay/provider/gemini`: Gemini `thoughtSignature` and other
+  provider-native thought metadata no longer produce conversion errors.
+  Gemini `thought: true` text maps to OpenAI-compatible `reasoning_content`
+  and `reasoning` fields where the downstream protocol supports them.
+- `internal/httputil/idle_timeout_reader.go`: Streaming HTTP reads use a
+  Bifrost-style application-layer idle timeout. The default
+  `server.stream_idle_timeout_seconds` is 300 seconds.
 - `internal/user/service.go`: Password change validates length; API key deletion
   uses `deleted_at` soft-delete instead of GORM hard delete.
 
@@ -388,6 +395,12 @@ Current relay notes:
 - Default HTTP body size, WS message size, nginx `client_max_body_size`, and the
   checked-in example configs are aligned at 256 MB. The local `config.yaml` is
   git-ignored but mounted by default Docker Compose, so keep it aligned too.
+- New tests should be added under `tests/` unless there is a deliberate reason
+  to extend an existing package-local test. Prefer black-box tests through
+  exported APIs over exporting internals solely for tests.
+- `server.stream_idle_timeout_seconds` governs idle time between upstream stream
+  chunks for both Relay provider calls and Gateway-to-Relay streaming proxying.
+  Keep edge proxy read timeouts greater than this value.
 - SSE conversion must preserve `event:` names and significant `data:` payload
   whitespace. Only the single optional space after `data:` may be removed.
 - The Responses WS HTTP-SSE bridge synthesizes a final `[DONE]` for Chat Completions

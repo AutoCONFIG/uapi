@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Copy, Plus, Save, Trash2 } from "lucide-react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { formatQuota } from "@/lib/format";
 import type { AccessPolicy, Plan, RedeemCode } from "@/types/api";
 
 type PolicyDraft = {
@@ -51,12 +52,6 @@ function policyBody(draft: PolicyDraft) {
   };
 }
 
-function formatQuota(value: number) {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
-}
-
 function monthlyQuotaLabel(type: string) {
   return type === "count_based" ? "每月次数" : "每月 Token";
 }
@@ -84,12 +79,18 @@ export default function AdminPlansPage() {
     Promise.all([
       adminApi.plans(token, 1, 100).then((data) => data.items).catch(() => []),
       adminApi.accessPolicies(token, 1, 100).then((data) => data.items).catch(() => []),
-      adminApi.redeemCodes(token, 1, 50, redeemStatus).then((data) => data.items).catch(() => []),
-    ]).then(([planItems, policyItems, codeItems]) => {
+    ]).then(([planItems, policyItems]) => {
       setPlans(planItems);
       setPolicies(policyItems);
-      setRedeemCodes(codeItems);
       setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    adminApi.redeemCodes(token, 1, 50, redeemStatus).then((data) => data.items).catch(() => []).then((codeItems) => {
+      setRedeemCodes(codeItems);
     });
   }, [redeemStatus]);
 

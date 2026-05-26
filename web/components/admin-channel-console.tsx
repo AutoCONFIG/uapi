@@ -176,20 +176,21 @@ export function AdminChannelConsole() {
     return buildQuotaDisplayItems(account);
   }
 
-  function loadData() {
+  useEffect(() => {
     if (!token) { setLoading(false); return; }
+    let cancelled = false;
     setLoading(true);
     Promise.all([
       adminApi.channels(token, 1, 500).then((r) => r.items).catch(() => []),
       adminApi.accounts(token, 1, 1000).then((r) => r.items).catch(() => []),
     ]).then(([ch, ac]) => {
+      if (cancelled) return;
       setChannels(ch);
       setAccounts(ac);
       setSelectedID((current) => current || ch[0]?.id || "");
-    }).finally(() => setLoading(false));
-  }
-
-  useEffect(() => { loadData(); }, []);
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!selected) return;

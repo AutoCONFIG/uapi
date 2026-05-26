@@ -41,5 +41,8 @@ the specific current document that matches the task.
   session.
 - Before first production release, remove or rewrite obsolete behavior instead
   of preserving compatibility layers that create historical burden.
+- When code and older prose disagree, treat code plus `current/handoff.md` as the
+  immediate source of truth and update or delete the stale prose in the same
+  change.
 - Prefer adding cross-links from this index instead of scattering "start here"
   instructions across many files.

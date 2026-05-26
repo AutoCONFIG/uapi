@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/modelalias"
@@ -43,21 +44,24 @@ var bufferedClient = &fasthttp.Client{
 // maxResponseSize limits how much data we buffer from upstream (100 MB).
 const maxResponseSize = 100 * 1024 * 1024
 
+const defaultStreamIdleTimeout = 300 * time.Second
+
 type Relayer struct {
-	db              *gorm.DB
-	pools           *PoolManager
-	billing         *BillingService
-	affinity        *AffinityCache
-	concLimiter     *ConcurrencyLimiter
-	chCache         *channelCache
-	internalSecret  string
-	requireInternal bool
-	controlURL      string
-	trustedProxies  []string
-	runtimeMu       sync.RWMutex
-	runtimeVersion  int64
-	runtimeChannels map[uuid.UUID]db.Channel
-	runtimeAccounts map[uuid.UUID]db.Account
+	db                *gorm.DB
+	pools             *PoolManager
+	billing           *BillingService
+	affinity          *AffinityCache
+	concLimiter       *ConcurrencyLimiter
+	chCache           *channelCache
+	internalSecret    string
+	requireInternal   bool
+	controlURL        string
+	trustedProxies    []string
+	streamIdleTimeout time.Duration
+	runtimeMu         sync.RWMutex
+	runtimeVersion    int64
+	runtimeChannels   map[uuid.UUID]db.Channel
+	runtimeAccounts   map[uuid.UUID]db.Account
 }
 
 type RelayerOption func(*Relayer)
@@ -78,19 +82,28 @@ func WithTrustedProxies(proxies []string) RelayerOption {
 	}
 }
 
+func WithStreamIdleTimeout(timeout time.Duration) RelayerOption {
+	return func(r *Relayer) {
+		if timeout > 0 {
+			r.streamIdleTimeout = timeout
+		}
+	}
+}
+
 func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int, internalSecret string, requireInternal bool, controlURL string, opts ...RelayerOption) *Relayer {
 	r := &Relayer{
-		db:              database,
-		pools:           pools,
-		billing:         billing,
-		affinity:        affinity,
-		concLimiter:     NewConcurrencyLimiter(concLimit),
-		chCache:         newChannelCache(database, 30*time.Second),
-		internalSecret:  internalSecret,
-		requireInternal: requireInternal,
-		controlURL:      strings.TrimRight(controlURL, "/"),
-		runtimeChannels: make(map[uuid.UUID]db.Channel),
-		runtimeAccounts: make(map[uuid.UUID]db.Account),
+		db:                database,
+		pools:             pools,
+		billing:           billing,
+		affinity:          affinity,
+		concLimiter:       NewConcurrencyLimiter(concLimit),
+		chCache:           newChannelCache(database, 30*time.Second),
+		internalSecret:    internalSecret,
+		requireInternal:   requireInternal,
+		controlURL:        strings.TrimRight(controlURL, "/"),
+		streamIdleTimeout: defaultStreamIdleTimeout,
+		runtimeChannels:   make(map[uuid.UUID]db.Channel),
+		runtimeAccounts:   make(map[uuid.UUID]db.Account),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -235,7 +248,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		// 1. Auth
-		tokenKey := extractBearerToken(ctx)
+		tokenKey := httputil.ExtractBearerToken(ctx, true)
 		if tokenKey == "" {
 			ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
 			return
@@ -250,7 +263,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 
 		// 2. IP whitelist check
-		if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, r.trustedProxies) {
+		if token.IPWhitelist != "" && !httputil.CheckIPWhitelist(ctx, token.IPWhitelist, r.trustedProxies) {
 			ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 			return
 		}
@@ -296,13 +309,13 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			if errors.Is(err, ErrNoActiveSubscription) {
 				status = fasthttp.StatusPaymentRequired
 			}
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, status)
 			return
 		}
 		// Check user status and require an active plan for user-linked tokens.
 		if token.UserID != "" {
 			if err := r.billing.CheckUserPlan(token.UserID, token.ID.String()); err != nil {
-				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, 402)
+				ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, 402)
 				return
 			}
 		}
@@ -313,7 +326,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	body := ctx.PostBody()
 	isImageRequest := strings.HasPrefix(path, "/v1/images/")
 	if isImageRequest {
-		req.Model = modelFromImageRequest(ctx)
+		req.Model = httputil.ModelFromImageRequest(ctx)
 		if req.Model == "" {
 			req.Model = "gpt-image-1"
 		}
@@ -323,7 +336,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			ctx.Error(`{"error":"invalid request body"}`, fasthttp.StatusBadRequest)
 			return
 		}
-		req.Model = modelFromRequestPath(path, req.Model)
+		req.Model = httputil.ModelFromRequestPath(path, req.Model)
 		if strings.Contains(path, ":streamGenerateContent") {
 			req.Stream = true
 		}
@@ -343,7 +356,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	permission := permissionForRequest(path, clientFormat)
-	if !gatewayAuthenticated && token.Permissions != "" && !permissionInList(permission, token.Permissions) {
+	if !gatewayAuthenticated && token.Permissions != "" && !httputil.PermissionInList(permission, token.Permissions) {
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return
 	}
@@ -361,7 +374,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}
 	if err != nil {
 		finishGatewayEarlyFailure(req.Model, fasthttp.StatusNotFound)
-		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
+		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
 	}
 	upstreamModel := modelalias.UpstreamName(req.Model, targetChannel.ModelAliases)
@@ -395,7 +408,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			if errors.Is(err, ErrNoActiveSubscription) {
 				status = fasthttp.StatusPaymentRequired
 			}
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, status)
 			return
 		}
 		tokenPlanID = planID
@@ -444,7 +457,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	adaptor.SetRequestParams(upstreamModel, effectiveStream)
 	upstreamURL, err := adaptor.GetRequestURL(path)
 	if err != nil {
-		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens, "build url failed", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusInternalServerError, estimatedTokens, "build url failed", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 		ctx.Error(`{"error":"build url failed"}`, fasthttp.StatusInternalServerError)
 		return
 	}
@@ -475,8 +488,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		var err error
 		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
 		if err != nil {
-			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
-			ctx.Error(`{"error":"convert request failed: `+jsonEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+			ctx.Error(`{"error":"convert request failed: `+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
 			return
 		}
 	}
@@ -578,20 +591,31 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 		defer fasthttp.ReleaseResponse(upResp)
 		defer r.releaseLocalConcurrency(token.ID.String(), claims)
 
-		result := streamAndForward(upResp.BodyStream(), reader, tracker, inputConvert, outputConvert, sendDone)
+		bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(upResp.BodyStream(), upResp.BodyStream(), r.streamIdleTimeout)
+		defer stopIdleTimeout()
+		result := streamAndForward(bodyStream, reader, tracker, inputConvert, outputConvert, sendDone)
 		if result.err != nil {
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
-			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+			if errors.Is(result.err, io.ErrClosedPipe) {
+				pt, ct, _ := tracker.Result()
+				if pt > 0 || ct > 0 {
+					go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, 499, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+				} else {
+					go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, 499, estTokens, "client disconnected", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+				}
+				return
+			}
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		if result.failed {
 			logger.Warnf("relay.stream", "upstream stream reported failure")
-			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		if !result.finalized {
 			logger.Warnf("relay.stream", "stream ended without terminal event")
-			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+			go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, true, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			return
 		}
 		{
@@ -619,7 +643,7 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
-		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, true, pt, ct, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	}()
 }
 
@@ -658,11 +682,19 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		return
 	}
 
-	// Buffer entire stream (bounded by maxResponseSize)
-	respBody, err := io.ReadAll(io.LimitReader(upResp.BodyStream(), int64(maxResponseSize)))
+	// Buffer entire stream. Read one byte past the limit so oversized upstream
+	// streams fail explicitly instead of being silently truncated.
+	bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(upResp.BodyStream(), upResp.BodyStream(), r.streamIdleTimeout)
+	defer stopIdleTimeout()
+	respBody, err := io.ReadAll(io.LimitReader(bodyStream, int64(maxResponseSize)+1))
 	if err != nil {
 		logger.Warnf("relay.upstream", "force stream read failed", logger.Err(err))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start, tokenPlanID)
+		return
+	}
+	if len(respBody) > maxResponseSize {
+		logger.Warnf("relay.upstream", "force stream response too large", logger.F("limit", maxResponseSize))
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream response too large", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
 
@@ -714,7 +746,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		logger.F("completion_tokens", ct),
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
-	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, pt, ct, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 }
 
@@ -768,7 +800,7 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	ctx.SetBody(respBody)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.images", "image request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
-	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
+	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 }
 
 func (c *channelCache) get() []db.Channel {
@@ -873,7 +905,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 
 	if respBody == nil {
 		r.releaseLocalConcurrency(token.ID.String(), claims)
-		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", clientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, ch.ID, respAccount.ID, model, false, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 		ctx.Error(`{"error":"all retries exhausted"}`, fasthttp.StatusServiceUnavailable)
 		return
 	}
@@ -901,7 +933,8 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 
 	// Response format normalization/conversion. Same-format buffered responses
 	// keep the upstream standard JSON intact to preserve provider-native fields.
-	if upstreamFormat != clientFormat {
+	responseConverted := upstreamFormat != clientFormat
+	if responseConverted {
 		if converted, err := provider.ConvertResponse(upstreamFormat, clientFormat, respBody); err != nil {
 			logger.Warnf("relay.convert", "response conversion failed", logger.Err(err))
 			r.finishFailedBuffered(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, respAccount, model, start, fasthttp.StatusBadGateway, tokenPlanID)
@@ -926,6 +959,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	respHeaders.VisitAll(func(key, value []byte) {
 		ctx.Response.Header.SetBytesKV(key, value)
 	})
+	if responseConverted {
+		sanitizeConvertedResponseHeaders(&ctx.Response.Header)
+	}
 	ctx.SetBody(respBody)
 
 	logger.Debugf("relay.buffered", "buffered request completed",
@@ -942,9 +978,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		// Gateway-authenticated requests did not acquire the Relay-local
 		// concurrency limiter; Gateway owns that slot and releases it when this
 		// response completes.
-		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens, clientIPForLog(ctx, r.trustedProxies))
+		go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	} else {
-		go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, clientIPForLog(ctx, r.trustedProxies))
+		go r.writeLog(token.ID, ch.ID, respAccount.ID, model, false, pt, ct, start, statusCode, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	}
 }
 
@@ -1470,13 +1506,13 @@ func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTo
 
 func (r *Relayer) refundAndErrorWithStatus(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
-	ctx.Error(`{"error":"`+jsonEscape(msg)+`"}`, statusCode)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
+	ctx.Error(`{"error":"`+httputil.JSONEscape(msg)+`"}`, statusCode)
 }
 
 func (r *Relayer) finishFailedBuffered(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, statusCode int, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, false, start, statusCode, estTokens, msg, httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
 }
 
 // normalizeErrorResponse converts an upstream error body into the client's expected format.
@@ -1605,7 +1641,7 @@ func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTok
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.SetBody(normalizedBody)
-	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), clientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
+	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanIDs...)
 }
 
 func injectStreamTrue(body []byte) []byte {
@@ -1669,6 +1705,7 @@ var hopByHopHeaders = map[string]struct{}{
 	"Connection":        {},
 	"Keep-Alive":        {},
 	"Upgrade":           {},
+	"Content-Length":    {},
 }
 
 func copyHeaders(resp *fasthttp.Response, dst *fasthttp.ResponseHeader) {
@@ -1678,6 +1715,14 @@ func copyHeaders(resp *fasthttp.Response, dst *fasthttp.ResponseHeader) {
 		}
 		dst.SetBytesKV(k, v)
 	})
+}
+
+func sanitizeConvertedResponseHeaders(h *fasthttp.ResponseHeader) {
+	h.Del("Content-Length")
+	h.Del("Content-Encoding")
+	h.Del("Content-Range")
+	h.Del("Accept-Ranges")
+	h.Set("Content-Type", "application/json")
 }
 
 func parseNonStreamUsage(respBody []byte) (int, int) {
@@ -1703,117 +1748,6 @@ func isOpenAIErrorResponse(respBody []byte) bool {
 	}
 	_, ok := obj["error"].(map[string]interface{})
 	return ok
-}
-
-func extractBearerToken(ctx *fasthttp.RequestCtx) string {
-	auth := string(ctx.Request.Header.Peek("Authorization"))
-	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:]
-	}
-	if key := strings.TrimSpace(string(ctx.Request.Header.Peek("x-api-key"))); key != "" {
-		return key
-	}
-	if key := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Goog-Api-Key"))); key != "" {
-		return key
-	}
-	if key := strings.TrimSpace(string(ctx.QueryArgs().Peek("key"))); key != "" {
-		return key
-	}
-	return ""
-}
-
-func modelFromRequestPath(path, bodyModel string) string {
-	if strings.TrimSpace(bodyModel) != "" {
-		return bodyModel
-	}
-	const prefix = "/v1beta/models/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
-	}
-	rest := strings.TrimPrefix(path, prefix)
-	if rest == "" {
-		return ""
-	}
-	if idx := strings.Index(rest, ":"); idx >= 0 {
-		rest = rest[:idx]
-	}
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		rest = rest[:idx]
-	}
-	return strings.TrimSpace(rest)
-}
-
-func modelFromImageRequest(ctx *fasthttp.RequestCtx) string {
-	var body struct {
-		Model string `json:"model"`
-	}
-	if json.Unmarshal(ctx.PostBody(), &body) == nil && strings.TrimSpace(body.Model) != "" {
-		return strings.TrimSpace(body.Model)
-	}
-	if model := strings.TrimSpace(string(ctx.FormValue("model"))); model != "" {
-		return model
-	}
-	return ""
-}
-
-// checkIPWhitelist verifies the client IP against the whitelist.
-// Only trusts X-Forwarded-For / X-Real-IP when the direct connection IP
-// matches a configured trusted proxy.
-func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string, trustedProxies []string) bool {
-	for _, allowedIP := range strings.Split(whitelist, ",") {
-		allowedIP = strings.TrimSpace(allowedIP)
-		if allowedIP == "" {
-			continue
-		}
-		for _, clientIP := range clientIPCandidates(ctx, trustedProxies) {
-			if allowedIP == clientIP {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// clientIPCandidates returns candidate client IPs for whitelist matching.
-// Forwarded headers are only considered when the direct connection IP is a trusted proxy.
-
-func clientIPForLog(ctx *fasthttp.RequestCtx, trustedProxies []string) string {
-	candidates := clientIPCandidates(ctx, trustedProxies)
-	if len(candidates) == 0 {
-		return ""
-	}
-	return candidates[len(candidates)-1]
-}
-
-func clientIPCandidates(ctx *fasthttp.RequestCtx, trustedProxies []string) []string {
-	remoteIP := ctx.RemoteIP().String()
-	candidates := []string{remoteIP}
-
-	// Only trust forwarded headers if the direct connection is from a trusted proxy
-	if !isTrustedProxy(remoteIP, trustedProxies) {
-		return candidates
-	}
-
-	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
-		candidates = append(candidates, xRealIP)
-	}
-	if forwardedFor := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Forwarded-For"))); forwardedFor != "" {
-		firstHop := strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
-		if firstHop != "" {
-			candidates = append(candidates, firstHop)
-		}
-	}
-	return candidates
-}
-
-// isTrustedProxy checks if the given IP is in the trusted proxies list.
-func isTrustedProxy(ip string, trustedProxies []string) bool {
-	for _, trusted := range trustedProxies {
-		if strings.TrimSpace(trusted) == ip {
-			return true
-		}
-	}
-	return false
 }
 
 func getAdaptor(channelType string) provider.Adaptor {
@@ -1885,15 +1819,6 @@ func permissionForRequest(path string, format provider.Format) string {
 		return "images"
 	}
 	return permissionForFormat(format)
-}
-
-func permissionInList(permission, list string) bool {
-	for _, item := range strings.Split(list, ",") {
-		if strings.TrimSpace(item) == permission {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Relayer) writeLog(tokenID, channelID, accountID interface{}, model string, isStream bool, pt, ct int, start time.Time, statusCode int, clientIPs ...string) {
@@ -2042,15 +1967,6 @@ func toUUID(v interface{}) uuid.UUID {
 		}
 	}
 	return uuid.UUID{}
-}
-
-func jsonEscape(s string) string {
-	b, _ := json.Marshal(s)
-	// Strip surrounding quotes
-	if len(b) >= 2 {
-		return string(b[1 : len(b)-1])
-	}
-	return s
 }
 
 func (r *Relayer) settleAndRefund(tokenID string, tokenPlanID uuid.UUID, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int) {

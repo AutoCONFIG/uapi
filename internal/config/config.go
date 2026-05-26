@@ -26,11 +26,13 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Mode             string `yaml:"mode"`
-	Host             string `yaml:"host"`
-	Port             int    `yaml:"port"`
-	MaxBodySizeMB    int    `yaml:"max_body_size_mb"`
-	ConcurrencyLimit int    `yaml:"concurrency_limit"`
+	Mode                     string   `yaml:"mode"`
+	Host                     string   `yaml:"host"`
+	Port                     int      `yaml:"port"`
+	MaxBodySizeMB            int      `yaml:"max_body_size_mb"`
+	ConcurrencyLimit         int      `yaml:"concurrency_limit"`
+	StreamIdleTimeoutSeconds int      `yaml:"stream_idle_timeout_seconds"`
+	AllowedOrigins           []string `yaml:"allowed_origins"`
 }
 
 type DatabaseConfig struct {
@@ -173,9 +175,10 @@ func Save(cfg *Config, path string) error {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Mode:          "all",
-			Port:          8080,
-			MaxBodySizeMB: 256,
+			Mode:                     "all",
+			Port:                     8080,
+			MaxBodySizeMB:            256,
+			StreamIdleTimeoutSeconds: 300,
 		},
 		Gateway: GatewayConfig{
 			CacheTTL:           "5s",

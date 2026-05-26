@@ -80,15 +80,19 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 				if !ok {
 					return nil, fmt.Errorf("gemini response parts entries must be objects")
 				}
-				if err := validateGeminiPartKeys(part); err != nil {
+				if err := validateGeminiStreamPartKeys(part); err != nil {
 					return nil, err
 				}
 				// Text part → InternalContentPart
 				if text, ok := part["text"].(string); ok {
-					ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{
-						Type: "text",
-						Text: text,
-					})
+					if thought, _ := part["thought"].(bool); thought {
+						ir.Choices[0].Message.ReasoningContent = append(ir.Choices[0].Message.ReasoningContent, provider.InternalContentPart{Type: "reasoning", Text: text})
+					} else {
+						ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{
+							Type: "text",
+							Text: text,
+						})
+					}
 				} else if _, exists := part["text"]; exists {
 					return nil, fmt.Errorf("gemini response text part requires string text")
 				}
@@ -117,10 +121,28 @@ func geminiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 				} else if _, exists := part["functionCall"]; exists {
 					return nil, fmt.Errorf("gemini response functionCall part requires object functionCall")
 				}
-				if _, hasText := part["text"]; !hasText {
-					if _, hasCall := part["functionCall"]; !hasCall {
-						return nil, fmt.Errorf("gemini response part cannot be converted to non-gemini downstream formats")
+				if fr, ok := part["functionResponse"].(map[string]interface{}); ok {
+					if text := geminiFunctionResponseText(fr); text != "" {
+						ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{Type: "text", Text: text})
 					}
+				} else if _, exists := part["functionResponse"]; exists {
+					return nil, fmt.Errorf("gemini response functionResponse part requires object functionResponse")
+				}
+				if cer, ok := part["codeExecutionResult"].(map[string]interface{}); ok {
+					if output, _ := cer["output"].(string); output != "" {
+						ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{Type: "text", Text: output})
+					}
+				} else if _, exists := part["codeExecutionResult"]; exists {
+					return nil, fmt.Errorf("gemini response codeExecutionResult part requires object codeExecutionResult")
+				}
+				if code, ok := part["executableCode"].(map[string]interface{}); ok {
+					codeText, _ := code["code"].(string)
+					if codeText != "" {
+						lang, _ := code["language"].(string)
+						ir.Choices[0].Message.Content = append(ir.Choices[0].Message.Content, provider.InternalContentPart{Type: "text", Text: "```" + lang + "\n" + codeText + "\n```"})
+					}
+				} else if _, exists := part["executableCode"]; exists {
+					return nil, fmt.Errorf("gemini response executableCode part requires object executableCode")
 				}
 			}
 		}

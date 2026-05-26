@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/modelalias"
@@ -37,9 +38,10 @@ type Gateway struct {
 	client   *fasthttp.Client
 	limiter  *relay.ConcurrencyLimiter
 
-	internalSecret string
-	gatewayID      string
-	trustedProxies []string
+	internalSecret    string
+	gatewayID         string
+	trustedProxies    []string
+	streamIdleTimeout time.Duration
 
 	mu        sync.Mutex
 	nodes     []*nodeState
@@ -183,23 +185,27 @@ type relayRequest struct {
 	MaxTokens int    `json:"max_tokens,omitempty"`
 }
 
-func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string) *Gateway {
+func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string, streamIdleTimeout time.Duration) *Gateway {
 	if cacheTTL <= 0 {
 		cacheTTL = defaultCacheTTL
 	}
 	if concLimiter == nil {
 		concLimiter = relay.NewConcurrencyLimiter(0)
 	}
+	if streamIdleTimeout <= 0 {
+		streamIdleTimeout = 300 * time.Second
+	}
 	return &Gateway{
-		db:             database,
-		billing:        billing,
-		fallback:       fallback,
-		cacheTTL:       cacheTTL,
-		internalSecret: internalSecret,
-		gatewayID:      gatewayID,
-		limiter:        concLimiter,
-		trustedProxies: trustedProxies,
-		tokenCache:     newTokenLRUCache(defaultTokenCacheSize),
+		db:                database,
+		billing:           billing,
+		fallback:          fallback,
+		cacheTTL:          cacheTTL,
+		internalSecret:    internalSecret,
+		gatewayID:         gatewayID,
+		limiter:           concLimiter,
+		trustedProxies:    trustedProxies,
+		streamIdleTimeout: streamIdleTimeout,
+		tokenCache:        newTokenLRUCache(defaultTokenCacheSize),
 		client: &fasthttp.Client{
 			ReadTimeout:                   0,
 			WriteTimeout:                  30 * time.Second,
@@ -224,9 +230,9 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	body := ctx.PostBody()
 	var req relayRequest
 	_ = json.Unmarshal(body, &req)
-	req.Model = modelFromRequestPath(string(ctx.Path()), req.Model)
+	req.Model = httputil.ModelFromRequestPath(string(ctx.Path()), req.Model)
 	if req.Model == "" && strings.HasPrefix(string(ctx.Path()), "/v1/images/") {
-		req.Model = modelFromImageRequest(ctx)
+		req.Model = httputil.ModelFromImageRequest(ctx)
 	}
 	if req.Model == "" && strings.HasPrefix(string(ctx.Path()), "/v1/images/") {
 		req.Model = "gpt-image-1"
@@ -280,12 +286,12 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 			if errors.Is(err, relay.ErrNoActiveSubscription) {
 				status = fasthttp.StatusPaymentRequired
 			}
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, status)
 			return
 		}
 		if token.UserID != "" {
 			if err := g.billing.CheckUserPlan(token.UserID, tokenID); err != nil {
-				ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusPaymentRequired)
+				ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusPaymentRequired)
 				return
 			}
 		}
@@ -295,7 +301,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 			if errors.Is(err, relay.ErrNoActiveSubscription) {
 				status = fasthttp.StatusPaymentRequired
 			}
-			ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, status)
+			ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, status)
 			return
 		}
 		if tokenPlanID == uuid.Nil {
@@ -328,7 +334,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		EstimatedTokens: estimatedTokens,
 		Precharged:      precharged,
 		TokenPlanID:     prechargedTokenPlanID.String(),
-		ClientIP:        g.clientIP(ctx),
+		ClientIP:        httputil.ClientIPForLog(ctx, g.trustedProxies),
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
 		AccountID:       route.AccountID.String(),
@@ -368,12 +374,14 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 
 	stream := upResp.BodyStream()
 	if stream != nil {
+		streamReader, stopIdleTimeout := httputil.NewIdleTimeoutReader(stream, stream, g.streamIdleTimeout)
 		rel := releaseNode
 		resp := upResp
 		statusCode := upResp.StatusCode()
 		ctx.Response.SetBodyStream(&releaseReader{
-			reader: stream,
+			reader: streamReader,
 			close: func() {
+				stopIdleTimeout()
 				rel(false)
 				fasthttp.ReleaseResponse(resp)
 			},
@@ -451,7 +459,7 @@ func (g *Gateway) handleGeminiModels(ctx *fasthttp.RequestCtx) {
 }
 
 func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticatedToken, bool) {
-	tokenKey := extractBearerToken(ctx)
+	tokenKey := httputil.ExtractBearerToken(ctx, false)
 	if tokenKey == "" {
 		ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
@@ -465,17 +473,17 @@ func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticated
 		ctx.Error(`{"error":"token expired"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
 	}
-	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
+	if token.IPWhitelist != "" && !httputil.CheckIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	if token.Permissions != "" && !anyPermissionInList(token.Permissions, "chat", "responses", "messages", "gemini") {
+	if token.Permissions != "" && !httputil.AnyPermissionInList(token.Permissions, "chat", "responses", "messages", "gemini") {
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
 	policy, hasPolicy, planType, err := g.loadPolicy(token)
 	if err != nil {
-		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
+		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
 	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy, planType: planType}, true
@@ -498,7 +506,7 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 	if authInfo.hasPolicy {
 		allowed = authInfo.policy.AllowedModels
 	}
-	allowedSet := csvSet(allowed)
+	allowedSet := httputil.CSVSet(allowed)
 	seen := map[string]modelDiscoveryItem{}
 	for _, row := range rows {
 		for _, model := range modelalias.PublicList(row.Models, row.ModelAliases) {
@@ -522,7 +530,7 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 }
 
 func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenticatedToken, bool) {
-	tokenKey := extractBearerToken(ctx)
+	tokenKey := httputil.ExtractBearerToken(ctx, false)
 	if tokenKey == "" {
 		ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
@@ -536,25 +544,25 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 		ctx.Error(`{"error":"token expired"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
 	}
-	if token.IPWhitelist != "" && !checkIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
+	if token.IPWhitelist != "" && !httputil.CheckIPWhitelist(ctx, token.IPWhitelist, g.trustedProxies) {
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
 	policy, hasPolicy, planType, err := g.loadPolicy(token)
 	if err != nil {
-		ctx.Error(`{"error":"`+jsonEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
+		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
 	allowedModels := token.Models
 	if hasPolicy {
 		allowedModels = policy.AllowedModels
 	}
-	if allowedModels != "" && !modelInList(model, allowedModels) {
+	if allowedModels != "" && !httputil.ModelInList(model, allowedModels) {
 		ctx.Error(`{"error":"model not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
 	permission := permissionForPath(string(ctx.Path()))
-	if token.Permissions != "" && !permissionInList(permission, token.Permissions) {
+	if token.Permissions != "" && !httputil.PermissionInList(permission, token.Permissions) {
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
@@ -737,7 +745,7 @@ func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, 
 	out.Header.Del("Proxy-Connection")
 	out.Header.Del("Keep-Alive")
 	out.Header.Del("Transfer-Encoding")
-	out.Header.Set("X-Forwarded-For", g.clientIP(ctx))
+	out.Header.Set("X-Forwarded-For", httputil.ClientIPForLog(ctx, g.trustedProxies))
 	out.Header.Set("X-Forwarded-Proto", string(ctx.URI().Scheme()))
 	return nil
 }
@@ -778,130 +786,6 @@ func (r *releaseReader) Close() error {
 	return nil
 }
 
-func extractBearerToken(ctx *fasthttp.RequestCtx) string {
-	auth := string(ctx.Request.Header.Peek("Authorization"))
-	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:]
-	}
-	if key := strings.TrimSpace(string(ctx.Request.Header.Peek("x-api-key"))); key != "" {
-		return key
-	}
-	if key := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Goog-Api-Key"))); key != "" {
-		return key
-	}
-	return ""
-}
-
-func modelFromRequestPath(path, bodyModel string) string {
-	if strings.TrimSpace(bodyModel) != "" {
-		return bodyModel
-	}
-	const prefix = "/v1beta/models/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
-	}
-	rest := strings.TrimPrefix(path, prefix)
-	if rest == "" {
-		return ""
-	}
-	if idx := strings.Index(rest, ":"); idx >= 0 {
-		rest = rest[:idx]
-	}
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		rest = rest[:idx]
-	}
-	return strings.TrimSpace(rest)
-}
-
-func checkIPWhitelist(ctx *fasthttp.RequestCtx, whitelist string, trustedProxies []string) bool {
-	for _, allowedIP := range strings.Split(whitelist, ",") {
-		allowedIP = strings.TrimSpace(allowedIP)
-		if allowedIP == "" {
-			continue
-		}
-		for _, clientIP := range clientIPCandidates(ctx, trustedProxies) {
-			if allowedIP == clientIP {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// clientIPCandidates returns candidate client IPs for whitelist matching.
-// Forwarded headers are only considered when the direct connection IP is a trusted proxy.
-func clientIPCandidates(ctx *fasthttp.RequestCtx, trustedProxies []string) []string {
-	remoteIP := ctx.RemoteIP().String()
-	candidates := []string{remoteIP}
-
-	// Only trust forwarded headers if the direct connection is from a trusted proxy
-	if !isTrustedProxy(remoteIP, trustedProxies) {
-		return candidates
-	}
-
-	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
-		candidates = append(candidates, xRealIP)
-	}
-	if forwardedFor := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Forwarded-For"))); forwardedFor != "" {
-		firstHop := strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
-		if firstHop != "" {
-			candidates = append(candidates, firstHop)
-		}
-	}
-	return candidates
-}
-
-// isTrustedProxy checks if the given IP is in the trusted proxies list.
-func isTrustedProxy(ip string, trustedProxies []string) bool {
-	for _, trusted := range trustedProxies {
-		if strings.TrimSpace(trusted) == ip {
-			return true
-		}
-	}
-	return false
-}
-
-func (g *Gateway) clientIP(ctx *fasthttp.RequestCtx) string {
-	ips := clientIPCandidates(ctx, g.trustedProxies)
-	if len(ips) == 0 {
-		return ""
-	}
-	return ips[len(ips)-1]
-}
-
-func modelInList(model, list string) bool {
-	for _, m := range csvList(list) {
-		if m == model {
-			return true
-		}
-	}
-	return false
-}
-
-func csvList(list string) []string {
-	items := strings.Split(list, ",")
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
-}
-
-func csvSet(list string) map[string]struct{} {
-	items := csvList(list)
-	if len(items) == 0 {
-		return nil
-	}
-	set := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		set[item] = struct{}{}
-	}
-	return set
-}
-
 func permissionForPath(path string) string {
 	switch {
 	case strings.HasPrefix(path, "/v1/messages"):
@@ -915,46 +799,6 @@ func permissionForPath(path string) string {
 	default:
 		return "chat"
 	}
-}
-
-func modelFromImageRequest(ctx *fasthttp.RequestCtx) string {
-	var body struct {
-		Model string `json:"model"`
-	}
-	if json.Unmarshal(ctx.PostBody(), &body) == nil && strings.TrimSpace(body.Model) != "" {
-		return strings.TrimSpace(body.Model)
-	}
-	if model := strings.TrimSpace(string(ctx.FormValue("model"))); model != "" {
-		return model
-	}
-	return ""
-}
-
-func permissionInList(permission, list string) bool {
-	for _, item := range csvList(list) {
-		if item == permission {
-			return true
-		}
-	}
-	return false
-}
-
-func anyPermissionInList(list string, permissions ...string) bool {
-	set := csvSet(list)
-	for _, permission := range permissions {
-		if _, ok := set[permission]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func jsonEscape(s string) string {
-	b, _ := json.Marshal(s)
-	if len(b) >= 2 {
-		return string(b[1 : len(b)-1])
-	}
-	return s
 }
 
 func logProxy(node string, start time.Time, status int) {

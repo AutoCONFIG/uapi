@@ -4,14 +4,8 @@ import { useEffect, useState } from "react";
 import { CalendarDays, Check, Gift, ShieldCheck, WalletCards } from "lucide-react";
 import { AppShell, PageHead } from "@/components/shell";
 import { userApi } from "@/lib/api";
+import { formatQuota } from "@/lib/format";
 import type { Subscription, SubscriptionWindow } from "@/types/api";
-
-function formatQuota(value: number, type?: string): string {
-  const suffix = type === "count_based" ? " 次" : " tokens";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M${suffix}`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K${suffix}`;
-  return `${value}${suffix}`;
-}
 
 function quotaValues(subscription: Subscription) {
   const monthly = subscription.windows.find((item) => item.type === "month");

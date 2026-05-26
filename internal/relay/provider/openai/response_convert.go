@@ -51,10 +51,8 @@ func openaiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 				return nil, err
 			}
 			im.Content = content
-			if len(im.Content) == 0 {
-				if reasoning, ok := msg["reasoning_content"].(string); ok && reasoning != "" {
-					im.Content = []provider.InternalContentPart{{Type: "text", Text: reasoning}}
-				}
+			if reasoning := openAIReasoningText(msg); reasoning != "" {
+				im.ReasoningContent = append(im.ReasoningContent, provider.InternalContentPart{Type: "reasoning", Text: reasoning})
 			}
 			// Handle refusal: store in Refusal field instead of hard error
 			if refusal, ok := msg["refusal"].(string); ok && refusal != "" && len(im.Content) == 0 {
@@ -126,6 +124,15 @@ func openaiResponseToInternal(body []byte) (*provider.InternalResponse, error) {
 	}
 
 	return ir, nil
+}
+
+func openAIReasoningText(msg map[string]interface{}) string {
+	for _, key := range []string{"reasoning_content", "reasoning"} {
+		if reasoning, ok := msg[key].(string); ok && reasoning != "" {
+			return reasoning
+		}
+	}
+	return ""
 }
 
 // parseResponseContent parses OpenAI response content into InternalContentPart slice.
@@ -379,6 +386,10 @@ func internalToOpenAIResponse(resp *provider.InternalResponse) ([]byte, error) {
 			}
 			msg["tool_calls"] = tcs
 		}
+		if reasoning := internalReasoningText(ch.Message.ReasoningContent); reasoning != "" {
+			msg["reasoning_content"] = reasoning
+			msg["reasoning"] = reasoning
+		}
 
 		choice := map[string]interface{}{
 			"index":         ch.Index,
@@ -398,6 +409,16 @@ func internalToOpenAIResponse(resp *provider.InternalResponse) ([]byte, error) {
 	oai["usage"] = usage
 
 	return json.Marshal(oai)
+}
+
+func internalReasoningText(parts []provider.InternalContentPart) string {
+	out := ""
+	for _, part := range parts {
+		if part.Text != "" {
+			out += part.Text
+		}
+	}
+	return out
 }
 
 func internalToResponsesResponse(resp *provider.InternalResponse) ([]byte, error) {

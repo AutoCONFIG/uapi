@@ -356,6 +356,9 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 		if len(event) < 2 || string(event[len(event)-2:]) != "\n\n" {
 			event = append(event, '\n')
 		}
+		for _, payload := range sseDataPayloads(event) {
+			tracker.TrackChunk([]byte(payload))
+		}
 		ok := reader.Send(event)
 		event = nil
 		return ok
@@ -378,8 +381,6 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 			data := strings.TrimSpace(strings.TrimPrefix(lineStr, "data:"))
 			if data == "[DONE]" {
 				sawDone = true
-			} else {
-				tracker.TrackChunk([]byte(data))
 			}
 		}
 		if streamHasTerminalEvent(event) {
@@ -489,16 +490,5 @@ func sseDataPayloads(event []byte) []string {
 	if raw == "" || raw == "[DONE]" {
 		return nil
 	}
-	// normalizeSSEEventForConverter joins multi-line data payloads with \n.
-	// Split them back into individual JSON payloads so that terminal/failure
-	// event detection can inspect each one independently.
-	lines := strings.Split(raw, "\n")
-	var payloads []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && line != "[DONE]" {
-			payloads = append(payloads, line)
-		}
-	}
-	return payloads
+	return []string{raw}
 }
