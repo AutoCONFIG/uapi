@@ -14,17 +14,11 @@ function formatQuota(value: number, type?: string): string {
 }
 
 function quotaValues(subscription: Subscription) {
-  if (subscription.plan_type === "count_based") {
-    return {
-      total: subscription.count_quota,
-      used: subscription.used_count,
-      remaining: subscription.remaining_count,
-    };
-  }
+  const monthly = subscription.windows.find((item) => item.type === "month");
   return {
-    total: subscription.token_quota,
-    used: subscription.used_tokens,
-    remaining: subscription.remaining_tokens,
+    total: monthly?.limit ?? 0,
+    used: monthly?.used ?? 0,
+    remaining: monthly?.remaining ?? 0,
   };
 }
 
@@ -136,7 +130,7 @@ export default function PlansPage() {
 
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <section className="card card-pad">
-          <h2>套餐额度</h2>
+          <h2>本月额度</h2>
           {subscription ? (
             <>
               <p className="metric-value" style={{ marginBottom: 0 }}>{formatQuota(quota?.remaining ?? 0, subscription.plan_type)}</p>

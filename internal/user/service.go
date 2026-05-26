@@ -442,33 +442,19 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 		return nil, errors.New("plan not found")
 	}
 
-	remainingRequests := plan.CountQuota - tokenPlan.UsedCount
-	if remainingRequests < 0 {
-		remainingRequests = 0
-	}
-	remainingTokens := plan.TokenQuota - tokenPlan.UsedTokens
-	if remainingTokens < 0 {
-		remainingTokens = 0
-	}
 	windows, err := s.subscriptionWindows(userID, plan.PolicyID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &SubscriptionResponse{
-		PlanID:          tokenPlan.PlanID.String(),
-		PlanName:        plan.Name,
-		PlanType:        plan.Type,
-		CountQuota:      plan.CountQuota,
-		TokenQuota:      plan.TokenQuota,
-		UsedCount:       tokenPlan.UsedCount,
-		UsedTokens:      tokenPlan.UsedTokens,
-		RemainingCount:  remainingRequests,
-		RemainingTokens: remainingTokens,
-		Windows:         windows,
-		StartsAt:        tokenPlan.StartsAt.Format(time.RFC3339),
-		ExpiresAt:       tokenPlan.ExpiresAt.Format(time.RFC3339),
-		Status:          "active",
+		PlanID:    tokenPlan.PlanID.String(),
+		PlanName:  plan.Name,
+		PlanType:  plan.Type,
+		Windows:   windows,
+		StartsAt:  tokenPlan.StartsAt.Format(time.RFC3339),
+		ExpiresAt: tokenPlan.ExpiresAt.Format(time.RFC3339),
+		Status:    "active",
 	}, nil
 }
 
@@ -556,20 +542,6 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 			return errors.New("plan not found")
 		}
 		now := time.Now()
-		var currentPlan db.Plan
-		currentErr := tx.Table("plans").
-			Select("plans.*").
-			Joins("JOIN token_plans ON token_plans.plan_id = plans.id").
-			Where("token_plans.user_id = ? AND token_plans.starts_at <= ? AND token_plans.expires_at > ?", userID, now, now).
-			Where("plans.enabled = true AND plans.deleted_at IS NULL").
-			Order("token_plans.created_at DESC").
-			First(&currentPlan).Error
-		if currentErr != nil && !errors.Is(currentErr, gorm.ErrRecordNotFound) {
-			return currentErr
-		}
-		if currentErr == nil && planEffectiveQuota(plan) <= planEffectiveQuota(currentPlan) {
-			return errors.New("can only upgrade to a higher quota plan")
-		}
 		if err := tx.Model(&db.TokenPlan{}).
 			Where("user_id = ? AND expires_at > ?", userID, now).
 			Update("expires_at", now).Error; err != nil {
@@ -589,20 +561,13 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		if err := tx.Save(&redeemCode).Error; err != nil {
 			return err
 		}
-		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, CountQuota: plan.CountQuota, TokenQuota: plan.TokenQuota, UsedCount: 0, UsedTokens: 0, RemainingCount: plan.CountQuota, RemainingTokens: plan.TokenQuota, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
+		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return subscription, nil
-}
-
-func planEffectiveQuota(plan db.Plan) int64 {
-	if plan.Type == "count_based" {
-		return plan.CountQuota
-	}
-	return plan.TokenQuota
 }
 
 func (s *Service) issueTokenPair(userID, username, passwordHash string) (*LoginResponse, error) {

@@ -33,10 +33,8 @@ The frontend calls the implemented backend routes:
   `/api/user/password`, `/api/user/email`
 
 `/api/user/subscription` is the user-facing source for the current plan name,
-plan validity, remaining total quota, and hourly/weekly/monthly usage-window
-remaining quota. The total quota fields are split by plan type:
-`count_based` exposes `count_quota`, `used_count`, and `remaining_count`;
-`token_based` exposes `token_quota`, `used_tokens`, and `remaining_tokens`.
+plan validity, and hourly/weekly/monthly usage-window remaining quota. The
+monthly window is the package quota and resets with the monthly billing window.
 Window units follow the plan type: requests for `count_based`, tokens for
 `token_based`; `0` means no remaining quota, not unlimited.
 - Admin auth/setup: `/api/admin/login`, `/api/admin/init-status`,

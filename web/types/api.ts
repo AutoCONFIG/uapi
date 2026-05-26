@@ -125,12 +125,6 @@ export type Subscription = {
   plan_id: string;
   plan_name: string;
   plan_type: string;
-  count_quota: number;
-  token_quota: number;
-  used_count: number;
-  used_tokens: number;
-  remaining_count: number;
-  remaining_tokens: number;
   windows: SubscriptionWindow[];
   starts_at: string;
   expires_at: string;
@@ -150,8 +144,6 @@ export type Plan = {
   name: string;
   type: string;
   policy_id?: string;
-  count_quota: number;
-  token_quota: number;
   duration_days: number;
   enabled: boolean;
 };

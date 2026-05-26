@@ -170,13 +170,12 @@ Access Policy first version includes only:
 - Monthly usage window.
 - Max concurrency (per plan policy when the active subscription plan has a policy; otherwise per-token).
 
-Plan total quota is split by type: `count_based` uses `plans.count_quota` and
-`token_plans.used_count`; `token_based` uses `plans.token_quota` and
-`token_plans.used_tokens`. The irrelevant plan quota column is written as `0`.
-Window semantics also depend on the plan type: `count_based` increments each
-window by 1 per accepted request, while `token_based` increments by the
-pre-consumed token estimate and is corrected on settlement/refund. A configured
-total or window value of `0` means zero available quota, not unlimited.
+There is no separate plan-level total quota. The monthly policy window is the
+package quota because packages reset monthly. Window semantics depend on the
+plan type: `count_based` increments each window by 1 per accepted request, while
+`token_based` increments by the pre-consumed token estimate and is corrected on
+settlement/refund. A configured window value of `0` means zero available quota,
+not unlimited.
 
 It intentionally does not limit:
 

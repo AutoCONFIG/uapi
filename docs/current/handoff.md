@@ -335,9 +335,9 @@ gateway behavior.
   `adminApi.startChannelOAuth`, `adminApi.channelOAuthStatus`, and
   `adminApi.bindChannelOAuth`.
 - `web/app/admin/plans/page.tsx`: Plan management composes plan CRUD with
-  access-policy CRUD so admins configure count quota for `count_based` plans,
-  token quota for `token_based` plans, model limits, fixed-window limits, and
-  max concurrency from the plan page.
+  access-policy CRUD so admins configure the monthly package quota through the
+  policy monthly window, plus model limits, fixed-window limits, and max
+  concurrency from the plan page.
 - `web/app/admin/relay-nodes/page.tsx`: Relay node management is available for
   node address, region, egress IP, weight, max concurrency, status, and
   channel-level node bindings.

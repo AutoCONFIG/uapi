@@ -18,7 +18,7 @@ UAPI 是一个**面向公众的高性能 AI API 中转平台**。用户注册账
 - 透明代理 + 格式转换（OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API 四种格式互转，客户端可用任一原生格式接入）
 - 渠道管理（分组、上游凭据、账号元数据、加权轮询、故障冷却、OAuth 自动刷新）
 - OAuth 渠道（Codex、Gemini Code、Claude Code、Antigravity）按本地官方客户端源码对齐；具体源文件见 `docs/current/oauth-channels.md`
-- 双模式计费（次数窗口限额 + Token 额度扣费）
+- 双模式计费（按次数或按 Token 写入套餐策略窗口，月窗口即套餐月额度）
 - 用户注册/登录/套餐领取/API Key 管理
 - 管理员后台（渠道/账号凭据、节点、用户、套餐、日志、系统设置）
 - 本地模型目录（渠道模型配置、手动上游同步、模型重定向；下游模型列表不实时访问上游）

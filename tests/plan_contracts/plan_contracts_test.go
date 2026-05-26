@@ -43,10 +43,14 @@ func TestBillingRequiresTokenPlanForSettlement(t *testing.T) {
 func TestZeroQuotaIsNotTreatedAsUnlimited(t *testing.T) {
 	billing := readRepoFile(t, "internal", "relay", "billing.go")
 	forbidden := []string{
+		"CountQuota",
 		"TokenQuota > 0",
+		"TokenQuota",
 		"plan.TokenQuota > 0",
+		"count_quota",
 		"token_quota <= 0",
 		"used_quota",
+		"used_tokens",
 		"no plan = unlimited",
 		"no rate limit",
 	}
@@ -55,11 +59,14 @@ func TestZeroQuotaIsNotTreatedAsUnlimited(t *testing.T) {
 			t.Fatalf("billing code still contains unlimited zero-quota pattern %q", pattern)
 		}
 	}
-	if !strings.Contains(billing, "tp.UsedCount >= plan.CountQuota") {
-		t.Fatal("count billing must deny used count greater than or equal to count quota, including zero quota")
+	if !strings.Contains(billing, "next > window.limit") {
+		t.Fatal("billing must deny usage above the policy window, including zero window quota")
 	}
-	if !strings.Contains(billing, "tp.UsedTokens >= plan.TokenQuota") {
-		t.Fatal("token billing must deny used tokens greater than or equal to token quota, including zero quota")
+	planModel := readRepoFile(t, "internal", "db", "plan.go")
+	for _, pattern := range []string{"CountQuota", "TokenQuota", "UsedTokens", "count_quota", "token_quota", "used_tokens"} {
+		if strings.Contains(planModel, pattern) {
+			t.Fatalf("plan schema still contains redundant quota field %q", pattern)
+		}
 	}
 }
 

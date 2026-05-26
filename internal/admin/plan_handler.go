@@ -55,17 +55,6 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "type must be count_based or token_based")
 		return
 	}
-	if req.CountQuota < 0 || req.TokenQuota < 0 {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "count_quota and token_quota must be >= 0")
-		return
-	}
-	countQuota := req.CountQuota
-	tokenQuota := req.TokenQuota
-	if req.Type == "count_based" {
-		tokenQuota = 0
-	} else {
-		countQuota = 0
-	}
 	durationDays := req.DurationDays
 	if durationDays <= 0 {
 		durationDays = 30
@@ -76,8 +65,6 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		PolicyID:        req.PolicyID,
 		ModelRatios:     req.ModelRatios,
 		CompletionRatio: req.CompletionRatio,
-		CountQuota:      countQuota,
-		TokenQuota:      tokenQuota,
 		Enabled:         req.Enabled,
 		DurationDays:    durationDays,
 	}
@@ -86,7 +73,7 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
-	auditCreateCtx(h.db, "plan", p.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": p.Name, "type": p.Type, "count_quota": p.CountQuota, "token_quota": p.TokenQuota, "policy_id": p.PolicyID, "duration_days": p.DurationDays})
+	auditCreateCtx(h.db, "plan", p.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": p.Name, "type": p.Type, "policy_id": p.PolicyID, "duration_days": p.DurationDays})
 	h.jsonResponse(ctx, 200, p)
 }
 
@@ -108,7 +95,6 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	updates := map[string]interface{}{}
-	nextType := existing.Type
 	if req.Name != nil {
 		updates["name"] = *req.Name
 	}
@@ -118,7 +104,6 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		updates["type"] = *req.Type
-		nextType = *req.Type
 	}
 	if req.PolicyID != nil {
 		updates["policy_id"] = *req.PolicyID
@@ -128,25 +113,6 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 	}
 	if req.CompletionRatio != nil {
 		updates["completion_ratio"] = *req.CompletionRatio
-	}
-	if req.CountQuota != nil {
-		if *req.CountQuota < 0 {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "count_quota must be >= 0")
-			return
-		}
-		updates["count_quota"] = *req.CountQuota
-	}
-	if req.TokenQuota != nil {
-		if *req.TokenQuota < 0 {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, "token_quota must be >= 0")
-			return
-		}
-		updates["token_quota"] = *req.TokenQuota
-	}
-	if nextType == "count_based" {
-		updates["token_quota"] = int64(0)
-	} else {
-		updates["count_quota"] = int64(0)
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
