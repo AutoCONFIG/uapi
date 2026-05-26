@@ -410,6 +410,35 @@ textarea {
   margin-top: 12px;
 }
 
+.plan-create-basic {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(220px, 1fr) minmax(150px, 0.55fr);
+  gap: 14px 16px;
+  align-items: end;
+  margin-top: 14px;
+}
+
+.plan-create-policy {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.3fr) minmax(180px, 0.8fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr);
+  gap: 14px 16px;
+  align-items: end;
+  margin-top: 18px;
+}
+
+.plan-create-policy .field,
+.plan-create-basic .field {
+  margin: 0;
+}
+
+.plan-create-models {
+  grid-column: span 2;
+}
+
+.plan-create-monthly {
+  grid-column: span 1;
+}
+
 .icon-only {
   width: 34px;
   min-width: 34px;
@@ -3035,6 +3064,8 @@ tr:last-child td {
   .quick-grid,
   .gateway-form-row,
   .node-controls,
+  .plan-create-basic,
+  .plan-create-policy,
   .plan-policy-editor,
   .redeem-create-row,
   .channel-create-row,
@@ -3047,6 +3078,11 @@ tr:last-child td {
   .api-key-secret-row,
   .model-sync-row {
     grid-template-columns: 1fr;
+  }
+
+  .plan-create-models,
+  .plan-create-monthly {
+    grid-column: auto;
   }
 
   .node-grid,

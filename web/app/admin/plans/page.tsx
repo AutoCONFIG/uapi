@@ -301,7 +301,7 @@ export default function AdminPlansPage() {
               </div>
               <button className="btn" disabled={saving} onClick={() => { setCreating(false); setError(""); }} type="button">关闭</button>
             </div>
-            <div className="grid grid-2" style={{ marginTop: 12 }}>
+            <div className="plan-create-basic">
               <div className="field">
                 <label>套餐名称</label>
                 <input className="input" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="Starter" />
@@ -323,12 +323,12 @@ export default function AdminPlansPage() {
                 <input className="input" type="number" min={1} value={draft.duration_days} onChange={(e) => setDraft((d) => ({ ...d, duration_days: Number(e.target.value) }))} />
               </div>
             </div>
-            <div className="grid grid-2" style={{ marginTop: 8 }}>
-              <div className="field"><label>允许模型</label><input className="input" value={policyDraft.allowed_models} onChange={(e) => setPolicyDraft((d) => ({ ...d, allowed_models: e.target.value }))} placeholder="留空不限制" /></div>
-              <div className="field"><label>最大并发</label><input className="input" type="number" value={policyDraft.max_concurrency} onChange={(e) => setPolicyDraft((d) => ({ ...d, max_concurrency: e.target.value }))} /></div>
+            <div className="plan-create-policy">
+              <div className="field plan-create-models"><label>允许模型</label><input className="input" value={policyDraft.allowed_models} onChange={(e) => setPolicyDraft((d) => ({ ...d, allowed_models: e.target.value }))} placeholder="留空不限制" /></div>
+              <div className="field plan-create-monthly"><label>{monthlyQuotaLabel(draft.type)}</label><input className="input" min={0} type="number" value={policyDraft.monthly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, monthly_limit: e.target.value }))} /></div>
+              <div className="field"><label>最大并发</label><input className="input" min={0} type="number" value={policyDraft.max_concurrency} onChange={(e) => setPolicyDraft((d) => ({ ...d, max_concurrency: e.target.value }))} /></div>
               <div className="field"><label>每小时窗口</label><input className="input" min={0} type="number" value={policyDraft.hourly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, hourly_limit: e.target.value }))} /></div>
               <div className="field"><label>每周窗口</label><input className="input" min={0} type="number" value={policyDraft.weekly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, weekly_limit: e.target.value }))} /></div>
-              <div className="field"><label>{monthlyQuotaLabel(draft.type)}</label><input className="input" min={0} type="number" value={policyDraft.monthly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, monthly_limit: e.target.value }))} /></div>
             </div>
             {error && <p className="form-error">{error}</p>}
             <div className="form-actions">

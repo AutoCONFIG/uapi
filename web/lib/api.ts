@@ -63,6 +63,17 @@ async function rawRequest<T>(path: string, options: RequestOptions = {}): Promis
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const body = await response.text().catch(() => "");
+    const looksLikeHTML = body.trimStart().startsWith("<");
+    const message = looksLikeHTML
+      ? `API 返回了 HTML 页面，请检查 ${path} 是否被反代到 Gateway 服务。`
+      : `API 返回了非 JSON 响应：${body.slice(0, 160) || response.statusText}`;
+    const error = new Error(message);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
+  }
   const payload = (await response.json()) as ApiEnvelope<T>;
   if (!response.ok || payload.code !== 0) {
     const error = new Error(payload.message || "Request failed");
