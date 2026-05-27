@@ -12,6 +12,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/gateway"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/quota"
 	"github.com/AutoCONFIG/uapi/internal/relay"
 	"github.com/AutoCONFIG/uapi/internal/user"
 	"github.com/valyala/fasthttp"
@@ -19,19 +20,20 @@ import (
 )
 
 type Server struct {
-	cfg          *config.Config
-	cfgPath      string
-	db           *gorm.DB
-	pools        *relay.PoolManager
-	billing      *relay.BillingService
-	relayer      *relay.Relayer
-	gateway      *gateway.Gateway
-	affinity     *relay.AffinityCache
-	adminHandler *admin.Handler
-	oauthIdle    *admin.OAuthIdleMaintainer
-	userHandler  *user.Handler
-	wsHandler    *relay.WSHandler
-	router       *Router
+	cfg            *config.Config
+	cfgPath        string
+	db             *gorm.DB
+	pools          *relay.PoolManager
+	billing        *relay.BillingService
+	relayer        *relay.Relayer
+	gateway        *gateway.Gateway
+	affinity       *relay.AffinityCache
+	adminHandler   *admin.Handler
+	oauthIdle      *admin.OAuthIdleMaintainer
+	userHandler    *user.Handler
+	wsHandler      *relay.WSHandler
+	router         *Router
+	quotaScheduler *quota.Scheduler
 }
 
 func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billing *relay.BillingService, userSvc *user.Service, cfgPath string) *Server {
@@ -51,8 +53,10 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		billing:  billing,
 		affinity: affinity,
 	}
+	s.quotaScheduler = quota.NewScheduler(database)
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
 		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies), relay.WithStreamIdleTimeout(time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second))
+		s.relayer.SetQuotaScheduler(s.quotaScheduler)
 		s.relayer.StartConfigPuller(cfg.Gateway.RelayNodeID, pullInterval)
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "gateway" {
@@ -63,6 +67,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second)
 		refreshPool := makeRefreshPool(database, pools)
 		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools))
+		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
 		s.userHandler = user.NewHandler(userSvc)
@@ -203,6 +208,8 @@ func (s *Server) setupRoutes() {
 	r.PUT("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.DELETE("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.POST("/api/admin/accounts/export", s.handleAdminAuth(s.adminHandler.HandleAccountCredentialExport))
+	r.POST("/api/admin/accounts/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshAccountQuota))
+	r.POST("/api/admin/channels/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshChannelQuota))
 	r.GET("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.POST("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.PUT("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))

@@ -14,6 +14,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/modelalias"
+	"github.com/AutoCONFIG/uapi/internal/quota"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
@@ -62,6 +63,7 @@ type Relayer struct {
 	runtimeVersion    int64
 	runtimeChannels   map[uuid.UUID]db.Channel
 	runtimeAccounts   map[uuid.UUID]db.Account
+	quotaScheduler    *quota.Scheduler
 }
 
 type RelayerOption func(*Relayer)
@@ -109,6 +111,10 @@ func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, 
 		opt(r)
 	}
 	return r
+}
+
+func (r *Relayer) SetQuotaScheduler(s *quota.Scheduler) {
+	r.quotaScheduler = s
 }
 
 type RuntimeConfig struct {
@@ -859,6 +865,11 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		if err != nil {
 			logger.Warnf("relay.upstream", "buffered request failed", logger.F("retry", retry), logger.Err(err))
 			shouldRetry = true
+		} else if upResp.StatusCode() == 429 {
+			// Trigger quota refresh on 429 so admin can see updated usage
+			if r.quotaScheduler != nil && currentAccount != nil && ch != nil {
+				r.quotaScheduler.On429(currentAccount.ID, ch.ID)
+			}
 		} else if upResp.StatusCode() >= 500 {
 			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
 			respBody = copyBody(upResp)

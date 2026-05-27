@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -10,24 +11,33 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/quota"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
+// QuotaScheduler is the interface for refreshing account quota data.
+type QuotaScheduler interface {
+	RefreshAccount(accountID uuid.UUID) (*quota.QuotaData, error)
+	RefreshChannel(channelID uuid.UUID) ([]*quota.QuotaData, []error)
+}
+
 // Handler is the main admin handler that holds shared state and provides
 // authentication, setup, login, and dashboard endpoints.
 type Handler struct {
-	db            *gorm.DB
-	cfg           *config.Config
-	cfgPath       string
-	RefreshPool   func(channelID string) // refresh pool for a channel after CRUD
-	RemovePool    func(channelID string) // remove pool when channel is deleted/disabled
-	OAuthIdle     *OAuthIdleMaintainer
-	setupMu       sync.Mutex
-	setupDone     bool
-	oauthMu       sync.Mutex
-	oauthSessions map[string]*oauthSession
+	db             *gorm.DB
+	cfg            *config.Config
+	cfgPath        string
+	RefreshPool    func(channelID string) // refresh pool for a channel after CRUD
+	RemovePool     func(channelID string) // remove pool when channel is deleted/disabled
+	OAuthIdle      *OAuthIdleMaintainer
+	quotaScheduler QuotaScheduler
+	setupMu        sync.Mutex
+	setupDone      bool
+	oauthMu        sync.Mutex
+	oauthSessions  map[string]*oauthSession
 }
 
 // NewHandler creates a new admin Handler.
@@ -37,6 +47,10 @@ func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string, refreshPo
 		RefreshPool: refreshPool, RemovePool: removePool,
 		oauthSessions: make(map[string]*oauthSession),
 	}
+}
+
+func (h *Handler) SetQuotaScheduler(s QuotaScheduler) {
+	h.quotaScheduler = s
 }
 
 // jsonResponse writes a success JSON response.
@@ -315,4 +329,51 @@ func (h *Handler) HandleDashboard(ctx *fasthttp.RequestCtx) {
 // HandleAccountCredentialExport returns decrypted credential material to authenticated admins.
 func (h *Handler) HandleAccountCredentialExport(ctx *fasthttp.RequestCtx) {
 	h.exportAccountCredential(ctx)
+}
+
+// HandleRefreshAccountQuota refreshes quota for a single account.
+func (h *Handler) HandleRefreshAccountQuota(ctx *fasthttp.RequestCtx) {
+	idStr := ctx.UserValue("id")
+	if idStr == nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "missing account id")
+		return
+	}
+	accountID, err := uuid.Parse(fmt.Sprint(idStr))
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid account id")
+		return
+	}
+	if h.quotaScheduler == nil {
+		h.jsonError(ctx, fasthttp.StatusServiceUnavailable, "quota scheduler not available")
+		return
+	}
+	qd, err := h.quotaScheduler.RefreshAccount(accountID)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, err.Error())
+		return
+	}
+	h.jsonResponse(ctx, fasthttp.StatusOK, qd)
+}
+
+// HandleRefreshChannelQuota refreshes quota for all OAuth accounts under a channel.
+func (h *Handler) HandleRefreshChannelQuota(ctx *fasthttp.RequestCtx) {
+	idStr := ctx.UserValue("id")
+	if idStr == nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "missing channel id")
+		return
+	}
+	channelID, err := uuid.Parse(fmt.Sprint(idStr))
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid channel id")
+		return
+	}
+	if h.quotaScheduler == nil {
+		h.jsonError(ctx, fasthttp.StatusServiceUnavailable, "quota scheduler not available")
+		return
+	}
+	results, errs := h.quotaScheduler.RefreshChannel(channelID)
+	h.jsonResponse(ctx, fasthttp.StatusOK, map[string]interface{}{
+		"refreshed": len(results),
+		"errors":    len(errs),
+	})
 }
