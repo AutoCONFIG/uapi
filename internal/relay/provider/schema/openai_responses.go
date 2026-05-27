@@ -144,6 +144,24 @@ type ResponsesOutputItem struct {
 	CallID    string         `json:"call_id,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Arguments string         `json:"arguments,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON captures unknown top-level keys into Extra.
+func (item *ResponsesOutputItem) UnmarshalJSON(data []byte) error {
+	type Alias ResponsesOutputItem
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*item = ResponsesOutputItem(a)
+	return unmarshalExtra(data, item, &item.Extra)
+}
+
+// MarshalJSON includes Extra fields in the output.
+func (item ResponsesOutputItem) MarshalJSON() ([]byte, error) {
+	return marshalExtra(item, item.Extra)
 }
 
 // ResponsesUsage represents token usage in the Responses API.

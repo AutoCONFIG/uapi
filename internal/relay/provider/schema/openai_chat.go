@@ -52,22 +52,58 @@ func (r OpenAIChatRequest) MarshalJSON() ([]byte, error) {
 
 // ChatMessage represents a single message in an OpenAI Chat request or response.
 type ChatMessage struct {
-	Role       string        `json:"role"`
-	Content    MessageContent `json:"content"`
-	Name       string        `json:"name,omitempty"`
-	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	Refusal    string        `json:"refusal,omitempty"`
+	Role       string          `json:"role"`
+	Content    MessageContent  `json:"content"`
+	Name       string          `json:"name,omitempty"`
+	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Refusal    string         `json:"refusal,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON captures unknown top-level keys into Extra.
+func (m *ChatMessage) UnmarshalJSON(data []byte) error {
+	type Alias ChatMessage
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*m = ChatMessage(a)
+	return unmarshalExtra(data, m, &m.Extra)
+}
+
+// MarshalJSON includes Extra fields in the output.
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	return marshalExtra(m, m.Extra)
 }
 
 // OpenAIChatResponse represents an OpenAI Chat Completions API response.
 type OpenAIChatResponse struct {
 	ID      string       `json:"id"`
 	Object  string       `json:"object"`
-	Created int        `json:"created"`
+	Created int64        `json:"created"`
 	Model   string       `json:"model"`
 	Choices []ChatChoice `json:"choices"`
 	Usage   *Usage       `json:"usage,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON captures unknown top-level keys into Extra.
+func (r *OpenAIChatResponse) UnmarshalJSON(data []byte) error {
+	type Alias OpenAIChatResponse
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*r = OpenAIChatResponse(a)
+	return unmarshalExtra(data, r, &r.Extra)
+}
+
+// MarshalJSON includes Extra fields in the output.
+func (r OpenAIChatResponse) MarshalJSON() ([]byte, error) {
+	return marshalExtra(r, r.Extra)
 }
 
 // ChatChoice represents a single choice in a Chat Completions response.
@@ -75,4 +111,22 @@ type ChatChoice struct {
 	Index        int          `json:"index"`
 	Message      ChatMessage  `json:"message"`
 	FinishReason string       `json:"finish_reason,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON captures unknown top-level keys into Extra.
+func (c *ChatChoice) UnmarshalJSON(data []byte) error {
+	type Alias ChatChoice
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*c = ChatChoice(a)
+	return unmarshalExtra(data, c, &c.Extra)
+}
+
+// MarshalJSON includes Extra fields in the output.
+func (c ChatChoice) MarshalJSON() ([]byte, error) {
+	return marshalExtra(c, c.Extra)
 }
