@@ -476,7 +476,7 @@ func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]Sub
 		start time.Time
 		end   time.Time
 	}{
-		{name: "hour", limit: policy.HourlyLimit, start: currentHour(now), end: currentHour(now).Add(time.Hour)},
+		{name: "hour", limit: policy.HourlyLimit, start: currentFiveHour(now), end: currentFiveHour(now).Add(5 * time.Hour)},
 		{name: "week", limit: policy.WeeklyLimit, start: currentWeek(now), end: currentWeek(now).AddDate(0, 0, 7)},
 		{name: "month", limit: policy.MonthlyLimit, start: currentMonth(now), end: currentMonth(now).AddDate(0, 1, 0)},
 	}
@@ -506,8 +506,8 @@ func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]Sub
 	return windows, nil
 }
 
-func currentHour(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+func currentFiveHour(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/5*5, 0, 0, 0, time.UTC)
 }
 
 func currentWeek(now time.Time) time.Time {

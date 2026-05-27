@@ -2,11 +2,14 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
+	"gorm.io/gorm"
 )
 
 // HandlePlans routes plan CRUD operations by HTTP method.
@@ -59,21 +62,43 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 	if durationDays <= 0 {
 		durationDays = 30
 	}
-	p := db.Plan{
-		Name:            req.Name,
-		Type:            req.Type,
-		PolicyID:        req.PolicyID,
-		ModelRatios:     req.ModelRatios,
-		CompletionRatio: req.CompletionRatio,
-		Enabled:         req.Enabled,
-		DurationDays:    durationDays,
+	if msg := validatePolicyLimits(req.MaxConcurrency, req.HourlyLimit, req.WeeklyLimit, req.MonthlyLimit); msg != "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+		return
 	}
-	p.ID = uuid.New()
-	if err := h.db.Create(&p).Error; err != nil {
+	var p db.Plan
+	var policy db.AccessPolicy
+	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		policy = db.AccessPolicy{
+			AllowedModels:  strings.TrimSpace(req.AllowedModels),
+			MaxConcurrency: req.MaxConcurrency,
+			HourlyLimit:    req.HourlyLimit,
+			WeeklyLimit:    req.WeeklyLimit,
+			MonthlyLimit:   req.MonthlyLimit,
+			Enabled:        true,
+		}
+		policy.ID = uuid.New()
+		if err := tx.Create(&policy).Error; err != nil {
+			return err
+		}
+		policyID := policy.ID
+		p = db.Plan{
+			Name:            req.Name,
+			Type:            req.Type,
+			PolicyID:        &policyID,
+			ModelRatios:     req.ModelRatios,
+			CompletionRatio: req.CompletionRatio,
+			Enabled:         req.Enabled,
+			DurationDays:    durationDays,
+		}
+		p.ID = uuid.New()
+		return tx.Create(&p).Error
+	}); err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create failed")
 		return
 	}
 	auditCreateCtx(h.db, "plan", p.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": p.Name, "type": p.Type, "policy_id": p.PolicyID, "duration_days": p.DurationDays})
+	auditCreateCtx(h.db, "access_policy", policy.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"plan_id": p.ID, "allowed_models": policy.AllowedModels, "max_concurrency": policy.MaxConcurrency})
 	h.jsonResponse(ctx, 200, p)
 }
 
@@ -105,9 +130,6 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		}
 		updates["type"] = *req.Type
 	}
-	if req.PolicyID != nil {
-		updates["policy_id"] = *req.PolicyID
-	}
 	if req.ModelRatios != nil {
 		updates["model_ratios"] = *req.ModelRatios
 	}
@@ -125,7 +147,75 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		updates["duration_days"] = *req.DurationDays
 	}
 	updates["updated_at"] = time.Now()
-	if err := h.db.Model(&existing).Updates(updates).Error; err != nil {
+	policyChanged := planPolicyChanged(req)
+	if policyChanged {
+		policy := db.AccessPolicy{
+			Enabled: true,
+		}
+		if existing.PolicyID != nil {
+			err := h.db.Where("id = ? AND deleted_at IS NULL", *existing.PolicyID).First(&policy).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				existing.PolicyID = nil
+			} else if err != nil {
+				h.jsonError(ctx, fasthttp.StatusNotFound, "access policy not found")
+				return
+			}
+		}
+		if req.AllowedModels != nil {
+			policy.AllowedModels = strings.TrimSpace(*req.AllowedModels)
+		}
+		if req.MaxConcurrency != nil {
+			policy.MaxConcurrency = *req.MaxConcurrency
+		}
+		if req.HourlyLimit != nil {
+			policy.HourlyLimit = *req.HourlyLimit
+		}
+		if req.WeeklyLimit != nil {
+			policy.WeeklyLimit = *req.WeeklyLimit
+		}
+		if req.MonthlyLimit != nil {
+			policy.MonthlyLimit = *req.MonthlyLimit
+		}
+		if msg := validatePolicyLimits(policy.MaxConcurrency, policy.HourlyLimit, policy.WeeklyLimit, policy.MonthlyLimit); msg != "" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+			return
+		}
+	}
+	var policyAudit map[string]interface{}
+	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		if policyChanged {
+			policyUpdates := planPolicyUpdates(req)
+			policyUpdates["enabled"] = true
+			policyUpdates["updated_at"] = time.Now()
+			if existing.PolicyID != nil {
+				var policy db.AccessPolicy
+				if err := tx.Where("id = ? AND deleted_at IS NULL", *existing.PolicyID).First(&policy).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&policy).Updates(policyUpdates).Error; err != nil {
+					return err
+				}
+				policyAudit = policyUpdates
+			} else {
+				policy := db.AccessPolicy{
+					AllowedModels:  strings.TrimSpace(valueOrEmpty(req.AllowedModels)),
+					MaxConcurrency: valueOrZero(req.MaxConcurrency),
+					HourlyLimit:    valueOrZero(req.HourlyLimit),
+					WeeklyLimit:    valueOrZero(req.WeeklyLimit),
+					MonthlyLimit:   valueOrZero(req.MonthlyLimit),
+					Enabled:        true,
+				}
+				policy.ID = uuid.New()
+				if err := tx.Create(&policy).Error; err != nil {
+					return err
+				}
+				policyID := policy.ID
+				updates["policy_id"] = policyID
+				policyAudit = map[string]interface{}{"created": true, "policy_id": policyID, "allowed_models": policy.AllowedModels, "max_concurrency": policy.MaxConcurrency}
+			}
+		}
+		return tx.Model(&existing).Updates(updates).Error
+	}); err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "update failed")
 		return
 	}
@@ -134,7 +224,52 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditUpdateCtx(h.db, "plan", id, h.getAdminUser(ctx), ctx, updates)
+	if policyAudit != nil && existing.PolicyID != nil {
+		auditUpdateCtx(h.db, "access_policy", *existing.PolicyID, h.getAdminUser(ctx), ctx, policyAudit)
+	}
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func planPolicyChanged(req UpdatePlanRequest) bool {
+	return req.AllowedModels != nil ||
+		req.MaxConcurrency != nil ||
+		req.HourlyLimit != nil ||
+		req.WeeklyLimit != nil ||
+		req.MonthlyLimit != nil
+}
+
+func planPolicyUpdates(req UpdatePlanRequest) map[string]interface{} {
+	updates := map[string]interface{}{}
+	if req.AllowedModels != nil {
+		updates["allowed_models"] = strings.TrimSpace(*req.AllowedModels)
+	}
+	if req.MaxConcurrency != nil {
+		updates["max_concurrency"] = *req.MaxConcurrency
+	}
+	if req.HourlyLimit != nil {
+		updates["hourly_limit"] = *req.HourlyLimit
+	}
+	if req.WeeklyLimit != nil {
+		updates["weekly_limit"] = *req.WeeklyLimit
+	}
+	if req.MonthlyLimit != nil {
+		updates["monthly_limit"] = *req.MonthlyLimit
+	}
+	return updates
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func valueOrZero(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (h *Handler) deletePlan(ctx *fasthttp.RequestCtx) {

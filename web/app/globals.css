@@ -1322,9 +1322,11 @@ h3 {
 
 .side-drawer {
   position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(480px, 100vw);
   height: 100%;
-  overflow: auto;
+  overflow: hidden;
   border-left: 1px solid var(--glass-border);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.20), rgba(248, 250, 252, 0.12));
   box-shadow: var(--shadow);
@@ -1334,8 +1336,6 @@ h3 {
 }
 
 .drawer-head {
-  position: sticky;
-  top: 0;
   z-index: 1;
   display: flex;
   align-items: center;
@@ -1355,7 +1355,56 @@ h3 {
 .drawer-body {
   display: grid;
   gap: 14px;
-  padding: 16px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px 16px calc(32px + env(safe-area-inset-bottom));
+  -webkit-overflow-scrolling: touch;
+}
+
+.account-edit-drawer {
+  width: min(560px, 100vw);
+}
+
+.account-edit-drawer .drawer-head {
+  padding: 14px 16px;
+}
+
+.account-edit-drawer .drawer-body {
+  gap: 12px;
+  padding-bottom: calc(80px + env(safe-area-inset-bottom));
+}
+
+.account-edit-drawer .field {
+  margin-bottom: 0;
+}
+
+.account-edit-drawer .credential-export-panel,
+.account-edit-drawer .credential-editor.account-create-panel {
+  gap: 8px;
+  padding: 12px;
+}
+
+.account-edit-drawer .section-head {
+  margin-bottom: 0;
+}
+
+.account-edit-drawer .section-head h2 {
+  font-size: 17px;
+}
+
+.account-edit-drawer .section-head .muted,
+.account-edit-drawer .oauth-inline .muted {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.account-edit-drawer .oauth-inline {
+  gap: 8px;
+}
+
+.account-edit-drawer .oauth-inline .btn.primary {
+  width: 100%;
 }
 
 .drawer-oauth {
@@ -1954,6 +2003,7 @@ h3 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 8px;
+  min-width: 0;
   border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
   border-radius: 4px;
   background: color-mix(in srgb, var(--panel) 72%, var(--panel-soft));
@@ -1963,6 +2013,7 @@ h3 {
 .quota-compact-item {
   display: grid;
   gap: 5px;
+  overflow: hidden;
 }
 
 .quota-compact-header {
@@ -1970,26 +2021,31 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .quota-label,
-.quota-percent,
 .quota-compact-reset {
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
 }
 
 .quota-label {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
 }
 
 .quota-percent {
+  flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .quota-percent.high { color: var(--green); }
@@ -1998,6 +2054,7 @@ h3 {
 
 .quota-compact-bar-track {
   height: 5px;
+  max-width: 100%;
   overflow: hidden;
   border-radius: 999px;
   background: color-mix(in srgb, var(--line) 70%, transparent);
@@ -2026,28 +2083,6 @@ h3 {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 10px;
-}
-
-.quota-refresh-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 2px 4px;
-  font-size: 12px;
-  opacity: 0.5;
-  color: inherit;
-}
-.quota-refresh-btn:hover {
-  opacity: 1;
-}
-
-.quota-refresh-btn.spinning {
-  animation: quota-spin 0.8s linear infinite;
-  pointer-events: none;
-}
-
-@keyframes quota-spin {
-  to { transform: rotate(360deg); }
 }
 
 .quota-compact-reset.reset-soon { color: var(--green); }
@@ -2189,12 +2224,37 @@ table {
   border-collapse: collapse;
 }
 
+.plans-table-wrap table {
+  min-width: 1180px;
+  table-layout: fixed;
+}
+
+.plans-table-wrap th:nth-child(1),
+.plans-table-wrap td:nth-child(1) {
+  width: 150px;
+}
+
+.plans-table-wrap th:nth-child(2),
+.plans-table-wrap td:nth-child(2) {
+  width: 80px;
+}
+
+.plans-table-wrap th:nth-child(4),
+.plans-table-wrap td:nth-child(4) {
+  width: 132px;
+}
+
+.plans-table-wrap th:nth-child(5),
+.plans-table-wrap td:nth-child(5) {
+  width: 48px;
+}
+
 th,
 td {
   border-bottom: 1px solid rgba(203, 213, 225, 0.58);
   padding: 9px 11px;
   text-align: left;
-  vertical-align: middle;
+  vertical-align: top;
   white-space: nowrap;
   font-size: 13px;
 }
@@ -2207,25 +2267,45 @@ th {
 }
 
 .plan-policy-cell {
-  min-width: 600px;
+  padding-top: 42px;
 }
 
 .plan-policy-editor {
   display: grid;
   grid-template-columns:
-    minmax(220px, 1.8fr)
-    minmax(76px, 0.55fr)
-    minmax(76px, 0.55fr)
-    minmax(76px, 0.55fr)
-    minmax(76px, 0.55fr)
-    auto;
-  align-items: start;
+    minmax(220px, 1fr)
+    86px
+    86px
+    86px
+    104px
+    82px;
+  align-items: end;
   gap: 8px;
 }
 
-.compact-field {
+.field.compact-field {
   gap: 4px;
   margin-bottom: 0;
+}
+
+.plan-name-cell strong {
+  display: block;
+  overflow: hidden;
+  min-height: 20px;
+  text-overflow: ellipsis;
+}
+
+.plan-name-cell .compact-field {
+  margin-top: 12px;
+}
+
+.plan-duration-cell {
+  padding-top: 42px;
+}
+
+.plan-name-cell .input,
+.plan-duration-cell .input {
+  min-width: 0;
 }
 
 .compact-field label {
@@ -2238,8 +2318,7 @@ th {
 }
 
 .plan-policy-save {
-  align-self: start;
-  margin-top: 26px;
+  width: 100%;
   height: 34px;
   min-height: 34px;
   padding: 0 10px;
@@ -2249,6 +2328,7 @@ th {
 .plan-status-cell,
 .plan-delete-cell {
   width: 1%;
+  padding-top: 62px;
   text-align: center;
 }
 
@@ -2316,7 +2396,7 @@ th {
 
 .plan-mobile-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(78px, auto) 34px;
+  grid-template-columns: minmax(0, 1fr) repeat(2, auto);
   align-items: center;
   gap: 8px;
 }

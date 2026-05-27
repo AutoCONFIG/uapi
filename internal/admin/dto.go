@@ -133,24 +133,32 @@ type UpdateAccessPolicyRequest struct {
 
 // CreatePlanRequest is the request DTO for creating a plan.
 type CreatePlanRequest struct {
-	Name            string     `json:"name"`
-	Type            string     `json:"type"`
-	PolicyID        *uuid.UUID `json:"policy_id"`
-	ModelRatios     string     `json:"model_ratios"`
-	CompletionRatio string     `json:"completion_ratio"`
-	Enabled         bool       `json:"enabled"`
-	DurationDays    int        `json:"duration_days"`
+	Name            string `json:"name"`
+	Type            string `json:"type"`
+	ModelRatios     string `json:"model_ratios"`
+	CompletionRatio string `json:"completion_ratio"`
+	Enabled         bool   `json:"enabled"`
+	DurationDays    int    `json:"duration_days"`
+	AllowedModels   string `json:"allowed_models"`
+	MaxConcurrency  int    `json:"max_concurrency"`
+	HourlyLimit     int    `json:"hourly_limit"`
+	WeeklyLimit     int    `json:"weekly_limit"`
+	MonthlyLimit    int    `json:"monthly_limit"`
 }
 
 // UpdatePlanRequest is the request DTO for updating a plan.
 type UpdatePlanRequest struct {
-	Name            *string    `json:"name,omitempty"`
-	Type            *string    `json:"type,omitempty"`
-	PolicyID        *uuid.UUID `json:"policy_id,omitempty"`
-	ModelRatios     *string    `json:"model_ratios,omitempty"`
-	CompletionRatio *string    `json:"completion_ratio,omitempty"`
-	Enabled         *bool      `json:"enabled,omitempty"`
-	DurationDays    *int       `json:"duration_days,omitempty"`
+	Name            *string `json:"name,omitempty"`
+	Type            *string `json:"type,omitempty"`
+	ModelRatios     *string `json:"model_ratios,omitempty"`
+	CompletionRatio *string `json:"completion_ratio,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
+	DurationDays    *int    `json:"duration_days,omitempty"`
+	AllowedModels   *string `json:"allowed_models,omitempty"`
+	MaxConcurrency  *int    `json:"max_concurrency,omitempty"`
+	HourlyLimit     *int    `json:"hourly_limit,omitempty"`
+	WeeklyLimit     *int    `json:"weekly_limit,omitempty"`
+	MonthlyLimit    *int    `json:"monthly_limit,omitempty"`
 }
 
 // --- User DTOs ---
@@ -162,6 +170,27 @@ type UpdateUserRequest struct {
 	PlanID        *uuid.UUID `json:"plan_id,omitempty"`
 	PlanStartsAt  *time.Time `json:"plan_starts_at,omitempty"`
 	PlanExpiresAt *time.Time `json:"plan_expires_at,omitempty"`
+}
+
+type userDTO struct {
+	ID            string           `json:"id"`
+	Email         string           `json:"email"`
+	Username      string           `json:"username"`
+	Status        string           `json:"status"`
+	PlanName      string           `json:"plan_name,omitempty"`
+	PlanType      string           `json:"plan_type,omitempty"`
+	PlanStartsAt  string           `json:"plan_starts_at,omitempty"`
+	PlanExpiresAt string           `json:"plan_expires_at,omitempty"`
+	UsageWindows  []usageWindowDTO `json:"usage_windows,omitempty"`
+	CreatedAt     string           `json:"created_at"`
+}
+
+type usageWindowDTO struct {
+	Type      string `json:"type"`
+	Limit     int    `json:"limit"`
+	Used      int    `json:"used"`
+	Remaining int    `json:"remaining"`
+	ResetAt   string `json:"reset_at"`
 }
 
 // --- Relay Node DTOs ---

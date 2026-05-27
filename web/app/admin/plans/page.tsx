@@ -48,12 +48,25 @@ function policyBody(draft: PolicyDraft) {
     hourly_limit: Number(draft.hourly_limit || 0),
     weekly_limit: Number(draft.weekly_limit || 0),
     monthly_limit: Number(draft.monthly_limit || 0),
-    enabled: true,
   };
 }
 
 function monthlyQuotaLabel(type: string) {
   return type === "count_based" ? "每月次数" : "每月 Token";
+}
+
+function policyFromDraft(id: string, draft: PolicyDraft, existing?: AccessPolicy): AccessPolicy {
+  return {
+    id,
+    allowed_models: draft.allowed_models.trim(),
+    max_concurrency: Number(draft.max_concurrency || 0),
+    hourly_limit: Number(draft.hourly_limit || 0),
+    weekly_limit: Number(draft.weekly_limit || 0),
+    monthly_limit: Number(draft.monthly_limit || 0),
+    enabled: true,
+    created_at: existing?.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
 }
 
 export default function AdminPlansPage() {
@@ -112,17 +125,18 @@ export default function AdminPlansPage() {
     setError("");
     setNotice("");
     try {
-      const createdPolicy = await adminApi.createAccessPolicy(token, policyBody(policyDraft));
       const createdPlan = await adminApi.createPlan(token, {
         name: draft.name.trim(),
         type: draft.type,
-        policy_id: createdPolicy.id,
         duration_days: draft.duration_days,
         model_ratios: "{}",
         completion_ratio: "{}",
         enabled: draft.enabled,
+        ...policyBody(policyDraft),
       });
-      setPolicies((cur) => [createdPolicy, ...cur]);
+      if (createdPlan.policy_id) {
+        setPolicies((cur) => [policyFromDraft(createdPlan.policy_id!, policyDraft), ...cur]);
+      }
       setPlans((cur) => [createdPlan, ...cur]);
       setCreating(false);
       setNotice(`套餐 ${createdPlan.name} 已创建。`);
@@ -133,26 +147,46 @@ export default function AdminPlansPage() {
     }
   }
 
-  async function savePolicy(plan: Plan) {
+  async function savePlan(plan: Plan) {
     const token = window.localStorage.getItem("uapi.admin.token");
     if (!token) return;
     const currentPolicy = plan.policy_id ? policyByID.get(plan.policy_id) : undefined;
     const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy);
+    const currentMeta = planDraft(plan);
+    const durationDays = Number(currentMeta.duration_days || 30);
+    if (durationDays < 1) {
+      setError("有效天数必须大于 0");
+      return;
+    }
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      if (currentPolicy) {
-        const updated = await adminApi.updateAccessPolicy(token, currentPolicy.id, policyBody(currentDraft));
-        setPolicies((cur) => cur.map((policy) => policy.id === updated.id ? updated : policy));
-        setNotice(`${plan.name} 的策略已保存。`);
-      } else {
-        const created = await adminApi.createAccessPolicy(token, policyBody(currentDraft));
-        const updatedPlan = await adminApi.updatePlan(token, plan.id, { policy_id: created.id });
-        setPolicies((cur) => [created, ...cur]);
-        setPlans((cur) => cur.map((item) => item.id === plan.id ? updatedPlan : item));
-        setNotice(`${plan.name} 已绑定新策略。`);
+      const nextPlan = await adminApi.updatePlan(token, plan.id, {
+        type: currentMeta.type,
+        duration_days: durationDays,
+        ...policyBody(currentDraft),
+      });
+      if (nextPlan.policy_id) {
+        setPolicies((cur) => {
+          const nextPolicy = policyFromDraft(nextPlan.policy_id!, currentDraft, currentPolicy);
+          return cur.some((policy) => policy.id === nextPolicy.id)
+            ? cur.map((policy) => policy.id === nextPolicy.id ? nextPolicy : policy)
+            : [nextPolicy, ...cur];
+        });
       }
+      setPlans((cur) => cur.map((item) => item.id === plan.id ? nextPlan : item));
+      setEditingPlans((cur) => {
+        const next = { ...cur };
+        delete next[plan.id];
+        return next;
+      });
+      setEditingPolicies((cur) => {
+        const next = { ...cur };
+        delete next[plan.id];
+        return next;
+      });
+      setNotice(`${plan.name} 已保存。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
     } finally {
@@ -169,37 +203,6 @@ export default function AdminPlansPage() {
 
   function setPlanDraft(planID: string, next: PlanDraft) {
     setEditingPlans((cur) => ({ ...cur, [planID]: next }));
-  }
-
-  async function savePlanMeta(plan: Plan) {
-    const token = window.localStorage.getItem("uapi.admin.token");
-    if (!token) return;
-    const current = planDraft(plan);
-    const durationDays = Number(current.duration_days || 30);
-    if (durationDays < 1) {
-      setError("有效天数必须大于 0");
-      return;
-    }
-    setSaving(true);
-    setError("");
-    setNotice("");
-    try {
-      const updated = await adminApi.updatePlan(token, plan.id, {
-        type: current.type,
-        duration_days: durationDays,
-      });
-      setPlans((cur) => cur.map((item) => item.id === plan.id ? updated : item));
-      setEditingPlans((cur) => {
-        const next = { ...cur };
-        delete next[plan.id];
-        return next;
-      });
-      setNotice(`${plan.name} 的套餐信息已保存。`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "保存套餐失败");
-    } finally {
-      setSaving(false);
-    }
   }
 
   async function deletePlan(id: string) {
@@ -328,7 +331,7 @@ export default function AdminPlansPage() {
               <div className="field plan-create-models"><label>允许模型</label><input className="input" value={policyDraft.allowed_models} onChange={(e) => setPolicyDraft((d) => ({ ...d, allowed_models: e.target.value }))} placeholder="留空不限制" /></div>
               <div className="field plan-create-monthly"><label>{monthlyQuotaLabel(draft.type)}</label><input className="input" min={0} type="number" value={policyDraft.monthly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, monthly_limit: e.target.value }))} /></div>
               <div className="field"><label>最大并发</label><input className="input" min={0} type="number" value={policyDraft.max_concurrency} onChange={(e) => setPolicyDraft((d) => ({ ...d, max_concurrency: e.target.value }))} /></div>
-              <div className="field"><label>每小时窗口</label><input className="input" min={0} type="number" value={policyDraft.hourly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, hourly_limit: e.target.value }))} /></div>
+              <div className="field"><label>每 5 小时窗口</label><input className="input" min={0} type="number" value={policyDraft.hourly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, hourly_limit: e.target.value }))} /></div>
               <div className="field"><label>每周窗口</label><input className="input" min={0} type="number" value={policyDraft.weekly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, weekly_limit: e.target.value }))} /></div>
             </div>
             {error && <p className="form-error">{error}</p>}
@@ -349,12 +352,11 @@ export default function AdminPlansPage() {
               {plans.map((p) => {
                 const draftRow = rowDraft(p);
                 const metaDraft = planDraft(p);
-                const policy = p.policy_id ? policyByID.get(p.policy_id) : undefined;
                 return (
                   <tr key={p.id}>
-                    <td>
+                    <td className="plan-name-cell">
                       <strong>{p.name}</strong>
-                      <div className="field compact-field" style={{ marginTop: 8 }}>
+                      <div className="field compact-field">
                         <label>计费类型</label>
                         <select className="input" value={metaDraft.type} onChange={(e) => {
                           const type = e.target.value;
@@ -365,7 +367,7 @@ export default function AdminPlansPage() {
                         </select>
                       </div>
                     </td>
-                    <td>
+                    <td className="plan-duration-cell">
                       <div className="field compact-field">
                         <label>天数</label>
                         <input className="input" min={1} type="number" value={metaDraft.duration_days} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, duration_days: e.target.value })} />
@@ -375,11 +377,10 @@ export default function AdminPlansPage() {
                       <div className="plan-policy-editor">
                         <div className="field compact-field plan-policy-models"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
                         <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
-                        <div className="field compact-field"><label>小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
+                        <div className="field compact-field"><label>5 小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
                         <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
                         <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
-                        <button className="btn plan-policy-save" disabled={saving} onClick={() => savePlanMeta(p)} title="保存套餐信息"><Save /> 套餐</button>
-                        <button className="btn plan-policy-save" disabled={saving} onClick={() => savePolicy(p)} title={policy ? "保存策略" : "创建并绑定策略"}><Save /> {policy ? "保存" : "绑定"}</button>
+                        <button className="btn plan-policy-save" disabled={saving} onClick={() => savePlan(p)} title="保存套餐"><Save /> 保存</button>
                       </div>
                     </td>
                     <td className="plan-status-cell">
@@ -401,7 +402,6 @@ export default function AdminPlansPage() {
           {plans.map((p) => {
             const draftRow = rowDraft(p);
             const metaDraft = planDraft(p);
-            const policy = p.policy_id ? policyByID.get(p.policy_id) : undefined;
             return (
               <article className="plan-mobile-card" key={`mobile-${p.id}`}>
                 <div className="plan-mobile-head">
@@ -425,13 +425,12 @@ export default function AdminPlansPage() {
                   <div className="field compact-field"><label>有效天数</label><input className="input" min={1} type="number" value={metaDraft.duration_days} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, duration_days: e.target.value })} /></div>
                   <div className="field compact-field"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
                   <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
-                  <div className="field compact-field"><label>小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
+                  <div className="field compact-field"><label>5 小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
                   <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
                   <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
                 </div>
                 <div className="plan-mobile-actions">
-                  <button className="btn" disabled={saving} onClick={() => savePlanMeta(p)} type="button"><Save /> 保存套餐</button>
-                  <button className="btn" disabled={saving} onClick={() => savePolicy(p)} type="button"><Save /> {policy ? "保存策略" : "绑定策略"}</button>
+                  <button className="btn" disabled={saving} onClick={() => savePlan(p)} type="button"><Save /> 保存</button>
                   <button className="btn" onClick={() => togglePlan(p)} type="button">{p.enabled ? "停用" : "启用"}</button>
                   <button className="btn danger icon-only" onClick={() => deletePlan(p.id)} title="删除套餐" type="button"><Trash2 /></button>
                 </div>

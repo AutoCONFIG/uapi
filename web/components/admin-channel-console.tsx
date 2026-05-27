@@ -133,8 +133,8 @@ export function AdminChannelConsole() {
   const [oauthJSON, setOauthJSON] = useState("");
   const [exportPassword, setExportPassword] = useState("");
   const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
-  const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
+  const [quotaSyncing, setQuotaSyncing] = useState(false);
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const selected = channels.find((item) => item.id === selectedID) || null;
@@ -211,6 +211,25 @@ export function AdminChannelConsole() {
     setOauthJSON("");
   }, [selected?.id]);
 
+  // Auto-refresh quota for OAuth channels on first view
+  useEffect(() => {
+    if (!selected || !isOAuthChannel(selected) || !token) return;
+    const channelAccs = accounts.filter(a => a.channel_id === selected.id);
+    if (channelAccs.length === 0) return;
+    // Check if any account lacks quota data
+    const needsRefresh = channelAccs.some(a => {
+      const q = asRecord((a.metadata || {}).quota);
+      return !q;
+    });
+    if (!needsRefresh) return;
+    let cancelled = false;
+    adminApi.refreshChannelQuota(token, selected.id).then(() => {
+      if (cancelled) return;
+      adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [selected?.id, token]);
+
   useEffect(() => {
     if (!oauthState || !token || oauthMode === "manual_callback") return;
     const timer = window.setInterval(() => {
@@ -249,7 +268,12 @@ export function AdminChannelConsole() {
     return "healthy";
   }
 
-  const selectedAccounts = useMemo(() => selected ? channelAccounts(selected.id) : [], [selected?.id, accounts]);
+  const selectedAccounts = useMemo(() => {
+    if (!selected) return [];
+    return channelAccounts(selected.id)
+      .slice()
+      .sort((left, right) => accountLowestQuotaRemaining(left) - accountLowestQuotaRemaining(right));
+  }, [selected?.id, accounts]);
 
 
   function applyPreset(preset: ChannelPreset) {
@@ -610,6 +634,14 @@ export function AdminChannelConsole() {
                 <div className="channel-head-actions">
                   <button className="btn" onClick={() => setChannelEditOpen(true)} type="button"><Pencil /> 编辑渠道</button>
                   <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0 || !supportsModelSync(selected)} onClick={() => syncChannelModels(selected)} title={supportsModelSync(selected) ? "从上游同步模型" : "此 OAuth 渠道使用预置模型列表"} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
+                  {isOAuthChannel(selected) ? (
+                    <button className="btn" disabled={quotaSyncing || selectedAccounts.length === 0} onClick={async () => {
+                      if (!token || quotaSyncing) return;
+                      setQuotaSyncing(true);
+                      try { await adminApi.refreshChannelQuota(token, selected.id); } catch {}
+                      adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {}).finally(() => setQuotaSyncing(false));
+                    }} type="button"><RefreshCw /> {quotaSyncing ? "刷新中" : "刷新额度"}</button>
+                  ) : null}
                   <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
                 </div>
               </div>
@@ -680,22 +712,6 @@ export function AdminChannelConsole() {
                               收起
                             </button>
                           ) : null}
-                          <button
-                            className={`quota-refresh-btn${refreshingIds.has(account.id) ? " spinning" : ""}`}
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              if (!token || refreshingIds.has(account.id)) return;
-                              setRefreshingIds(prev => new Set(prev).add(account.id));
-                              const success = await adminApi.refreshAccountQuota(token, account.id).then(() => true).catch(() => false);
-                              if (success) {
-                                adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {});
-                              }
-                              setRefreshingIds(prev => { const s = new Set(prev); s.delete(account.id); return s; });
-                            }}
-                            title="刷新额度"
-                          >
-                            ↻
-                          </button>
                         </div>
                       ) : null}
                       {validation ? <a className="account-card-warning" href={validation.url || undefined} rel="noreferrer" target="_blank">{validation.message}</a> : null}
@@ -720,7 +736,7 @@ export function AdminChannelConsole() {
 
       {accountEditOpen && selected && selectedAccount ? (
         <div className="drawer-backdrop" onClick={() => setAccountEditOpen(false)} role="presentation">
-          <aside aria-label="编辑账号" className="side-drawer channel-config-drawer" onClick={(event) => event.stopPropagation()}>
+          <aside aria-label="编辑账号" className="side-drawer channel-config-drawer account-edit-drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-head">
               <div>
                 <p className="eyebrow">账号</p>
@@ -1006,71 +1022,24 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
         });
       }
     }
-    return items.sort((left, right) => left.remainingPercent - right.remainingPercent);
+    return sortQuotaDisplayItems(items);
   }
 
-  // Fallback: legacy per-channel parsing
-  const codexUsage = asRecord(meta.codex_usage);
-  if (codexUsage) {
-    const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
-    addUsageLimit(items, "codex-primary", "Codex 主窗口", asRecord(limits.primary));
-    addUsageLimit(items, "codex-secondary", "Codex 次窗口", asRecord(limits.secondary));
-    const credits = asRecord(limits.credits);
-    if (credits) {
-      const balance = stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "");
-      items.push({ key: "codex-credits", label: "Credits", remainingPercent: credits.unlimited === true ? 100 : 0, detail: balance ? `Credits ${balance}` : "" });
-    }
-  }
-  const geminiQuota = asRecord(meta.user_quota);
-  if (geminiQuota) {
-    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-    for (const [index, bucket] of buckets.entries()) {
-      const remaining = numberValue(bucket.remainingFraction);
-      const amount = stringValue(bucket.remainingAmount);
-      if (remaining === null && !amount) continue;
-      const percent = remaining !== null ? Math.round(clampPercent(remaining * 100)) : 0;
-      const reset = stringValue(bucket.resetTime);
-      items.push({
-        key: `gemini-${index}`,
-        label: quotaBucketLabel(bucket, index + 1),
-        remainingPercent: percent,
-        resetText: formatResetTimeShort(reset),
-        detail: [amount ? `剩余 ${amount}` : `剩余 ${percent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
-      });
-    }
-  }
-  const geminiCredits = asRecord(meta.credits) || asRecord(meta.credit_balance);
-  if (geminiCredits) {
-    const balance = stringValue(geminiCredits.balance) || stringValue(geminiCredits.remaining) || stringValue(geminiCredits.amount);
-    if (balance) items.push({ key: "gemini-credits", label: "Credits", remainingPercent: 100, detail: `Credits ${balance}` });
-  }
-  const anthropicUsage = asRecord(meta.usage);
-  if (anthropicUsage) {
-    for (const key of ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"]) {
-      addUsageLimit(items, `anthropic-${key}`, key.replaceAll("_", " "), asRecord(anthropicUsage[key]));
-    }
-  }
-  return items.sort((left, right) => left.remainingPercent - right.remainingPercent);
+  return sortQuotaDisplayItems(items);
 }
 
-function addUsageLimit(items: QuotaDisplayItem[], key: string, label: string, row: Record<string, unknown> | null) {
-  if (!row) return;
-  const used = numberValue(row.used_percent ?? row.usedPercent ?? row.utilization);
-  if (used === null) return;
-  const usedPercent = normalizePercent(used);
-  const remainingPercent = Math.round(clampPercent(100 - usedPercent));
-  const reset = stringValue(row.resets_at ?? row.reset_at ?? row.resetAt ?? row.resetTime);
-  items.push({
-    key,
-    label,
-    remainingPercent,
-    resetText: formatResetTimeShort(reset),
-    detail: [`剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
+function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {
+  return items.sort((left, right) => {
+    const byRemaining = left.remainingPercent - right.remainingPercent;
+    if (byRemaining !== 0) return byRemaining;
+    return left.label.localeCompare(right.label, "zh-Hans-u-co-pinyin", { numeric: true });
   });
 }
 
-function quotaBucketLabel(bucket: Record<string, unknown>, index: number): string {
-  return stringValue(bucket.model) || stringValue(bucket.name) || stringValue(bucket.type) || `额度桶 ${index}`;
+function accountLowestQuotaRemaining(account: Account): number {
+  const quotaItems = buildQuotaDisplayItems(account);
+  if (quotaItems.length === 0) return Number.POSITIVE_INFINITY;
+  return Math.min(...quotaItems.map((item) => item.remainingPercent));
 }
 
 function quotaTone(percent: number): string {
@@ -1125,45 +1094,13 @@ function accountState(account: Account): { tone: AccountTone; label: string } {
 
 function accountUsagePercent(account: Account): number | null {
   const meta = account.metadata || {};
-
-  // Primary: read unified meta.quota
   const quota = asRecord(meta.quota);
-  if (quota) {
-    const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-    const candidates: number[] = [];
-    for (const b of buckets) {
-      const pct = numberValue(b.remaining_percent);
-      if (pct !== null) candidates.push(Math.max(0, Math.min(100, 100 - pct)));
-    }
-    return candidates.length > 0 ? Math.max(...candidates) : null;
-  }
-
-  // Fallback: legacy logic
+  if (!quota) return null;
+  const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
   const candidates: number[] = [];
-  const codexUsage = asRecord(meta.codex_usage);
-  if (codexUsage) {
-    const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
-    for (const key of ["primary", "secondary", "credits"]) {
-      const row = asRecord(limits[key]);
-      const percent = numberValue(row?.used_percent ?? row?.usedPercent ?? row?.utilization);
-      if (percent !== null) candidates.push(normalizePercent(percent));
-    }
-  }
-  const geminiQuota = asRecord(meta.user_quota);
-  if (geminiQuota) {
-    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-    for (const bucket of buckets) {
-      const remaining = numberValue(bucket.remainingFraction);
-      if (remaining !== null) candidates.push(Math.max(0, Math.min(100, (1 - remaining) * 100)));
-    }
-  }
-  const anthropicUsage = asRecord(meta.usage);
-  if (anthropicUsage) {
-    for (const key of ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"]) {
-      const row = asRecord(anthropicUsage[key]);
-      const percent = numberValue(row?.utilization);
-      if (percent !== null) candidates.push(normalizePercent(percent));
-    }
+  for (const b of buckets) {
+    const pct = numberValue(b.remaining_percent);
+    if (pct !== null) candidates.push(Math.max(0, Math.min(100, 100 - pct)));
   }
   return candidates.length > 0 ? Math.max(...candidates) : null;
 }
@@ -1177,9 +1114,6 @@ function numberValue(value: unknown): number | null {
   return null;
 }
 
-function normalizePercent(value: number): number {
-  return value <= 1 ? value * 100 : value;
-}
 
 
 function asRecord(value: unknown): Record<string, unknown> | null {

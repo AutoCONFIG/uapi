@@ -5,14 +5,27 @@ import { Ban, Clipboard, KeyRound, Package, Search, Trash2, Undo2 } from "lucide
 import { StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import { isUUID } from "@/lib/format";
-import type { Plan, User } from "@/types/api";
+import type { Plan } from "@/types/api";
+
+type UsageWindow = {
+  type: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  reset_at: string;
+};
 
 type UserRow = {
   id: string;
   email: string;
+  username: string;
   status: string;
-  keys: number;
-  joined: string;
+  plan_name: string;
+  plan_type: string;
+  plan_starts_at: string;
+  plan_expires_at: string;
+  usage_windows: UsageWindow[];
+  created_at: string;
 };
 
 function generatePassword() {
@@ -22,6 +35,31 @@ function generatePassword() {
   crypto.getRandomValues(bytes);
   const body = Array.from(bytes, (value) => alphabet[value % alphabet.length]).join("");
   return `${body.slice(0, 8)}${symbols[bytes[0] % symbols.length]}${body.slice(8, 14)}`;
+}
+
+const windowLabels: Record<string, string> = {
+  hour: "5h 窗口",
+  week: "周窗口",
+  month: "月窗口",
+};
+
+function formatResetShort(iso: string): string {
+  const diff = new Date(iso).getTime() - Date.now();
+  if (diff <= 0) return "已重置";
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+
+function usageTone(remaining: number, limit: number): string {
+  if (limit <= 0) return "high";
+  const pct = remaining / limit * 100;
+  if (pct >= 50) return "high";
+  if (pct >= 20) return "medium";
+  return "low";
 }
 
 export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) {
@@ -39,8 +77,9 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     if (!keyword) return users;
     return users.filter((user) => (
       user.email.toLowerCase().includes(keyword) ||
+      user.username.toLowerCase().includes(keyword) ||
       user.status.toLowerCase().includes(keyword) ||
-      user.id.toLowerCase().includes(keyword)
+      user.plan_name.toLowerCase().includes(keyword)
     ));
   }, [query, users]);
 
@@ -50,7 +89,7 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
     let cancelled = false;
 
     adminApi.users(token)
-      .then((response) => { if (!cancelled) setUsers((response.items ?? []).map(fromApiUser)); })
+      .then((response) => { if (!cancelled) setUsers((response.items ?? []) as unknown as UserRow[]); })
       .catch(() => {});
     adminApi.plans(token, 1, 100)
       .then((response) => { if (!cancelled) setPlans(response.items ?? []); })
@@ -66,8 +105,8 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
 
     if (token && isUUID(row.id)) {
       try {
-        const updated = await adminApi.updateUser(token, row.id, { status: nextStatus as User["status"] });
-        setUsers((current) => current.map((user) => (user.id === row.id ? fromApiUser(updated) : user)));
+        await adminApi.updateUser(token, row.id, { status: nextStatus as "active" | "disabled" });
+        setUsers((current) => current.map((user) => (user.id === row.id ? { ...user, status: nextStatus } : user)));
         setNotice(`${row.email} 已${nextStatus === "disabled" ? "封禁" : "解封"}。`);
         return;
       } catch (err) {
@@ -75,13 +114,6 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         return;
       }
     }
-
-    setUsers((current) =>
-      current.map((user) =>
-        user.id === row.id ? { ...user, status: nextStatus } : user,
-      ),
-    );
-    setNotice(`${row.email} 已${nextStatus === "disabled" ? "封禁" : "解封"}。`);
   }
 
   async function deleteUser(row: UserRow) {
@@ -124,6 +156,8 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         plan_expires_at: planDraft.expires_at ? new Date(planDraft.expires_at).toISOString() : undefined,
       });
       setNotice(`${assigning.email} 的套餐已更新。`);
+      // Reload users to get updated plan/usage
+      adminApi.users(token).then(r => setUsers((r.items ?? []) as unknown as UserRow[])).catch(() => {});
       setAssigning(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "分配套餐失败");
@@ -162,12 +196,12 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
         <div>
           <h2>用户列表</h2>
           <p className="muted" style={{ margin: 0 }}>
-            管理员可封禁、删除用户，或生成一次性随机密码交给用户重新登录。
+            管理员可封禁、删除用户，分配套餐或生成一次性随机密码。
           </p>
         </div>
         <div className="toolbar-search">
           <Search />
-          <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、状态或 ID" />
+          <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、用户名、套餐" />
         </div>
       </section>
 
@@ -207,10 +241,11 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
           <table>
             <thead>
               <tr>
-                <th>邮箱</th>
+                <th>用户</th>
                 <th>状态</th>
-                <th>Key 数</th>
-                <th>注册时间</th>
+                <th>套餐</th>
+                <th>使用量</th>
+                <th>到期</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -219,10 +254,44 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
                 const disabled = row.status === "disabled";
                 return (
                   <tr key={row.id}>
-                    <td>{row.email}</td>
+                    <td>
+                      <div>{row.email}</div>
+                      <div className="muted" style={{ fontSize: 11 }}>{row.username}</div>
+                    </td>
                     <td><StatusBadge value={row.status} /></td>
-                    <td>{row.keys}</td>
-                    <td>{row.joined}</td>
+                    <td>
+                      {row.plan_name ? (
+                        <span className="badge" style={{ background: "var(--primary)", color: "#fff" }}>{row.plan_name}</span>
+                      ) : (
+                        <span className="muted">无</span>
+                      )}
+                    </td>
+                    <td>
+                      {row.usage_windows && row.usage_windows.length > 0 ? (
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {row.usage_windows.map((w) => (
+                            <div key={w.type} className="usage-window-cell" title={`${windowLabels[w.type] || w.type}: ${w.used}/${w.limit}`}>
+                              <div style={{ fontSize: 10, color: "var(--muted)" }}>{windowLabels[w.type] || w.type}</div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                <div className="quota-compact-bar-track" style={{ width: 48, height: 4 }}>
+                                  <div className={`quota-compact-bar ${usageTone(w.remaining, w.limit)}`} style={{ width: `${w.limit > 0 ? (w.remaining / w.limit * 100) : 100}%` }} />
+                                </div>
+                                <span style={{ fontSize: 11, fontFamily: "var(--font-mono)" }} className={`quota-percent ${usageTone(w.remaining, w.limit)}`}>{w.remaining}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="muted">-</span>
+                      )}
+                    </td>
+                    <td>
+                      {row.plan_expires_at ? (
+                        <span style={{ fontSize: 12 }}>{new Date(row.plan_expires_at).toLocaleDateString()}</span>
+                      ) : (
+                        <span className="muted">-</span>
+                      )}
+                    </td>
                     <td>
                       <div className="row-actions">
                         <button className="btn" onClick={() => toggleBan(row)} title={disabled ? "解封" : "封禁"} type="button">
@@ -248,14 +317,4 @@ export function AdminUserConsole({ initialUsers }: { initialUsers: UserRow[] }) 
       </section>
     </>
   );
-}
-
-function fromApiUser(user: User): UserRow {
-  return {
-    id: user.id,
-    email: user.email,
-    status: user.status,
-    keys: 0,
-    joined: user.created_at ? new Date(user.created_at).toISOString().slice(0, 10) : "-",
-  };
 }

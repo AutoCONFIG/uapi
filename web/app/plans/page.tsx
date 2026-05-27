@@ -17,7 +17,7 @@ function quotaValues(subscription: Subscription) {
 }
 
 function windowLabel(type: SubscriptionWindow["type"]): string {
-  return ({ hour: "本小时", week: "本周", month: "本月" } as const)[type] || type;
+  return ({ hour: "5 小时", week: "本周", month: "本月" } as const)[type] || type;
 }
 
 function percent(used: number, limit: number): number {

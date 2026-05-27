@@ -216,7 +216,7 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, d
 		limit int
 		start time.Time
 	}{
-		{name: "hour", limit: policy.HourlyLimit, start: fixedHour(now)},
+		{name: "hour", limit: policy.HourlyLimit, start: fixedFiveHour(now)},
 		{name: "week", limit: policy.WeeklyLimit, start: fixedWeek(now)},
 		{name: "month", limit: policy.MonthlyLimit, start: fixedMonth(now)},
 	}
@@ -260,8 +260,8 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, d
 	return nil
 }
 
-func fixedHour(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
+func fixedFiveHour(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/5*5, 0, 0, 0, time.UTC)
 }
 
 func fixedWeek(now time.Time) time.Time {

@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ListUsers returns a paginated list of users.
+// ListUsers returns a paginated list of users with subscription usage.
 func (h *Handler) ListUsers(ctx *fasthttp.RequestCtx) {
 	if string(ctx.Method()) != "GET" {
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
@@ -26,7 +26,6 @@ func (h *Handler) ListUsers(ctx *fasthttp.RequestCtx) {
 	var users []db.User
 	query := h.db.Model(&db.User{}).Where("deleted_at IS NULL")
 
-	// Optional status filter
 	if status := string(ctx.QueryArgs().Peek("status")); status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -34,11 +33,31 @@ func (h *Handler) ListUsers(ctx *fasthttp.RequestCtx) {
 	query.Count(&total)
 	query.Order("created_at desc").Limit(limit).Offset(offset).Find(&users)
 
+	now := time.Now()
+	dtos := make([]userDTO, 0, len(users))
+	for _, u := range users {
+		dto := userDTOFromUser(u)
+		// Load active subscription
+		var tp db.TokenPlan
+		if err := h.db.Where("user_id = ? AND starts_at <= ? AND expires_at > ?", u.ID.String(), now, now).
+			Order("created_at DESC").First(&tp).Error; err == nil {
+			var plan db.Plan
+			if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", tp.PlanID).First(&plan).Error; err == nil {
+				dto.PlanName = plan.Name
+				dto.PlanType = plan.Type
+				dto.PlanStartsAt = tp.StartsAt.Format(time.RFC3339)
+				dto.PlanExpiresAt = tp.ExpiresAt.Format(time.RFC3339)
+				dto.UsageWindows = h.userUsageWindows(u.ID.String(), plan.PolicyID, now)
+			}
+		}
+		dtos = append(dtos, dto)
+	}
+
 	h.jsonResponse(ctx, 200, PaginatedResponse{
 		Total: total,
 		Page:  page,
 		Limit: limit,
-		Items: users,
+		Items: dtos,
 	})
 }
 
@@ -192,4 +211,70 @@ func createDefaultUserTokenTx(tx *gorm.DB, userID string) (db.Token, error) {
 		return db.Token{}, err
 	}
 	return token, nil
+}
+
+func userDTOFromUser(u db.User) userDTO {
+	return userDTO{
+		ID:        u.ID.String(),
+		Email:     u.Email,
+		Username:  u.Username,
+		Status:    u.Status,
+		CreatedAt: u.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *Handler) userUsageWindows(userID string, policyID *uuid.UUID, now time.Time) []usageWindowDTO {
+	if policyID == nil || *policyID == uuid.Nil {
+		return nil
+	}
+	var policy db.AccessPolicy
+	if err := h.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *policyID).First(&policy).Error; err != nil {
+		return nil
+	}
+	specs := []struct {
+		name  string
+		limit int
+		start time.Time
+		end   time.Time
+	}{
+		{name: "hour", limit: policy.HourlyLimit, start: currentFiveHour(now), end: currentFiveHour(now).Add(5 * time.Hour)},
+		{name: "week", limit: policy.WeeklyLimit, start: currentWeek(now), end: currentWeek(now).AddDate(0, 0, 7)},
+		{name: "month", limit: policy.MonthlyLimit, start: currentMonth(now), end: currentMonth(now).AddDate(0, 1, 0)},
+	}
+	windows := make([]usageWindowDTO, 0, len(specs))
+	for _, spec := range specs {
+		var usage db.PolicyUsageWindow
+		used := 0
+		if err := h.db.Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start = ?", *policyID, userID, spec.name, spec.start).First(&usage).Error; err == nil {
+			used = usage.UsedCount
+		}
+		remaining := spec.limit - used
+		if remaining < 0 {
+			remaining = 0
+		}
+		windows = append(windows, usageWindowDTO{
+			Type:      spec.name,
+			Limit:     spec.limit,
+			Used:      used,
+			Remaining: remaining,
+			ResetAt:   spec.end.Format(time.RFC3339),
+		})
+	}
+	return windows
+}
+
+func currentFiveHour(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/5*5, 0, 0, 0, time.UTC)
+}
+
+func currentWeek(now time.Time) time.Time {
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
+}
+
+func currentMonth(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
