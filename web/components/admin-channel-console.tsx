@@ -4,51 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { apiKeyChannelPresets, channelDefaults, channelPresets, defaultChannelPreset, isOAuthAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
 
-const channelDefaults: Record<string, string> = {
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta",
-};
-
-const oauthChannelDefaults: Record<string, string> = {
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  gemini: "https://generativelanguage.googleapis.com",
-  antigravity: "https://cloudcode-pa.googleapis.com",
-};
-
-type ChannelPreset = {
-  id: string;
-  label: string;
-  type: string;
-  apiFormat: string;
-  auth: "oauth" | "apikey";
-  endpoint: string;
-  models: string;
-  note: string;
-};
-
-const codexModels = "gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2,gpt-image-2";
-const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview";
-const claudeCodeModels = "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
-const antigravityModels = "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-pro-high,gemini-3-pro-low,gemini-pro-agent,gemini-3.1-pro-low,gemini-3-flash,gemini-3-flash-agent,gemini-3.1-flash-lite,gpt-oss-120b-medium";
-
-const channelPresets: ChannelPreset[] = [
-  { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: oauthChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
-  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: oauthChannelDefaults.openai, models: codexModels, note: "OpenAI Responses API / OAuth" },
-  { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: oauthChannelDefaults.gemini, models: geminiCodeModels, note: "Gemini API / OAuth" },
-  { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: oauthChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
-  { id: "openai_responses_api", label: "OpenAI Responses API", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
-  { id: "openai_chat_completions", label: "OpenAI Chat Completions API", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions API" },
-  { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent API" },
-  { id: "anthropic_messages", label: "Anthropic Messages API", type: "anthropic", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.anthropic, models: "", note: "Anthropic Messages API" },
-];
-
-const defaultPreset = channelPresets[5];
-
-function createInitialDraft(preset: ChannelPreset = defaultPreset) {
+function createInitialDraft(preset: ChannelPreset = defaultChannelPreset) {
   return { name: "", preset: preset.id, type: preset.type, models: preset.models, apiFormat: preset.apiFormat };
 }
 
@@ -79,25 +38,11 @@ function composeEndpoint(baseURL: string, path: string, defaultPath: string): st
 }
 
 function isOAuthChannel(channel: Pick<Channel, "api_format">): boolean {
-  return channel.api_format === "codex" || channel.api_format === "gemini_code" || channel.api_format === "claude_code" || channel.api_format === "antigravity";
+  return isOAuthAPIFormat(channel.api_format);
 }
 
 function supportsModelSync(channel: Pick<Channel, "api_format">): boolean {
   return !channel.api_format || channel.api_format === "standard" || channel.api_format === "responses" || channel.api_format === "antigravity";
-}
-
-function presetTitleLines(preset: ChannelPreset): [string, string] {
-  const map: Record<string, [string, string]> = {
-    antigravity: ["Google", "Antigravity"],
-    codex: ["OpenAI", "Codex"],
-    gemini_code: ["Google", "Gemini Code"],
-    claude_code: ["Anthropic", "Claude Code"],
-    openai_responses_api: ["OpenAI", "Responses API"],
-    openai_chat_completions: ["OpenAI", "Chat Completions"],
-    gemini_api: ["Google", "Gemini API"],
-    anthropic_messages: ["Anthropic", "Messages API"],
-  };
-  return map[preset.id] || [preset.type.toUpperCase(), preset.label];
 }
 
 export function AdminChannelConsole() {
@@ -135,23 +80,11 @@ export function AdminChannelConsole() {
   const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
   const [quotaSyncing, setQuotaSyncing] = useState(false);
+  const [createKind, setCreateKind] = useState<"oauth" | "apikey">("oauth");
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const selected = channels.find((item) => item.id === selectedID) || null;
   const selectedAccount = accounts.find((item) => item.id === selectedAccountID) || null;
-
-
-  function presetForChannel(channel: Channel): ChannelPreset {
-    if (channel.api_format === "antigravity") return channelPresets[0];
-    if (channel.api_format === "codex") return channelPresets[1];
-    if (channel.api_format === "gemini_code") return channelPresets[2];
-    if (channel.api_format === "claude_code") return channelPresets[3];
-    if (channel.type === "openai" && channel.api_format === "responses") return channelPresets[4];
-    if (channel.type === "openai") return channelPresets[5];
-    if (channel.type === "gemini") return channelPresets[6];
-    if (channel.type === "anthropic") return channelPresets[7];
-    return { id: channel.type, label: channel.type.toUpperCase(), type: channel.type, apiFormat: channel.api_format || "standard", auth: "apikey", endpoint: channel.endpoint, models: "", note: channel.type };
-  }
 
   function channelAccounts(channelID: string): Account[] {
     return accounts.filter((item) => item.channel_id === channelID);
@@ -210,6 +143,13 @@ export function AdminChannelConsole() {
     setOauthCallbackURL("");
     setOauthJSON("");
   }, [selected?.id]);
+
+  useEffect(() => {
+    const group = createKind === "oauth" ? oauthChannelPresets : apiKeyChannelPresets;
+    if (!group.some((preset) => preset.id === draft.preset)) {
+      applyPreset(group[0]);
+    }
+  }, [createKind]);
 
   // Auto-refresh quota for OAuth channels on first view
   useEffect(() => {
@@ -331,6 +271,8 @@ export function AdminChannelConsole() {
 
   function closeCreateDrawer() {
     setCreateOpen(false);
+    setCreateKind("oauth");
+    setDraft(createInitialDraft());
     setError("");
     setCredError("");
     setCredNotice("");
@@ -425,13 +367,14 @@ export function AdminChannelConsole() {
     setCredError("");
     setCredNotice("");
     try {
-      const started = await adminApi.startChannelOAuth(token, { channel_id: selected.id, provider: selected.type });
+      const provider = oauthProviderForChannel(selected);
+      const started = await adminApi.startChannelOAuth(token, { channel_id: selected.id, provider });
       setOauthChannel(selected);
       setOauthState(started.state);
       setOauthMode(started.mode);
       setOauthUserCode(started.user_code || "");
       setOauthAuthURL(started.auth_url);
-      setOauthStatus({ state: started.state, provider: selected.type as OAuthStatus["provider"], channel_id: selected.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
+      setOauthStatus({ state: started.state, provider, channel_id: selected.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
       setCredNotice(started.mode === "manual_callback" ? "登录页已打开，完成后把本地回调 URL 或认证 JSON 粘贴回来。" : "认证页面已打开，完成后会自动绑定。");
       window.open(started.auth_url, "_blank", "noopener,noreferrer");
     } catch (err) {
@@ -639,11 +582,17 @@ export function AdminChannelConsole() {
                   <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0 || !supportsModelSync(selected)} onClick={() => syncChannelModels(selected)} title={supportsModelSync(selected) ? "从上游同步模型" : "此 OAuth 渠道使用预置模型列表"} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
                   {isOAuthChannel(selected) ? (
                     <button className="btn" disabled={quotaSyncing || selectedAccounts.length === 0} onClick={async () => {
-                      if (!token || quotaSyncing) return;
-                      setQuotaSyncing(true);
-                      try { await adminApi.refreshChannelQuota(token, selected.id); } catch {}
-                      adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {}).finally(() => setQuotaSyncing(false));
-                    }} type="button"><RefreshCw /> {quotaSyncing ? "刷新中" : "刷新额度"}</button>
+	                      if (!token || quotaSyncing) return;
+	                      setQuotaSyncing(true);
+	                      setError("");
+	                      try {
+	                        const result = await adminApi.refreshChannelQuota(token, selected.id);
+	                        if (result.errors > 0) setError(result.error_messages?.[0] || "额度刷新失败");
+	                      } catch (err) {
+	                        setError(err instanceof Error ? err.message : "额度刷新失败");
+	                      }
+	                      adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {}).finally(() => setQuotaSyncing(false));
+	                    }} type="button"><RefreshCw /> {quotaSyncing ? "刷新中" : "刷新额度"}</button>
                   ) : null}
                   <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
                 </div>
@@ -941,8 +890,13 @@ export function AdminChannelConsole() {
             </div>
 
             <div className="drawer-body">
+              <div className="channel-create-tabs segmented">
+                <button className={createKind === "oauth" ? "active" : ""} onClick={() => setCreateKind("oauth")} type="button">OAuth 渠道</button>
+                <button className={createKind === "apikey" ? "active" : ""} onClick={() => setCreateKind("apikey")} type="button">API Key 渠道</button>
+              </div>
+
               <div className="preset-grid provider-pick-grid">
-                {channelPresets.map((preset) => (
+                {(createKind === "oauth" ? oauthChannelPresets : apiKeyChannelPresets).map((preset) => (
                   <button className={draft.preset === preset.id ? "active" : ""} key={preset.id} onClick={() => applyPreset(preset)} type="button">
                     <strong className="preset-title">
                       {presetTitleLines(preset).map((line) => <span key={`${preset.id}-${line}`}>{line}</span>)}
@@ -1028,7 +982,95 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
     return sortQuotaDisplayItems(items);
   }
 
+  addLegacyCodexQuotaItems(items, meta);
+  addLegacyGeminiQuotaItems(items, meta);
+  addLegacyAnthropicQuotaItems(items, meta);
   return sortQuotaDisplayItems(items);
+}
+
+function addLegacyCodexQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
+  const codexUsage = asRecord(meta.codex_usage);
+  if (!codexUsage) return;
+  const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
+  addUsageLimit(items, "codex-primary", "Codex 主窗口", asRecord(limits.primary));
+  addUsageLimit(items, "codex-secondary", "Codex 周窗口", asRecord(limits.secondary));
+  const credits = asRecord(limits.credits);
+  if (!credits) return;
+  const balance = stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "");
+  if (!balance) return;
+  items.push({
+    key: "codex-credits",
+    label: "Codex Credits",
+    remainingPercent: credits.unlimited === true ? 100 : 0,
+    detail: `Credits ${balance}`,
+  });
+}
+
+function addLegacyGeminiQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
+  const geminiQuota = asRecord(meta.user_quota);
+  if (geminiQuota) {
+    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+    for (const [index, bucket] of buckets.entries()) {
+      const remaining = numberValue(bucket.remainingFraction);
+      const amount = stringValue(bucket.remainingAmount);
+      if (remaining === null && !amount) continue;
+      const remainingPercent = remaining !== null ? Math.round(clampPercent(remaining * 100)) : 0;
+      const reset = stringValue(bucket.resetTime);
+      items.push({
+        key: `gemini-${index}`,
+        label: quotaBucketLabel(bucket, index + 1),
+        remainingPercent,
+        resetText: formatResetTimeShort(reset),
+        resetTone: resetTimeTone(reset),
+        detail: [amount ? `剩余 ${amount}` : `剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
+      });
+    }
+  }
+  const geminiCredits = asRecord(meta.credits) || asRecord(meta.credit_balance);
+  if (!geminiCredits) return;
+  const balance = stringValue(geminiCredits.balance) || stringValue(geminiCredits.remaining) || stringValue(geminiCredits.amount);
+  if (!balance) return;
+  items.push({ key: "gemini-credits", label: "Credits", remainingPercent: 100, detail: `Credits ${balance}` });
+}
+
+const legacyAnthropicWindowLabels: Record<string, string> = {
+  five_hour: "Claude 5h 窗口",
+  seven_day: "Claude 周窗口",
+  seven_day_sonnet: "Claude Sonnet 周窗口",
+  seven_day_opus: "Claude Opus 周窗口",
+  seven_day_oauth_apps: "Claude OAuth Apps 周窗口",
+};
+
+function addLegacyAnthropicQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
+  const anthropicUsage = asRecord(meta.usage);
+  if (!anthropicUsage) return;
+  for (const [key, label] of Object.entries(legacyAnthropicWindowLabels)) {
+    addUsageLimit(items, `anthropic-${key}`, label, asRecord(anthropicUsage[key]));
+  }
+}
+
+function addUsageLimit(items: QuotaDisplayItem[], key: string, label: string, window: Record<string, unknown> | null) {
+  if (!window) return;
+  const usedPercent = numberValue(window.used_percent) ?? numberValue(window.usedPercent) ?? numberValue(window.utilization);
+  if (usedPercent === null) return;
+  const remainingPercent = Math.round(clampPercent(100 - usedPercent));
+  const reset = stringValue(window.resets_at) || stringValue(window.reset_at) || stringValue(window.resetAt);
+  items.push({
+    key,
+    label,
+    remainingPercent,
+    resetText: formatResetTimeShort(reset),
+    resetTone: resetTimeTone(reset),
+    detail: [`剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
+  });
+}
+
+function quotaBucketLabel(bucket: Record<string, unknown>, fallbackIndex: number): string {
+  return stringValue(bucket.model) ||
+    stringValue(bucket.modelId) ||
+    stringValue(bucket.model_id) ||
+    stringValue(bucket.label) ||
+    `额度 ${fallbackIndex}`;
 }
 
 function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {
@@ -1163,25 +1205,26 @@ function OAuthPanel({
   onStart: () => void;
   onComplete: () => void;
 }) {
-  const callbackPlaceholder = channel.type === "openai"
+  const oauthFormat = channel.api_format || channel.type;
+  const callbackPlaceholder = oauthFormat === "codex"
     ? "http://localhost:1455/auth/callback?code=...&state=..."
-    : channel.type === "gemini"
+    : oauthFormat === "gemini_code"
       ? "http://127.0.0.1:1456/oauth2callback?code=...&state=..."
-      : channel.type === "antigravity"
+      : oauthFormat === "antigravity"
         ? "http://localhost:51121/oauth-callback?code=...&state=..."
         : "https://platform.claude.com/oauth/code/callback?code=...&state=...";
-  const jsonPlaceholder = channel.type === "openai"
+  const jsonPlaceholder = oauthFormat === "codex"
     ? "{\"callback_url\":\"http://localhost:1455/auth/callback?code=...&state=...\"}"
-    : channel.type === "gemini"
+    : oauthFormat === "gemini_code"
       ? "{\"access_token\":\"ya29...\",\"refresh_token\":\"1//...\",\"expiry_date\":1710000000000}"
-      : channel.type === "antigravity"
+      : oauthFormat === "antigravity"
         ? "{\"access_token\":\"ya29...\",\"refresh_token\":\"1//...\",\"expiry_date\":1710000000000}"
         : "{\"callback_url\":\"https://platform.claude.com/oauth/code/callback?code=...&state=...\"}";
-  const providerHint = channel.type === "openai"
+  const providerHint = oauthFormat === "codex"
     ? "按 Codex OAuth 方式认证。"
-    : channel.type === "gemini"
+    : oauthFormat === "gemini_code"
       ? "按 Gemini Code OAuth 方式认证。"
-      : channel.type === "antigravity"
+      : oauthFormat === "antigravity"
         ? "按 Antigravity OAuth 方式认证。"
         : "按 Claude Code OAuth 方式认证。";
 

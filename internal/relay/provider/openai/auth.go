@@ -30,6 +30,7 @@ const (
 	DeviceAuthURL     = "https://auth.openai.com/codex/device"
 	DeviceRedirectURI = "https://auth.openai.com/deviceauth/callback"
 	CodexUsageURL     = "https://chatgpt.com/backend-api/api/codex/usage"
+	CodexAPIBaseURL   = "https://chatgpt.com/backend-api/codex"
 )
 
 var CodexUserAgent = buildCodexUserAgent()
@@ -225,42 +226,23 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*
 	return &tokenResp, nil
 }
 
-// ExchangeForAPIKey uses id_token to get an API key (Codex-specific flow)
-func ExchangeForAPIKey(tokenURL, idToken, clientID string) (string, error) {
+func NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret string) (*http.Request, error) {
 	data := url.Values{
-		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
-		"subject_token":      {idToken},
-		"subject_token_type": {"urn:ietf:params:oauth:token-type:id_token"},
-		"client_id":          {clientID},
-		"requested_token":    {"openai-api-key"},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
 	}
-	resp, err := postForm(tokenURL, data)
+	if clientSecret != "" {
+		data.Set("client_secret", clientSecret)
+	}
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("api key exchange failed: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("api key exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
-	}
-	var result struct {
-		AccessToken string `json:"access_token"`
-		APIKey      string `json:"api_key"`
-		Error       string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parse response: %w", err)
-	}
-	if result.Error != "" {
-		return "", fmt.Errorf("api key exchange failed: %s", result.Error)
-	}
-	if result.APIKey != "" {
-		return result.APIKey, nil
-	}
-	return result.AccessToken, nil
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("originator", CodexOriginator)
+	req.Header.Set("User-Agent", CodexUserAgent)
+	return req, nil
 }
 
 func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]interface{}, error) {
@@ -269,9 +251,10 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", "codex-cli")
+	req.Header.Set("originator", CodexOriginator)
+	req.Header.Set("User-Agent", CodexUserAgent)
 	if accountID != "" {
-		req.Header.Set("ChatGPT-Account-Id", accountID)
+		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
 	if fedramp {
 		req.Header.Set("X-OpenAI-Fedramp", "true")

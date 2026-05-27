@@ -3,6 +3,7 @@ package oauthprovider
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,8 +31,21 @@ type ExchangeResult struct {
 	Metadata     map[string]interface{}
 }
 
+type Spec struct {
+	Key             string `json:"key"`
+	Label           string `json:"label"`
+	ChannelType     string `json:"channel_type"`
+	APIFormat       string `json:"api_format"`
+	DefaultEndpoint string `json:"default_endpoint"`
+	Models          string `json:"models"`
+	ManualCallback  bool   `json:"manual_callback"`
+	DeviceFlow      bool   `json:"device_flow"`
+	Quota           bool   `json:"quota"`
+}
+
 type Provider interface {
 	Key() string
+	Spec() Spec
 	DefaultClientID() string
 	DefaultClientSecret() string
 	DefaultTokenURL() string
@@ -59,6 +73,15 @@ func Get(key string) (Provider, bool) {
 	return provider, ok
 }
 
+func MatchChannel(ch db.Channel) (Provider, bool) {
+	for _, provider := range registry {
+		if provider.ChannelAllowed(ch) {
+			return provider, true
+		}
+	}
+	return nil, false
+}
+
 func SupportedKeys() []string {
 	keys := make([]string, 0, len(registry))
 	for key := range registry {
@@ -67,7 +90,17 @@ func SupportedKeys() []string {
 	return keys
 }
 
+func SupportedSpecs() []Spec {
+	specs := make([]Spec, 0, len(registry))
+	for _, provider := range registry {
+		specs = append(specs, provider.Spec())
+	}
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Key < specs[j].Key })
+	return specs
+}
+
 type providerImpl struct {
+	spec                Spec
 	key                 string
 	defaultClientID     string
 	defaultClientSecret string
@@ -81,7 +114,15 @@ type providerImpl struct {
 	syncMetadata        func(accessToken string, metadata map[string]interface{}) (map[string]interface{}, error)
 }
 
-func (p providerImpl) Key() string                 { return p.key }
+func (p providerImpl) Key() string { return p.key }
+func (p providerImpl) Spec() Spec {
+	spec := p.spec
+	if spec.Key == "" {
+		spec.Key = p.key
+	}
+	spec.ManualCallback = p.manualCallback
+	return spec
+}
 func (p providerImpl) DefaultClientID() string     { return p.defaultClientID }
 func (p providerImpl) DefaultClientSecret() string { return p.defaultClientSecret }
 func (p providerImpl) DefaultTokenURL() string     { return p.defaultTokenURL }
@@ -110,8 +151,14 @@ func (p providerImpl) SyncMetadata(accessToken string, metadata map[string]inter
 
 func init() {
 	Register(providerImpl{
-		key: "openai", defaultClientID: openai.DefaultClientID, defaultTokenURL: openai.DefaultTokenURL,
+		key: "codex", defaultClientID: openai.DefaultClientID, defaultTokenURL: openai.DefaultTokenURL,
 		defaultRedirectURI: openai.DefaultRedirectURI, manualCallback: true,
+		spec: Spec{
+			Key: "codex", Label: "Codex", ChannelType: "openai", APIFormat: "codex",
+			DefaultEndpoint: openai.CodexAPIBaseURL,
+			Models:          "gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2,gpt-image-2",
+			DeviceFlow:      true, Quota: true,
+		},
 		channelAllowed: func(ch db.Channel) bool { return strings.EqualFold(ch.Type, "openai") && ch.APIFormat == "codex" },
 		pkce: func() (string, string, error) {
 			v, err := openai.GenerateCodeVerifier()
@@ -126,7 +173,6 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			credential := tokens.AccessToken
 			var metadata map[string]interface{}
 			if tokens.IDToken != "" {
 				if parsed, err := openai.ParseIDTokenMetadata(tokens.IDToken); err == nil {
@@ -139,22 +185,23 @@ func init() {
 				}
 				metadata["codex_usage"] = usage
 			}
-			if tokens.IDToken != "" {
-				if exchanged, err := openai.ExchangeForAPIKey(req.TokenURL, tokens.IDToken, req.ClientID); err == nil && exchanged != "" {
-					credential = exchanged
-				}
-			}
 			exp := time.Now().Add(8 * 24 * time.Hour)
 			if tokens.ExpiresIn > 0 {
 				exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
 			}
-			return &ExchangeResult{Credential: credential, RefreshToken: tokens.RefreshToken, Expiry: &exp, Metadata: metadata}, nil
+			return &ExchangeResult{Credential: tokens.AccessToken, RefreshToken: tokens.RefreshToken, Expiry: &exp, Metadata: metadata}, nil
 		},
 	})
 
 	Register(providerImpl{
 		key: "gemini", defaultClientID: gemini.DefaultClientID, defaultClientSecret: gemini.DefaultClientSecret,
 		defaultTokenURL: gemini.DefaultTokenURL, defaultRedirectURI: gemini.DefaultRedirectURI, manualCallback: true,
+		spec: Spec{
+			Key: "gemini", Label: "Gemini Code", ChannelType: "gemini", APIFormat: "gemini_code",
+			DefaultEndpoint: "https://generativelanguage.googleapis.com",
+			Models:          "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview",
+			Quota:           true,
+		},
 		channelAllowed: func(ch db.Channel) bool { return strings.EqualFold(ch.Type, "gemini") && ch.APIFormat == "gemini_code" },
 		pkce: func() (string, string, error) {
 			v, err := gemini.GenerateCodeVerifier()
@@ -184,6 +231,12 @@ func init() {
 	Register(providerImpl{
 		key: "anthropic", defaultClientID: anthropic.DefaultClientID, defaultTokenURL: anthropic.DefaultTokenURL,
 		defaultRedirectURI: anthropic.DefaultRedirectURI, manualCallback: true,
+		spec: Spec{
+			Key: "anthropic", Label: "Claude Code", ChannelType: "anthropic", APIFormat: "claude_code",
+			DefaultEndpoint: "https://api.anthropic.com/v1",
+			Models:          "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022",
+			Quota:           true,
+		},
 		channelAllowed: func(ch db.Channel) bool {
 			return strings.EqualFold(ch.Type, "anthropic") && ch.APIFormat == "claude_code"
 		},
@@ -215,6 +268,12 @@ func init() {
 	Register(providerImpl{
 		key: "antigravity", defaultClientID: antigravity.DefaultClientID, defaultClientSecret: antigravity.DefaultClientSecret,
 		defaultTokenURL: antigravity.DefaultTokenURL, defaultRedirectURI: antigravity.DefaultRedirectURI, manualCallback: true,
+		spec: Spec{
+			Key: "antigravity", Label: "Antigravity", ChannelType: "antigravity", APIFormat: "antigravity",
+			DefaultEndpoint: "https://cloudcode-pa.googleapis.com",
+			Models:          "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-pro-high,gemini-3-pro-low,gemini-pro-agent,gemini-3.1-pro-low,gemini-3-flash,gemini-3-flash-agent,gemini-3.1-flash-lite,gpt-oss-120b-medium",
+			Quota:           true,
+		},
 		channelAllowed: func(ch db.Channel) bool {
 			return strings.EqualFold(ch.Type, "antigravity") && ch.APIFormat == "antigravity"
 		},

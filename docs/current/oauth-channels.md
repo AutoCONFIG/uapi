@@ -52,7 +52,10 @@ Implemented alignment:
   `codex_cli_simplified_flow=true`, and `originator=codex_cli_rs`.
 - Device auth uses the Codex device endpoints and sends the shared Codex
   `originator` and `User-Agent` headers.
-- Authorization-code exchange and API-key exchange use form-urlencoded payloads.
+- Authorization-code exchange uses a form-urlencoded payload and stores the
+  Codex OAuth access token as the account credential. Codex does not exchange
+  ID tokens for OpenAI API keys; standard OpenAI API keys belong only to the
+  `standard` and `responses` API-key channel formats.
 - Refresh uses JSON `{client_id, grant_type, refresh_token}` and Codex headers.
 - Refresh is checked when credentials are used. UAPI mirrors Codex's stale
   criteria from `AuthManager::is_stale_for_proactive_refresh`: expired access
@@ -63,7 +66,11 @@ Implemented alignment:
   `GET https://chatgpt.com/backend-api/api/codex/usage` with Codex backend
   auth headers, matching the local backend-client usage path. When available,
   the response is stored as `metadata.codex_usage`.
-- Codex upstream requests are routed through the OpenAI Responses converter.
+- Codex upstream requests are routed through the OpenAI Responses converter but
+  target the ChatGPT Codex backend base URL
+  `https://chatgpt.com/backend-api/codex`, matching upstream Codex's ChatGPT
+  auth mode. They must not be sent to `https://api.openai.com/v1` with a Codex
+  OAuth token.
 - OAuth channels are credential channels backed by provider OAuth. Admin API-key
   credential creation is rejected for `codex`, `gemini_code`, `claude_code`, and
   `antigravity` channels so regular API Base URL/API Key channels cannot be

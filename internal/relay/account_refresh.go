@@ -170,19 +170,18 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthHTTPClient.Do(req)
 	} else if isOpenAIOAuthTokenURL(account.TokenURL) {
-		payload := map[string]interface{}{
-			"grant_type":    "refresh_token",
-			"refresh_token": refreshToken,
-			"client_id":     account.ClientID,
+		clientSecret := ""
+		if account.ClientSecret != "" {
+			var secretErr error
+			clientSecret, secretErr = crypto.Decrypt(account.ClientSecret)
+			if secretErr != nil {
+				return "", fmt.Errorf("decrypt client secret: %w", secretErr)
+			}
 		}
-		body, _ := json.Marshal(payload)
-		req, reqErr := http.NewRequest(http.MethodPost, account.TokenURL, bytes.NewReader(body))
+		req, reqErr := openai.NewRefreshTokenRequest(account.TokenURL, refreshToken, account.ClientID, clientSecret)
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("originator", openai.CodexOriginator)
-		req.Header.Set("User-Agent", openai.CodexUserAgent)
 		resp, err = oauthHTTPClient.Do(req)
 	} else {
 		resp, err = oauthHTTPClient.PostForm(account.TokenURL, data)
@@ -217,7 +216,6 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		return "", fmt.Errorf("refresh response missing access token")
 	}
 
-	credential := result.AccessToken
 	if result.IDToken != "" && strings.Contains(account.TokenURL, "auth.openai.com") {
 		if metadata, err := openai.ParseIDTokenMetadata(result.IDToken); err == nil {
 			if account.Metadata == nil {
@@ -233,9 +231,6 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 			}
 			account.Metadata["codex_usage"] = usage
 		}
-		if exchanged, err := openai.ExchangeForAPIKey(account.TokenURL, result.IDToken, account.ClientID); err == nil && exchanged != "" {
-			credential = exchanged
-		}
 	}
 	if account.Metadata == nil {
 		account.Metadata = map[string]interface{}{}
@@ -246,7 +241,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	if result.ExpiresIn <= 0 {
 		newExpiry = time.Now().Add(8 * 24 * time.Hour)
 	}
-	newCreds, encErr := crypto.Encrypt(credential)
+	newCreds, encErr := crypto.Encrypt(result.AccessToken)
 	if encErr != nil {
 		return "", fmt.Errorf("encrypt refreshed credentials: %w", encErr)
 	}
@@ -270,7 +265,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		if len(scopes) == 0 {
 			scopes = strings.Fields(anthropic.ClaudeAIRefreshScope)
 		}
-		if metadata, err := anthropic.FetchAccountMetadata(credential, scopes); err == nil {
+		if metadata, err := anthropic.FetchAccountMetadata(result.AccessToken, scopes); err == nil {
 			updates["metadata"] = metadata
 			account.Metadata = metadata
 		} else {
@@ -280,7 +275,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		updates["metadata"] = account.Metadata
 	} else if oauthProviderKey(account) == "gemini" && isGoogleOAuthTokenURL(account.TokenURL) {
 		projectID := geminiProjectID(account.Metadata)
-		if metadata, err := gemini.FetchCodeAssistMetadata(credential, projectID); err == nil {
+		if metadata, err := gemini.FetchCodeAssistMetadata(result.AccessToken, projectID); err == nil {
 			updates["metadata"] = metadata
 			account.Metadata = metadata
 		} else {
@@ -293,7 +288,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		}
 	}
 
-	return credential, nil
+	return result.AccessToken, nil
 }
 
 func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refreshToken string) (string, error) {

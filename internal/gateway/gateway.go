@@ -752,12 +752,20 @@ func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, 
 
 func copyResponseHeaders(ctx *fasthttp.RequestCtx, resp *fasthttp.Response) {
 	resp.Header.VisitAll(func(k, v []byte) {
-		key := string(k)
-		if strings.EqualFold(key, "Connection") || strings.EqualFold(key, "Transfer-Encoding") || strings.EqualFold(key, "Keep-Alive") {
+		if isHopByHopHeader(string(k)) {
 			return
 		}
 		ctx.Response.Header.SetBytesKV(k, v)
 	})
+}
+
+func isHopByHopHeader(key string) bool {
+	for _, header := range []string{"Connection", "Transfer-Encoding", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Trailer", "Upgrade", "Content-Length"} {
+		if strings.EqualFold(key, header) {
+			return true
+		}
+	}
+	return false
 }
 
 type releaseReader struct {

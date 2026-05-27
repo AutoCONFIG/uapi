@@ -6,6 +6,7 @@ import type {
   ApiKey,
   AuditLogEntry,
   Channel,
+  ChannelCatalog,
   ChannelModelSync,
   Dashboard,
   LoginResponse,
@@ -204,6 +205,8 @@ export const adminApi = {
     request<{ deleted: boolean }>(`/api/admin/node-channels?id=${id}`, { method: "DELETE", token }),
   channels: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Channel>>(`/api/admin/channels?page=${page}&limit=${limit}`, { token }),
+  channelCatalog: (token: string) =>
+    request<ChannelCatalog>("/api/admin/channels/catalog", { token }),
   createChannel: (token: string, body: {
     name: string;
     type: string;
@@ -247,7 +250,7 @@ export const adminApi = {
   refreshAccountQuota: (token: string, accountId: string) =>
     request<Record<string, unknown>>("/api/admin/accounts/" + accountId + "/refresh-quota", { method: "POST", token }),
   refreshChannelQuota: (token: string, channelId: string) =>
-    request<{ refreshed: number; errors: number }>("/api/admin/channels/" + channelId + "/refresh-quota", { method: "POST", token }),
+    request<{ refreshed: number; errors: number; error_messages?: string[] }>("/api/admin/channels/" + channelId + "/refresh-quota", { method: "POST", token }),
   exportAccount: (token: string, body: { id: string; password: string }) =>
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>

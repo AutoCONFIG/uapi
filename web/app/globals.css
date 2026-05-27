@@ -1423,6 +1423,11 @@ h3 {
   gap: 8px;
 }
 
+.channel-create-tabs {
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .preset-grid button {
   position: relative;
   overflow: hidden;

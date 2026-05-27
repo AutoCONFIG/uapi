@@ -1805,20 +1805,32 @@ func parseRetryDelay(body []byte, apiFormat provider.Format) time.Duration {
 
 // hopByHopHeaders should not be forwarded between proxy hops.
 var hopByHopHeaders = map[string]struct{}{
-	"Transfer-Encoding": {},
-	"Connection":        {},
-	"Keep-Alive":        {},
-	"Upgrade":           {},
-	"Content-Length":    {},
+	"Transfer-Encoding":   {},
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Trailer":             {},
+	"Upgrade":             {},
+	"Content-Length":      {},
 }
 
 func copyHeaders(resp *fasthttp.Response, dst *fasthttp.ResponseHeader) {
 	resp.Header.VisitAll(func(k, v []byte) {
-		if _, skip := hopByHopHeaders[string(k)]; skip {
+		if isHopByHopHeader(string(k)) {
 			return
 		}
 		dst.SetBytesKV(k, v)
 	})
+}
+
+func isHopByHopHeader(key string) bool {
+	for header := range hopByHopHeaders {
+		if strings.EqualFold(key, header) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeConvertedResponseHeaders(h *fasthttp.ResponseHeader) {

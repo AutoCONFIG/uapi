@@ -29,6 +29,9 @@ func (a *OpenAIAdaptor) Init(channel *db.Channel, account *db.Account) {
 
 func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 	base := strings.TrimRight(upstreamconfig.AccountEndpoint(a.channel, a.account), "/")
+	if a.channel.APIFormat == "codex" && isOpenAIPlatformBaseURL(base) {
+		base = CodexAPIBaseURL
+	}
 	if strings.HasPrefix(path, "/v1/images/") {
 		return base + strings.TrimPrefix(path, "/v1"), nil
 	}
@@ -43,6 +46,12 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	if a.channel != nil && a.channel.APIFormat == "codex" {
 		req.Header.Set("originator", CodexOriginator)
 		req.Header.Set("User-Agent", CodexUserAgent)
+		if accountID := metadataString(a.account, "chatgpt_account_id"); accountID != "" {
+			req.Header.Set("ChatGPT-Account-ID", accountID)
+		}
+		if metadataBool(a.account, "chatgpt_account_is_fedramp") {
+			req.Header.Set("X-OpenAI-Fedramp", "true")
+		}
 	}
 	if len(req.Header.Peek("Content-Type")) == 0 {
 		req.Header.Set("Content-Type", "application/json")
@@ -156,6 +165,27 @@ func (a *OpenAIAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
 }
 
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
+
+func isOpenAIPlatformBaseURL(base string) bool {
+	base = strings.TrimRight(strings.ToLower(strings.TrimSpace(base)), "/")
+	return base == "" || base == "https://api.openai.com" || base == "https://api.openai.com/v1"
+}
+
+func metadataString(account *db.Account, key string) string {
+	if account == nil || account.Metadata == nil {
+		return ""
+	}
+	value, _ := account.Metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func metadataBool(account *db.Account, key string) bool {
+	if account == nil || account.Metadata == nil {
+		return false
+	}
+	value, _ := account.Metadata[key].(bool)
+	return value
+}
 
 func init() {
 	provider.RegisterToInternal(provider.FormatOpenAIChatCompletions, openaiChatToInternal)

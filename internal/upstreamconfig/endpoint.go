@@ -9,6 +9,9 @@ import (
 func DefaultEndpoint(providerType, apiFormat string) string {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case "openai":
+		if apiFormat == "codex" {
+			return "https://chatgpt.com/backend-api/codex"
+		}
 		return "https://api.openai.com/v1"
 	case "anthropic":
 		return "https://api.anthropic.com/v1"

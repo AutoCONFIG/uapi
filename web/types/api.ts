@@ -154,6 +154,25 @@ export type ChannelModelSync = {
   count: number;
 };
 
+export type ChannelPresetDTO = {
+  id: string;
+  label: string;
+  type: string;
+  api_format: string;
+  auth: "oauth" | "apikey";
+  endpoint: string;
+  models: string;
+  note: string;
+  manual_callback?: boolean;
+  device_flow?: boolean;
+  quota?: boolean;
+};
+
+export type ChannelCatalog = {
+  oauth: ChannelPresetDTO[];
+  api_key: ChannelPresetDTO[];
+};
+
 export type Channel = {
   id: string;
   name: string;
@@ -197,7 +216,7 @@ export type OAuthAuthURL = {
 
 export type OAuthStatus = {
   state: string;
-  provider: "openai" | "gemini" | "anthropic" | "antigravity";
+  provider: string;
   channel_id: string;
   status: "pending" | "completed" | "error" | "bound";
   ready_to_bind: boolean;

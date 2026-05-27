@@ -82,6 +82,25 @@ type OAuthStatusResponse struct {
 	BoundAccountID *uuid.UUID `json:"bound_account_id,omitempty"`
 }
 
+type ChannelCatalogResponse struct {
+	OAuth  []ChannelPresetDTO `json:"oauth"`
+	APIKey []ChannelPresetDTO `json:"api_key"`
+}
+
+type ChannelPresetDTO struct {
+	ID             string `json:"id"`
+	Label          string `json:"label"`
+	Type           string `json:"type"`
+	APIFormat      string `json:"api_format"`
+	Auth           string `json:"auth"`
+	Endpoint       string `json:"endpoint"`
+	Models         string `json:"models"`
+	Note           string `json:"note"`
+	ManualCallback bool   `json:"manual_callback,omitempty"`
+	DeviceFlow     bool   `json:"device_flow,omitempty"`
+	Quota          bool   `json:"quota,omitempty"`
+}
+
 // BindOAuthAccountRequest creates a channel account from a completed OAuth session.
 type BindOAuthAccountRequest struct {
 	State       string `json:"state"`

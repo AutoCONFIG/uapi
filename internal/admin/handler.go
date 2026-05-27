@@ -11,6 +11,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/oauthprovider"
 	"github.com/AutoCONFIG/uapi/internal/quota"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -51,6 +52,34 @@ func NewHandler(database *gorm.DB, cfg *config.Config, cfgPath string, refreshPo
 
 func (h *Handler) SetQuotaScheduler(s QuotaScheduler) {
 	h.quotaScheduler = s
+}
+
+func (h *Handler) HandleChannelCatalog(ctx *fasthttp.RequestCtx) {
+	oauth := make([]ChannelPresetDTO, 0)
+	for _, spec := range oauthprovider.SupportedSpecs() {
+		oauth = append(oauth, ChannelPresetDTO{
+			ID:             spec.APIFormat,
+			Label:          spec.Label,
+			Type:           spec.ChannelType,
+			APIFormat:      spec.APIFormat,
+			Auth:           "oauth",
+			Endpoint:       spec.DefaultEndpoint,
+			Models:         spec.Models,
+			Note:           spec.Label + " OAuth",
+			ManualCallback: spec.ManualCallback,
+			DeviceFlow:     spec.DeviceFlow,
+			Quota:          spec.Quota,
+		})
+	}
+	h.jsonResponse(ctx, fasthttp.StatusOK, ChannelCatalogResponse{
+		OAuth: oauth,
+		APIKey: []ChannelPresetDTO{
+			{ID: "openai_responses_api", Label: "OpenAI Responses API", Type: "openai", APIFormat: "responses", Auth: "apikey", Endpoint: "https://api.openai.com/v1", Note: "OpenAI Responses API"},
+			{ID: "openai_chat_completions", Label: "OpenAI Chat Completions API", Type: "openai", APIFormat: "standard", Auth: "apikey", Endpoint: "https://api.openai.com/v1", Note: "OpenAI Chat Completions API"},
+			{ID: "gemini_api", Label: "Gemini API", Type: "gemini", APIFormat: "standard", Auth: "apikey", Endpoint: "https://generativelanguage.googleapis.com/v1beta", Note: "Gemini generateContent API"},
+			{ID: "anthropic_messages", Label: "Anthropic Messages API", Type: "anthropic", APIFormat: "standard", Auth: "apikey", Endpoint: "https://api.anthropic.com/v1", Note: "Anthropic Messages API"},
+		},
+	})
 }
 
 // jsonResponse writes a success JSON response.
@@ -372,8 +401,20 @@ func (h *Handler) HandleRefreshChannelQuota(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	results, errs := h.quotaScheduler.RefreshChannel(channelID)
+	errorMessages := make([]string, 0, len(errs))
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		msg := err.Error()
+		if len(msg) > 300 {
+			msg = msg[:300] + "..."
+		}
+		errorMessages = append(errorMessages, msg)
+	}
 	h.jsonResponse(ctx, fasthttp.StatusOK, map[string]interface{}{
-		"refreshed": len(results),
-		"errors":    len(errs),
+		"refreshed":      len(results),
+		"errors":         len(errs),
+		"error_messages": errorMessages,
 	})
 }

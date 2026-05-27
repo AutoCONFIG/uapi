@@ -55,37 +55,8 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 		limits = rl
 	}
 
-	// Primary window (short, e.g. 5h)
-	if primary, ok := limits["primary"].(map[string]interface{}); ok {
-		usedPct := codexUsedPercent(primary)
-		if usedPct != nil {
-			remaining := 100 - *usedPct
-			if remaining < 0 {
-				remaining = 0
-			}
-			qd.Buckets = append(qd.Buckets, QuotaBucket{
-				Label:            "Codex 主窗口",
-				RemainingPercent: remaining,
-				ResetTime:        codexResetTime(primary),
-			})
-		}
-	}
-
-	// Secondary window (weekly)
-	if secondary, ok := limits["secondary"].(map[string]interface{}); ok {
-		usedPct := codexUsedPercent(secondary)
-		if usedPct != nil {
-			remaining := 100 - *usedPct
-			if remaining < 0 {
-				remaining = 0
-			}
-			qd.Buckets = append(qd.Buckets, QuotaBucket{
-				Label:            "Codex 周窗口",
-				RemainingPercent: remaining,
-				ResetTime:        codexResetTime(secondary),
-			})
-		}
-	}
+	addCodexWindow(qd, "Codex 主窗口", mapValue(limits, "primary"))
+	addCodexWindow(qd, "Codex 周窗口", mapValue(limits, "secondary"))
 
 	// Credits
 	if credits, ok := limits["credits"].(map[string]interface{}); ok {
@@ -109,10 +80,35 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 	return qd
 }
 
-func codexUsedPercent(m map[string]interface{}) *int {
-	for _, key := range []string{"used_percent", "usedPercent"} {
+func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}) {
+	if window == nil {
+		return
+	}
+	if remainingPct := codexRemainingPercent(window); remainingPct != nil {
+		qd.Buckets = append(qd.Buckets, QuotaBucket{
+			Label:            label,
+			RemainingPercent: clampPercent(*remainingPct),
+			ResetTime:        codexResetTime(window),
+		})
+	}
+}
+
+func codexRemainingPercent(m map[string]interface{}) *int {
+	for _, key := range []string{"remaining_percent", "remainingPercent"} {
 		if v, ok := m[key].(float64); ok {
 			pct := int(v)
+			return &pct
+		}
+	}
+	for _, key := range []string{"remaining_fraction", "remainingFraction"} {
+		if v, ok := m[key].(float64); ok {
+			pct := int(v * 100)
+			return &pct
+		}
+	}
+	for _, key := range []string{"used_percent", "usedPercent", "utilization"} {
+		if v, ok := m[key].(float64); ok {
+			pct := 100 - int(v)
 			return &pct
 		}
 	}
@@ -131,4 +127,24 @@ func codexResetTime(m map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func mapValue(m map[string]interface{}, key string) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	if value, ok := m[key].(map[string]interface{}); ok {
+		return value
+	}
+	return nil
+}
+
+func clampPercent(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }

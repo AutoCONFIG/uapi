@@ -73,13 +73,18 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 	}
 	provider := strings.ToLower(req.Provider)
 	if provider == "" {
-		provider = strings.ToLower(channel.Type)
+		if matched, ok := oauthprovider.MatchChannel(channel); ok {
+			provider = matched.Key()
+		} else {
+			provider = strings.ToLower(channel.Type)
+		}
 	}
 	oauthProv, ok := oauthprovider.Get(provider)
 	if !ok {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "unsupported oauth provider")
 		return
 	}
+	provider = oauthProv.Key()
 	if !oauthProv.ChannelAllowed(channel) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching OAuth channel format")
 		return
@@ -113,7 +118,7 @@ func (h *Handler) StartOAuth(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if provider == "openai" && strings.EqualFold(req.Mode, "device") {
+	if provider == "codex" && strings.EqualFold(req.Mode, "device") {
 		device, err := openai.StartDeviceAuth(clientID)
 		if err != nil {
 			h.jsonError(ctx, fasthttp.StatusBadGateway, sanitizeOAuthError(err))
@@ -242,6 +247,7 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "unsupported oauth provider")
 			return
 		}
+		provider = oauthProv.Key()
 		var channel db.Channel
 		if err := h.db.Where("id = ? AND deleted_at IS NULL", req.ChannelID).First(&channel).Error; err != nil {
 			h.jsonError(ctx, fasthttp.StatusNotFound, "channel not found")
@@ -256,7 +262,7 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 			State: state, Provider: provider, ChannelID: req.ChannelID,
 			TokenURL: oauthProv.DefaultTokenURL(), ClientID: oauthProv.DefaultClientID(),
 			RedirectURI: oauthProv.DefaultRedirectURI(),
-			Status: "pending", CreatedAt: time.Now(),
+			Status:      "pending", CreatedAt: time.Now(),
 			CreatedBy: adminUsername, CreatedByIP: ctx.RemoteIP().String(),
 		}
 		h.oauthMu.Lock()
@@ -273,13 +279,13 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		if imported.AccessToken != "" || imported.IDToken != "" {
-			// JSON import is supported for Google OAuth, Codex (openai), and Antigravity
-			if session.Provider != "gemini" && session.Provider != "antigravity" && session.Provider != "openai" {
+			// JSON import is supported for Google OAuth, Codex, and Antigravity.
+			if session.Provider != "gemini" && session.Provider != "antigravity" && session.Provider != "codex" {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth, Codex, and Antigravity channels")
 				return
 			}
 			if imported.AccessToken == "" || imported.RefreshToken == "" {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "google oauth_json requires access_token and refresh_token")
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth_json requires access_token and refresh_token")
 				return
 			}
 			credential := imported.AccessToken

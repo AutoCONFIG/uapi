@@ -202,6 +202,7 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/admin/channels/oauth/complete", s.handleAdminAuth(s.adminHandler.CompleteOAuth))
 	r.GET("/api/admin/channels/oauth/status", s.handleAdminAuth(s.adminHandler.OAuthStatus))
 	r.POST("/api/admin/channels/oauth/bind", s.handleAdminAuth(s.adminHandler.BindOAuthAccount))
+	r.GET("/api/admin/channels/catalog", s.handleAdminAuth(s.adminHandler.HandleChannelCatalog))
 	r.POST("/api/admin/channels/models/sync", s.handleAdminAuth(s.adminHandler.HandleChannelModelSync))
 	r.GET("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.POST("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))

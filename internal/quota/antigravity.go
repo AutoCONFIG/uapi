@@ -122,19 +122,19 @@ func fetchAntigravityModels(endpoint, accessToken string, body []byte) ([]modelE
 }
 
 func parseAntigravityModels(data []byte) ([]modelEntry, error) {
-	// Try array format: models[].id
 	var arrResp struct {
-		Models []struct {
-			ID                string  `json:"id"`
-			RemainingFraction float64 `json:"remaining_fraction"`
-			ResetTime         string  `json:"reset_time"`
-		} `json:"models"`
+		Models []map[string]interface{} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &arrResp); err == nil && len(arrResp.Models) > 0 {
-		var out []modelEntry
-		for _, m := range arrResp.Models {
-			out = append(out, modelEntry{Name: m.ID, RemainingFraction: m.RemainingFraction, ResetTime: m.ResetTime})
+		out := antigravityEntriesFromArray(arrResp.Models)
+		if len(out) > 0 {
+			return out, nil
 		}
+	}
+
+	var array []map[string]interface{}
+	if err := json.Unmarshal(data, &array); err == nil && len(array) > 0 {
+		out := antigravityEntriesFromArray(array)
 		return out, nil
 	}
 
@@ -143,12 +143,13 @@ func parseAntigravityModels(data []byte) ([]modelEntry, error) {
 	if err := json.Unmarshal(data, &mapResp); err == nil {
 		var out []modelEntry
 		for name, raw := range mapResp {
-			var entry modelEntry
-			if err := json.Unmarshal(raw, &entry); err != nil {
+			var value map[string]interface{}
+			if err := json.Unmarshal(raw, &value); err != nil {
 				continue
 			}
-			entry.Name = name
-			out = append(out, entry)
+			if entry, ok := antigravityEntryFromMap(name, value); ok {
+				out = append(out, entry)
+			}
 		}
 		if len(out) > 0 {
 			return out, nil
@@ -156,6 +157,54 @@ func parseAntigravityModels(data []byte) ([]modelEntry, error) {
 	}
 
 	return nil, fmt.Errorf("no models found in response")
+}
+
+func antigravityEntriesFromArray(models []map[string]interface{}) []modelEntry {
+	out := make([]modelEntry, 0, len(models))
+	for _, m := range models {
+		if entry, ok := antigravityEntryFromMap("", m); ok {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func antigravityEntryFromMap(fallbackName string, m map[string]interface{}) (modelEntry, bool) {
+	name := firstString(m, "id", "name", "model", "modelId", "model_id")
+	if name == "" {
+		name = fallbackName
+	}
+	if name == "" {
+		return modelEntry{}, false
+	}
+	source := m
+	for _, key := range []string{"quota", "usage", "rateLimit", "rate_limit"} {
+		if nested := mapValue(m, key); nested != nil {
+			source = nested
+			break
+		}
+	}
+	remaining := firstFloat(source, "remaining_fraction", "remainingFraction")
+	if remaining == nil {
+		if pct := firstFloat(source, "remaining_percent", "remainingPercent"); pct != nil {
+			value := *pct / 100
+			remaining = &value
+		}
+	}
+	if remaining == nil {
+		if used := firstFloat(source, "used_percent", "usedPercent", "utilization"); used != nil {
+			value := (100 - *used) / 100
+			remaining = &value
+		}
+	}
+	if remaining == nil {
+		return modelEntry{}, false
+	}
+	return modelEntry{
+		Name:              name,
+		RemainingFraction: *remaining,
+		ResetTime:         firstString(source, "reset_time", "resetTime", "resets_at", "reset_at", "resetAt"),
+	}, true
 }
 
 func convertAntigravityModels(models []modelEntry, metadata map[string]interface{}) *QuotaData {
@@ -227,4 +276,3 @@ func extractCredits(paidTier map[string]interface{}) *CreditsInfo {
 	}
 	return nil
 }
-
