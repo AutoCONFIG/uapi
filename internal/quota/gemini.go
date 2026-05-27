@@ -71,6 +71,9 @@ func fetchGeminiQuota(accessToken, projectID string) (map[string]interface{}, er
 	if err != nil {
 		return nil, fmt.Errorf("read retrieveUserQuota response: %w", err)
 	}
+	if resp.StatusCode == 403 {
+		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("retrieveUserQuota failed: status %d: %s", resp.StatusCode, truncate(respBody, 200))
 	}
@@ -83,6 +86,13 @@ func fetchGeminiQuota(accessToken, projectID string) (map[string]interface{}, er
 
 func convertGeminiQuota(raw map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
+
+	// Check for forbidden flag
+	if forbidden, ok := raw["_forbidden"].(bool); ok && forbidden {
+		qd.IsForbidden = true
+		qd.ForbiddenReason, _ = raw["_forbidden_reason"].(string)
+		return qd
+	}
 
 	if buckets, ok := raw["buckets"].([]interface{}); ok {
 		for i, b := range buckets {

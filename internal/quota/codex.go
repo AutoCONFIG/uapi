@@ -2,6 +2,7 @@ package quota
 
 import (
 	"fmt"
+	"strings"
 
 	openai "github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 )
@@ -18,6 +19,12 @@ func (c *codexFetcher) FetchQuota(accessToken string, metadata map[string]interf
 
 	usage, err := openai.FetchCodexUsage(accessToken, accountID, fedramp)
 	if err != nil {
+		if strings.Contains(err.Error(), "status 403") {
+			return &QuotaData{
+				IsForbidden:     true,
+				ForbiddenReason: "account_forbidden",
+			}, nil
+		}
 		return nil, err
 	}
 	return convertCodexUsage(usage), nil

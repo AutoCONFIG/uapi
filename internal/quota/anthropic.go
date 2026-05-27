@@ -42,6 +42,9 @@ func fetchAnthropicUsage(accessToken string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read anthropic usage response: %w", err)
 	}
+	if resp.StatusCode == 403 {
+		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("anthropic usage failed: status %d: %s", resp.StatusCode, truncate(body, 200))
 	}
@@ -62,6 +65,13 @@ var anthropicWindowLabels = map[string]string{
 
 func convertAnthropicUsage(usage map[string]interface{}, metadata map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
+
+	// Check for forbidden flag
+	if forbidden, ok := usage["_forbidden"].(bool); ok && forbidden {
+		qd.IsForbidden = true
+		qd.ForbiddenReason, _ = usage["_forbidden_reason"].(string)
+		return qd
+	}
 
 	for key, label := range anthropicWindowLabels {
 		window, ok := usage[key].(map[string]interface{})

@@ -35,16 +35,31 @@ func (a *antigravityFetcher) FetchQuota(accessToken string, metadata map[string]
 
 	var models []modelEntry
 	var lastErr error
+	forbidden := false
 	for _, endpoint := range antigravityQuotaEndpoints {
 		m, err := fetchAntigravityModels(endpoint, accessToken, body)
 		if err != nil {
+			if strings.Contains(err.Error(), "forbidden") {
+				forbidden = true
+				continue
+			}
 			lastErr = err
 			continue
 		}
 		models = m
 		lastErr = nil
+		forbidden = false
 		break
 	}
+
+	// All endpoints returned 403 → account is forbidden
+	if forbidden && models == nil {
+		return &QuotaData{
+			IsForbidden:     true,
+			ForbiddenReason: "account_forbidden",
+		}, nil
+	}
+
 	if lastErr != nil {
 		return nil, fmt.Errorf("all antigravity quota endpoints failed: %w", lastErr)
 	}
