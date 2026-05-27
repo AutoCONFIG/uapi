@@ -64,7 +64,7 @@ type ChatMessage struct {
 type OpenAIChatResponse struct {
 	ID      string       `json:"id"`
 	Object  string       `json:"object"`
-	Created int64        `json:"created"`
+	Created int        `json:"created"`
 	Model   string       `json:"model"`
 	Choices []ChatChoice `json:"choices"`
 	Usage   *Usage       `json:"usage,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 )
 
@@ -45,12 +46,28 @@ func unmarshalExtra(data []byte, v interface{}, extra *map[string]json.RawMessag
 	return nil
 }
 
-// getKnownFields returns a set of known JSON field names for a struct.
+// getKnownFields uses reflection to get all JSON field names from a struct type
 func getKnownFields(v interface{}) map[string]bool {
-	// This is a simplified version - in practice you'd use reflection or generate this.
-	// For now, we return an empty map which means all unknown fields will be captured.
-	// A more complete implementation would enumerate the actual struct fields.
-	return make(map[string]bool)
+	t := reflect.TypeOf(v)
+	// If v is a pointer, get the element type
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return make(map[string]bool)
+	}
+	known := make(map[string]bool)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if jsonTag := field.Tag.Get("json"); jsonTag != "" {
+			// Handle json:"fieldname,omitempty" by extracting fieldname
+			name := strings.Split(jsonTag, ",")[0]
+			if name != "-" {
+				known[name] = true
+			}
+		}
+	}
+	return known
 }
 
 // marshalExtra marshals the struct to JSON, then adds the Extra fields.
