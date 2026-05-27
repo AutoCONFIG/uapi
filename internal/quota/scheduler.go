@@ -1,12 +1,16 @@
 package quota
 
 import (
+	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthprovider"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -151,7 +155,42 @@ func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error
 
 	qd, err := fetcher.FetchQuota(accessToken, acc.Metadata)
 	if err != nil {
-		return nil, err
+		// Check if error suggests token expiration (401)
+		errStr := err.Error()
+		is401 := strings.Contains(errStr, "status 401") || strings.Contains(errStr, " \"401\"")
+		if is401 {
+			// Try to refresh token using OAuth provider
+			if newToken, refreshErr := s.tryRefreshToken(ch.APIFormat, &acc); refreshErr == nil && newToken != "" {
+				// Retry with new token
+				qd, err = fetcher.FetchQuota(newToken, acc.Metadata)
+				if err == nil && qd != nil {
+					// Update credentials in database
+					encToken, encErr := crypto.Encrypt(newToken)
+					if encErr == nil {
+						s.db.Model(&db.Account{}).Where("id = ?", acc.ID).Update("credentials", encToken)
+					} else {
+						logger.Warnf("quota.token", "failed to encrypt refreshed token", logger.Err(encErr))
+					}
+				}
+			}
+		}
+		// If still error after retry, check if it's a 403 (forbidden)
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "status 403") || strings.Contains(errStr, " \"403\"") || strings.Contains(errStr, "forbidden") {
+				// Mark as forbidden
+				qd = &QuotaData{
+					IsForbidden:     true,
+					ForbiddenReason: "account_forbidden",
+					FetchedAt:       time.Now().UTC(),
+				}
+				err = nil
+			}
+		}
+	}
+	// Also check if qd returned from retry indicates forbidden
+	if qd != nil && qd.IsForbidden {
+		err = nil
 	}
 	if qd == nil {
 		return nil, nil
@@ -164,8 +203,54 @@ func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error
 		acc.Metadata = map[string]interface{}{}
 	}
 	acc.Metadata["quota"] = qd
+
+	// Check quota alert: all buckets <= 20%
+	allLow := len(qd.Buckets) > 0
+	for _, b := range qd.Buckets {
+		if b.RemainingPercent > 20 {
+			allLow = false
+			break
+		}
+	}
+	if allLow {
+		acc.Metadata["quota_alert"] = map[string]interface{}{
+			"level":   "warning",
+			"message": "所有模型额度低于 20%",
+		}
+	} else {
+		delete(acc.Metadata, "quota_alert")
+	}
+
 	if err := s.db.Model(&db.Account{}).Where("id = ?", acc.ID).Update("metadata", acc.Metadata).Error; err != nil {
 		return nil, err
 	}
 	return qd, nil
+}
+
+// tryRefreshToken attempts to refresh an expired OAuth token using the provider's SyncMetadata.
+func (s *Scheduler) tryRefreshToken(apiFormat string, acc *db.Account) (string, error) {
+	provider, ok := oauthprovider.Get(apiFormat)
+	if !ok {
+		return "", fmt.Errorf("no provider for %s", apiFormat)
+	}
+
+	// Get current access token from credentials
+	credential, err := crypto.Decrypt(acc.Credentials)
+	if err != nil {
+		return "", err
+	}
+
+	// Try to sync metadata, which may refresh the token
+	newMetadata, syncErr := provider.SyncMetadata(credential, acc.Metadata)
+	if syncErr != nil {
+		return "", syncErr
+	}
+
+	// Extract new access token from updated metadata
+	// The SyncMetadata should update oauth_token in metadata
+	if newToken, ok := newMetadata["oauth_token"].(string); ok && newToken != "" {
+		return newToken, nil
+	}
+
+	return "", fmt.Errorf("no new token in metadata")
 }

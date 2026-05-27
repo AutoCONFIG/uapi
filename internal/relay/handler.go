@@ -870,6 +870,20 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			if r.quotaScheduler != nil && currentAccount != nil && ch != nil {
 				r.quotaScheduler.On429(currentAccount.ID, ch.ID)
 			}
+			respBody429 := copyBody(upResp)
+			statusCode = 429
+			copyHeaders(upResp, &respHeaders)
+			retryDelay := parseRetryDelay(respBody429, upstreamFormat)
+			if retryDelay >= 0 && retryDelay <= 3*time.Second && retry < 2 {
+				// Short delay: wait and retry same account
+				logger.Infof("relay.429", "short retry delay, retrying same account", logger.F("delay", retryDelay), logger.F("retry", retry))
+				time.Sleep(retryDelay)
+				fasthttp.ReleaseResponse(upResp)
+				continue
+			}
+			// Medium/long delay or unknown: switch account
+			shouldRetry = true
+			r.markAutoDisable(currentAccount, "quota_exhausted")
 		} else if upResp.StatusCode() >= 500 {
 			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
 			respBody = copyBody(upResp)
@@ -910,6 +924,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		statusCode = upResp.StatusCode()
 		copyHeaders(upResp, &respHeaders)
 		fasthttp.ReleaseResponse(upResp)
+		r.clearAutoDisable(currentAccount)
 		respAccount = currentAccount
 		break
 	}
@@ -1489,6 +1504,36 @@ func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
 	r.affinity.EvictChannel(ch.ID.String())
 }
 
+func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
+	if acc == nil {
+		return
+	}
+	if acc.Metadata == nil {
+		acc.Metadata = make(map[string]interface{})
+	}
+	// Only mark if not already marked or if reason is more severe
+	existingReason, _ := acc.Metadata["auto_disable_reason"].(string)
+	if existingReason != "" && existingReason != "quota_exhausted" {
+		// Don't overwrite a more severe reason
+		return
+	}
+	acc.Metadata["auto_disable_reason"] = reason
+	acc.Metadata["auto_disable_time"] = time.Now().UTC().Format(time.RFC3339)
+	r.db.Model(acc).Update("metadata", acc.Metadata)
+}
+
+func (r *Relayer) clearAutoDisable(acc *db.Account) {
+	if acc == nil || acc.Metadata == nil {
+		return
+	}
+	if _, ok := acc.Metadata["auto_disable_reason"]; !ok {
+		return
+	}
+	delete(acc.Metadata, "auto_disable_reason")
+	delete(acc.Metadata, "auto_disable_time")
+	r.db.Model(acc).Update("metadata", acc.Metadata)
+}
+
 func (r *Relayer) retryNext(ch *db.Channel, failed *db.Account) *db.Account {
 	r.cooldownAndEvict(ch, failed)
 	pool, _ := r.pools.GetPool(ch.ID.String())
@@ -1708,6 +1753,54 @@ func copyBody(resp *fasthttp.Response) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// parseRetryDelay attempts to extract a retry delay from a 429 response body.
+// Returns -1 if no delay can be determined.
+// Supports: Gemini (retryDelay/retry_info.retry_delay), Anthropic (error.retry_after), OpenAI (Retry-After header style in body).
+func parseRetryDelay(body []byte, apiFormat provider.Format) time.Duration {
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return -1
+	}
+
+	// Anthropic: error.retry_after (seconds)
+	if errObj, ok := parsed["error"].(map[string]interface{}); ok {
+		if ra, ok := errObj["retry_after"].(float64); ok && ra > 0 {
+			return time.Duration(ra) * time.Second
+		}
+	}
+
+	// Gemini: retryDelay or retry_info.retry_delay (e.g. "32s")
+	if rd, ok := parsed["retryDelay"].(string); ok {
+		if d, err := time.ParseDuration(rd); err == nil {
+			return d
+		}
+	}
+	if ri, ok := parsed["retry_info"].(map[string]interface{}); ok {
+		if rd, ok := ri["retry_delay"].(string); ok {
+			if d, err := time.ParseDuration(rd); err == nil {
+				return d
+			}
+		}
+	}
+
+	// Gemini v2: error.details[].retryDelay
+	if errObj, ok := parsed["error"].(map[string]interface{}); ok {
+		if details, ok := errObj["details"].([]interface{}); ok {
+			for _, d := range details {
+				if dm, ok := d.(map[string]interface{}); ok {
+					if rd, ok := dm["retryDelay"].(string); ok {
+						if dur, err := time.ParseDuration(rd); err == nil {
+							return dur
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return -1
 }
 
 // hopByHopHeaders should not be forwarded between proxy hops.

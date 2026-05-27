@@ -133,6 +133,8 @@ export function AdminChannelConsole() {
   const [oauthJSON, setOauthJSON] = useState("");
   const [exportPassword, setExportPassword] = useState("");
   const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
+  const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
+  const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const selected = channels.find((item) => item.id === selectedID) || null;
@@ -623,15 +625,40 @@ export function AdminChannelConsole() {
                         <span className={`account-light ${state.tone}`} title={state.label} />
                         <strong>{account.name}</strong>
                         <span className="badge">{account.cred_type === "oauth_token" ? "OAuth" : "Key"}</span>
+                        {(() => {
+                          const q = asRecord((account.metadata || {}).quota);
+                          const tier = stringValue(q?.tier) || "";
+                          if (!tier) return null;
+                          const t = tier.toUpperCase();
+                          const tierLabel = t.includes("ULTRA") || t.includes("MAX") ? "U" : t.includes("PRO") ? "P" : t.includes("TEAM") ? "T" : t.includes("ENTERPRISE") ? "E" : "F";
+                          const tierClass = t.includes("ULTRA") || t.includes("MAX") ? "tier-ultra" : t.includes("PRO") || t.includes("TEAM") || t.includes("ENTERPRISE") ? "tier-pro" : "tier-free";
+                          return <span className={`badge ${tierClass}`}>{tierLabel}</span>;
+                        })()}
+                        {(() => {
+                          const reason = stringValue((account.metadata || {}).auto_disable_reason);
+                          if (!reason) return null;
+                          return <span className="badge auto-disable-badge">{reason === "quota_exhausted" ? "额度耗尽" : reason}</span>;
+                        })()}
+                        {(() => {
+                          const alert = asRecord((account.metadata || {}).quota_alert);
+                          if (!alert) return null;
+                          return <span className="badge quota-alert-badge" title={stringValue(alert.message)}>⚠️</span>;
+                        })()}
                       </div>
                       {accountMetaSummary(account) ? <p>{accountMetaSummary(account)}</p> : <p>{selected.type} · 权重 {account.weight || 0}</p>}
                       <div className="account-card-meta">
                         <span>{state.label}</span>
                         {account.token_expiry ? <span>访问令牌 {new Date(account.token_expiry).toLocaleString()}</span> : <span>长期凭证</span>}
                       </div>
+                      {(() => {
+                        const q = asRecord((account.metadata || {}).quota);
+                        if (q?.is_forbidden) return <div className="account-card-quota quota-forbidden">账户被禁</div>;
+                        if (q && !asArray(q.buckets).length && !stringValue(q.tier)) return <div className="account-card-quota quota-error">账户异常</div>;
+                        return null;
+                      })()}
                       {quotaItems.length > 0 ? (
                         <div className="account-card-quota">
-                          {quotaItems.slice(0, 3).map((item) => (
+                          {(expandedQuotaIds.has(account.id) ? quotaItems : quotaItems.slice(0, 3)).map((item) => (
                             <div className="quota-compact-item" key={item.key} title={item.detail || item.label}>
                               <div className="quota-compact-header">
                                 <span className="quota-label">{item.label}</span>
@@ -640,18 +667,30 @@ export function AdminChannelConsole() {
                               <div className="quota-compact-bar-track">
                                 <div className={`quota-compact-bar ${quotaTone(item.remainingPercent)}`} style={{ width: `${item.remainingPercent}%` }} />
                               </div>
-                              {item.resetText ? <span className="quota-compact-reset">{item.resetText}</span> : null}
+                              {item.resetText ? <span className={`quota-compact-reset ${item.resetTone || ""}`}>{item.resetText}</span> : null}
                             </div>
                           ))}
+                          {quotaItems.length > 3 && !expandedQuotaIds.has(account.id) ? (
+                            <button className="quota-expand-btn" onClick={(e) => { e.stopPropagation(); setExpandedQuotaIds(prev => new Set(prev).add(account.id)); }}>
+                              还有 {quotaItems.length - 3} 个模型
+                            </button>
+                          ) : null}
+                          {quotaItems.length > 3 && expandedQuotaIds.has(account.id) ? (
+                            <button className="quota-expand-btn" onClick={(e) => { e.stopPropagation(); setExpandedQuotaIds(prev => { const s = new Set(prev); s.delete(account.id); return s; }); }}>
+                              收起
+                            </button>
+                          ) : null}
                           <button
-                            className="quota-refresh-btn"
+                            className={`quota-refresh-btn${refreshingIds.has(account.id) ? " spinning" : ""}`}
                             onClick={async (e) => {
                               e.stopPropagation();
-                              if (!token) return;
-                              try { await adminApi.refreshAccountQuota(token, account.id); } catch {}
-                              adminApi.accounts(token, 1, 1000).then(r => {
-                                setAccounts(r.items);
-                              }).catch(() => {});
+                              if (!token || refreshingIds.has(account.id)) return;
+                              setRefreshingIds(prev => new Set(prev).add(account.id));
+                              const success = await adminApi.refreshAccountQuota(token, account.id).then(() => true).catch(() => false);
+                              if (success) {
+                                adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {});
+                              }
+                              setRefreshingIds(prev => { const s = new Set(prev); s.delete(account.id); return s; });
                             }}
                             title="刷新额度"
                           >
@@ -930,6 +969,7 @@ type QuotaDisplayItem = {
   label: string;
   remainingPercent: number;
   resetText?: string;
+  resetTone?: string;
   detail?: string;
 };
 
@@ -950,6 +990,7 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
         label: stringValue(b.label) || `额度 ${i + 1}`,
         remainingPercent,
         resetText: formatResetTimeShort(stringValue(b.reset_time)),
+        resetTone: resetTimeTone(stringValue(b.reset_time)),
         detail: [`剩余 ${remainingPercent}%`, stringValue(b.reset_time) ? `重置 ${stringValue(b.reset_time)}` : ""].filter(Boolean).join(" · "),
       });
     }
@@ -1034,7 +1075,7 @@ function quotaBucketLabel(bucket: Record<string, unknown>, index: number): strin
 
 function quotaTone(percent: number): string {
   if (percent >= 50) return "high";
-  if (percent > 0) return "medium";
+  if (percent >= 20) return "medium";
   return "low";
 }
 
@@ -1042,22 +1083,28 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
-function formatResetTimeShort(raw: string): string {
-  if (!raw) return "";
-  const reset = new Date(raw);
-  if (Number.isNaN(reset.getTime())) return raw;
-  const diffMs = reset.getTime() - Date.now();
-  if (diffMs <= 0) return "已重置";
-  const totalMinutes = Math.max(1, Math.floor(diffMs / 60000));
-  const days = Math.floor(totalMinutes / 1440);
-  const hours = Math.floor((totalMinutes % 1440) / 60);
-  const minutes = totalMinutes % 60;
-  const relative = [days ? `${days}天` : "", hours ? `${hours}时` : "", !days && minutes ? `${minutes}分` : ""].filter(Boolean).join(" ");
-  const month = String(reset.getMonth() + 1).padStart(2, "0");
-  const day = String(reset.getDate()).padStart(2, "0");
-  const hh = String(reset.getHours()).padStart(2, "0");
-  const mm = String(reset.getMinutes()).padStart(2, "0");
-  return `${relative || "<1分"}后 (${month}/${day} ${hh}:${mm})`;
+function formatResetTimeShort(isoStr: string | null | undefined): string {
+  if (!isoStr) return "";
+  const t = new Date(isoStr).getTime();
+  if (isNaN(t)) return isoStr;
+  const diff = t - Date.now();
+  if (diff <= 0) return "即将重置";
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+
+function resetTimeTone(isoStr: string | null | undefined): string {
+  if (!isoStr) return "";
+  const t = new Date(isoStr).getTime();
+  if (isNaN(t)) return "";
+  const diff = t - Date.now();
+  if (diff <= 3600000) return "reset-soon";
+  if (diff <= 21600000) return "reset-waiting";
+  return "reset-later";
 }
 
 type AccountTone = "healthy" | "warning" | "exhausted";

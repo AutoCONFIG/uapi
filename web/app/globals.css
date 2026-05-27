@@ -2041,6 +2041,43 @@ h3 {
   opacity: 1;
 }
 
+.quota-refresh-btn.spinning {
+  animation: quota-spin 0.8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes quota-spin {
+  to { transform: rotate(360deg); }
+}
+
+.quota-compact-reset.reset-soon { color: var(--green); }
+.quota-compact-reset.reset-waiting { color: var(--amber); }
+.quota-compact-reset.reset-later { color: var(--muted-2); }
+
+.quota-forbidden { color: var(--red); font-size: 12px; font-weight: 700; padding: 4px 0; }
+.quota-error { color: var(--amber); font-size: 12px; font-weight: 700; padding: 4px 0; }
+
+.badge.tier-ultra { background: #7c3aed; color: #fff; }
+.badge.tier-pro { background: var(--primary); color: #fff; }
+.badge.tier-free { background: var(--muted-2); color: #fff; }
+
+.badge.auto-disable-badge { background: var(--red); color: #fff; font-size: 10px; }
+
+.badge.quota-alert-badge { background: var(--amber); font-size: 12px; }
+
+.quota-expand-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--primary);
+  padding: 2px 0;
+  text-align: left;
+}
+.quota-expand-btn:hover {
+  text-decoration: underline;
+}
+
 .account-card-warning {
   color: var(--amber);
   font-size: 12px;
