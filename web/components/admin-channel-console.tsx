@@ -448,6 +448,7 @@ export function AdminChannelConsole() {
 
   async function completeOAuth() {
     if (!token || !oauthState || (!oauthCallbackURL.trim() && !oauthJSON.trim())) return;
+    const channel = oauthChannel || selected;
     setCredLoading(true);
     setCredError("");
     try {
@@ -455,6 +456,8 @@ export function AdminChannelConsole() {
         state: oauthState,
         callback_url: oauthCallbackURL.trim() || undefined,
         oauth_json: oauthJSON.trim() || undefined,
+        channel_id: channel?.id,
+        provider: channel?.type,
       });
       setOauthStatus(status);
       if (status.status === "completed") {

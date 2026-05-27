@@ -226,15 +226,56 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 	}
 	session := h.getOAuthSession(state)
 	if session == nil {
-		h.jsonError(ctx, fasthttp.StatusNotFound, "oauth session not found")
-		return
+		// When importing OAuth JSON without a prior StartOAuth call, create a
+		// transient session from the request's channel_id and provider fields.
+		if imported == nil || (imported.AccessToken == "" && imported.IDToken == "") {
+			h.jsonError(ctx, fasthttp.StatusNotFound, "oauth session not found")
+			return
+		}
+		if req.ChannelID == uuid.Nil || strings.TrimSpace(req.Provider) == "" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "channel_id and provider are required for JSON import without a prior OAuth session")
+			return
+		}
+		provider := strings.ToLower(strings.TrimSpace(req.Provider))
+		oauthProv, ok := oauthprovider.Get(provider)
+		if !ok {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "unsupported oauth provider")
+			return
+		}
+		var channel db.Channel
+		if err := h.db.Where("id = ? AND deleted_at IS NULL", req.ChannelID).First(&channel).Error; err != nil {
+			h.jsonError(ctx, fasthttp.StatusNotFound, "channel not found")
+			return
+		}
+		if !oauthProv.ChannelAllowed(channel) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth login is only supported on the matching OAuth channel format")
+			return
+		}
+		adminUsername, _ := ctx.UserValue("admin_user").(string)
+		session = &oauthSession{
+			State: state, Provider: provider, ChannelID: req.ChannelID,
+			TokenURL: oauthProv.DefaultTokenURL(), ClientID: oauthProv.DefaultClientID(),
+			RedirectURI: oauthProv.DefaultRedirectURI(),
+			Status: "pending", CreatedAt: time.Now(),
+			CreatedBy: adminUsername, CreatedByIP: ctx.RemoteIP().String(),
+		}
+		h.oauthMu.Lock()
+		h.pruneOAuthSessionsLocked()
+		h.oauthSessions[state] = session
+		h.oauthMu.Unlock()
+		logger.Infof("admin.oauth", "oauth session created from JSON import", logger.F("provider", provider), logger.F("channel_id", req.ChannelID.String()))
 	}
 	if imported != nil {
 		h.applyOAuthJSONImport(state, imported)
 		session = h.getOAuthSession(state)
+		if session == nil {
+			h.jsonError(ctx, fasthttp.StatusNotFound, "oauth session not found")
+			return
+		}
 		if imported.AccessToken != "" || imported.IDToken != "" {
-			if session.Provider != "gemini" && session.Provider != "antigravity" {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth channels")
+			// JSON import is supported for Google OAuth, Codex (openai), and Antigravity
+			if session.Provider != "gemini" && session.Provider != "antigravity" && session.Provider != "openai" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth, Codex, and Antigravity channels")
 				return
 			}
 			if imported.AccessToken == "" || imported.RefreshToken == "" {

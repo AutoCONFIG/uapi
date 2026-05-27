@@ -230,7 +230,7 @@ export const adminApi = {
     token_url?: string;
     mode?: string;
   }) => request<OAuthAuthURL>("/api/admin/channels/oauth/auth-url", { method: "POST", token, body }),
-  completeChannelOAuth: (token: string, body: { state?: string; callback_url?: string; code?: string; oauth_json?: string }) =>
+  completeChannelOAuth: (token: string, body: { state?: string; callback_url?: string; code?: string; oauth_json?: string; channel_id?: string; provider?: string }) =>
     request<OAuthStatus>("/api/admin/channels/oauth/complete", { method: "POST", token, body }),
   channelOAuthStatus: (token: string, state: string) =>
     request<OAuthStatus>(`/api/admin/channels/oauth/status?state=${encodeURIComponent(state)}`, { token }),

@@ -58,11 +58,15 @@ type OAuthAuthURLResponse struct {
 }
 
 // CompleteOAuthRequest completes a manual OAuth flow from a copied callback URL.
+// When importing OAuth JSON without a prior StartOAuth call, channel_id and
+// provider must be supplied so a transient session can be created on the fly.
 type CompleteOAuthRequest struct {
-	State       string `json:"state"`
-	CallbackURL string `json:"callback_url"`
-	Code        string `json:"code"`
-	OAuthJSON   string `json:"oauth_json"`
+	State       string    `json:"state"`
+	CallbackURL string    `json:"callback_url"`
+	Code        string    `json:"code"`
+	OAuthJSON   string    `json:"oauth_json"`
+	ChannelID   uuid.UUID `json:"channel_id"`
+	Provider    string    `json:"provider"`
 }
 
 // OAuthStatusResponse describes a pending, completed, failed, or bound OAuth session.
