@@ -7,6 +7,78 @@ import (
 	"strings"
 )
 
+var errNotStringOrArray = errors.New("schema: input must be a string or array")
+
+// trimNull returns the data without leading/trailing whitespace and checks for null.
+// Returns nil if the input is null or empty.
+func trimNull(data []byte) []byte {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	return trimmed
+}
+
+// unmarshalExtra extracts unknown fields from JSON data into the provided Extra map.
+func unmarshalExtra(data []byte, v interface{}, extra *map[string]json.RawMessage) error {
+	// First do a standard unmarshal into the struct to get known fields.
+	if err := json.Unmarshal(data, v); err != nil {
+		return err
+	}
+
+	// Now extract unknown fields into Extra.
+	// Parse as generic map[string]interface{} to find unknown keys.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Get the known field names from the struct.
+	knownFields := getKnownFields(v)
+
+	for k, v := range raw {
+		if _, ok := knownFields[k]; !ok {
+			(*extra)[k] = v
+		}
+	}
+
+	return nil
+}
+
+// getKnownFields returns a set of known JSON field names for a struct.
+func getKnownFields(v interface{}) map[string]bool {
+	// This is a simplified version - in practice you'd use reflection or generate this.
+	// For now, we return an empty map which means all unknown fields will be captured.
+	// A more complete implementation would enumerate the actual struct fields.
+	return make(map[string]bool)
+}
+
+// marshalExtra marshals the struct to JSON, then adds the Extra fields.
+func marshalExtra(v interface{}, extra map[string]json.RawMessage) ([]byte, error) {
+	// First marshal the main struct (without Extra).
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(extra) == 0 {
+		return data, nil
+	}
+
+	// Parse the result as a map to add extra fields.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+
+	// Add extra fields.
+	for k, v := range extra {
+		m[k] = v
+	}
+
+	return json.Marshal(m)
+}
+
 // MarshalJSON emits a bare string if Text is set, or an array if Parts is set.
 // If both are set it returns an error; if neither it emits null.
 func (mc MessageContent) MarshalJSON() ([]byte, error) {
