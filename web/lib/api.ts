@@ -244,6 +244,10 @@ export const adminApi = {
     request<Account>(`/api/admin/accounts?id=${id}`, { method: "PUT", token, body }),
   deleteAccount: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/accounts?id=${id}`, { method: "DELETE", token }),
+  refreshAccountQuota: (token: string, accountId: string) =>
+    request<Record<string, unknown>>("/api/admin/accounts/" + accountId + "/refresh-quota", { method: "POST", token }),
+  refreshChannelQuota: (token: string, channelId: string) =>
+    request<{ refreshed: number; errors: number }>("/api/admin/channels/" + channelId + "/refresh-quota", { method: "POST", token }),
   exportAccount: (token: string, body: { id: string; password: string }) =>
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>

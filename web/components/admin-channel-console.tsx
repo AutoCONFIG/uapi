@@ -643,6 +643,20 @@ export function AdminChannelConsole() {
                               {item.resetText ? <span className="quota-compact-reset">{item.resetText}</span> : null}
                             </div>
                           ))}
+                          <button
+                            className="quota-refresh-btn"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!token) return;
+                              try { await adminApi.refreshAccountQuota(token, account.id); } catch {}
+                              adminApi.accounts(token, 1, 1000).then(r => {
+                                setAccounts(r.items);
+                              }).catch(() => {});
+                            }}
+                            title="刷新额度"
+                          >
+                            ↻
+                          </button>
                         </div>
                       ) : null}
                       {validation ? <a className="account-card-warning" href={validation.url || undefined} rel="noreferrer" target="_blank">{validation.message}</a> : null}
@@ -922,6 +936,39 @@ type QuotaDisplayItem = {
 function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
   const meta = account.metadata || {};
   const items: QuotaDisplayItem[] = [];
+
+  // Primary: read unified meta.quota
+  const quota = asRecord(meta.quota);
+  if (quota) {
+    const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+    for (const [i, b] of buckets.entries()) {
+      const pct = numberValue(b.remaining_percent);
+      if (pct === null) continue;
+      const remainingPercent = Math.round(clampPercent(pct));
+      items.push({
+        key: `quota-${i}`,
+        label: stringValue(b.label) || `额度 ${i + 1}`,
+        remainingPercent,
+        resetText: formatResetTimeShort(stringValue(b.reset_time)),
+        detail: [`剩余 ${remainingPercent}%`, stringValue(b.reset_time) ? `重置 ${stringValue(b.reset_time)}` : ""].filter(Boolean).join(" · "),
+      });
+    }
+    const credits = asRecord(quota.credits);
+    if (credits) {
+      const balance = stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "");
+      if (balance) {
+        items.push({
+          key: "quota-credits",
+          label: stringValue(credits.label) || "Credits",
+          remainingPercent: credits.unlimited === true ? 100 : 0,
+          detail: `Credits ${balance}`,
+        });
+      }
+    }
+    return items.sort((left, right) => left.remainingPercent - right.remainingPercent);
+  }
+
+  // Fallback: legacy per-channel parsing
   const codexUsage = asRecord(meta.codex_usage);
   if (codexUsage) {
     const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
@@ -1031,6 +1078,20 @@ function accountState(account: Account): { tone: AccountTone; label: string } {
 
 function accountUsagePercent(account: Account): number | null {
   const meta = account.metadata || {};
+
+  // Primary: read unified meta.quota
+  const quota = asRecord(meta.quota);
+  if (quota) {
+    const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+    const candidates: number[] = [];
+    for (const b of buckets) {
+      const pct = numberValue(b.remaining_percent);
+      if (pct !== null) candidates.push(Math.max(0, Math.min(100, 100 - pct)));
+    }
+    return candidates.length > 0 ? Math.max(...candidates) : null;
+  }
+
+  // Fallback: legacy logic
   const candidates: number[] = [];
   const codexUsage = asRecord(meta.codex_usage);
   if (codexUsage) {
