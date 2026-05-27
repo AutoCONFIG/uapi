@@ -14,10 +14,9 @@ import (
 )
 
 const (
-	stalenessTTL = 5 * time.Minute
-	batchSize    = 3
-	jitterMin    = 2 * time.Second
-	jitterMax    = 8 * time.Second
+	batchSize = 3
+	jitterMin = 2 * time.Second
+	jitterMax = 8 * time.Second
 )
 
 type Scheduler struct {
@@ -66,16 +65,6 @@ func (s *Scheduler) RefreshChannel(channelID uuid.UUID) ([]*QuotaData, []error) 
 		return nil, []error{err}
 	}
 
-	// Filter stale accounts
-	var stale []db.Account
-	cutoff := time.Now().Add(-stalenessTTL)
-	for _, acc := range accounts {
-		if !s.isStale(acc, cutoff) {
-			continue
-		}
-		stale = append(stale, acc)
-	}
-
 	var ch db.Channel
 	if err := s.db.First(&ch, "id = ?", channelID).Error; err != nil {
 		return nil, []error{err}
@@ -83,9 +72,9 @@ func (s *Scheduler) RefreshChannel(channelID uuid.UUID) ([]*QuotaData, []error) 
 
 	var results []*QuotaData
 	var errs []error
-	for i := 0; i < len(stale); i += batchSize {
-		end := min(i+batchSize, len(stale))
-		batch := stale[i:end]
+	for i := 0; i < len(accounts); i += batchSize {
+		end := min(i+batchSize, len(accounts))
+		batch := accounts[i:end]
 
 		var wg sync.WaitGroup
 		batchResults := make([]*QuotaData, len(batch))
@@ -110,32 +99,12 @@ func (s *Scheduler) RefreshChannel(channelID uuid.UUID) ([]*QuotaData, []error) 
 		}
 
 		// Jitter between batches (skip after last batch)
-		if end < len(stale) {
+		if end < len(accounts) {
 			d := jitterMin + time.Duration(rand.Int64N(int64(jitterMax-jitterMin)))
 			time.Sleep(d)
 		}
 	}
 	return results, errs
-}
-
-func (s *Scheduler) isStale(acc db.Account, cutoff time.Time) bool {
-	meta := acc.Metadata
-	if meta == nil {
-		return true
-	}
-	quota, ok := meta["quota"].(map[string]interface{})
-	if !ok {
-		return true
-	}
-	fetchedAt, ok := quota["fetched_at"].(string)
-	if !ok {
-		return true
-	}
-	t, err := time.Parse(time.RFC3339, fetchedAt)
-	if err != nil {
-		return true
-	}
-	return t.Before(cutoff)
 }
 
 func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error) {

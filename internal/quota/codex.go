@@ -47,7 +47,6 @@ func codexFedramp(metadata map[string]interface{}) bool {
 func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
 
-	// Navigate to rate_limits
 	limits := raw
 	if rl, ok := raw["rate_limits"].(map[string]interface{}); ok {
 		limits = rl
@@ -57,8 +56,8 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 
 	addCodexWindow(qd, "Codex 主窗口", mapValue(limits, "primary"))
 	addCodexWindow(qd, "Codex 周窗口", mapValue(limits, "secondary"))
+	collectCodexWindows(qd, "", limits)
 
-	// Credits
 	if credits, ok := limits["credits"].(map[string]interface{}); ok {
 		hasCredits, _ := credits["has_credits"].(bool)
 		if hasCredits {
@@ -72,8 +71,7 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 		}
 	}
 
-	// Tier from plan type
-	if planType, ok := raw["plan_type"].(string); ok && planType != "" {
+	if planType := firstString(raw, "plan_type", "planType", "tier", "account_plan", "accountPlan"); planType != "" {
 		qd.Tier = planType
 	}
 
@@ -93,24 +91,74 @@ func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}) 
 	}
 }
 
+func collectCodexWindows(qd *QuotaData, prefix string, m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+	if remainingPct := codexRemainingPercent(m); remainingPct != nil {
+		label := firstString(m, "label", "name", "model", "model_id", "modelId", "type", "window")
+		if label == "" {
+			label = prefix
+		}
+		if label == "" {
+			label = "Codex 额度"
+		}
+		key := "Codex " + label
+		if !quotaBucketExists(qd, key) {
+			qd.Buckets = append(qd.Buckets, QuotaBucket{
+				Label:            key,
+				RemainingPercent: clampPercent(*remainingPct),
+				ResetTime:        codexResetTime(m),
+			})
+		}
+	}
+	for key, value := range m {
+		child, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if key == "credits" {
+			continue
+		}
+		childPrefix := strings.TrimSpace(key)
+		if prefix != "" {
+			childPrefix = prefix + " " + childPrefix
+		}
+		collectCodexWindows(qd, childPrefix, child)
+	}
+}
+
+func quotaBucketExists(qd *QuotaData, label string) bool {
+	for _, bucket := range qd.Buckets {
+		if bucket.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
 func codexRemainingPercent(m map[string]interface{}) *int {
-	for _, key := range []string{"remaining_percent", "remainingPercent"} {
-		if v, ok := m[key].(float64); ok {
-			pct := int(v)
-			return &pct
-		}
+	if v := firstFloat(m, "remaining_percent", "remainingPercent", "remaining_percentage", "remainingPercentage"); v != nil {
+		pct := int(*v)
+		return &pct
 	}
-	for _, key := range []string{"remaining_fraction", "remainingFraction"} {
-		if v, ok := m[key].(float64); ok {
-			pct := int(v * 100)
-			return &pct
-		}
+	if v := firstFloat(m, "remaining_fraction", "remainingFraction"); v != nil {
+		pct := int(*v * 100)
+		return &pct
 	}
-	for _, key := range []string{"used_percent", "usedPercent", "utilization"} {
-		if v, ok := m[key].(float64); ok {
-			pct := 100 - int(v)
-			return &pct
+	if v := firstFloat(m, "used_percent", "usedPercent", "used_percentage", "usedPercentage", "utilization"); v != nil {
+		used := *v
+		if used <= 1 {
+			used *= 100
 		}
+		pct := 100 - int(used)
+		return &pct
+	}
+	limit := firstFloat(m, "limit", "total", "quota", "max")
+	used := firstFloat(m, "used", "usage", "consumed")
+	if limit != nil && used != nil && *limit > 0 {
+		pct := int(((*limit - *used) / *limit) * 100)
+		return &pct
 	}
 	return nil
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 )
 
 func init() {
@@ -31,6 +33,7 @@ func fetchAnthropicUsage(accessToken string) (map[string]interface{}, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", anthropic.ClaudeCodeUserAgent)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -78,11 +81,15 @@ func convertAnthropicUsage(usage map[string]interface{}, metadata map[string]int
 		if !ok {
 			continue
 		}
-		utilization, ok := window["utilization"].(float64)
-		if !ok {
+		utilization := firstFloat(window, "utilization", "used_percentage", "usedPercentage")
+		if utilization == nil {
 			continue
 		}
-		usedPercent := int(utilization)
+		usedValue := *utilization
+		if usedValue <= 1 {
+			usedValue *= 100
+		}
+		usedPercent := int(usedValue)
 		if usedPercent < 0 {
 			usedPercent = 0
 		}

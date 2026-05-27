@@ -29,7 +29,7 @@ const (
 	DeviceTokenURL    = "https://auth.openai.com/api/accounts/deviceauth/token"
 	DeviceAuthURL     = "https://auth.openai.com/codex/device"
 	DeviceRedirectURI = "https://auth.openai.com/deviceauth/callback"
-	CodexUsageURL     = "https://chatgpt.com/backend-api/api/codex/usage"
+	CodexUsageURL     = "https://chatgpt.com/backend-api/wham/usage"
 	CodexAPIBaseURL   = "https://chatgpt.com/backend-api/codex"
 )
 
@@ -251,10 +251,11 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("originator", CodexOriginator)
 	req.Header.Set("User-Agent", CodexUserAgent)
 	if accountID != "" {
-		req.Header.Set("ChatGPT-Account-ID", accountID)
+		req.Header.Set("chatgpt-account-id", accountID)
 	}
 	if fedramp {
 		req.Header.Set("X-OpenAI-Fedramp", "true")

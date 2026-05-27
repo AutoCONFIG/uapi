@@ -132,6 +132,21 @@ func parseAntigravityModels(data []byte) ([]modelEntry, error) {
 		}
 	}
 
+	var objectResp struct {
+		Models map[string]map[string]interface{} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &objectResp); err == nil && len(objectResp.Models) > 0 {
+		out := make([]modelEntry, 0, len(objectResp.Models))
+		for name, value := range objectResp.Models {
+			if entry, ok := antigravityEntryFromMap(name, value); ok {
+				out = append(out, entry)
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+
 	var array []map[string]interface{}
 	if err := json.Unmarshal(data, &array); err == nil && len(array) > 0 {
 		out := antigravityEntriesFromArray(array)
@@ -178,7 +193,7 @@ func antigravityEntryFromMap(fallbackName string, m map[string]interface{}) (mod
 		return modelEntry{}, false
 	}
 	source := m
-	for _, key := range []string{"quota", "usage", "rateLimit", "rate_limit"} {
+	for _, key := range []string{"quotaInfo", "quota_info", "quota", "usage", "rateLimit", "rate_limit"} {
 		if nested := mapValue(m, key); nested != nil {
 			source = nested
 			break
