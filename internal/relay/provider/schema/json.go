@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -29,8 +30,8 @@ func (mc MessageContent) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON tries bare string first, then []ContentPart.
 func (mc *MessageContent) UnmarshalJSON(data []byte) error {
-	// Handle null.
-	if string(data) == "null" {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
 		mc.Text = nil
 		mc.Parts = nil
 		return nil
@@ -74,13 +75,16 @@ func (mc MessageContent) ExtractText() string {
 		return *mc.Text
 	}
 
-	var texts []string
-	for _, p := range mc.Parts {
+	var sb strings.Builder
+	for i, p := range mc.Parts {
 		if p.Type == "text" && p.Text != "" {
-			texts = append(texts, p.Text)
+			if i > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(p.Text)
 		}
 	}
-	return strings.Join(texts, "\n")
+	return sb.String()
 }
 
 // NewTextContent creates a MessageContent with bare string content.

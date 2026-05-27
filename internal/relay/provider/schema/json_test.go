@@ -116,3 +116,64 @@ func TestBothTextAndPartsError(t *testing.T) {
 		t.Fatal("expected error when both Text and Parts are set")
 	}
 }
+
+func TestUnmarshalArrayOfParts(t *testing.T) {
+	data := []byte(`[{"type":"text","text":"hello"},{"type":"image_url","image_url":"http://img"}]`)
+
+	var mc MessageContent
+	if err := json.Unmarshal(data, &mc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if mc.Text != nil {
+		t.Fatalf("expected nil Text, got %v", mc.Text)
+	}
+
+	if len(mc.Parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(mc.Parts))
+	}
+
+	if mc.Parts[0].Type != "text" || mc.Parts[0].Text != "hello" {
+		t.Fatalf("unexpected first part: %+v", mc.Parts[0])
+	}
+
+	if mc.Parts[1].Type != "image_url" || mc.Parts[1].Text != "" || mc.Parts[1].ImageURL == nil || *mc.Parts[1].ImageURL != "http://img" {
+		t.Fatalf("unexpected second part: %+v", mc.Parts[1])
+	}
+}
+
+func TestUnmarshalInvalidJSON(t *testing.T) {
+	data := []byte(`{"unknown": true}`)
+
+	var mc MessageContent
+	err := json.Unmarshal(data, &mc)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestUnmarshalOverwritesExisting(t *testing.T) {
+	// Start with a pre-existing MessageContent (string form).
+	mc := NewTextContent("original")
+	if mc.Text == nil || *mc.Text != "original" {
+		t.Fatalf("setup: expected original content, got %+v", mc)
+	}
+
+	// Unmarshal an array — should overwrite the string content.
+	data := []byte(`[{"type":"text","text":"new content"}]`)
+	if err := json.Unmarshal(data, &mc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if mc.Text != nil {
+		t.Fatalf("expected Text to be nil after array unmarshal, got %v", mc.Text)
+	}
+
+	if len(mc.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(mc.Parts))
+	}
+
+	if mc.Parts[0].Type != "text" || mc.Parts[0].Text != "new content" {
+		t.Fatalf("unexpected part: %+v", mc.Parts[0])
+	}
+}
