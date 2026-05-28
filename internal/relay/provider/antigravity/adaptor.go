@@ -11,6 +11,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
@@ -59,7 +60,11 @@ func (a *AntigravityAdaptor) SetupRequestHeader(req *fasthttp.Request, credentia
 }
 
 func (a *AntigravityAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	return gemini.RequestToInternal(body)
+	ir, err := convert.ToInternalOnly(convert.FormatGeminiCLI, body)
+	if err != nil {
+		return nil, err
+	}
+	return convert.ToProviderInternal(ir), nil
 }
 
 func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {

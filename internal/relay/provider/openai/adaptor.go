@@ -7,6 +7,8 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -62,15 +64,30 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 // --- Intermediate format conversion ---
 
 func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	return openaiChatToInternal(body)
+	// Determine format based on API format
+	format := convert.FormatOpenAIChatCompletions
+	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
+		format = convert.FormatOpenAIResponses
+	}
+	ir, err := convert.ToInternalOnly(format, body)
+	if err != nil {
+		return nil, err
+	}
+	return convert.ToProviderInternal(ir), nil
 }
 
 func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
-		// Convert InternalRequest to OpenAI Responses API format
-		return internalToResponses(req)
+	format := convert.FormatOpenAIChatCompletions
+	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
+		format = convert.FormatOpenAIResponses
 	}
-	return internalToOpenAIChat(req)
+	// Convert provider.InternalRequest to convert.InternalRequest for conversion
+	ir := convert.FromProviderInternal(req)
+	fromInternal, ok := convert.GetFromInternalFunc(format)
+	if !ok {
+		return nil, fmt.Errorf("no FromInternal converter for format %q", format)
+	}
+	return fromInternal(ir)
 }
 
 // --- Response/stream handling ---
@@ -161,7 +178,17 @@ func (a *OpenAIAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
 
 // CreateReverseStreamConverter returns nil — no reverse conversion needed for OpenAI.
 func (a *OpenAIAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	return nil
+	if a.channel == nil || (a.channel.APIFormat != "responses" && a.channel.APIFormat != "codex") {
+		return nil
+	}
+	// Convert from OpenAI Responses (upstream) to Chat Completions (client)
+	upstream := convert.FormatOpenAIResponses
+	client := convert.FormatOpenAIChatCompletions
+	converter := stream.NewConverter(upstream, client)
+	if converter == nil {
+		return func(line []byte) []byte { return line }
+	}
+	return converter.Convert
 }
 
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }

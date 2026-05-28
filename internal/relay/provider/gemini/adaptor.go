@@ -7,6 +7,8 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -83,17 +85,30 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 // --- Intermediate format conversion ---
 
 func (a *GeminiAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	return geminiToInternal(body)
+	format := convert.FormatGemini
+	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
+		format = convert.FormatGeminiCLI
+	}
+	ir, err := convert.ToInternalOnly(format, body)
+	if err != nil {
+		return nil, err
+	}
+	return convert.ToProviderInternal(ir), nil
 }
 
 func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
 	// Store model and stream for URL construction
 	a.model = req.Model
 	a.isStream = req.Stream
-	if a.channel.APIFormat == "gemini_code" {
+	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
 		return internalToGeminiCodeAssistWithAccount(req, a.account)
 	}
-	return internalToGemini(req)
+	ir := convert.FromProviderInternal(req)
+	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatGemini)
+	if !ok {
+		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatGemini)
+	}
+	return fromInternal(ir)
 }
 
 // --- Streaming ---
@@ -111,7 +126,15 @@ func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }
 // CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
 // back to Gemini SSE format for clients requesting Gemini format.
 func (a *GeminiAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	return NewReverseStreamConverter()
+	// Convert from OpenAI Chat Completions (client) to Gemini (upstream)
+	upstream := convert.FormatGemini
+	client := convert.FormatOpenAIChatCompletions
+	converter := stream.NewConverter(upstream, client)
+	if converter == nil {
+		// Fallback to legacy converter if stream package doesn't have it
+		return NewReverseStreamConverter()
+	}
+	return converter.Convert
 }
 
 // --- Usage parsing ---

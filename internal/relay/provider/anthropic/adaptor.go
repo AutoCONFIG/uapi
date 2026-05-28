@@ -7,6 +7,8 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -55,11 +57,20 @@ func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials
 // --- Intermediate format conversion ---
 
 func (a *AnthropicAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	return anthropicToInternal(body)
+	ir, err := convert.ToInternalOnly(convert.FormatAnthropic, body)
+	if err != nil {
+		return nil, err
+	}
+	return convert.ToProviderInternal(ir), nil
 }
 
 func (a *AnthropicAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	return internalToAnthropic(req)
+	ir := convert.FromProviderInternal(req)
+	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatAnthropic)
+	if !ok {
+		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatAnthropic)
+	}
+	return fromInternal(ir)
 }
 
 // --- Streaming ---
@@ -78,7 +89,15 @@ func (a *AnthropicAdaptor) GetChannelType() string { return "anthropic" }
 // CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
 // back to Anthropic SSE events for clients requesting Anthropic format.
 func (a *AnthropicAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	return NewReverseStreamConverter()
+	// Convert from OpenAI Chat Completions (client) to Anthropic (upstream)
+	upstream := convert.FormatAnthropic
+	client := convert.FormatOpenAIChatCompletions
+	converter := stream.NewConverter(upstream, client)
+	if converter == nil {
+		// Fallback to legacy converter if stream package doesn't have it
+		return NewReverseStreamConverter()
+	}
+	return converter.Convert
 }
 
 // --- Usage parsing ---
