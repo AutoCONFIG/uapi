@@ -284,7 +284,18 @@ func fromProviderToolResult(result *InternalToolResult) *schema.ToolResult {
 func toProviderTools(tools []schema.Tool) []InternalTool {
 	out := make([]InternalTool, 0, len(tools))
 	for _, t := range tools {
-		out = append(out, InternalTool{Type: t.Type, Name: t.Name, Description: t.Description, Parameters: rawToInterface(t.Parameters)})
+		name := t.Name
+		description := t.Description
+		parameters := t.Parameters
+		if t.Function != nil {
+			name = t.Function.Name
+			description = t.Function.Description
+			parameters = t.Function.Parameters
+		}
+		if len(parameters) == 0 {
+			parameters = t.InputSchema
+		}
+		out = append(out, InternalTool{Type: t.Type, Name: name, Description: description, Parameters: rawToInterface(parameters)})
 	}
 	return out
 }

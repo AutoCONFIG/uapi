@@ -18,6 +18,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/modelalias"
 	"github.com/AutoCONFIG/uapi/internal/relay"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
@@ -231,8 +232,8 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	var req relayRequest
 	_ = json.Unmarshal(body, &req)
 	req.Model = httputil.ModelFromRequestPath(string(ctx.Path()), req.Model)
-	if req.Model == "" && strings.HasPrefix(string(ctx.Path()), "/v1/images/") {
-		req.Model = httputil.ModelFromImageRequest(ctx)
+	if req.Model == "" && pathCarriesOpenAIModel(string(ctx.Path())) {
+		req.Model = httputil.ModelFromBodyOrForm(ctx)
 	}
 	if req.Model == "" && strings.HasPrefix(string(ctx.Path()), "/v1/images/") {
 		req.Model = "gpt-image-1"
@@ -405,10 +406,11 @@ type modelListResponse struct {
 }
 
 type modelListItem struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID          string `json:"id"`
+	Object      string `json:"object"`
+	Created     int64  `json:"created"`
+	OwnedBy     string `json:"owned_by"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 func (g *Gateway) handleModels(ctx *fasthttp.RequestCtx) {
@@ -431,10 +433,11 @@ func (g *Gateway) handleModels(ctx *fasthttp.RequestCtx) {
 	data := make([]modelListItem, 0, len(models))
 	for _, model := range models {
 		data = append(data, modelListItem{
-			ID:      model.ID,
-			Object:  "model",
-			Created: model.Created,
-			OwnedBy: model.OwnedBy,
+			ID:          model.ID,
+			Object:      "model",
+			Created:     model.Created,
+			OwnedBy:     model.OwnedBy,
+			DisplayName: model.DisplayName,
 		})
 	}
 	body, _ := json.Marshal(modelListResponse{Object: "list", Data: data})
@@ -477,7 +480,7 @@ func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticated
 		ctx.Error(`{"error":"ip not whitelisted"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
-	if token.Permissions != "" && !httputil.AnyPermissionInList(token.Permissions, "chat", "responses", "messages", "gemini") {
+	if token.Permissions != "" && !httputil.AnyPermissionInList(token.Permissions, "chat", "responses", "messages", "gemini", "images", "audio", "embeddings", "moderations", "realtime", "videos") {
 		ctx.Error(`{"error":"permission not allowed for token"}`, fasthttp.StatusForbidden)
 		return authenticatedToken{}, false
 	}
@@ -493,9 +496,10 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 	var rows []struct {
 		Models       string
 		ModelAliases string
+		APIFormat    string
 	}
 	if err := g.db.Table("channels").
-		Select("DISTINCT channels.models, channels.model_aliases").
+		Select("DISTINCT channels.models, channels.model_aliases, channels.api_format").
 		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
 		Where("channels.enabled = true AND channels.deleted_at IS NULL AND channels.models <> ''").
 		Scan(&rows).Error; err != nil {
@@ -515,7 +519,11 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 					continue
 				}
 			}
-			seen[model] = modelDiscoveryItem{ID: model, OwnedBy: "uapi"}
+			item := modelDiscoveryItem{ID: model, OwnedBy: "uapi"}
+			if row.APIFormat == "antigravity" {
+				item.DisplayName = antigravity.DisplayName(model)
+			}
+			seen[model] = item
 		}
 	}
 	models := make([]modelDiscoveryItem, 0, len(seen))
@@ -804,9 +812,29 @@ func permissionForPath(path string) string {
 		return "responses"
 	case strings.HasPrefix(path, "/v1/images/"):
 		return "images"
+	case strings.HasPrefix(path, "/v1/audio/"):
+		return "audio"
+	case strings.HasPrefix(path, "/v1/embeddings"):
+		return "embeddings"
+	case strings.HasPrefix(path, "/v1/moderations"):
+		return "moderations"
+	case strings.HasPrefix(path, "/v1/realtime/"):
+		return "realtime"
+	case strings.HasPrefix(path, "/v1/videos") || strings.HasPrefix(path, "/v1/video/"):
+		return "videos"
 	default:
 		return "chat"
 	}
+}
+
+func pathCarriesOpenAIModel(path string) bool {
+	return strings.HasPrefix(path, "/v1/images/") ||
+		strings.HasPrefix(path, "/v1/audio/") ||
+		strings.HasPrefix(path, "/v1/embeddings") ||
+		strings.HasPrefix(path, "/v1/moderations") ||
+		strings.HasPrefix(path, "/v1/realtime/") ||
+		strings.HasPrefix(path, "/v1/videos") ||
+		strings.HasPrefix(path, "/v1/video/")
 }
 
 func logProxy(node string, start time.Time, status int) {

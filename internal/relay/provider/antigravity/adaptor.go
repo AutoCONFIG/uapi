@@ -166,6 +166,10 @@ func antigravityProjectID(account *db.Account) string {
 	return ""
 }
 
+func ProjectID(account *db.Account) string {
+	return antigravityProjectID(account)
+}
+
 func stableSessionID(req map[string]interface{}) string {
 	contents, _ := req["contents"].([]interface{})
 	for _, raw := range contents {

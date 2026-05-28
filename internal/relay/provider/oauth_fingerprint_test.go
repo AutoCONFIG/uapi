@@ -1,4 +1,4 @@
-package oauth_fingerprint_test
+package provider_test
 
 import (
 	"runtime"

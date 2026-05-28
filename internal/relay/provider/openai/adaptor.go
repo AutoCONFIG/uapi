@@ -33,13 +33,23 @@ func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 	if a.channel.APIFormat == "codex" && isOpenAIPlatformBaseURL(base) {
 		base = CodexAPIBaseURL
 	}
-	if strings.HasPrefix(path, "/v1/images/") {
+	if openAIPassthroughPath(path) {
 		return base + strings.TrimPrefix(path, "/v1"), nil
 	}
 	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
 		return base + "/responses", nil
 	}
 	return base + "/chat/completions", nil
+}
+
+func openAIPassthroughPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/images/") ||
+		strings.HasPrefix(path, "/v1/audio/") ||
+		strings.HasPrefix(path, "/v1/embeddings") ||
+		strings.HasPrefix(path, "/v1/moderations") ||
+		strings.HasPrefix(path, "/v1/realtime/") ||
+		strings.HasPrefix(path, "/v1/videos") ||
+		strings.HasPrefix(path, "/v1/video/")
 }
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {

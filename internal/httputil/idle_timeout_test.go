@@ -1,4 +1,4 @@
-package httputil_idle_timeout_test
+package httputil_test
 
 import (
 	"errors"

@@ -1,4 +1,4 @@
-package openai_channel_contract_test
+package openai_test
 
 import (
 	"testing"

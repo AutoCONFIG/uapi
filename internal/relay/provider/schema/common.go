@@ -39,6 +39,14 @@ type Tool struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	Function    *ToolFunction   `json:"function,omitempty"`
+}
+
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type ToolChoice struct {

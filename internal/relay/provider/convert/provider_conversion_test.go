@@ -1,4 +1,4 @@
-package provider_conversion_test
+package convert_test
 
 import (
 	"strings"

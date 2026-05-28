@@ -1,4 +1,4 @@
-package relay_handler_test
+package relay_test
 
 import (
 	"testing"

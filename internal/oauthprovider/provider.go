@@ -265,7 +265,7 @@ func init() {
 		spec: Spec{
 			Key: "antigravity", Label: "Antigravity", ChannelType: "antigravity", APIFormat: "antigravity",
 			DefaultEndpoint: "https://cloudcode-pa.googleapis.com",
-			Models:          "claude-opus-4-6-thinking,claude-sonnet-4-6,gemini-3-pro-high,gemini-3-pro-low,gemini-pro-agent,gemini-3.1-pro-low,gemini-3-flash,gemini-3-flash-agent,gemini-3.1-flash-lite,gpt-oss-120b-medium",
+			Models:          antigravity.PublicModelCSV(),
 			Quota:           true,
 		},
 		channelAllowed: func(ch db.Channel) bool {

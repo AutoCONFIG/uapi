@@ -200,7 +200,15 @@ user package subscription, not a package bound to one API key.
 Relay follows a Bifrost-style adapter pipeline and preserves raw bodies only
 when the upstream and downstream are the same standard protocol:
 
-- Detect the downstream client format from the request path: OpenAI Chat Completions API, OpenAI Responses API, Anthropic Messages API, or Gemini generateContent API.
+- Detect the downstream request type from the request path. Text-family
+  request types include OpenAI Chat Completions API, OpenAI Responses API,
+  Anthropic Messages API, and Gemini generateContent API. Non-text request
+  types are tracked separately for OpenAI Images, OpenAI Audio, OpenAI
+  Embeddings, Moderations, Realtime, and Video endpoints.
+- Capability routing follows Bifrost's `RequestType`/`AllowedRequests` model:
+  each provider/channel must explicitly support a request type. Unsupported
+  non-text combinations return an explicit error instead of being coerced
+  through the text conversion path.
 - For cross-protocol requests, convert into UAPI's internal request structure,
   then serialize to the selected upstream channel format.
 - For same-protocol requests/responses, keep the standard body/stream intact
@@ -220,6 +228,21 @@ when the upstream and downstream are the same standard protocol:
   metadata-only thought parts are ignored for cross-protocol output, while
   `thought: true` text maps to OpenAI-compatible `reasoning_content` and
   `reasoning` fields where possible.
+- OpenAI-compatible `/v1/images/generations` can be converted to Antigravity
+  `requestType:"image_gen"` for image-capable Antigravity models such as
+  `nano-banana-2`/`gemini-3.1-flash-image`. The converter maps OpenAI
+  `prompt`, `size`, `quality`, `image_size`/`imageSize`, and
+  `response_format`, then converts Gemini `inlineData` image parts back to
+  OpenAI Images `data[]`.
+- OpenAI-compatible `/v1/images/edits` and `/v1/images/variations` also convert
+  to Antigravity `image_gen`; multipart `image` and `mask` files become Gemini
+  `inlineData` parts next to the text prompt.
+- `/v1/audio/*`, `/v1/embeddings`, model-bearing `/v1/moderations`, OpenAI
+  Realtime HTTP session/control requests, and model-bearing `/v1/videos*`
+  currently pass through only to OpenAI-compatible upstream channels. Realtime
+  WebSocket and model-less management/retrieval endpoints are not claimed by
+  this conversion layer. Other providers return explicit unsupported-operation
+  errors until a provider-specific converter is implemented.
 - SSE normalization preserves `event:` names for converters and removes only the
   single optional space after `data:`. Do not trim the remaining payload: leading
   or trailing spaces may be valid JSON string content in multi-line SSE data.

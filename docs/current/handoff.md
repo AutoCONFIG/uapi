@@ -269,6 +269,11 @@ ANY    /v1/chat/completions    # OpenAI Chat Completions API
 ANY    /v1/responses           # OpenAI Responses API HTTP/SSE; WS 仅 all-in-one 模式暴露
 GET    /v1/models              # 当前 API Key 可用模型列表
 ANY    /v1/images/*            # OpenAI Images API
+ANY    /v1/audio/*             # OpenAI Audio API
+ANY    /v1/embeddings          # OpenAI Embeddings API
+ANY    /v1/moderations         # OpenAI Moderations API（需请求携带 model）
+ANY    /v1/realtime/*          # OpenAI Realtime HTTP session/control API（非 WS）
+ANY    /v1/videos*             # OpenAI Video API（需请求携带 model）
 ANY    /v1/messages            # Anthropic Messages API
 ANY    /v1beta/*               # Gemini generateContent API
 GET    /v1beta/models          # Gemini 格式模型列表
@@ -403,6 +408,17 @@ Current relay notes:
   Keep edge proxy read timeouts greater than this value.
 - SSE conversion must preserve `event:` names and significant `data:` payload
   whitespace. Only the single optional space after `data:` may be removed.
+- Protocol conversion treats non-text operations as first-class request types,
+  following Bifrost's `RequestType`/`AllowedRequests` pattern. Text formats
+  still use `InternalRequest`; OpenAI Images/Audio/Embeddings bypass text
+  conversion and require explicit provider support.
+- Current non-text matrix: OpenAI Images/Audio/Embeddings plus model-bearing
+  Moderations/Video and Realtime HTTP session/control requests pass through to
+  OpenAI-compatible upstreams. `/v1/images/generations`, `/v1/images/edits`,
+  and `/v1/images/variations` also convert to Antigravity
+  `requestType:"image_gen"` for exposed image models such as `nano-banana-2`;
+  audio, embeddings, moderations, realtime, and video are explicitly unsupported
+  on Antigravity until dedicated converters are added.
 - The Responses WS HTTP-SSE bridge synthesizes a final `[DONE]` for Chat Completions
   upstreams that ended after `finish_reason` without sending `[DONE]`.
 

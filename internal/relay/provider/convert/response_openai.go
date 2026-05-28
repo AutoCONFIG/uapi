@@ -329,6 +329,12 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 
 	// Convert choices to output items
 	for _, choice := range ir.Choices {
+		if len(choice.ToolCalls) == 0 {
+			if contentItems := responsesContentOutputItems(choice); len(contentItems) > 0 {
+				resp.Output = append(resp.Output, contentItems...)
+				continue
+			}
+		}
 		item := schema.ResponsesOutputItem{
 			Type: "message",
 			Role: choice.Role,
@@ -376,6 +382,95 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func responsesContentOutputItems(choice InternalChoice) []schema.ResponsesOutputItem {
+	out := make([]schema.ResponsesOutputItem, 0)
+	pending := make([]schema.ContentPart, 0)
+	flushMessage := func() {
+		if len(pending) == 0 {
+			return
+		}
+		out = append(out, schema.ResponsesOutputItem{
+			Type:    "message",
+			Role:    choice.Role,
+			Content: pending,
+			Status:  responsesStatusFromFinishReason(choice.FinishReason),
+		})
+		pending = nil
+	}
+	for idx, part := range choice.Content {
+		if part.ImageURL == nil || *part.ImageURL == "" {
+			pending = append(pending, part)
+			continue
+		}
+		mimeType, b64, ok := splitDataURI(*part.ImageURL)
+		if !ok {
+			pending = append(pending, part)
+			continue
+		}
+		flushMessage()
+		format := imageOutputFormatFromMime(mimeType)
+		resultRaw, _ := json.Marshal(b64)
+		formatRaw, _ := json.Marshal(format)
+		out = append(out, schema.ResponsesOutputItem{
+			Type:   "image_generation_call",
+			ID:     fmt.Sprintf("ig_%d", idx),
+			Status: "completed",
+			Extra: map[string]json.RawMessage{
+				"result":        resultRaw,
+				"output_format": formatRaw,
+			},
+		})
+	}
+	flushMessage()
+	return out
+}
+
+func responsesStatusFromFinishReason(finishReason string) string {
+	switch finishReason {
+	case "end_turn", "stop":
+		return "completed"
+	case "max_tokens", "length":
+		return "incomplete"
+	default:
+		return finishReason
+	}
+}
+
+func splitDataURI(uri string) (mimeType, data string, ok bool) {
+	if !strings.HasPrefix(uri, "data:") {
+		return "", "", false
+	}
+	comma := strings.Index(uri, ",")
+	if comma < 0 {
+		return "", "", false
+	}
+	meta := uri[len("data:"):comma]
+	data = uri[comma+1:]
+	if data == "" {
+		return "", "", false
+	}
+	mimeType = "image/png"
+	if semi := strings.Index(meta, ";"); semi >= 0 {
+		if meta[:semi] != "" {
+			mimeType = meta[:semi]
+		}
+	} else if meta != "" {
+		mimeType = meta
+	}
+	return mimeType, data, true
+}
+
+func imageOutputFormatFromMime(mimeType string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/jpeg", "image/jpg":
+		return "jpeg"
+	case "image/webp":
+		return "webp"
+	default:
+		return "png"
+	}
 }
 
 func init() {

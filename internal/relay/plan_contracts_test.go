@@ -1,4 +1,4 @@
-package plan_contracts_test
+package relay_test
 
 import (
 	"errors"

@@ -220,23 +220,10 @@ type relayRequest struct {
 func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
+	requestType := detectRelayRequestType(path)
 
 	// Detect client format from request path
-	var clientFormat provider.Format
-	switch {
-	case strings.HasPrefix(path, "/v1/chat/completions"):
-		clientFormat = provider.FormatOpenAIChatCompletions
-	case strings.HasPrefix(path, "/v1/responses"):
-		clientFormat = provider.FormatOpenAIResponses
-	case strings.HasPrefix(path, "/v1/messages"):
-		clientFormat = provider.FormatAnthropic
-	case strings.HasPrefix(path, "/v1beta/"):
-		clientFormat = provider.FormatGemini
-	case strings.HasPrefix(path, "/v1/images/"):
-		clientFormat = provider.FormatOpenAIResponses
-	default:
-		clientFormat = provider.FormatOpenAIChatCompletions // backward compat
-	}
+	clientFormat := requestType.clientFormat()
 
 	var token db.Token
 	internalClaims, gatewayAuthenticated := internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
@@ -330,10 +317,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 5. Parse request
 	var req relayRequest
 	body := ctx.PostBody()
-	isImageRequest := strings.HasPrefix(path, "/v1/images/")
-	if isImageRequest {
-		req.Model = httputil.ModelFromImageRequest(ctx)
-		if req.Model == "" {
+	isMediaRequest := requestType.isMedia()
+	if isMediaRequest {
+		req.Model = httputil.ModelFromBodyOrForm(ctx)
+		if req.Model == "" && requestType.isImage() {
 			req.Model = "gpt-image-1"
 		}
 	} else {
@@ -406,6 +393,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		estimatedTokens = internalClaims.EstimatedTokens
 	}
 	tokenPlanID := toUUID(internalClaims.TokenPlanID)
+	if !supportsRelayRequestType(targetChannel.Type, requestType) {
+		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, fmt.Sprintf("%s is not supported by %s channels", requestType, targetChannel.Type), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+		ctx.Error(`{"error":"request type not supported by selected channel"}`, fasthttp.StatusBadRequest)
+		return
+	}
 	if r.billing != nil && (!gatewayAuthenticated || !internalClaims.Precharged) {
 		planID, err := r.billing.PreConsume(token.ID.String(), req.Model, estimatedTokens)
 		if err != nil {
@@ -444,7 +436,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	sameFormat := clientFormat == upstreamFormat
 	rawGeminiSameFormat := sameFormat && clientFormat == provider.FormatGemini
-	if !rawGeminiSameFormat {
+	if !isMediaRequest && !rawGeminiSameFormat {
 		if upstreamModel != req.Model {
 			body = setRequestModel(body, upstreamModel)
 		} else {
@@ -454,7 +446,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	forceStreamActive := targetChannel.ForceStream && !req.Stream
 	effectiveStream := req.Stream || forceStreamActive
-	if effectiveStream && (!sameFormat || forceStreamActive) && !rawGeminiSameFormat {
+	if !isMediaRequest && effectiveStream && (!sameFormat || forceStreamActive) && !rawGeminiSameFormat {
 		body = injectStreamTrue(body)
 	}
 
@@ -483,9 +475,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		logger.F("gateway_authenticated", gatewayAuthenticated),
 	)
 
-	if isImageRequest {
-		streaming = true // image handler owns concurrency release on all paths
-		r.handleImageRequest(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, start, estimatedTokens, claims)
+	if isMediaRequest {
+		streaming = true // media handler owns concurrency release on all paths
+		r.handleMediaRequest(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, requestType, start, estimatedTokens, claims)
 		return
 	}
 
@@ -754,10 +746,19 @@ func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
 	return &channelCache{db: database, ttl: ttl}
 }
 
-func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, start time.Time, estTokens int, claims *internalauth.Claims) {
-	if ch.Type != "openai" {
-		r.refundAndError(ctx, token.ID.String(), estTokens, "image generation is only available on OpenAI-compatible image channels", claims, ch, acc, model, start, tokenPlanID)
+func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, requestType relayRequestType, start time.Time, estTokens int, claims *internalauth.Claims) {
+	if !supportsRelayRequestType(ch.Type, requestType) {
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 		return
+	}
+	responseFormat := imageResponseFormat(ctx, body)
+	if ch.Type == "antigravity" {
+		converted, err := antigravityImageBody(ctx, body, acc, model, requestType)
+		if err != nil {
+			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, err.Error(), claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
+			return
+		}
+		body = converted
 	}
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
@@ -765,9 +766,15 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	defer fasthttp.ReleaseResponse(upResp)
 
 	upReq.SetRequestURI(url)
-	upReq.Header.SetMethodBytes(ctx.Method())
+	if ch.Type == "antigravity" {
+		upReq.Header.SetMethod(fasthttp.MethodPost)
+	} else {
+		upReq.Header.SetMethodBytes(ctx.Method())
+	}
 	upReq.SetBody(body)
-	if contentType := ctx.Request.Header.ContentType(); len(contentType) > 0 {
+	if ch.Type == "antigravity" {
+		upReq.Header.SetContentType("application/json")
+	} else if contentType := ctx.Request.Header.ContentType(); len(contentType) > 0 {
 		upReq.Header.SetBytesV("Content-Type", contentType)
 	}
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
@@ -775,7 +782,7 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 		return
 	}
 	if err := bufferedClient.Do(upReq, upResp); err != nil {
-		logger.Warnf("relay.images", "upstream image request failed", logger.Err(err))
+		logger.Warnf("relay.media", "upstream media request failed", logger.F("request_type", string(requestType)), logger.Err(err))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
@@ -785,12 +792,48 @@ func (r *Relayer) handleImageRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, provider.FormatOpenAIResponses, claims, tokenPlanID)
 		return
 	}
-	copyHeaders(upResp, &ctx.Response.Header)
+	if ch.Type == "antigravity" {
+		converted, err := antigravityImagesOpenAIResponse(respBody, responseFormat)
+		if err != nil {
+			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+			return
+		}
+		respBody = converted
+		ctx.Response.Header.Set("Content-Type", "application/json")
+	} else {
+		copyHeaders(upResp, &ctx.Response.Header)
+	}
 	ctx.SetStatusCode(statusCode)
 	ctx.SetBody(respBody)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
-	logger.Debugf("relay.images", "image request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
+	logger.Debugf("relay.media", "media request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("request_type", string(requestType)), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
 	go r.finishUsage(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, false, 0, estTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+}
+
+func antigravityImageBody(ctx *fasthttp.RequestCtx, body []byte, acc *db.Account, model string, requestType relayRequestType) ([]byte, error) {
+	switch requestType {
+	case requestTypeImageGeneration:
+		return antigravityImageGenerationRequest(body, acc, model)
+	case requestTypeImageEdit, requestTypeImageVariation:
+		return antigravityImageMultipartRequest(ctx, acc, model, requestType)
+	default:
+		return nil, fmt.Errorf("antigravity only supports image media requests")
+	}
+}
+
+func imageResponseFormat(ctx *fasthttp.RequestCtx, body []byte) string {
+	var req struct {
+		ResponseFormat string `json:"response_format"`
+	}
+	if json.Unmarshal(body, &req) == nil && strings.TrimSpace(req.ResponseFormat) != "" {
+		return strings.TrimSpace(req.ResponseFormat)
+	}
+	if ctx != nil {
+		if value := strings.TrimSpace(string(ctx.FormValue("response_format"))); value != "" {
+			return value
+		}
+	}
+	return "b64_json"
 }
 
 func (c *channelCache) get() []db.Channel {
@@ -1906,8 +1949,9 @@ func permissionForFormat(format provider.Format) string {
 }
 
 func permissionForRequest(path string, format provider.Format) string {
-	if strings.HasPrefix(path, "/v1/images/") {
-		return "images"
+	rt := detectRelayRequestType(path)
+	if rt.isMedia() {
+		return rt.permission()
 	}
 	return permissionForFormat(format)
 }

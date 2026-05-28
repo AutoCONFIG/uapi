@@ -1,4 +1,4 @@
-package oauth_refresh_test
+package openai_test
 
 import (
 	"io"

@@ -1,4 +1,4 @@
-package provider_conversion
+package convert_test
 
 import (
 	"encoding/json"

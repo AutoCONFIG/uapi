@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
@@ -132,12 +133,15 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 	// Tool config
 	if req.ToolConfig != nil && req.ToolConfig.FunctionCallingConfig != nil {
 		fcConfig := req.ToolConfig.FunctionCallingConfig
-		toolChoice := json.RawMessage(fmt.Sprintf(`{"mode":%q}`, fcConfig.Mode))
-		if len(fcConfig.AllowedFunctionNames) > 0 {
-			names, _ := json.Marshal(fcConfig.AllowedFunctionNames)
-			toolChoice = json.RawMessage(fmt.Sprintf(`{"mode":%q,"function_names":%s}`, fcConfig.Mode, names))
+		mode := normalizeGeminiFunctionCallingMode(fcConfig.Mode)
+		if mode != "" {
+			toolChoice := json.RawMessage(fmt.Sprintf(`{"mode":%q}`, mode))
+			if len(fcConfig.AllowedFunctionNames) > 0 {
+				names, _ := json.Marshal(fcConfig.AllowedFunctionNames)
+				toolChoice = json.RawMessage(fmt.Sprintf(`{"mode":%q,"function_names":%s}`, mode, names))
+			}
+			ir.ToolChoice = toolChoice
 		}
-		ir.ToolChoice = toolChoice
 	}
 
 	return ir, nil
@@ -274,26 +278,19 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 		req["safetySettings"] = ir.SafetySettings
 	}
 
-	// Tools
+	hasGeminiTools := false
 	if ir.Tools != nil {
-		tools, _ := json.Marshal(ir.Tools)
-		req["tools"] = json.RawMessage(tools)
+		if tools := geminiTools(ir.Tools); len(tools) > 0 {
+			req["tools"] = tools
+			hasGeminiTools = true
+		}
 	}
 
 	// Tool config
-	if ir.ToolChoice != nil {
-		var tc struct {
-			Mode                string   `json:"mode"`
-			AllowedFunctionNames []string `json:"function_names,omitempty"`
-		}
-		if json.Unmarshal(ir.ToolChoice, &tc) == nil {
+	if hasGeminiTools && ir.ToolChoice != nil {
+		if fcConfig, ok := geminiFunctionCallingConfig(ir.ToolChoice); ok {
 			toolConfig := map[string]interface{}{
-				"functionCallingConfig": map[string]interface{}{
-					"mode": tc.Mode,
-				},
-			}
-			if len(tc.AllowedFunctionNames) > 0 {
-				toolConfig["functionCallingConfig"].(map[string]interface{})["allowedFunctionNames"] = tc.AllowedFunctionNames
+				"functionCallingConfig": fcConfig,
 			}
 			req["toolConfig"] = toolConfig
 		}
@@ -305,6 +302,172 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func geminiFunctionCallingConfig(raw json.RawMessage) (map[string]interface{}, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
+
+	var choice string
+	if err := json.Unmarshal(raw, &choice); err == nil {
+		mode := openAIToolChoiceTypeToGeminiMode(choice)
+		if mode == "" {
+			mode = normalizeGeminiFunctionCallingMode(choice)
+		}
+		if mode == "" {
+			return nil, false
+		}
+		return map[string]interface{}{"mode": mode}, true
+	}
+
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, false
+	}
+
+	mode := firstString(obj, "mode", "Mode")
+	choiceType := firstString(obj, "type", "Type")
+	if mode == "" {
+		mode = openAIToolChoiceTypeToGeminiMode(choiceType)
+	}
+	mode = normalizeGeminiFunctionCallingMode(mode)
+	if mode == "" {
+		return nil, false
+	}
+
+	allowed := firstStringSlice(obj, "allowedFunctionNames", "function_names", "AllowedFunctionNames")
+	if name := functionChoiceName(obj); name != "" {
+		allowed = appendIfMissing(allowed, name)
+		if mode == "AUTO" && strings.EqualFold(choiceType, "function") {
+			mode = "ANY"
+		}
+	}
+
+	config := map[string]interface{}{"mode": mode}
+	if len(allowed) > 0 {
+		config["allowedFunctionNames"] = allowed
+	}
+	return config, true
+}
+
+func geminiTools(tools []schema.Tool) []map[string]interface{} {
+	functionDeclarations := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		name, description, parameters := normalizedFunctionTool(tool)
+		if name == "" {
+			continue
+		}
+		declaration := map[string]interface{}{
+			"name": name,
+		}
+		if description != "" {
+			declaration["description"] = description
+		}
+		if len(parameters) > 0 && string(parameters) != "null" {
+			declaration["parametersJsonSchema"] = json.RawMessage(parameters)
+		}
+		functionDeclarations = append(functionDeclarations, declaration)
+	}
+	if len(functionDeclarations) == 0 {
+		return nil
+	}
+	return []map[string]interface{}{
+		{"functionDeclarations": functionDeclarations},
+	}
+}
+
+func normalizedFunctionTool(tool schema.Tool) (string, string, json.RawMessage) {
+	if tool.Function != nil {
+		return strings.TrimSpace(tool.Function.Name), strings.TrimSpace(tool.Function.Description), tool.Function.Parameters
+	}
+	if tool.Type != "" && tool.Type != "function" {
+		return "", "", nil
+	}
+	parameters := tool.Parameters
+	if len(parameters) == 0 {
+		parameters = tool.InputSchema
+	}
+	return strings.TrimSpace(tool.Name), strings.TrimSpace(tool.Description), parameters
+}
+
+func normalizeGeminiFunctionCallingMode(mode string) string {
+	switch strings.ToUpper(strings.TrimSpace(mode)) {
+	case "AUTO", "NONE", "ANY", "VALIDATED":
+		return strings.ToUpper(strings.TrimSpace(mode))
+	case "REQUIRED":
+		return "ANY"
+	default:
+		return ""
+	}
+}
+
+func openAIToolChoiceTypeToGeminiMode(choice string) string {
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "auto":
+		return "AUTO"
+	case "none":
+		return "NONE"
+	case "required", "function":
+		return "ANY"
+	default:
+		return ""
+	}
+}
+
+func firstString(obj map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := obj[key].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func firstStringSlice(obj map[string]interface{}, keys ...string) []string {
+	for _, key := range keys {
+		switch raw := obj[key].(type) {
+		case []string:
+			return raw
+		case []interface{}:
+			out := make([]string, 0, len(raw))
+			for _, item := range raw {
+				if value, ok := item.(string); ok && strings.TrimSpace(value) != "" {
+					out = append(out, strings.TrimSpace(value))
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func functionChoiceName(obj map[string]interface{}) string {
+	for _, key := range []string{"function", "Function"} {
+		switch raw := obj[key].(type) {
+		case string:
+			return strings.TrimSpace(raw)
+		case map[string]interface{}:
+			if name := firstString(raw, "name", "Name"); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func appendIfMissing(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func init() {

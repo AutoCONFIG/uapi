@@ -53,6 +53,11 @@ func ModelFromRequestPath(path, bodyModel string) string {
 
 // ModelFromImageRequest extracts the model name from an image generation request.
 func ModelFromImageRequest(ctx *fasthttp.RequestCtx) string {
+	return ModelFromBodyOrForm(ctx)
+}
+
+// ModelFromBodyOrForm extracts a model from either a JSON body or multipart/form data.
+func ModelFromBodyOrForm(ctx *fasthttp.RequestCtx) string {
 	var body struct {
 		Model string `json:"model"`
 	}

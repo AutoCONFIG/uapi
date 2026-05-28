@@ -216,6 +216,11 @@ ANY    /v1/chat/completions           # OpenAI Chat Completions API 格式
 ANY    /v1/responses                  # OpenAI Responses API 格式
 GET    /v1/models                     # OpenAI/Anthropic 兼容模型列表；只读本地模型目录
 ANY    /v1/images/*                   # OpenAI 兼容图片端点，需上游渠道支持
+ANY    /v1/audio/*                    # OpenAI 兼容音频端点，需上游渠道支持
+ANY    /v1/embeddings                 # OpenAI 兼容 Embeddings 端点，需上游渠道支持
+ANY    /v1/moderations                # OpenAI 兼容 Moderations 端点，需上游渠道支持
+ANY    /v1/realtime/*                 # OpenAI 兼容 Realtime 控制端点，需上游渠道支持
+ANY    /v1/videos*                    # OpenAI 兼容 Video 端点，需上游渠道支持
 ANY    /v1/messages                   # Anthropic Messages API 格式
 GET    /v1beta/models                 # Gemini 兼容模型列表；只读本地模型目录
 ANY    /v1beta/*                      # Gemini generateContent API 格式
@@ -257,16 +262,42 @@ Relay API：      Gateway HMAC 签名校验 → 执行指定 channel/account →
 
 ### 多格式中转
 
-客户端可用四种原生格式中的任一种接入 Gateway。Gateway 完成鉴权、策略限制和调度后，Relay 根据入口路径判断客户端格式，再按 Gateway 指定的上游渠道/账号进行格式转换：
+客户端可用原生协议格式接入 Gateway。Gateway 完成鉴权、策略限制和调度后，Relay 根据入口路径判断客户端格式和 request type，再按 Gateway 指定的上游渠道/账号进行格式转换：
 
 ```
 入口路径                 客户端格式
 /v1/chat/completions    OpenAI Chat Completions API
 /v1/responses           OpenAI Responses API
 /v1/images/*            OpenAI Images API
+/v1/audio/*             OpenAI Audio API
+/v1/embeddings          OpenAI Embeddings API
+/v1/moderations         OpenAI Moderations API（需请求携带 model）
+/v1/realtime/*          OpenAI Realtime HTTP session/control API（非 WS）
+/v1/videos*             OpenAI Video API（需请求携带 model）
 /v1/messages            Anthropic Messages API
 /v1beta/*               Gemini generateContent API
 ```
+
+Relay 先识别 request type，再决定是否能转换或透传。这个模型参考
+Bifrost 的 `RequestType`、`AllowedRequests` 和 provider interface：文本类请求
+进入统一 `InternalRequest` 协议转换；图片、音频、Embeddings、Realtime、Video 等非文本能力单独
+声明支持矩阵，不能走文本转换器凑合。当前支持矩阵：
+
+| 下游请求 | OpenAI 上游 | Antigravity 上游 | 其他上游 |
+| --- | --- | --- | --- |
+| `/v1/images/generations` | raw passthrough | 转为 `requestType:"image_gen"` | unsupported |
+| `/v1/images/edits` / `/v1/images/variations` | raw passthrough | 转为 `requestType:"image_gen"`，输入图/mask 作为 `inlineData` | unsupported |
+| `/v1/audio/*` | raw passthrough | unsupported | unsupported |
+| `/v1/embeddings` | raw passthrough | unsupported | unsupported |
+| `/v1/moderations` | model-bearing raw passthrough | unsupported | unsupported |
+| `/v1/realtime/*` | HTTP control/session raw passthrough | unsupported | unsupported |
+| `/v1/videos*` / `/v1/video/*` | model-bearing raw passthrough | unsupported | unsupported |
+
+Antigravity 图片生成转换参考 Antigravity-Manager 的
+`handle_images_generations_internal` 和 `parse_image_config_with_params`，以及
+CLIProxyAPI 的 `geminiToAntigravity()`：图片模型使用
+`requestType:"image_gen"`、`image_gen/<millis>/<uuid>/12` requestId，并将
+OpenAI Images 参数映射到 Gemini `generationConfig.imageConfig`；图片编辑和变体请求会把 multipart 图片输入转换为 Gemini `inlineData` parts。
 
 #### 转换策略：跨协议中间格式，同协议 raw preservation
 

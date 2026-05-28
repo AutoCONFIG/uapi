@@ -227,12 +227,23 @@ func antigravityEntryFromMap(fallbackName string, m map[string]interface{}) (mod
 
 func convertAntigravityModels(models []modelEntry, metadata map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
+	seen := map[string]struct{}{}
 
 	for _, m := range models {
 		name := strings.TrimPrefix(m.Name, "models/")
-		if !isRelevantModel(name) && hasRelevantAntigravityModels(models) {
+		spec, ok := antigravity.CanonicalModel(name)
+		if !ok && hasRelevantAntigravityModels(models) {
 			continue
 		}
+		label := antigravity.DisplayName(name)
+		dedupeKey := name
+		if ok {
+			dedupeKey = spec.ID
+		}
+		if _, exists := seen[dedupeKey]; exists {
+			continue
+		}
+		seen[dedupeKey] = struct{}{}
 		pct := int(m.RemainingFraction * 100)
 		if pct < 0 {
 			pct = 0
@@ -241,7 +252,7 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 			pct = 100
 		}
 		qd.Buckets = append(qd.Buckets, QuotaBucket{
-			Label:            name,
+			Label:            label,
 			RemainingPercent: pct,
 			ResetTime:        m.ResetTime,
 		})
@@ -262,18 +273,7 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 
 func hasRelevantAntigravityModels(models []modelEntry) bool {
 	for _, m := range models {
-		if isRelevantModel(strings.TrimPrefix(m.Name, "models/")) {
-			return true
-		}
-	}
-	return false
-}
-
-func isRelevantModel(name string) bool {
-	prefixes := []string{"gemini", "claude", "gpt", "image", "imagen"}
-	lower := strings.ToLower(name)
-	for _, p := range prefixes {
-		if strings.HasPrefix(lower, p) {
+		if _, ok := antigravity.CanonicalModel(m.Name); ok {
 			return true
 		}
 	}
