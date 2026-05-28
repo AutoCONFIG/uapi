@@ -2,7 +2,9 @@ package quota
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	openai "github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 )
@@ -54,9 +56,12 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 		limits = rl
 	}
 
-	addCodexWindow(qd, "Codex 主窗口", mapValue(limits, "primary"))
-	addCodexWindow(qd, "Codex 周窗口", mapValue(limits, "secondary"))
-	collectCodexWindows(qd, "", limits)
+	addCodexWindow(qd, "Codex 5小时窗口", mapValue(limits, "primary"))
+	addCodexWindow(qd, "Codex 每周窗口", mapValue(limits, "secondary"))
+	if len(qd.Buckets) == 0 {
+		collectCodexWindows(qd, "", limits)
+		normalizeCodexWindowLabels(qd)
+	}
 
 	if credits, ok := limits["credits"].(map[string]interface{}); ok {
 		hasCredits, _ := credits["has_credits"].(bool)
@@ -96,10 +101,11 @@ func collectCodexWindows(qd *QuotaData, prefix string, m map[string]interface{})
 		return
 	}
 	if remainingPct := codexRemainingPercent(m); remainingPct != nil {
-		label := firstString(m, "label", "name", "model", "model_id", "modelId", "type", "window")
+		label := firstString(m, "label", "name", "model", "model_id", "modelId", "window")
 		if label == "" {
 			label = prefix
 		}
+		label = codexWindowLabel(label)
 		if label == "" {
 			label = "Codex 额度"
 		}
@@ -126,6 +132,48 @@ func collectCodexWindows(qd *QuotaData, prefix string, m map[string]interface{})
 		}
 		collectCodexWindows(qd, childPrefix, child)
 	}
+}
+
+func normalizeCodexWindowLabels(qd *QuotaData) {
+	if len(qd.Buckets) != 2 {
+		return
+	}
+	for _, bucket := range qd.Buckets {
+		if bucket.Label != "Codex rate_limit" && bucket.Label != "Codex 额度" {
+			return
+		}
+	}
+	sort.SliceStable(qd.Buckets, func(i, j int) bool {
+		return resetUnix(qd.Buckets[i].ResetTime) < resetUnix(qd.Buckets[j].ResetTime)
+	})
+	qd.Buckets[0].Label = "Codex 5小时窗口"
+	qd.Buckets[1].Label = "Codex 每周窗口"
+}
+
+func codexWindowLabel(label string) string {
+	lower := strings.ToLower(strings.TrimSpace(label))
+	switch {
+	case strings.Contains(lower, "weekly"), strings.Contains(lower, "week"), strings.Contains(lower, "secondary"):
+		return "每周窗口"
+	case strings.Contains(lower, "5h"), strings.Contains(lower, "five"), strings.Contains(lower, "primary"):
+		return "5小时窗口"
+	default:
+		return strings.TrimSpace(label)
+	}
+}
+
+func resetUnix(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.Unix()
+	}
+	var seconds int64
+	if _, err := fmt.Sscanf(value, "%d", &seconds); err == nil {
+		return seconds
+	}
+	return 0
 }
 
 func quotaBucketExists(qd *QuotaData, label string) bool {
@@ -171,7 +219,11 @@ func codexResetTime(m map[string]interface{}) string {
 	}
 	for _, key := range []string{"resets_at", "reset_at", "resetAt"} {
 		if v, ok := m[key].(float64); ok {
-			return fmt.Sprintf("%d", int64(v))
+			seconds := int64(v)
+			if seconds > 0 {
+				return time.Unix(seconds, 0).UTC().Format(time.RFC3339)
+			}
+			return fmt.Sprintf("%d", seconds)
 		}
 	}
 	return ""

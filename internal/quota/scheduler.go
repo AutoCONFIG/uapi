@@ -124,6 +124,9 @@ func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error
 	} else if err != nil {
 		logger.Warnf("quota.token", "failed to refresh oauth access token before quota fetch", logger.F("account_id", acc.ID.String()), logger.Err(err))
 	}
+	if acc.CredType == "oauth_token" && cloudCodeMetadataIncomplete(ch.APIFormat, acc.Metadata) {
+		s.syncOAuthMetadata(&acc, ch, accessToken, "")
+	}
 
 	qd, err := fetcher.FetchQuota(accessToken, acc.Metadata)
 	if err != nil {
@@ -201,4 +204,15 @@ func (s *Scheduler) quotaAccessToken(acc *db.Account, ch db.Channel, currentCred
 		return s.refreshOAuthAccessToken(acc, ch)
 	}
 	return currentCredential, nil
+}
+
+func cloudCodeMetadataIncomplete(apiFormat string, metadata map[string]interface{}) bool {
+	if apiFormat != "gemini_code" && apiFormat != "antigravity" {
+		return false
+	}
+	if metadata == nil {
+		return true
+	}
+	projectID, _ := metadata["project_id"].(string)
+	return strings.TrimSpace(projectID) == ""
 }

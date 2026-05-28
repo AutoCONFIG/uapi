@@ -185,10 +185,8 @@ func (a *AnthropicAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) 
 }
 
 func init() {
-	provider.RegisterToInternal(provider.FormatAnthropic, anthropicToInternal)
-	provider.RegisterFromInternal(provider.FormatAnthropic, internalToAnthropic)
-	provider.RegisterToResponseInternal(provider.FormatAnthropic, anthropicResponseToInternal)
-	provider.RegisterFromResponseInternal(provider.FormatAnthropic, internalToAnthropicResponse)
+	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
+	// The new convert/ package registrations are in convert package init() functions
 }
 
 // Verify interface compliance at compile time.

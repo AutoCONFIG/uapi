@@ -215,12 +215,6 @@ func metadataBool(account *db.Account, key string) bool {
 }
 
 func init() {
-	provider.RegisterToInternal(provider.FormatOpenAIChatCompletions, openaiChatToInternal)
-	provider.RegisterFromInternal(provider.FormatOpenAIChatCompletions, internalToOpenAIChat)
-	provider.RegisterToResponseInternal(provider.FormatOpenAIChatCompletions, openaiResponseToInternal)
-	provider.RegisterFromResponseInternal(provider.FormatOpenAIChatCompletions, internalToOpenAIResponse)
-	provider.RegisterToInternal(provider.FormatOpenAIResponses, responsesToInternal)
-	provider.RegisterFromInternal(provider.FormatOpenAIResponses, internalToResponses)
-	provider.RegisterToResponseInternal(provider.FormatOpenAIResponses, responsesResponseToInternal)
-	provider.RegisterFromResponseInternal(provider.FormatOpenAIResponses, internalToResponsesResponse)
+	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
+	// The new convert/ package registrations are in convert package init() functions
 }

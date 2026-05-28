@@ -79,6 +79,9 @@ func antigravityProjectIDFromMeta(metadata map[string]interface{}) string {
 		return pid
 	}
 	if m, ok := lca["cloudaicompanionProject"].(map[string]interface{}); ok {
+		if pid, ok := m["id"].(string); ok && pid != "" {
+			return pid
+		}
 		if pid, ok := m["projectId"].(string); ok && pid != "" {
 			return pid
 		}
@@ -227,7 +230,7 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 
 	for _, m := range models {
 		name := strings.TrimPrefix(m.Name, "models/")
-		if !isRelevantModel(name) {
+		if !isRelevantModel(name) && hasRelevantAntigravityModels(models) {
 			continue
 		}
 		pct := int(m.RemainingFraction * 100)
@@ -255,6 +258,15 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 	}
 
 	return qd
+}
+
+func hasRelevantAntigravityModels(models []modelEntry) bool {
+	for _, m := range models {
+		if isRelevantModel(strings.TrimPrefix(m.Name, "models/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRelevantModel(name string) bool {

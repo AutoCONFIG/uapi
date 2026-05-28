@@ -207,13 +207,8 @@ func (a *GeminiAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 }
 
 func init() {
-	provider.RegisterToInternal(provider.FormatGemini, geminiToInternal)
-	provider.RegisterFromInternal(provider.FormatGemini, internalToGemini)
-	provider.RegisterToResponseInternal(provider.FormatGemini, geminiResponseToInternal)
-	provider.RegisterFromResponseInternal(provider.FormatGemini, internalToGeminiResponse)
-	provider.RegisterToInternal(provider.FormatGeminiCode, geminiToInternal)
-	provider.RegisterFromInternal(provider.FormatGeminiCode, internalToGeminiCodeAssist)
-	provider.RegisterToResponseInternal(provider.FormatGeminiCode, geminiCodeAssistResponseToInternal)
+	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
+	// The new convert/ package registrations are in convert package init() functions
 }
 
 // Verify interface compliance at compile time.

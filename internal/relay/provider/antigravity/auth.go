@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -316,15 +317,19 @@ func fetchUserInfo(ctx context.Context, accessToken string) (string, error) {
 }
 
 func loadCodeAssist(ctx context.Context, accessToken string) (map[string]interface{}, error) {
-	body, _ := json.Marshal(map[string]interface{}{"metadata": map[string]string{"ideType": "ANTIGRAVITY"}})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, APIEndpoint+"/"+APIVersion+":loadCodeAssist", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]interface{}{
+		"metadata": cloudCodeMetadata(""),
+		"mode":     "FULL_ELIGIBILITY_CHECK",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DailyAPIEndpoint+"/"+APIVersion+":loadCodeAssist", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", RequestUserAgent())
+	req.Header.Set("User-Agent", LoadCodeAssistUserAgent())
+	req.Header.Set("X-Goog-Api-Client", GoogAPIClientUA)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -350,12 +355,8 @@ func onboardUser(ctx context.Context, accessToken, tierID string) (string, error
 	}
 	ua := LoadCodeAssistUserAgent()
 	body, _ := json.Marshal(map[string]interface{}{
-		"tier_id": tierID,
-		"metadata": map[string]string{
-			"ide_type":    "ANTIGRAVITY",
-			"ide_version": LatestVersion(),
-			"ide_name":    "antigravity",
-		},
+		"tierId":   tierID,
+		"metadata": cloudCodeMetadata(""),
 	})
 	for attempt := 0; attempt < 5; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, DailyAPIEndpoint+"/"+APIVersion+":onboardUser", bytes.NewReader(body))
@@ -410,6 +411,39 @@ func extractProject(data map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func cloudCodeMetadata(projectID string) map[string]string {
+	metadata := map[string]string{
+		"ideName":       "antigravity",
+		"ideType":       "ANTIGRAVITY",
+		"ideVersion":    LatestVersion(),
+		"pluginVersion": "unknown",
+		"platform":      cloudCodePlatform(),
+		"updateChannel": "stable",
+		"pluginType":    "GEMINI",
+	}
+	if strings.TrimSpace(projectID) != "" {
+		metadata["duetProject"] = strings.TrimSpace(projectID)
+	}
+	return metadata
+}
+
+func cloudCodePlatform() string {
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/amd64":
+		return "DARWIN_AMD64"
+	case "darwin/arm64":
+		return "DARWIN_ARM64"
+	case "linux/amd64":
+		return "LINUX_AMD64"
+	case "linux/arm64":
+		return "LINUX_ARM64"
+	case "windows/amd64":
+		return "WINDOWS_AMD64"
+	default:
+		return "PLATFORM_UNSPECIFIED"
+	}
 }
 
 func defaultTierID(loadRes map[string]interface{}) string {

@@ -75,6 +75,7 @@ type InternalMessage struct {
 	ToolCalls        []InternalToolCall
 	ToolResult       *InternalToolResult
 	ReasoningContent []InternalContentPart // Extended thinking / reasoning content
+	Name             string // for named messages
 }
 
 type InternalContentPart struct {
