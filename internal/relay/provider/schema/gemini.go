@@ -6,12 +6,12 @@ import (
 
 // GeminiRequest represents a Google Gemini API request.
 type GeminiRequest struct {
-	Contents         []GeminiContent       `json:"contents"`
-	SystemInstruction *GeminiContent       `json:"systemInstruction,omitempty"`
-	Tools            json.RawMessage       `json:"tools,omitempty"`
-	ToolConfig       *GeminiToolConfig     `json:"toolConfig,omitempty"`
-	GenerationConfig *GeminiGenerationConfig `json:"generationConfig,omitempty"`
-	SafetySettings   json.RawMessage       `json:"safetySettings,omitempty"`
+	Contents          []GeminiContent         `json:"contents"`
+	SystemInstruction *GeminiContent          `json:"systemInstruction,omitempty"`
+	Tools             json.RawMessage         `json:"tools,omitempty"`
+	ToolConfig        *GeminiToolConfig       `json:"toolConfig,omitempty"`
+	GenerationConfig  *GeminiGenerationConfig `json:"generationConfig,omitempty"`
+	SafetySettings    json.RawMessage         `json:"safetySettings,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -29,26 +29,27 @@ func (r *GeminiRequest) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (r GeminiRequest) MarshalJSON() ([]byte, error) {
-	return marshalExtra(r, r.Extra)
+	type Alias GeminiRequest
+	return marshalExtra(Alias(r), r.Extra)
 }
 
 // GeminiContent represents a content part in a Gemini request.
 type GeminiContent struct {
-	Role  string      `json:"role,omitempty"`
+	Role  string       `json:"role,omitempty"`
 	Parts []GeminiPart `json:"parts"`
 }
 
 // GeminiPart represents a single part in a Gemini content message.
 type GeminiPart struct {
-	Text               string                 `json:"text,omitempty"`
-	InlineData         *GeminiBlob            `json:"inlineData,omitempty"`
-	FunctionCall       *GeminiFuncCall        `json:"functionCall,omitempty"`
-	FunctionResponse   *GeminiFuncResponse    `json:"functionResponse,omitempty"`
-	FileData           *GeminiFileData        `json:"fileData,omitempty"`
-	Thought            bool                   `json:"thought,omitempty"`
-	ThoughtSignature   string                 `json:"thoughtSignature,omitempty"`
-	ExecutableCode     *GeminiExecutableCode  `json:"executableCode,omitempty"`
-	CodeExecutionResult *GeminiCodeResult      `json:"codeExecutionResult,omitempty"`
+	Text                string                `json:"text,omitempty"`
+	InlineData          *GeminiBlob           `json:"inlineData,omitempty"`
+	FunctionCall        *GeminiFuncCall       `json:"functionCall,omitempty"`
+	FunctionResponse    *GeminiFuncResponse   `json:"functionResponse,omitempty"`
+	FileData            *GeminiFileData       `json:"fileData,omitempty"`
+	Thought             bool                  `json:"thought,omitempty"`
+	ThoughtSignature    string                `json:"thoughtSignature,omitempty"`
+	ExecutableCode      *GeminiExecutableCode `json:"executableCode,omitempty"`
+	CodeExecutionResult *GeminiCodeResult     `json:"codeExecutionResult,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -66,7 +67,8 @@ func (p *GeminiPart) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (p GeminiPart) MarshalJSON() ([]byte, error) {
-	return marshalExtra(p, p.Extra)
+	type Alias GeminiPart
+	return marshalExtra(Alias(p), p.Extra)
 }
 
 // GeminiBlob represents inline binary data in a Gemini part.
@@ -112,21 +114,21 @@ type GeminiToolConfig struct {
 
 // GeminiFunctionCallingConfig represents function calling configuration.
 type GeminiFunctionCallingConfig struct {
-	Mode                string   `json:"mode,omitempty"`
+	Mode                 string   `json:"mode,omitempty"`
 	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 // GeminiGenerationConfig represents generation configuration in a Gemini request.
 type GeminiGenerationConfig struct {
-	MaxOutputTokens *int            `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
-	TopP            *float64        `json:"topP,omitempty"`
-	TopK            *int            `json:"topK,omitempty"`
-	CandidateCount  *int            `json:"candidateCount,omitempty"`
-	StopSequences   []string        `json:"stopSequences,omitempty"`
-	ResponseMimeType string         `json:"responseMimeType,omitempty"`
-	ResponseSchema  json.RawMessage `json:"responseSchema,omitempty"`
-	ThinkingConfig  json.RawMessage `json:"thinkingConfig,omitempty"`
+	MaxOutputTokens  *int            `json:"maxOutputTokens,omitempty"`
+	Temperature      *float64        `json:"temperature,omitempty"`
+	TopP             *float64        `json:"topP,omitempty"`
+	TopK             *int            `json:"topK,omitempty"`
+	CandidateCount   *int            `json:"candidateCount,omitempty"`
+	StopSequences    []string        `json:"stopSequences,omitempty"`
+	ResponseMimeType string          `json:"responseMimeType,omitempty"`
+	ResponseSchema   json.RawMessage `json:"responseSchema,omitempty"`
+	ThinkingConfig   json.RawMessage `json:"thinkingConfig,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -144,14 +146,15 @@ func (g *GeminiGenerationConfig) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (g GeminiGenerationConfig) MarshalJSON() ([]byte, error) {
-	return marshalExtra(g, g.Extra)
+	type Alias GeminiGenerationConfig
+	return marshalExtra(Alias(g), g.Extra)
 }
 
 // GeminiResponse represents a Google Gemini API response.
 type GeminiResponse struct {
-	Candidates     []GeminiCandidate     `json:"candidates,omitempty"`
-	UsageMetadata  *GeminiUsageMetadata  `json:"usageMetadata,omitempty"`
-	ModelVersion   string                `json:"modelVersion,omitempty"`
+	Candidates    []GeminiCandidate    `json:"candidates,omitempty"`
+	UsageMetadata *GeminiUsageMetadata `json:"usageMetadata,omitempty"`
+	ModelVersion  string               `json:"modelVersion,omitempty"`
 }
 
 // GeminiCandidate represents a single candidate in a Gemini response.
@@ -163,8 +166,8 @@ type GeminiCandidate struct {
 
 // GeminiUsageMetadata represents token usage in the Gemini API.
 type GeminiUsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount,omitempty"`
-	CandidatesTokenCount int `json:"candidatesTokenCount,omitempty"`
-	TotalTokenCount      int `json:"totalTokenCount,omitempty"`
+	PromptTokenCount        int `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount         int `json:"totalTokenCount,omitempty"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 }

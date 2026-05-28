@@ -20,7 +20,7 @@ const (
 	FormatAnthropic             Format = "anthropic"
 	FormatGemini                Format = "gemini"
 	FormatGeminiCode            Format = "gemini_code"
-	FormatGeminiCLI             Format = "gemini_cli"  // Gemini CLI / Antigravity protocol
+	FormatGeminiCLI             Format = "gemini_cli" // Gemini CLI / Antigravity protocol
 	FormatAntigravity           Format = "antigravity"
 )
 
@@ -75,7 +75,7 @@ type InternalMessage struct {
 	ToolCalls        []InternalToolCall
 	ToolResult       *InternalToolResult
 	ReasoningContent []InternalContentPart // Extended thinking / reasoning content
-	Name             string // for named messages
+	Name             string                // for named messages
 }
 
 type InternalContentPart struct {
@@ -198,9 +198,6 @@ type Adaptor interface {
 	SetupRequestHeader(req *fasthttp.Request, credentials string) error
 	ToInternal(body []byte) (*InternalRequest, error)
 	FromInternal(req *InternalRequest) ([]byte, error)
-	ConvertStreamLine(line []byte) []byte
-	ConvertSSEBuffer(sseBody []byte) []byte
-	CreateReverseStreamConverter() func([]byte) []byte
 	ParseUsage(respBody []byte) (promptTokens, completionTokens int, err error)
 	ParseStreamUsage(lastChunk []byte) (promptTokens, completionTokens int, err error)
 	// ParseUsageFull returns full usage including cache tokens

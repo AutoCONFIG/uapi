@@ -225,12 +225,6 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 				account.Metadata[key] = value
 			}
 		}
-		if usage, err := openai.FetchCodexUsage(result.AccessToken, openAIAccountID(account.Metadata), openAIFedRAMP(account.Metadata)); err == nil {
-			if account.Metadata == nil {
-				account.Metadata = map[string]interface{}{}
-			}
-			account.Metadata["codex_usage"] = usage
-		}
 	}
 	if account.Metadata == nil {
 		account.Metadata = map[string]interface{}{}
@@ -423,26 +417,6 @@ func geminiProjectID(metadata map[string]interface{}) string {
 		}
 	}
 	return ""
-}
-
-func openAIAccountID(metadata map[string]interface{}) string {
-	if metadata == nil {
-		return ""
-	}
-	if accountID, ok := metadata["chatgpt_account_id"].(string); ok {
-		return accountID
-	}
-	return ""
-}
-
-func openAIFedRAMP(metadata map[string]interface{}) bool {
-	if metadata == nil {
-		return false
-	}
-	if fedramp, ok := metadata["chatgpt_account_is_fedramp"].(bool); ok {
-		return fedramp
-	}
-	return false
 }
 
 func isAnthropicOAuthTokenURL(tokenURL string) bool {

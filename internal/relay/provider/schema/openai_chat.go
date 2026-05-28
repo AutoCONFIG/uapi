@@ -47,14 +47,15 @@ func (r *OpenAIChatRequest) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (r OpenAIChatRequest) MarshalJSON() ([]byte, error) {
-	return marshalExtra(r, r.Extra)
+	type Alias OpenAIChatRequest
+	return marshalExtra(Alias(r), r.Extra)
 }
 
 // ChatMessage represents a single message in an OpenAI Chat request or response.
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    MessageContent  `json:"content"`
-	Name       string          `json:"name,omitempty"`
+	Role       string         `json:"role"`
+	Content    MessageContent `json:"content"`
+	Name       string         `json:"name,omitempty"`
 	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	Refusal    string         `json:"refusal,omitempty"`
@@ -75,7 +76,8 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
-	return marshalExtra(m, m.Extra)
+	type Alias ChatMessage
+	return marshalExtra(Alias(m), m.Extra)
 }
 
 // OpenAIChatResponse represents an OpenAI Chat Completions API response.
@@ -103,14 +105,15 @@ func (r *OpenAIChatResponse) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (r OpenAIChatResponse) MarshalJSON() ([]byte, error) {
-	return marshalExtra(r, r.Extra)
+	type Alias OpenAIChatResponse
+	return marshalExtra(Alias(r), r.Extra)
 }
 
 // ChatChoice represents a single choice in a Chat Completions response.
 type ChatChoice struct {
-	Index        int          `json:"index"`
-	Message      ChatMessage  `json:"message"`
-	FinishReason string       `json:"finish_reason,omitempty"`
+	Index        int         `json:"index"`
+	Message      ChatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -128,5 +131,6 @@ func (c *ChatChoice) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (c ChatChoice) MarshalJSON() ([]byte, error) {
-	return marshalExtra(c, c.Extra)
+	type Alias ChatChoice
+	return marshalExtra(Alias(c), c.Extra)
 }

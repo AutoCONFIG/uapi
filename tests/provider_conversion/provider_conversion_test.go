@@ -4,22 +4,23 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	_ "github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 )
 
-func newGeminiAdaptor() *gemini.GeminiAdaptor {
-	adaptor := &gemini.GeminiAdaptor{}
-	adaptor.Init(&db.Channel{}, &db.Account{})
-	adaptor.SetRequestParams("gemini-test", true)
-	return adaptor
+func convertGeminiStream(t *testing.T, input string) string {
+	t.Helper()
+	converter := stream.NewConverter(convert.FormatGemini, convert.FormatOpenAIChatCompletions)
+	if converter == nil {
+		t.Fatalf("missing Gemini stream converter")
+	}
+	return string(converter.Convert([]byte(input)))
 }
 
 func TestGeminiStreamIgnoresThoughtSignatureMetadata(t *testing.T) {
-	out := newGeminiAdaptor().ConvertStreamLine([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"hi","thoughtSignature":"opaque"},{"thought":true,"thoughtSignature":"opaque"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5}}` + "\n\n"))
-	got := string(out)
+	got := convertGeminiStream(t, `data: {"candidates":[{"content":{"parts":[{"text":"hi","thoughtSignature":"opaque"},{"thought":true,"thoughtSignature":"opaque"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5}}`+"\n\n")
 	if strings.Contains(got, `"object":"error"`) || strings.Contains(got, "thoughtSignature") {
 		t.Fatalf("Gemini thought metadata must not leak as a conversion error: %s", got)
 	}
@@ -29,8 +30,7 @@ func TestGeminiStreamIgnoresThoughtSignatureMetadata(t *testing.T) {
 }
 
 func TestGeminiStreamMapsThoughtTextToReasoningContent(t *testing.T) {
-	out := newGeminiAdaptor().ConvertStreamLine([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"thinking","thought":true},{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}` + "\n\n"))
-	got := string(out)
+	got := convertGeminiStream(t, `data: {"candidates":[{"content":{"parts":[{"text":"thinking","thought":true},{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}`+"\n\n")
 	if strings.Contains(got, `"object":"error"`) {
 		t.Fatalf("Gemini thought text must not produce conversion error: %s", got)
 	}
@@ -40,8 +40,7 @@ func TestGeminiStreamMapsThoughtTextToReasoningContent(t *testing.T) {
 }
 
 func TestGeminiStreamConvertsFunctionResponseAndCodeParts(t *testing.T) {
-	out := newGeminiAdaptor().ConvertStreamLine([]byte(`data: {"candidates":[{"content":{"parts":[{"functionResponse":{"name":"lookup","response":{"content":[{"text":"tool result"}]}}},{"executableCode":{"language":"python","code":"print(1)"}},{"codeExecutionResult":{"output":"1\n"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}` + "\n\n"))
-	got := string(out)
+	got := convertGeminiStream(t, `data: {"candidates":[{"content":{"parts":[{"functionResponse":{"name":"lookup","response":{"content":[{"text":"tool result"}]}}},{"executableCode":{"language":"python","code":"print(1)"}},{"codeExecutionResult":{"output":"1\n"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}`+"\n\n")
 	if strings.Contains(got, `"object":"error"`) {
 		t.Fatalf("Gemini executable/function response parts must not produce conversion error: %s", got)
 	}

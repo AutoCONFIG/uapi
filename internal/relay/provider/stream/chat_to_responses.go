@@ -11,9 +11,9 @@ import (
 // chatToResponsesState holds the streaming conversion state
 type chatToResponsesState struct {
 	// Metadata
-	model    string
-	id       string
-	created  int64
+	model   string
+	id      string
+	created int64
 
 	// Tool call tracking
 	toolCallIDToIndex map[string]int
@@ -30,8 +30,8 @@ var chatToResponsesPool = sync.Pool{
 	New: func() interface{} {
 		return &chatToResponsesState{
 			toolCallIDToIndex: make(map[string]int),
-			toolCallNames:    make(map[string]string),
-			toolCallArgs:     make(map[string]*strings.Builder),
+			toolCallNames:     make(map[string]string),
+			toolCallArgs:      make(map[string]*strings.Builder),
 		}
 	},
 }
@@ -48,6 +48,10 @@ func newChatToResponsesConverter() StreamConverter {
 }
 
 func (c *chatToResponsesConverter) Convert(line []byte) []byte {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
+		return nil
+	}
 	// Parse the Chat SSE line
 	var event struct {
 		ID      string `json:"id"`
@@ -55,13 +59,13 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
 		Choices []struct {
-			Index      int             `json:"index"`
-			Delta      json.RawMessage `json:"delta"`
-			FinishReason string        `json:"finish_reason"`
+			Index        int             `json:"index"`
+			Delta        json.RawMessage `json:"delta"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 	}
 
-	if err := json.Unmarshal(line, &event); err != nil {
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
 	}
 
@@ -76,8 +80,8 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 		Role      string `json:"role"`
 		Content   string `json:"content"`
 		ToolCalls []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
 			Function struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
@@ -95,13 +99,13 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 		c.state.hasStarted = true
 
 		if deltaData.Role != "" {
-			return []byte(`{"type":"response.created","id":"` + event.ID + `","model":"` + event.Model + `","role":"` + deltaData.Role + `"}` + "\n\n")
+			return sseJSON(map[string]interface{}{"type": "response.created", "id": event.ID, "model": event.Model, "role": deltaData.Role})
 		}
 		return nil
 
 	// Content delta
 	case deltaData.Content != "":
-		return []byte(`{"type":"response.output_text.delta","delta":{"text":"` + escapeJSON(deltaData.Content) + `"}}` + "\n\n")
+		return sseJSON(map[string]interface{}{"type": "response.output_text.delta", "delta": map[string]interface{}{"text": deltaData.Content}})
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -114,12 +118,12 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 					c.state.toolCallNames[tc.ID] = tc.Function.Name
 					c.state.toolCallArgs[tc.ID] = &strings.Builder{}
 				}
-				return []byte(`{"type":"response.output_item.added","item":{"type":"function_call","id":"` + tc.ID + `","name":"` + tc.Function.Name + `","call_id":"` + tc.ID + `"}}` + "\n\n")
+				return sseJSON(map[string]interface{}{"type": "response.output_item.added", "item": map[string]interface{}{"type": "function_call", "id": tc.ID, "name": tc.Function.Name, "call_id": tc.ID}})
 			} else if tc.Function.Arguments != "" {
 				// Tool call arguments delta
 				if args, ok := c.state.toolCallArgs[tc.ID]; ok {
 					args.WriteString(tc.Function.Arguments)
-					return []byte(`{"type":"response.function_call_arguments.delta","delta":{"call_id":"` + tc.ID + `","arguments":"` + escapeJSON(tc.Function.Arguments) + `"}}` + "\n\n")
+					return sseJSON(map[string]interface{}{"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": tc.ID, "arguments": tc.Function.Arguments}})
 				}
 			}
 		}
@@ -130,9 +134,12 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 		c.state.hasFinished = true
 		finishReason := event.Choices[0].FinishReason
 		if finishReason == "stop" || finishReason == "length" {
-			return []byte(`{"type":"response.` + finishReason + `"}` + "\n\n")
+			if finishReason == "length" {
+				return sseJSON(map[string]interface{}{"type": "response.incomplete"})
+			}
+			return sseJSON(map[string]interface{}{"type": "response.completed"})
 		}
-		return []byte(`{"type":"response.completed"}` + "\n\n")
+		return sseJSON(map[string]interface{}{"type": "response.completed"})
 	}
 
 	return nil
@@ -140,7 +147,7 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 
 func (c *chatToResponsesConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"type":"response.completed"}` + "\n\n")
+		return sseJSON(map[string]interface{}{"type": "response.completed"})
 	}
 	return nil
 }

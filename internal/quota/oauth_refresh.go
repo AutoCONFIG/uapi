@@ -55,9 +55,6 @@ func (s *Scheduler) refreshOAuthAccessToken(acc *db.Account, ch db.Channel) (str
 		if metadata, err := openai.ParseIDTokenMetadata(result.IDToken); err == nil {
 			mergeMetadata(acc, metadata)
 		}
-		if usage, err := openai.FetchCodexUsage(result.AccessToken, codexAccountID(acc.Metadata), codexFedramp(acc.Metadata)); err == nil {
-			mergeMetadata(acc, map[string]interface{}{"codex_usage": usage})
-		}
 	}
 
 	updates := map[string]interface{}{}

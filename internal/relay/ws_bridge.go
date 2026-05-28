@@ -10,7 +10,6 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	ws "github.com/fasthttp/websocket"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -151,15 +150,9 @@ func (h *WSHandler) bridgeSSEToWS(
 	scanner := bufio.NewScanner(bodyStream)
 	scanner.Buffer(make([]byte, 0, 8*1024), 10*1024*1024)
 
-	var inputConvert func([]byte) []byte
 	upstreamFormat := channelUpstreamFormat(ch)
-	if upstreamFormat != provider.FormatOpenAIChatCompletions && upstreamFormat != provider.FormatOpenAIResponses {
-		inputConvert = adaptor.ConvertStreamLine
-	}
-	var responsesConvert func([]byte) []byte
-	if upstreamFormat != provider.FormatOpenAIResponses {
-		responsesConvert = openai.NewResponsesReverseStreamConverter()
-	}
+	inputConvert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions)
+	responsesConvert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIResponses)
 	completed := false
 	interrupted := false
 	failed := false

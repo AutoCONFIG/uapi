@@ -44,6 +44,10 @@ func newChatToGeminiConverter() StreamConverter {
 }
 
 func (c *chatToGeminiConverter) Convert(line []byte) []byte {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
+		return nil
+	}
 	// Parse the Chat SSE line
 	var event struct {
 		ID      string `json:"id"`
@@ -57,15 +61,13 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 		} `json:"choices"`
 	}
 
-	if err := json.Unmarshal(line, &event); err != nil {
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
 	}
 
 	if len(event.Choices) == 0 {
 		return nil
 	}
-
-	c.state.model = event.Model
 
 	delta := event.Choices[0].Delta
 
@@ -74,8 +76,8 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 		Role      string `json:"role"`
 		Content   string `json:"content"`
 		ToolCalls []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
 			Function struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
@@ -86,20 +88,19 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 
 	switch {
 	// First message with role
-	case c.state.model == "" && event.Model != "":
+	case c.state.model == "" && event.Model != "" && deltaData.Role != "" && deltaData.Content == "" && len(deltaData.ToolCalls) == 0:
 		c.state.model = event.Model
 		c.state.hasStarted = true
 
-		if deltaData.Role != "" {
-			// Gemini streaming doesn't have explicit role message, so we just start with content
-			return nil
-		}
 		return nil
 
 	// Content delta
 	case deltaData.Content != "":
+		if c.state.model == "" {
+			c.state.model = event.Model
+		}
 		// Gemini wrapped format: {"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[{"text":"..."}]}}]}}
-		return []byte(`{"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[{"text":"` + escapeJSON(deltaData.Content) + `"}]},"finishReason":"NOT_STARTED"}]}}` + "\n\n")
+		return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"text": deltaData.Content}}}, "finishReason": "NOT_STARTED"}}}})
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -115,12 +116,20 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 					"args": map[string]interface{}{},
 				}
 				funcCallJSON, _ := json.Marshal(functionCall)
-				return []byte(`{"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[{"functionCall":` + string(funcCallJSON) + `}]},"finishReason":"NOT_STARTED"}]}}` + "\n\n")
+				var functionCallValue interface{}
+				if err := json.Unmarshal(funcCallJSON, &functionCallValue); err != nil {
+					return nil
+				}
+				return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"functionCall": functionCallValue}}}, "finishReason": "NOT_STARTED"}}}})
 			} else if tc.Function.Arguments != "" {
 				// Tool call arguments - need to accumulate and emit as complete
 				c.state.toolCallArgs.WriteString(tc.Function.Arguments)
 				// For streaming, we emit partial arguments as JSON
-				return []byte(`{"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"`+c.state.currentToolCallName+`","args":`+tc.Function.Arguments+`}}]},"finishReason":"NOT_STARTED"}]}}` + "\n\n")
+				var args interface{}
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+					return nil
+				}
+				return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"functionCall": map[string]interface{}{"name": c.state.currentToolCallName, "args": args}}}}, "finishReason": "NOT_STARTED"}}}})
 			}
 		}
 		return nil
@@ -139,7 +148,7 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 		}
 
 		if geminiReason != "" {
-			return []byte(`{"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[]},"finishReason":"` + geminiReason + `"}]}}` + "\n\n")
+			return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{}}, "finishReason": geminiReason}}}})
 		}
 		return nil
 	}
@@ -149,7 +158,7 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 
 func (c *chatToGeminiConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}}` + "\n\n")
+		return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{}}, "finishReason": "STOP"}}}})
 	}
 	return nil
 }

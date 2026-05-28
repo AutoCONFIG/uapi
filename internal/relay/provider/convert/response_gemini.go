@@ -9,6 +9,13 @@ import (
 
 // GeminiResponseToInternal converts Gemini API response to InternalResponse.
 func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
+	var wrapped struct {
+		Response json.RawMessage `json:"response"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && len(wrapped.Response) > 0 {
+		body = wrapped.Response
+	}
+
 	var resp schema.GeminiResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini response: %w", err)
@@ -27,7 +34,10 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.PromptTokens = resp.UsageMetadata.PromptTokenCount
 		ir.Usage.CompletionTokens = resp.UsageMetadata.CandidatesTokenCount
 		ir.Usage.TotalTokens = resp.UsageMetadata.TotalTokenCount
-		ir.Usage.CacheCreationInputTokens = resp.UsageMetadata.CachedContentTokenCount
+		if ir.Usage.TotalTokens == 0 {
+			ir.Usage.TotalTokens = ir.Usage.PromptTokens + ir.Usage.CompletionTokens
+		}
+		ir.Usage.CacheReadInputTokens = resp.UsageMetadata.CachedContentTokenCount
 	}
 
 	// Convert candidates to choices
@@ -43,6 +53,11 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 			// Convert parts to content
 			for _, part := range cand.Content.Parts {
 				switch {
+				case part.Text != "" && part.Thought:
+					choice.ReasoningContent = append(choice.ReasoningContent, schema.ContentPart{
+						Type: "text",
+						Text: part.Text,
+					})
 				case part.Text != "":
 					choice.Content = append(choice.Content, schema.ContentPart{
 						Type: "text",
@@ -190,9 +205,9 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 	// Convert usage
 	if ir.Usage.TotalTokens > 0 || ir.Usage.PromptTokens > 0 {
 		usage := map[string]interface{}{
-			"promptTokenCount":      ir.Usage.PromptTokens,
-			"candidatesTokenCount":  ir.Usage.CompletionTokens,
-			"totalTokenCount":       ir.Usage.TotalTokens,
+			"promptTokenCount":     ir.Usage.PromptTokens,
+			"candidatesTokenCount": ir.Usage.CompletionTokens,
+			"totalTokenCount":      ir.Usage.TotalTokens,
 		}
 		if ir.Usage.CacheCreationInputTokens > 0 {
 			usage["cachedContentTokenCount"] = ir.Usage.CacheCreationInputTokens

@@ -563,23 +563,11 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 
 	tracker := newStreamTracker(adaptor)
 
-	var inputConvert func([]byte) []byte
-	if clientFormat == upstreamFormat {
-		inputConvert = nil
-	} else if upstreamFormat != provider.FormatOpenAIChatCompletions {
-		if upstreamFormat == provider.FormatOpenAIResponses {
-			inputConvert = openai.NewResponsesToChatStreamConverter()
-		} else {
-			inputConvert = adaptor.ConvertStreamLine
-		}
-	}
+	inputConvert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions)
 
 	var outputConvert func([]byte) []byte
-	if clientFormat != upstreamFormat {
-		outputConvert = reverseStreamConverterForClient(clientFormat, upstreamFormat)
-	}
-	if outputConvert == nil && clientFormat == provider.FormatOpenAIChatCompletions && clientFormat != upstreamFormat {
-		outputConvert = openai.NewChatStreamNormalizer()
+	if clientFormat != provider.FormatOpenAIChatCompletions {
+		outputConvert = newStreamConverterFunc(provider.FormatOpenAIChatCompletions, clientFormat)
 	}
 	sendDone := clientFormat == provider.FormatOpenAIChatCompletions
 
@@ -704,12 +692,8 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		return
 	}
 
-	// Convert upstream SSE to OpenAI Chat Completions API SSE format before StreamToNonStream.
-	if upstreamFormat == provider.FormatOpenAIResponses {
-		convert := openai.NewResponsesToChatStreamConverter()
+	if convert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions); convert != nil {
 		respBody = convertSSEBufferWithConverter(respBody, convert)
-	} else if upstreamFormat != provider.FormatOpenAIChatCompletions {
-		respBody = adaptor.ConvertSSEBuffer(respBody)
 	}
 
 	// SSE -> non-stream JSON (produces OpenAI Chat Completions API format)
@@ -1882,16 +1866,7 @@ func getAdaptor(channelType string) provider.Adaptor {
 }
 
 func reverseStreamConverterForClient(clientFormat, upstreamFormat provider.Format) func([]byte) []byte {
-	switch clientFormat {
-	case provider.FormatOpenAIResponses:
-		return openai.NewResponsesReverseStreamConverter()
-	case provider.FormatAnthropic:
-		return anthropic.NewReverseStreamConverter()
-	case provider.FormatGemini:
-		return gemini.NewReverseStreamConverter()
-	default:
-		return nil
-	}
+	return newStreamConverterFunc(provider.FormatOpenAIChatCompletions, clientFormat)
 }
 
 func modelInList(model, list string) bool {

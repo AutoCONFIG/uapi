@@ -11,9 +11,9 @@ import (
 // responsesToChatState holds the streaming conversion state
 type responsesToChatState struct {
 	// Metadata
-	model    string
-	id       string
-	created  int64
+	model   string
+	id      string
+	created int64
 
 	// Text accumulation
 	textOpen   bool
@@ -34,8 +34,8 @@ var responsesToChatPool = sync.Pool{
 	New: func() interface{} {
 		return &responsesToChatState{
 			toolCallIDToIndex: make(map[string]int),
-			toolCallNames:    make(map[string]string),
-			toolCallArgs:     make(map[string]*strings.Builder),
+			toolCallNames:     make(map[string]string),
+			toolCallArgs:      make(map[string]*strings.Builder),
 		}
 	},
 }
@@ -52,6 +52,10 @@ func newResponsesToChatConverter() StreamConverter {
 }
 
 func (c *responsesToChatConverter) Convert(line []byte) []byte {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
+		return nil
+	}
 	// Parse the SSE line
 	var event struct {
 		Type    string          `json:"type"`
@@ -62,7 +66,7 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 		Content json.RawMessage `json:"content,omitempty"`
 	}
 
-	if err := json.Unmarshal(line, &event); err != nil {
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
 	}
 
@@ -74,17 +78,17 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 			Model string `json:"model"`
 			Role  string `json:"role"`
 		}
-		json.Unmarshal(line, &meta)
+		json.Unmarshal([]byte(data), &meta)
 		c.state.id = meta.ID
 		c.state.model = meta.Model
-		return []byte(`{"id":"` + meta.ID + `","object":"chat.completion.chunk","created":0,"model":"` + meta.Model + `","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n")
+		return chatChunk(meta.ID, meta.Model, map[string]interface{}{"role": "assistant"}, nil, nil)
 
 	case "response.output_text.delta":
 		var delta struct {
 			Text string `json:"text"`
 		}
 		json.Unmarshal(event.Delta, &delta)
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"content":"`+escapeJSON(delta.Text)+`"},"finish_reason":null}]}` + "\n\n")
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": delta.Text}, nil, nil)
 
 	case "response.output_item.added":
 		// Could be message or function_call item
@@ -101,7 +105,9 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 			c.state.toolCallNames[item.CallID] = item.Name
 			c.state.toolCallArgs[item.CallID] = &strings.Builder{}
 			// Emit tool call start
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"tool_calls":[{"id":"`+item.CallID+`","type":"function","function":{"name":"`+item.Name+`","arguments":""}}]},"finish_reason":null}]}` + "\n\n")
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"tool_calls": []interface{}{
+				map[string]interface{}{"index": idx, "id": item.CallID, "type": "function", "function": map[string]interface{}{"name": item.Name, "arguments": ""}},
+			}}, nil, nil)
 		}
 		return nil
 
@@ -113,17 +119,20 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 		json.Unmarshal(event.Delta, &delta)
 		if args, ok := c.state.toolCallArgs[delta.CallID]; ok {
 			args.WriteString(delta.Arguments)
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"tool_calls":[{"id":"`+delta.CallID+`","type":"function","function":{"arguments":"`+escapeJSON(delta.Arguments)+`"}}]},"finish_reason":null}]}` + "\n\n")
+			idx := c.state.toolCallIDToIndex[delta.CallID]
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"tool_calls": []interface{}{
+				map[string]interface{}{"index": idx, "id": delta.CallID, "type": "function", "function": map[string]interface{}{"arguments": delta.Arguments}},
+			}}, nil, nil)
 		}
 		return nil
 
 	case "response.completed":
 		c.state.hasFinished = true
 		// Try to parse usage from the event if needed
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]` + "\n\n")
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "stop", nil)
 
 	case "response.incomplete":
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":"length"}]` + "\n\n")
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "length", nil)
 	}
 
 	return nil
@@ -131,7 +140,7 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 
 func (c *responsesToChatConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]` + "\n\n")
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "stop", nil)
 	}
 	return nil
 }

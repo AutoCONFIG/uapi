@@ -48,30 +48,56 @@ func newGeminiToChatConverter() StreamConverter {
 }
 
 func (c *geminiToChatConverter) Convert(line []byte) []byte {
-	// Parse the Gemini SSE line - it's wrapped in a method response
-	var wrapper struct {
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params,omitempty"`
-	}
-
-	if err := json.Unmarshal(line, &wrapper); err != nil {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
 		return nil
 	}
-
-	if wrapper.Method != "generateContentStream" {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(data), &root); err != nil {
 		return nil
 	}
+	if methodRaw, ok := root["method"]; ok {
+		var method string
+		if json.Unmarshal(methodRaw, &method) == nil && method == "generateContentStream" {
+			return c.convertResponse(root["params"])
+		}
+	}
+	if responseRaw, ok := root["response"]; ok {
+		var responses []json.RawMessage
+		if json.Unmarshal(responseRaw, &responses) == nil {
+			var out []byte
+			for _, response := range responses {
+				out = append(out, c.convertResponse(response)...)
+			}
+			return out
+		}
+		return c.convertResponse(responseRaw)
+	}
+	return c.convertResponse([]byte(data))
+}
 
-	// Parse the params (which contains the response)
+func (c *geminiToChatConverter) convertResponse(body []byte) []byte {
 	var response struct {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
 					Text         string `json:"text"`
+					Thought      bool   `json:"thought,omitempty"`
 					FunctionCall *struct {
 						Name string `json:"name"`
 						Args any    `json:"args"`
 					} `json:"functionCall,omitempty"`
+					FunctionResponse *struct {
+						Name     string          `json:"name"`
+						Response json.RawMessage `json:"response"`
+					} `json:"functionResponse,omitempty"`
+					ExecutableCode *struct {
+						Language string `json:"language"`
+						Code     string `json:"code"`
+					} `json:"executableCode,omitempty"`
+					CodeExecutionResult *struct {
+						Output string `json:"output"`
+					} `json:"codeExecutionResult,omitempty"`
 				} `json:"parts"`
 			} `json:"content"`
 			FinishReason string `json:"finishReason,omitempty"`
@@ -82,22 +108,29 @@ func (c *geminiToChatConverter) Convert(line []byte) []byte {
 		} `json:"usageMetadata,omitempty"`
 	}
 
-	if err := json.Unmarshal(wrapper.Params, &response); err != nil {
+	if err := json.Unmarshal(body, &response); err != nil {
 		return nil
 	}
 
 	if len(response.Candidates) == 0 {
+		if response.UsageMetadata != nil {
+			return chatChunk(c.state.id, "gemini", map[string]interface{}{}, nil, map[string]interface{}{
+				"prompt_tokens":     response.UsageMetadata.PromptTokenCount,
+				"completion_tokens": response.UsageMetadata.CandidatesTokenCount,
+				"total_tokens":      response.UsageMetadata.PromptTokenCount + response.UsageMetadata.CandidatesTokenCount,
+			})
+		}
 		return nil
 	}
 
 	candidate := response.Candidates[0]
+	var out []byte
 
 	// First message - emit role
 	if !c.state.hasStarted && len(candidate.Content.Parts) > 0 {
 		c.state.hasStarted = true
-		// Generate a simple ID
-		c.state.id = "chatcmpl-" + generateSimpleID()
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`+"\n\n")
+		c.state.id = randomID("chatcmpl-")
+		out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"role": "assistant"}, nil, nil)...)
 	}
 
 	// Process parts
@@ -105,17 +138,34 @@ func (c *geminiToChatConverter) Convert(line []byte) []byte {
 		// Text content
 		if part.Text != "" {
 			c.state.textBuffer.WriteString(part.Text)
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{"index":0,"delta":{"content":"`+escapeJSON(part.Text)+`"},"finish_reason":null}]}`+"\n\n")
+			key := "content"
+			if part.Thought {
+				out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"reasoning_content": part.Text, "reasoning": part.Text}, nil, nil)...)
+				continue
+			}
+			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{key: part.Text}, nil, nil)...)
+			continue
 		}
 
 		// Function call
 		if part.FunctionCall != nil {
 			argsStr, _ := json.Marshal(part.FunctionCall.Args)
-			c.state.currentToolCallID = "call_" + generateSimpleID()
+			c.state.currentToolCallID = randomID("call_")
 			c.state.currentToolCallName = part.FunctionCall.Name
 			c.state.toolCallArgs.Reset()
 			c.state.toolCallArgs.WriteString(string(argsStr))
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{"index":0,"delta":{"tool_calls":[{"id":"`+c.state.currentToolCallID+`","type":"function","function":{"name":"`+part.FunctionCall.Name+`","arguments":`+string(argsStr)+`}}]},"finish_reason":null}]}`+"\n\n")
+			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"tool_calls": []interface{}{
+				map[string]interface{}{"index": 0, "id": c.state.currentToolCallID, "type": "function", "function": map[string]interface{}{"name": part.FunctionCall.Name, "arguments": string(argsStr)}},
+			}}, nil, nil)...)
+		}
+		if part.FunctionResponse != nil {
+			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"content": geminiFunctionResponseText(part.FunctionResponse.Response)}, nil, nil)...)
+		}
+		if part.ExecutableCode != nil {
+			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"content": "```" + part.ExecutableCode.Language + "\n" + part.ExecutableCode.Code + "\n```"}, nil, nil)...)
+		}
+		if part.CodeExecutionResult != nil {
+			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"content": part.CodeExecutionResult.Output}, nil, nil)...)
 		}
 	}
 
@@ -126,15 +176,29 @@ func (c *geminiToChatConverter) Convert(line []byte) []byte {
 		if candidate.FinishReason == "MAX_TOKENS" {
 			finishReason = "length"
 		}
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{"index":0,"delta":{},"finish_reason":"`+finishReason+`"}]`+"\n\n")
+		out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{}, finishReason, geminiUsage(response.UsageMetadata))...)
 	}
 
-	return nil
+	return out
+}
+
+func geminiUsage(usage *struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+}) map[string]interface{} {
+	if usage == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"prompt_tokens":     usage.PromptTokenCount,
+		"completion_tokens": usage.CandidatesTokenCount,
+		"total_tokens":      usage.PromptTokenCount + usage.CandidatesTokenCount,
+	}
 }
 
 func (c *geminiToChatConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]`+"\n\n")
+		return chatChunk(c.state.id, "gemini", map[string]interface{}{}, "stop", nil)
 	}
 	return nil
 }
@@ -154,12 +218,35 @@ func (c *geminiToChatConverter) Reset() {
 	c.state = nil
 }
 
-// generateSimpleID generates a simple ID for message
-func generateSimpleID() string {
-	// Simple counter-based ID (not perfect but works for streaming)
-	return "abc123def456"
-}
-
 func init() {
 	Register(FormatPair{Upstream: convert.FormatGemini, Client: convert.FormatOpenAIChatCompletions}, newGeminiToChatConverter)
+}
+
+func geminiFunctionResponseText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var response struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &response) == nil {
+		var parts []string
+		for _, part := range response.Content {
+			if part.Text != "" {
+				parts = append(parts, part.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	var value interface{}
+	if json.Unmarshal(raw, &value) == nil {
+		if body, err := json.Marshal(value); err == nil {
+			return string(body)
+		}
+	}
+	return string(raw)
 }

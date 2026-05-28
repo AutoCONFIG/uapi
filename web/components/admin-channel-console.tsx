@@ -950,7 +950,6 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
   const meta = account.metadata || {};
   const items: QuotaDisplayItem[] = [];
 
-  // Primary: read unified meta.quota
   const quota = asRecord(meta.quota);
   if (quota) {
     const buckets = asArray(quota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
@@ -982,95 +981,7 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
     return sortQuotaDisplayItems(items);
   }
 
-  addLegacyCodexQuotaItems(items, meta);
-  addLegacyGeminiQuotaItems(items, meta);
-  addLegacyAnthropicQuotaItems(items, meta);
-  return sortQuotaDisplayItems(items);
-}
-
-function addLegacyCodexQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
-  const codexUsage = asRecord(meta.codex_usage);
-  if (!codexUsage) return;
-  const limits = asRecord(codexUsage.rate_limits) || asRecord(codexUsage.rateLimits) || codexUsage;
-  addUsageLimit(items, "codex-primary", "Codex 主窗口", asRecord(limits.primary));
-  addUsageLimit(items, "codex-secondary", "Codex 周窗口", asRecord(limits.secondary));
-  const credits = asRecord(limits.credits);
-  if (!credits) return;
-  const balance = stringValue(credits.balance) || (credits.unlimited === true ? "unlimited" : "");
-  if (!balance) return;
-  items.push({
-    key: "codex-credits",
-    label: "Codex Credits",
-    remainingPercent: credits.unlimited === true ? 100 : 0,
-    detail: `Credits ${balance}`,
-  });
-}
-
-function addLegacyGeminiQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
-  const geminiQuota = asRecord(meta.user_quota);
-  if (geminiQuota) {
-    const buckets = asArray(geminiQuota.buckets).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-    for (const [index, bucket] of buckets.entries()) {
-      const remaining = numberValue(bucket.remainingFraction);
-      const amount = stringValue(bucket.remainingAmount);
-      if (remaining === null && !amount) continue;
-      const remainingPercent = remaining !== null ? Math.round(clampPercent(remaining * 100)) : 0;
-      const reset = stringValue(bucket.resetTime);
-      items.push({
-        key: `gemini-${index}`,
-        label: quotaBucketLabel(bucket, index + 1),
-        remainingPercent,
-        resetText: formatResetTimeShort(reset),
-        resetTone: resetTimeTone(reset),
-        detail: [amount ? `剩余 ${amount}` : `剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
-      });
-    }
-  }
-  const geminiCredits = asRecord(meta.credits) || asRecord(meta.credit_balance);
-  if (!geminiCredits) return;
-  const balance = stringValue(geminiCredits.balance) || stringValue(geminiCredits.remaining) || stringValue(geminiCredits.amount);
-  if (!balance) return;
-  items.push({ key: "gemini-credits", label: "Credits", remainingPercent: 100, detail: `Credits ${balance}` });
-}
-
-const legacyAnthropicWindowLabels: Record<string, string> = {
-  five_hour: "Claude 5h 窗口",
-  seven_day: "Claude 周窗口",
-  seven_day_sonnet: "Claude Sonnet 周窗口",
-  seven_day_opus: "Claude Opus 周窗口",
-  seven_day_oauth_apps: "Claude OAuth Apps 周窗口",
-};
-
-function addLegacyAnthropicQuotaItems(items: QuotaDisplayItem[], meta: Record<string, unknown>) {
-  const anthropicUsage = asRecord(meta.usage);
-  if (!anthropicUsage) return;
-  for (const [key, label] of Object.entries(legacyAnthropicWindowLabels)) {
-    addUsageLimit(items, `anthropic-${key}`, label, asRecord(anthropicUsage[key]));
-  }
-}
-
-function addUsageLimit(items: QuotaDisplayItem[], key: string, label: string, window: Record<string, unknown> | null) {
-  if (!window) return;
-  const usedPercent = numberValue(window.used_percent) ?? numberValue(window.usedPercent) ?? numberValue(window.utilization);
-  if (usedPercent === null) return;
-  const remainingPercent = Math.round(clampPercent(100 - usedPercent));
-  const reset = stringValue(window.resets_at) || stringValue(window.reset_at) || stringValue(window.resetAt);
-  items.push({
-    key,
-    label,
-    remainingPercent,
-    resetText: formatResetTimeShort(reset),
-    resetTone: resetTimeTone(reset),
-    detail: [`剩余 ${remainingPercent}%`, reset ? `重置 ${reset}` : ""].filter(Boolean).join(" · "),
-  });
-}
-
-function quotaBucketLabel(bucket: Record<string, unknown>, fallbackIndex: number): string {
-  return stringValue(bucket.model) ||
-    stringValue(bucket.modelId) ||
-    stringValue(bucket.model_id) ||
-    stringValue(bucket.label) ||
-    `额度 ${fallbackIndex}`;
+  return items;
 }
 
 function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {

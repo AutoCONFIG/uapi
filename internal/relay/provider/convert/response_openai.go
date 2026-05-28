@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
@@ -27,8 +28,8 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.PromptTokens = resp.Usage.PromptTokens
 		ir.Usage.CompletionTokens = resp.Usage.CompletionTokens
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
-		ir.Usage.CacheCreationInputTokens = resp.Usage.PromptTokensDetails["cached_tokens"].(int)
-		ir.Usage.CacheReadInputTokens = resp.Usage.PromptTokensDetails["cached_tokens"].(int)
+		cachedTokens := usageDetailInt(resp.Usage.PromptTokensDetails, "cached_tokens")
+		ir.Usage.CacheReadInputTokens = cachedTokens
 	}
 
 	// Convert choices
@@ -77,6 +78,25 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 	}
 
 	return ir, nil
+}
+
+func usageDetailInt(details map[string]interface{}, key string) int {
+	if details == nil {
+		return 0
+	}
+	switch v := details[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 // mapOpenAIChatFinishReason converts OpenAI finish_reason to internal format.
@@ -154,7 +174,22 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 
 		// Convert content
 		if len(choice.Content) > 0 {
-			chatChoice.Message.Content = schema.NewPartsContent(choice.Content...)
+			if len(choice.Content) == 1 && choice.Content[0].Type == "text" {
+				chatChoice.Message.Content = schema.NewTextContent(choice.Content[0].Text)
+			} else {
+				chatChoice.Message.Content = schema.NewPartsContent(choice.Content...)
+			}
+		}
+		if len(choice.ReasoningContent) > 0 {
+			if chatChoice.Message.Extra == nil {
+				chatChoice.Message.Extra = make(map[string]json.RawMessage)
+			}
+			reasoning := contentPartsText(choice.ReasoningContent)
+			if reasoning != "" {
+				raw, _ := json.Marshal(reasoning)
+				chatChoice.Message.Extra["reasoning_content"] = raw
+				chatChoice.Message.Extra["reasoning"] = raw
+			}
 		}
 
 		// Convert tool calls
@@ -184,23 +219,17 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 		resp.Choices = append(resp.Choices, chatChoice)
 	}
 
-	// If Raw is present and contains valid JSON, preserve extra fields
-	if len(ir.Raw) > 0 {
-		var rawMap map[string]json.RawMessage
-		if json.Unmarshal(ir.Raw, &rawMap) == nil {
-			resp.Extra = make(map[string]json.RawMessage)
-			for k, v := range rawMap {
-				switch k {
-				case "id", "object", "created", "model", "choices", "usage":
-					// Skip standard fields
-				default:
-					resp.Extra[k] = v
-				}
-			}
+	return json.Marshal(resp)
+}
+
+func contentPartsText(parts []schema.ContentPart) string {
+	var out []string
+	for _, part := range parts {
+		if part.Text != "" {
+			out = append(out, part.Text)
 		}
 	}
-
-	return json.Marshal(resp)
+	return strings.Join(out, "\n")
 }
 
 // OpenAIResponsesResponseToInternal converts OpenAI Responses API response to InternalResponse.

@@ -8,17 +8,15 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
 
 type GeminiAdaptor struct {
-	channel     *db.Channel
-	account     *db.Account
-	model       string
-	isStream    bool
-	streamState *geminiStreamState
+	channel  *db.Channel
+	account  *db.Account
+	model    string
+	isStream bool
 	// Cache token tracking
 	lastCacheCreationInputTokens int
 	lastCacheReadInputTokens     int
@@ -32,7 +30,6 @@ func (a *GeminiAdaptor) SetRequestParams(model string, stream bool) {
 func (a *GeminiAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account
-	a.streamState = &geminiStreamState{}
 }
 
 func (a *GeminiAdaptor) GetRequestURL(path string) (string, error) {
@@ -93,7 +90,7 @@ func (a *GeminiAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 	if err != nil {
 		return nil, err
 	}
-	return convert.ToProviderInternal(ir), nil
+	return provider.ToProviderInternal(ir), nil
 }
 
 func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -103,7 +100,7 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
 		return internalToGeminiCodeAssistWithAccount(req, a.account)
 	}
-	ir := convert.FromProviderInternal(req)
+	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatGemini)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatGemini)
@@ -111,31 +108,7 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 	return fromInternal(ir)
 }
 
-// --- Streaming ---
-
-// ConvertStreamLine converts a single Gemini SSE/JSON line to OpenAI SSE format.
-func (a *GeminiAdaptor) ConvertStreamLine(line []byte) []byte {
-	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
-		return a.streamState.convertLine(unwrapCodeAssistSSELine(line), a.model)
-	}
-	return a.streamState.convertLine(line, a.model)
-}
-
 func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }
-
-// CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
-// back to Gemini SSE format for clients requesting Gemini format.
-func (a *GeminiAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	// Convert from OpenAI Chat Completions (client) to Gemini (upstream)
-	upstream := convert.FormatGemini
-	client := convert.FormatOpenAIChatCompletions
-	converter := stream.NewConverter(upstream, client)
-	if converter == nil {
-		// Fallback to legacy converter if stream package doesn't have it
-		return NewReverseStreamConverter()
-	}
-	return converter.Convert
-}
 
 // --- Usage parsing ---
 
@@ -206,84 +179,12 @@ func (a *GeminiAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 	return 0, 0, fmt.Errorf("parse gemini stream usage: no recognized format")
 }
 
-func init() {
-	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
-	// The new convert/ package registrations are in convert package init() functions
-}
-
 // Verify interface compliance at compile time.
 var _ provider.Adaptor = (*GeminiAdaptor)(nil)
-
-func (a *GeminiAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
-	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
-		return convertGeminiSSEBuffer(unwrapCodeAssistSSEBuffer(sseBody))
-	}
-	return convertGeminiSSEBuffer(sseBody)
-}
-
-func mapGeminiFinishReason(reason string) string {
-	switch reason {
-	case "STOP":
-		return "stop"
-	case "MAX_TOKENS":
-		return "length"
-	case "SAFETY":
-		return "content_filter"
-	case "RECITATION":
-		return "content_filter"
-	default:
-		return "content_filter"
-	}
-}
 
 func codeAssistBase(base string) string {
 	if base == "" || strings.Contains(base, "generativelanguage.googleapis.com") {
 		return "https://cloudcode-pa.googleapis.com"
 	}
 	return strings.TrimRight(base, "/")
-}
-
-func unwrapCodeAssistSSELine(line []byte) []byte {
-	const prefix = "data:"
-	text := string(line)
-	if !strings.HasPrefix(text, prefix) {
-		return line
-	}
-	payload := strings.TrimSpace(strings.TrimPrefix(text, prefix))
-	if payload == "" || payload == "[DONE]" {
-		return line
-	}
-	var wrapper map[string]interface{}
-	if err := provider.DecodeJSONUseNumber([]byte(payload), &wrapper); err != nil {
-		return line
-	}
-	resp, ok := wrapper["response"]
-	if !ok {
-		return line
-	}
-	respBody, err := json.Marshal(map[string]interface{}{"response": resp})
-	if err != nil {
-		return line
-	}
-	return []byte("data: " + string(respBody))
-}
-
-func unwrapCodeAssistSSEBuffer(sseBody []byte) []byte {
-	events := splitGeminiSSEEvents(sseBody)
-	if len(events) == 0 {
-		return sseBody
-	}
-	var out []byte
-	for _, event := range events {
-		normalized := normalizeGeminiSSEEvent(event)
-		unwrapped := unwrapCodeAssistSSELine(normalized)
-		if !strings.HasSuffix(string(unwrapped), "\n\n") {
-			unwrapped = append(unwrapped, '\n', '\n')
-		}
-		out = append(out, unwrapped...)
-	}
-	if len(out) == 0 {
-		return sseBody
-	}
-	return out
 }

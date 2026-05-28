@@ -12,7 +12,6 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -23,13 +22,11 @@ type AntigravityAdaptor struct {
 	account  *db.Account
 	model    string
 	isStream bool
-	convert  func([]byte, string) []byte
 }
 
 func (a *AntigravityAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account
-	a.convert = gemini.StreamLineConverter()
 }
 
 func (a *AntigravityAdaptor) SetRequestParams(model string, stream bool) {
@@ -64,7 +61,7 @@ func (a *AntigravityAdaptor) ToInternal(body []byte) (*provider.InternalRequest,
 	if err != nil {
 		return nil, err
 	}
-	return convert.ToProviderInternal(ir), nil
+	return provider.ToProviderInternal(ir), nil
 }
 
 func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -75,7 +72,7 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	model := UpstreamModelID(clientModel)
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := gemini.InternalToGeminiBody(&reqCopy)
+	gemBody, err := convert.InternalToGemini(provider.FromProviderInternal(&reqCopy))
 	if err != nil {
 		return nil, err
 	}
@@ -109,29 +106,6 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	return json.Marshal(body)
 }
 
-func (a *AntigravityAdaptor) ConvertStreamLine(line []byte) []byte {
-	if a.convert == nil {
-		a.convert = gemini.StreamLineConverter()
-	}
-	return a.convert(line, a.model)
-}
-
-func (a *AntigravityAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
-	converter := gemini.StreamLineConverter()
-	var out []byte
-	for _, raw := range strings.Split(string(sseBody), "\n") {
-		converted := converter([]byte(raw), a.model)
-		if converted != nil {
-			out = append(out, converted...)
-		}
-	}
-	return out
-}
-
-func (a *AntigravityAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	return gemini.NewReverseStreamConverter()
-}
-
 func (a *AntigravityAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	usage, err := a.ParseUsageFull(respBody)
 	return usage.PromptTokens, usage.CompletionTokens, err
@@ -151,11 +125,16 @@ func (a *AntigravityAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error
 }
 
 func (a *AntigravityAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage, error) {
-	internal, err := gemini.ResponseToInternal(respBody)
+	internal, err := convert.GeminiResponseToInternal(respBody)
 	if err != nil {
 		return provider.InternalUsage{}, err
 	}
-	return internal.Usage, nil
+	return provider.InternalUsage{
+		PromptTokens:             internal.Usage.PromptTokens,
+		CompletionTokens:         internal.Usage.CompletionTokens,
+		CacheCreationInputTokens: internal.Usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     internal.Usage.CacheReadInputTokens,
+	}, nil
 }
 
 func (a *AntigravityAdaptor) GetChannelType() string { return "antigravity" }
@@ -221,8 +200,4 @@ func ensureFunctionCallingValidated(request map[string]interface{}) {
 		toolConfig["functionCallingConfig"] = fcc
 	}
 	fcc["mode"] = "VALIDATED"
-}
-
-func init() {
-	provider.RegisterToResponseInternal(provider.FormatAntigravity, gemini.ResponseToInternal)
 }

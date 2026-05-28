@@ -9,12 +9,12 @@ type MessageContent struct {
 }
 
 type ContentPart struct {
-	Type     string          `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ImageURL *string         `json:"image_url,omitempty"`
-	Data     string          `json:"data,omitempty"`
-	MimeType string          `json:"mime_type,omitempty"`
-	Refusal  string          `json:"refusal,omitempty"`
+	Type     string                     `json:"type"`
+	Text     string                     `json:"text,omitempty"`
+	ImageURL *string                    `json:"image_url,omitempty"`
+	Data     string                     `json:"data,omitempty"`
+	MimeType string                     `json:"mime_type,omitempty"`
+	Refusal  string                     `json:"refusal,omitempty"`
 	Extra    map[string]json.RawMessage `json:"-"`
 }
 

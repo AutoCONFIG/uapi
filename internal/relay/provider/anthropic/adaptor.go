@@ -8,16 +8,13 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
 
 type AnthropicAdaptor struct {
-	channel     *db.Channel
-	account     *db.Account
-	stream      bool
-	streamState *anthropicStreamState
+	channel *db.Channel
+	account *db.Account
 	// Cache token tracking
 	lastCacheCreationInputTokens int
 	lastCacheReadInputTokens     int
@@ -30,7 +27,6 @@ func (a *AnthropicAdaptor) SetRequestParams(model string, stream bool) {
 func (a *AnthropicAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account
-	a.streamState = &anthropicStreamState{}
 }
 
 func (a *AnthropicAdaptor) GetRequestURL(path string) (string, error) {
@@ -61,11 +57,11 @@ func (a *AnthropicAdaptor) ToInternal(body []byte) (*provider.InternalRequest, e
 	if err != nil {
 		return nil, err
 	}
-	return convert.ToProviderInternal(ir), nil
+	return provider.ToProviderInternal(ir), nil
 }
 
 func (a *AnthropicAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	ir := convert.FromProviderInternal(req)
+	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatAnthropic)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatAnthropic)
@@ -73,32 +69,7 @@ func (a *AnthropicAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, 
 	return fromInternal(ir)
 }
 
-// --- Streaming ---
-
-// ConvertStreamLine converts a single Anthropic SSE line to OpenAI SSE format in real-time.
-func (a *AnthropicAdaptor) ConvertStreamLine(line []byte) []byte {
-	return a.streamState.convertLine(line)
-}
-
-func (a *AnthropicAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
-	return convertAnthropicSSEBuffer(sseBody)
-}
-
 func (a *AnthropicAdaptor) GetChannelType() string { return "anthropic" }
-
-// CreateReverseStreamConverter returns a stateful converter that converts OpenAI SSE chunks
-// back to Anthropic SSE events for clients requesting Anthropic format.
-func (a *AnthropicAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	// Convert from OpenAI Chat Completions (client) to Anthropic (upstream)
-	upstream := convert.FormatAnthropic
-	client := convert.FormatOpenAIChatCompletions
-	converter := stream.NewConverter(upstream, client)
-	if converter == nil {
-		// Fallback to legacy converter if stream package doesn't have it
-		return NewReverseStreamConverter()
-	}
-	return converter.Convert
-}
 
 // --- Usage parsing ---
 
@@ -184,26 +155,5 @@ func (a *AnthropicAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) 
 	return 0, 0, fmt.Errorf("parse anthropic stream usage: no recognized format")
 }
 
-func init() {
-	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
-	// The new convert/ package registrations are in convert package init() functions
-}
-
 // Verify interface compliance at compile time.
 var _ provider.Adaptor = (*AnthropicAdaptor)(nil)
-
-// mapFinishReason maps Anthropic stop_reason to OpenAI finish_reason (used by streaming).
-func mapFinishReason(reason string) string {
-	switch reason {
-	case "end_turn":
-		return "stop"
-	case "tool_use":
-		return "tool_calls"
-	case "max_tokens":
-		return "length"
-	case "stop_sequence":
-		return "stop"
-	default:
-		return "content_filter"
-	}
-}

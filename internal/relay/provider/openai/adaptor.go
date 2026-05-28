@@ -8,7 +8,6 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -73,7 +72,7 @@ func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 	if err != nil {
 		return nil, err
 	}
-	return convert.ToProviderInternal(ir), nil
+	return provider.ToProviderInternal(ir), nil
 }
 
 func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -82,7 +81,7 @@ func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 		format = convert.FormatOpenAIResponses
 	}
 	// Convert provider.InternalRequest to convert.InternalRequest for conversion
-	ir := convert.FromProviderInternal(req)
+	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(format)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", format)
@@ -166,31 +165,6 @@ func (a *OpenAIAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {
 	return pt, ct, nil
 }
 
-// ConvertStreamLine passes SSE lines through (OpenAI format is already the target).
-func (a *OpenAIAdaptor) ConvertStreamLine(line []byte) []byte {
-	return line
-}
-
-// ConvertSSEBuffer passes the SSE buffer through (already OpenAI SSE format).
-func (a *OpenAIAdaptor) ConvertSSEBuffer(sseBody []byte) []byte {
-	return sseBody
-}
-
-// CreateReverseStreamConverter returns nil — no reverse conversion needed for OpenAI.
-func (a *OpenAIAdaptor) CreateReverseStreamConverter() func([]byte) []byte {
-	if a.channel == nil || (a.channel.APIFormat != "responses" && a.channel.APIFormat != "codex") {
-		return nil
-	}
-	// Convert from OpenAI Responses (upstream) to Chat Completions (client)
-	upstream := convert.FormatOpenAIResponses
-	client := convert.FormatOpenAIChatCompletions
-	converter := stream.NewConverter(upstream, client)
-	if converter == nil {
-		return func(line []byte) []byte { return line }
-	}
-	return converter.Convert
-}
-
 func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
 
 func isOpenAIPlatformBaseURL(base string) bool {
@@ -212,9 +186,4 @@ func metadataBool(account *db.Account, key string) bool {
 	}
 	value, _ := account.Metadata[key].(bool)
 	return value
-}
-
-func init() {
-	// Legacy registrations kept for provider.ConvertRequestWithAdaptor (used in handler.go)
-	// The new convert/ package registrations are in convert package init() functions
 }

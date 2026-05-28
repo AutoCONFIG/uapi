@@ -22,16 +22,13 @@ func trimNull(data []byte) []byte {
 
 // unmarshalExtra extracts unknown fields from JSON data into the provided Extra map.
 func unmarshalExtra(data []byte, v interface{}, extra *map[string]json.RawMessage) error {
-	// First do a standard unmarshal into the struct to get known fields.
-	if err := json.Unmarshal(data, v); err != nil {
-		return err
-	}
-
-	// Now extract unknown fields into Extra.
 	// Parse as generic map[string]interface{} to find unknown keys.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
+	}
+	if *extra == nil {
+		*extra = make(map[string]json.RawMessage)
 	}
 
 	// Get the known field names from the struct.

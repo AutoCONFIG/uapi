@@ -245,12 +245,6 @@ func SetupCodeAssistAccount(accessToken, projectID string) (map[string]interface
 		}
 	}
 
-	project, _ := meta["project_id"].(string)
-	if project != "" {
-		if quota, err := retrieveUserQuota(accessToken, project); err == nil {
-			meta["user_quota"] = quota
-		}
-	}
 	if _, ok := meta["setup_status"]; !ok {
 		meta["setup_status"] = "ready"
 		meta["validation_required"] = false
@@ -419,35 +413,6 @@ func boolValue(value interface{}) bool {
 		return b
 	}
 	return false
-}
-
-func retrieveUserQuota(accessToken, projectID string) (map[string]interface{}, error) {
-	reqBody := map[string]interface{}{
-		"project": projectID,
-	}
-	body, _ := json.Marshal(reqBody)
-	req, err := http.NewRequest(http.MethodPost, CodeAssistEndpoint+"/"+CodeAssistVersion+":retrieveUserQuota", strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	setCodeAssistHeaders(req, accessToken, "")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("retrieveUserQuota failed: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read retrieveUserQuota response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("retrieveUserQuota failed: status %d: %s", resp.StatusCode, compactBody(respBody))
-	}
-	var quota map[string]interface{}
-	if err := json.Unmarshal(respBody, &quota); err != nil {
-		return nil, fmt.Errorf("parse retrieveUserQuota response: %w", err)
-	}
-	return quota, nil
 }
 
 func stringOrNil(value string) interface{} {

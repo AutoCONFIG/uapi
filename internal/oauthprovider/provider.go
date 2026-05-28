@@ -179,12 +179,6 @@ func init() {
 					metadata = parsed
 				}
 			}
-			if usage, err := openai.FetchCodexUsage(tokens.AccessToken, metadataString(metadata, "chatgpt_account_id"), metadataBool(metadata, "chatgpt_account_is_fedramp")); err == nil {
-				if metadata == nil {
-					metadata = map[string]interface{}{}
-				}
-				metadata["codex_usage"] = usage
-			}
 			exp := time.Now().Add(8 * 24 * time.Hour)
 			if tokens.ExpiresIn > 0 {
 				exp = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)

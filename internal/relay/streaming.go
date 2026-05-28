@@ -8,6 +8,9 @@ import (
 	"sync"
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	streamconvert "github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 )
 
 const (
@@ -256,6 +259,40 @@ func streamAndForward(
 
 	pt, ct, parseFailed := tracker.Result()
 	return streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, parseFailed: parseFailed}
+}
+
+func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([]byte) []byte {
+	if upstreamFormat == clientFormat {
+		return nil
+	}
+	upstream, ok := relayFormatToStreamFormat(upstreamFormat)
+	if !ok {
+		return nil
+	}
+	client, ok := relayFormatToStreamFormat(clientFormat)
+	if !ok {
+		return nil
+	}
+	converter := stream.NewConverter(upstream, client)
+	if converter == nil {
+		return nil
+	}
+	return converter.Convert
+}
+
+func relayFormatToStreamFormat(format provider.Format) (streamconvert.Format, bool) {
+	switch format {
+	case provider.FormatOpenAIChatCompletions:
+		return streamconvert.FormatOpenAIChatCompletions, true
+	case provider.FormatOpenAIResponses:
+		return streamconvert.FormatOpenAIResponses, true
+	case provider.FormatAnthropic:
+		return streamconvert.FormatAnthropic, true
+	case provider.FormatGemini, provider.FormatGeminiCode, provider.FormatGeminiCLI, provider.FormatAntigravity:
+		return streamconvert.FormatGemini, true
+	default:
+		return "", false
+	}
 }
 
 func streamSawChatFinish(event []byte) bool {

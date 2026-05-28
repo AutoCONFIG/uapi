@@ -11,9 +11,9 @@ import (
 // anthropicToChatState holds the streaming conversion state
 type anthropicToChatState struct {
 	// Metadata
-	id       string
-	model    string
-	role     string
+	id    string
+	model string
+	role  string
 
 	// Text accumulation
 	textBuffer strings.Builder
@@ -53,88 +53,130 @@ func newAnthropicToChatConverter() StreamConverter {
 }
 
 func (c *anthropicToChatConverter) Convert(line []byte) []byte {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
+		return nil
+	}
 	// Parse the Anthropic SSE line
 	var event struct {
 		Type string `json:"type"`
 	}
 
-	if err := json.Unmarshal(line, &event); err != nil {
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
 	}
 
 	switch event.Type {
 	case "message_start":
 		var msg struct {
-			ID     string `json:"id"`
-			Type   string `json:"type"`
-			Role   string `json:"role"`
-			Model  string `json:"model"`
-			Usage  struct {
+			ID    string `json:"id"`
+			Type  string `json:"type"`
+			Role  string `json:"role"`
+			Model string `json:"model"`
+			Usage struct {
 				InputTokens  int `json:"input_tokens"`
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
 		}
-		json.Unmarshal(line, &msg)
+		var envelope struct {
+			Message struct {
+				ID    string `json:"id"`
+				Role  string `json:"role"`
+				Model string `json:"model"`
+				Usage struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"message"`
+		}
+		json.Unmarshal([]byte(data), &envelope)
+		if envelope.Message.ID != "" {
+			msg.ID = envelope.Message.ID
+			msg.Role = envelope.Message.Role
+			msg.Model = envelope.Message.Model
+			msg.Usage = envelope.Message.Usage
+		} else {
+			json.Unmarshal([]byte(data), &msg)
+		}
 		c.state.id = msg.ID
 		c.state.model = msg.Model
 		c.state.role = msg.Role
 		c.state.hasStarted = true
-		return []byte(`{"id":"`+msg.ID+`","object":"chat.completion.chunk","created":0,"model":"`+msg.Model+`","choices":[{"index":0,"delta":{"role":"`+msg.Role+`"},"finish_reason":null}]}`+"\n\n")
+		return chatChunk(msg.ID, msg.Model, map[string]interface{}{"role": msg.Role}, nil, nil)
 
 	case "content_block_delta":
 		var delta struct {
-			Type          string `json:"type"`
-			Index         int    `json:"index"`
-			ContentBlock  *struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock *struct {
 				Type string `json:"type"`
 			} `json:"content_block,omitempty"`
-			TextDelta     string `json:"text_delta,omitempty"`
+			TextDelta      string `json:"text_delta,omitempty"`
 			InputJSONDelta string `json:"input_json_delta,omitempty"`
 		}
-		json.Unmarshal(line, &delta)
+		var raw struct {
+			Index int `json:"index"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				PartialJSON string `json:"partial_json"`
+			} `json:"delta"`
+		}
+		json.Unmarshal([]byte(data), &raw)
+		json.Unmarshal([]byte(data), &delta)
+		if raw.Delta.Text != "" {
+			delta.TextDelta = raw.Delta.Text
+		}
+		if raw.Delta.PartialJSON != "" {
+			delta.InputJSONDelta = raw.Delta.PartialJSON
+		}
 
 		// Handle text delta
 		if delta.TextDelta != "" {
 			c.state.textBuffer.WriteString(delta.TextDelta)
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"content":"`+escapeJSON(delta.TextDelta)+`"},"finish_reason":null}]}`+"\n\n")
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": delta.TextDelta}, nil, nil)
 		}
 
 		// Handle tool call (input_json_delta)
 		if delta.InputJSONDelta != "" && delta.ContentBlock != nil && delta.ContentBlock.Type == "tool_use" {
 			// This is tool call arguments
 			c.state.toolCallArgs.WriteString(delta.InputJSONDelta)
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"tool_calls":[{"id":"`+c.state.currentToolCallID+`","type":"function","function":{"arguments":"`+escapeJSON(delta.InputJSONDelta)+`"}}]},"finish_reason":null}]}`+"\n\n")
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"tool_calls": []interface{}{
+				map[string]interface{}{"index": raw.Index, "id": c.state.currentToolCallID, "type": "function", "function": map[string]interface{}{"arguments": delta.InputJSONDelta}},
+			}}, nil, nil)
 		}
 
 	case "content_block_start":
 		var block struct {
-			Type          string `json:"type"`
-			Index         int    `json:"index"`
-			ContentBlock  struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
 				Type string `json:"type"`
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"content_block"`
 		}
-		json.Unmarshal(line, &block)
+		json.Unmarshal([]byte(data), &block)
 		if block.ContentBlock.Type == "tool_use" {
 			c.state.currentToolCallID = block.ContentBlock.ID
 			c.state.currentToolCallName = block.ContentBlock.Name
 			c.state.toolCallArgs.Reset()
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{"tool_calls":[{"id":"`+block.ContentBlock.ID+`","type":"function","function":{"name":"`+block.ContentBlock.Name+`","arguments":""}}]},"finish_reason":null}]}`+"\n\n")
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"tool_calls": []interface{}{
+				map[string]interface{}{"index": block.Index, "id": block.ContentBlock.ID, "type": "function", "function": map[string]interface{}{"name": block.ContentBlock.Name, "arguments": ""}},
+			}}, nil, nil)
 		}
 
 	case "message_delta":
 		var delta struct {
-			Type        string `json:"type"`
-			Usage       struct {
+			Type  string `json:"type"`
+			Usage struct {
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
 			Delta struct {
 				StopReason string `json:"stop_reason"`
 			} `json:"delta"`
 		}
-		json.Unmarshal(line, &delta)
+		json.Unmarshal([]byte(data), &delta)
 		c.state.usage.OutputTokens = delta.Usage.OutputTokens
 
 		finishReason := ""
@@ -149,11 +191,11 @@ func (c *anthropicToChatConverter) Convert(line []byte) []byte {
 
 		if finishReason != "" {
 			c.state.hasFinished = true
-			return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":"`+finishReason+`"}]`+"\n\n")
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, finishReason, nil)
 		}
 
 	case "message_stop":
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":null}]}`+"\n\n")
+		return nil
 	}
 
 	return nil
@@ -161,7 +203,7 @@ func (c *anthropicToChatConverter) Convert(line []byte) []byte {
 
 func (c *anthropicToChatConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"id":"`+c.state.id+`","object":"chat.completion.chunk","created":0,"model":"`+c.state.model+`","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]`+"\n\n")
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "stop", nil)
 	}
 	return nil
 }

@@ -11,8 +11,8 @@ import (
 // chatToAnthropicState holds the streaming conversion state
 type chatToAnthropicState struct {
 	// Metadata
-	id       string
-	model    string
+	id    string
+	model string
 
 	// Tool call tracking
 	currentToolCallID   string
@@ -45,6 +45,10 @@ func newChatToAnthropicConverter() StreamConverter {
 }
 
 func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
+	data, ok := sseData(line)
+	if !ok || data == "[DONE]" {
+		return nil
+	}
 	// Parse the Chat SSE line
 	var event struct {
 		ID      string `json:"id"`
@@ -52,13 +56,13 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
 		Choices []struct {
-			Index         int             `json:"index"`
-			Delta         json.RawMessage `json:"delta"`
-			FinishReason  string          `json:"finish_reason"`
+			Index        int             `json:"index"`
+			Delta        json.RawMessage `json:"delta"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 	}
 
-	if err := json.Unmarshal(line, &event); err != nil {
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
 	}
 
@@ -73,8 +77,8 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 		Role      string `json:"role"`
 		Content   string `json:"content"`
 		ToolCalls []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
 			Function struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
@@ -85,19 +89,24 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 
 	switch {
 	// First message with role
-	case c.state.id == "" && event.ID != "":
+	case c.state.id == "" && event.ID != "" && deltaData.Role != "" && deltaData.Content == "" && len(deltaData.ToolCalls) == 0:
 		c.state.id = event.ID
 		c.state.model = event.Model
 		c.state.hasStarted = true
 
 		if deltaData.Role != "" {
-			return []byte(`{"type":"message_start","id":"` + event.ID + `","model":"` + event.Model + `","role":"` + deltaData.Role + `","usage":{"input_tokens":0,"output_tokens":0}}` + "\n\n")
+			return sseJSON(map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": event.ID, "type": "message", "model": event.Model, "role": deltaData.Role, "usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0}}})
 		}
 		return nil
 
 	// Content delta
 	case deltaData.Content != "":
-		return []byte(`{"type":"content_block_delta","index":0,"content_block":{"type":"text"},"text_delta":"` + escapeJSON(deltaData.Content) + `"}` + "\n\n")
+		if c.state.id == "" {
+			c.state.id = event.ID
+			c.state.model = event.Model
+			c.state.hasStarted = true
+		}
+		return sseJSON(map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "text_delta", "text": deltaData.Content}})
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -107,11 +116,11 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 				c.state.currentToolCallID = tc.ID
 				c.state.currentToolCallName = tc.Function.Name
 				c.state.toolCallArgs.Reset()
-				return []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"` + tc.ID + `","name":"` + tc.Function.Name + `"}}` + "\n\n")
+				return sseJSON(map[string]interface{}{"type": "content_block_start", "index": 0, "content_block": map[string]interface{}{"type": "tool_use", "id": tc.ID, "name": tc.Function.Name}})
 			} else if tc.Function.Arguments != "" {
 				// Tool call arguments delta - emit content_block_delta with input_json_delta
 				c.state.toolCallArgs.WriteString(tc.Function.Arguments)
-				return []byte(`{"type":"content_block_delta","index":0,"content_block":{"type":"tool_use","id":"` + tc.ID + `"},"input_json_delta":"` + escapeJSON(tc.Function.Arguments) + `"}` + "\n\n")
+				return sseJSON(map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "input_json_delta", "partial_json": tc.Function.Arguments}})
 			}
 		}
 		return nil
@@ -130,7 +139,7 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 		}
 
 		if anthropicReason != "" {
-			return []byte(`{"type":"message_delta","delta":{"stop_reason":"` + anthropicReason + `"},"usage":{"output_tokens":0}}` + "\n\n")
+			return sseJSON(map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": anthropicReason}, "usage": map[string]interface{}{"output_tokens": 0}})
 		}
 		return nil
 	}
@@ -140,7 +149,7 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 
 func (c *chatToAnthropicConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}` + "\n\n")
+		return sseJSON(map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "end_turn"}, "usage": map[string]interface{}{"output_tokens": 0}})
 	}
 	return nil
 }

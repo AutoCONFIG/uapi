@@ -42,13 +42,14 @@ func (r *OpenAIResponsesRequest) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (r OpenAIResponsesRequest) MarshalJSON() ([]byte, error) {
-	return marshalExtra(r, r.Extra)
+	type Alias OpenAIResponsesRequest
+	return marshalExtra(Alias(r), r.Extra)
 }
 
 // ResponsesInput is a polymorphic type: a bare string or an array of
 // ResponsesInputItem.
 type ResponsesInput struct {
-	Text  *string             // bare string form
+	Text  *string              // bare string form
 	Items []ResponsesInputItem // array form
 }
 
@@ -93,15 +94,15 @@ func (in *ResponsesInput) UnmarshalJSON(data []byte) error {
 
 // ResponsesInputItem represents a single item in the Responses API input array.
 type ResponsesInputItem struct {
-	Type      string          `json:"type,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   MessageContent  `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Status    string          `json:"status,omitempty"`
+	Type      string         `json:"type,omitempty"`
+	Role      string         `json:"role,omitempty"`
+	Content   MessageContent `json:"content,omitempty"`
+	CallID    string         `json:"call_id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Arguments string         `json:"arguments,omitempty"`
+	Output    string         `json:"output,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Status    string         `json:"status,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -119,31 +120,32 @@ func (item *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (item ResponsesInputItem) MarshalJSON() ([]byte, error) {
-	return marshalExtra(item, item.Extra)
+	type Alias ResponsesInputItem
+	return marshalExtra(Alias(item), item.Extra)
 }
 
 // OpenAIResponsesResponse represents an OpenAI Responses API response.
 type OpenAIResponsesResponse struct {
-	ID        string              `json:"id"`
-	Object    string              `json:"object"`
-	CreatedAt int64               `json:"created_at"`
-	Model     string              `json:"model"`
+	ID        string                `json:"id"`
+	Object    string                `json:"object"`
+	CreatedAt int64                 `json:"created_at"`
+	Model     string                `json:"model"`
 	Output    []ResponsesOutputItem `json:"output"`
-	Usage     *ResponsesUsage     `json:"usage,omitempty"`
-	Status    string              `json:"status,omitempty"`
-	Metadata  json.RawMessage     `json:"metadata,omitempty"`
+	Usage     *ResponsesUsage       `json:"usage,omitempty"`
+	Status    string                `json:"status,omitempty"`
+	Metadata  json.RawMessage       `json:"metadata,omitempty"`
 }
 
 // ResponsesOutputItem represents a single item in the Responses API output array.
 type ResponsesOutputItem struct {
-	Type      string         `json:"type"`
-	ID        string         `json:"id,omitempty"`
-	Role      string         `json:"role,omitempty"`
-	Content   []ContentPart  `json:"content,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	CallID    string         `json:"call_id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Arguments string         `json:"arguments,omitempty"`
+	Type      string        `json:"type"`
+	ID        string        `json:"id,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Content   []ContentPart `json:"content,omitempty"`
+	Status    string        `json:"status,omitempty"`
+	CallID    string        `json:"call_id,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	Arguments string        `json:"arguments,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -161,7 +163,8 @@ func (item *ResponsesOutputItem) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON includes Extra fields in the output.
 func (item ResponsesOutputItem) MarshalJSON() ([]byte, error) {
-	return marshalExtra(item, item.Extra)
+	type Alias ResponsesOutputItem
+	return marshalExtra(Alias(item), item.Extra)
 }
 
 // ResponsesUsage represents token usage in the Responses API.

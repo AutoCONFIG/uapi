@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -22,19 +21,6 @@ func TestSetupRequestHeaderUsesBearerForOAuthToken(t *testing.T) {
 	}
 	if got := string(req.URI().QueryArgs().Peek("key")); got != "" {
 		t.Fatalf("key query parameter = %q, want empty for OAuth", got)
-	}
-}
-
-func TestUnwrapCodeAssistSSEBufferUsesFullEvents(t *testing.T) {
-	body := []byte("event: message\n" +
-		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\n" +
-		"data: \"hi\"}]}}]}}\n\n")
-	out := string(unwrapCodeAssistSSEBuffer(body))
-	if !strings.Contains(out, `"candidates"`) || !strings.Contains(out, `"text":"hi"`) {
-		t.Fatalf("CodeAssist SSE unwrap must normalize full events: %s", out)
-	}
-	if !strings.Contains(out, `"response"`) {
-		t.Fatalf("CodeAssist wrapper should be preserved for Gemini stream converter: %s", out)
 	}
 }
 
