@@ -20,6 +20,7 @@ const (
 	FormatAnthropic             Format = "anthropic"
 	FormatGemini                Format = "gemini"
 	FormatGeminiCode            Format = "gemini_code"
+	FormatGeminiCLI             Format = "gemini_cli"  // Gemini CLI / Antigravity protocol
 	FormatAntigravity           Format = "antigravity"
 )
 
@@ -57,6 +58,9 @@ type InternalRequest struct {
 	SafetySettings interface{}
 	CandidateCount *int
 	Provider       string // Gemini provider field
+
+	// Unified system prompt (used by OpenAI Responses instructions, Anthropic system, etc.)
+	Instructions *string `json:"instructions,omitempty"`
 
 	// ExtraParams captures fields not explicitly modeled above. During
 	// same-protocol passthrough these are merged back into the output
