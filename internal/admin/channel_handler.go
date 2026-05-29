@@ -76,6 +76,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		APIFormat:    req.APIFormat,
 		ForceStream:  req.ForceStream,
 		AffinityTTL:  req.AffinityTTL,
+		Settings:     normalizeChannelSettings(req.Settings),
 		Enabled:      true,
 	}
 	ch.ID = uuid.New()
@@ -155,6 +156,9 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.AffinityTTL != nil {
 		updates["affinity_ttl"] = *req.AffinityTTL
 	}
+	if req.Settings != nil {
+		updates["settings"] = normalizeChannelSettings(*req.Settings)
+	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
@@ -172,6 +176,22 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	}
 	auditUpdateCtx(h.db, "channel", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func normalizeChannelSettings(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}"
+	}
+	var decoded interface{}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return "{}"
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, apiFormat string) (bool, string) {

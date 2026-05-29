@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -71,12 +72,12 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		}
 		switch plan.Type {
 		case "count_based":
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, 1, true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(1, model, plan.ModelRatios), true)
 		case "token_based":
 			if estimatedTokens <= 0 {
 				estimatedTokens = 1
 			}
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, estimatedTokens, true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(estimatedTokens, model, plan.ModelRatios), true)
 		}
 		return fmt.Errorf("unsupported plan type: %s", plan.Type)
 	})
@@ -123,8 +124,7 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	}
 
 	if plan.Type == "count_based" {
-		// Count-based plans: pre-consume 1 count per request.
-		// No refund needed since the request already consumed a count.
+		// Count-based plans are fully charged at pre-consume time.
 		return nil
 	}
 
@@ -142,7 +142,7 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	// Cache tokens are included in prompt-equivalent tokens at reduced rates
 	cacheEquivalent := int(float64(cacheCreationTokens)*cacheCreationRatio) +
 		int(float64(cacheReadTokens)*cacheReadRatio)
-	actual := int(float64(promptTokens+cacheEquivalent) + float64(completionTokens)*ratio)
+	actual := int(math.Ceil(float64(promptTokens+cacheEquivalent+completionTokens) * ratio))
 	if actual <= 0 {
 		actual = estTokens
 	}
@@ -313,6 +313,9 @@ func (b *BillingService) CheckUserPlan(userID string, tokenID string) error {
 
 func parseMap(jsonStr string) (map[string]interface{}, error) {
 	var result map[string]interface{}
+	if jsonStr == "" {
+		return map[string]interface{}{}, nil
+	}
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
 		return nil, err
 	}
@@ -330,7 +333,31 @@ func toFloat(v interface{}) (float64, bool) {
 		return float64(n), true
 	case int64:
 		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
 	default:
 		return 0, false
 	}
+}
+
+func applyModelRatio(tokens int, model, rawRatios string) int {
+	if tokens <= 0 {
+		return tokens
+	}
+	ratios, err := parseMap(rawRatios)
+	if err != nil {
+		return tokens
+	}
+	ratio := 1.0
+	if r, ok := ratios[model]; ok {
+		if f, ok := toFloat(r); ok && f >= 0 {
+			ratio = f
+		}
+	}
+	charged := int(math.Ceil(float64(tokens) * ratio))
+	if charged < 1 && ratio > 0 {
+		return 1
+	}
+	return charged
 }

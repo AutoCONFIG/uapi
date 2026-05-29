@@ -217,8 +217,9 @@ export const adminApi = {
     api_format?: string;
     force_stream?: boolean;
     affinity_ttl?: number;
+    settings?: string;
   }) => request<Channel>("/api/admin/channels", { method: "POST", token, body }),
-  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "models" | "priority" | "api_format" | "force_stream" | "affinity_ttl" | "enabled">>) =>
+  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "models" | "model_aliases" | "priority" | "api_format" | "force_stream" | "affinity_ttl" | "settings" | "enabled">>) =>
     request<Channel>(`/api/admin/channels?id=${id}`, { method: "PUT", token, body }),
   deleteChannel: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/channels?id=${id}`, { method: "DELETE", token }),

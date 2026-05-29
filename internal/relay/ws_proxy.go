@@ -45,7 +45,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 
 	// 1. Refresh credentials (handles OAuth token expiry)
-	validCreds, err := EnsureValidCredentials(acc, h.db)
+	validCreds, err := EnsureValidCredentialsForChannel(acc, ch, h.db)
 	if err != nil {
 		logger.Component("relay.ws").Warn("credential refresh failed", logger.F("session", sess.id), logger.Err(err))
 		return false

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
+import { CheckCircle2, Clipboard, KeyRound, Pencil, Plus, Power, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import { apiKeyChannelPresets, channelDefaults, channelPresets, defaultChannelPreset, isOAuthAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
@@ -45,6 +45,93 @@ function supportsModelSync(channel: Pick<Channel, "api_format">): boolean {
   return !channel.api_format || channel.api_format === "standard" || channel.api_format === "responses" || channel.api_format === "antigravity";
 }
 
+type AntigravitySettings = {
+  thinking_routing: boolean;
+  tier_fallback: boolean;
+  medium_token_threshold: number;
+  long_token_threshold: number;
+  tier_groups: AntigravityTierGroup[];
+};
+
+type AntigravityTierGroup = {
+  public_model: string;
+  aliases: string[];
+  high: string;
+  medium: string;
+  low: string;
+  fallback_order: string[];
+};
+
+function antigravitySettings(raw?: string): AntigravitySettings {
+  const fallback = defaultAntigravitySettings(false);
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+    return {
+      thinking_routing: typeof parsed.thinking_routing === "boolean" ? parsed.thinking_routing : fallback.thinking_routing,
+      tier_fallback: typeof parsed.tier_fallback === "boolean" ? parsed.tier_fallback : fallback.tier_fallback,
+      medium_token_threshold: Number(parsed.medium_token_threshold || fallback.medium_token_threshold),
+      long_token_threshold: Number(parsed.long_token_threshold || fallback.long_token_threshold),
+      tier_groups: parseTierGroups(parsed.tier_groups),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function defaultAntigravitySettings(enabled = true): AntigravitySettings {
+  return {
+    thinking_routing: enabled,
+    tier_fallback: enabled,
+    medium_token_threshold: 8000,
+    long_token_threshold: 32000,
+    tier_groups: [
+      { public_model: "gemini-3.5-flash", aliases: ["gemini-3-flash"], high: "gemini-3-flash-agent", medium: "gemini-3.5-flash-medium", low: "gemini-3.5-flash-low", fallback_order: ["medium", "low", "high"] },
+      { public_model: "gemini-3.1-pro", aliases: ["gemini-3-pro"], high: "gemini-pro-agent", medium: "", low: "gemini-3.1-pro-low", fallback_order: ["low", "high"] },
+    ],
+  };
+}
+
+function parseTierGroups(value: unknown): AntigravityTierGroup[] {
+  if (!Array.isArray(value)) return defaultAntigravitySettings(false).tier_groups;
+  return value.map((item) => {
+    const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    return {
+      public_model: stringValue(record.public_model),
+      aliases: csvValues(record.aliases),
+      high: stringValue(record.high),
+      medium: stringValue(record.medium),
+      low: stringValue(record.low),
+      fallback_order: csvValues(record.fallback_order),
+    };
+  }).filter((group) => group.public_model.trim());
+}
+
+function csvValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(stringValue).map((item) => item.trim()).filter(Boolean);
+  return stringValue(value).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function antigravitySettingsJSON(settings: AntigravitySettings): string {
+  const medium = Math.max(1, Math.floor(settings.medium_token_threshold || 8000));
+  const long = Math.max(medium + 1, Math.floor(settings.long_token_threshold || 32000));
+  return JSON.stringify({
+    thinking_routing: settings.thinking_routing,
+    tier_fallback: settings.tier_fallback,
+    medium_token_threshold: medium,
+    long_token_threshold: long,
+    tier_groups: settings.tier_groups.map((group) => ({
+      public_model: group.public_model.trim(),
+      aliases: group.aliases.map((item) => item.trim()).filter(Boolean),
+      high: group.high.trim(),
+      medium: group.medium.trim(),
+      low: group.low.trim(),
+      fallback_order: group.fallback_order.map((item) => item.trim()).filter(Boolean),
+    })).filter((group) => group.public_model && (group.high || group.medium || group.low)),
+  });
+}
+
 export function AdminChannelConsole() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -81,6 +168,7 @@ export function AdminChannelConsole() {
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
   const [quotaSyncing, setQuotaSyncing] = useState(false);
   const [createKind, setCreateKind] = useState<"oauth" | "apikey">("oauth");
+  const [antiSettingsDrawerOpen, setAntiSettingsDrawerOpen] = useState(false);
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const selected = channels.find((item) => item.id === selectedID) || null;
@@ -142,6 +230,7 @@ export function AdminChannelConsole() {
     setOauthAuthURL("");
     setOauthCallbackURL("");
     setOauthJSON("");
+    setAntiSettingsDrawerOpen(false);
   }, [selected?.id]);
 
   useEffect(() => {
@@ -249,6 +338,7 @@ export function AdminChannelConsole() {
         api_format: channelDraft.apiFormat,
         force_stream: false,
         affinity_ttl: 0,
+        settings: channelDraft.apiFormat === "antigravity" ? antigravitySettingsJSON(defaultAntigravitySettings(true)) : "{}",
       });
       setChannels((cur) => [created, ...cur]);
       if (selectAfterCreate) {
@@ -518,6 +608,10 @@ export function AdminChannelConsole() {
     }
   }
 
+  function openAntiSettings() {
+    setAntiSettingsDrawerOpen(true);
+  }
+
   return (
     <>
       <section className="ops-summary">
@@ -579,6 +673,9 @@ export function AdminChannelConsole() {
                 </div>
                 <div className="channel-head-actions">
                   <button className="btn" onClick={() => setChannelEditOpen(true)} type="button"><Pencil /> 编辑渠道</button>
+                  {selected.api_format === "antigravity" ? (
+                    <button className="btn" onClick={openAntiSettings} type="button"><SlidersHorizontal /> 思考/回退</button>
+                  ) : null}
                   <button className="btn" disabled={modelSyncing || selectedAccounts.length === 0 || !supportsModelSync(selected)} onClick={() => syncChannelModels(selected)} title={supportsModelSync(selected) ? "从上游同步模型" : "此 OAuth 渠道使用预置模型列表"} type="button"><RefreshCw /> {modelSyncing ? "获取中" : "获取模型"}</button>
                   {isOAuthChannel(selected) ? (
                     <button className="btn" disabled={quotaSyncing || selectedAccounts.length === 0} onClick={async () => {
@@ -810,6 +907,32 @@ export function AdminChannelConsole() {
                   if (value !== (selected.model_aliases || "")) patchChannel(selected.id, { model_aliases: value });
                 }} placeholder={"模型重定向，每行 上游模型=对外模型，例如 gemini-pro-agent=gemini-3.1-pro"} rows={4} />
               </div>
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      {antiSettingsDrawerOpen && selected?.api_format === "antigravity" ? (
+        <div className="drawer-backdrop" onClick={() => setAntiSettingsDrawerOpen(false)} role="presentation">
+          <aside aria-label="思考和回退设置" className="side-drawer anti-settings-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-head">
+              <div>
+                <p className="eyebrow">Antigravity</p>
+                <h2>思考和回退</h2>
+              </div>
+              <button className="btn" onClick={() => setAntiSettingsDrawerOpen(false)} title="关闭" type="button"><X /></button>
+            </div>
+            <div className="drawer-body">
+              <div className="resource-title">
+                <StatusBadge value={selected.enabled ? "enabled" : "disabled"} />
+                <span className="badge">{selected.name}</span>
+              </div>
+              <AntigravitySettingsPanel
+                channel={selected}
+                saving={saving}
+                onChange={(settings) => patchChannel(selected.id, { settings: antigravitySettingsJSON(settings) })}
+                onClear={() => patchChannel(selected.id, { settings: antigravitySettingsJSON(defaultAntigravitySettings(false)) })}
+              />
             </div>
           </aside>
         </div>
@@ -1085,6 +1208,89 @@ function stringValue(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   return "";
+}
+
+function AntigravitySettingsPanel({
+  channel,
+  saving,
+  onChange,
+  onClear,
+}: {
+  channel: Channel;
+  saving: boolean;
+  onChange: (settings: AntigravitySettings) => void;
+  onClear: () => void;
+}) {
+  const settings = antigravitySettings(channel.settings);
+  const update = (next: Partial<AntigravitySettings>) => onChange({ ...settings, ...next });
+  const updateGroup = (index: number, next: Partial<AntigravityTierGroup>) => {
+    const groups = [...settings.tier_groups];
+    groups[index] = { ...groups[index], ...next };
+    update({ tier_groups: groups });
+  };
+  return (
+    <div className="anti-settings-panel">
+      <div className="section-head">
+        <div><h2>思考档位</h2><p className="muted">关闭后按模型原样转发。</p></div>
+        <button className="btn" disabled={saving} onClick={onClear} type="button">取消适配</button>
+      </div>
+      <div className="anti-settings-grid">
+        <label className="toggle-line">
+          <input checked={settings.thinking_routing} onChange={(event) => update({ thinking_routing: event.target.checked })} type="checkbox" />
+          <span>启用自动档位</span>
+        </label>
+        <label className="toggle-line">
+          <input checked={settings.tier_fallback} disabled={!settings.thinking_routing} onChange={(event) => update({ tier_fallback: event.target.checked })} type="checkbox" />
+          <span>额度耗尽回退</span>
+        </label>
+        <div className="field compact-field anti-threshold-field">
+          <label>中档阈值</label>
+          <input className="threshold-slider" min={1000} max={64000} step={1000} type="range" value={settings.medium_token_threshold} onChange={(event) => update({ medium_token_threshold: Number(event.target.value || 8000) })} />
+          <input className="input" min={1} type="number" value={settings.medium_token_threshold} onChange={(event) => update({ medium_token_threshold: Number(event.target.value || 8000) })} />
+        </div>
+        <div className="field compact-field anti-threshold-field">
+          <label>长请求阈值</label>
+          <input className="threshold-slider" min={2000} max={128000} step={1000} type="range" value={settings.long_token_threshold} onChange={(event) => update({ long_token_threshold: Number(event.target.value || 32000) })} />
+          <input className="input" min={2} type="number" value={settings.long_token_threshold} onChange={(event) => update({ long_token_threshold: Number(event.target.value || 32000) })} />
+        </div>
+      </div>
+      <div className="anti-tier-groups">
+        <div className="model-ratio-head">
+          <span>模型组</span>
+          <button className="btn icon-only" onClick={() => update({ tier_groups: [...settings.tier_groups, { public_model: "", aliases: [], high: "", medium: "", low: "", fallback_order: ["medium", "low", "high"] }] })} title="新增模型组" type="button"><Plus /></button>
+        </div>
+        {settings.tier_groups.map((group, index) => (
+          <div className="anti-tier-group" key={`anti-group-${index}`}>
+            <div className="field compact-field">
+              <label>对外模型</label>
+              <input className="input" value={group.public_model} onChange={(event) => updateGroup(index, { public_model: event.target.value })} placeholder="gemini-3.5-flash" />
+            </div>
+            <div className="field compact-field">
+              <label>别名</label>
+              <input className="input" value={group.aliases.join(",")} onChange={(event) => updateGroup(index, { aliases: csvValues(event.target.value) })} placeholder="gemini-3-flash" />
+            </div>
+            <div className="field compact-field">
+              <label>High</label>
+              <input className="input" value={group.high} onChange={(event) => updateGroup(index, { high: event.target.value })} placeholder="gemini-3-flash-agent" />
+            </div>
+            <div className="field compact-field">
+              <label>Medium</label>
+              <input className="input" value={group.medium} onChange={(event) => updateGroup(index, { medium: event.target.value })} placeholder="gemini-3.5-flash-medium" />
+            </div>
+            <div className="field compact-field">
+              <label>Low</label>
+              <input className="input" value={group.low} onChange={(event) => updateGroup(index, { low: event.target.value })} placeholder="gemini-3.5-flash-low" />
+            </div>
+            <div className="field compact-field">
+              <label>回退顺序</label>
+              <input className="input" value={group.fallback_order.join(",")} onChange={(event) => updateGroup(index, { fallback_order: csvValues(event.target.value) })} placeholder="medium,low,high 或具体模型 ID" />
+            </div>
+            <button className="btn danger icon-only anti-group-delete" onClick={() => update({ tier_groups: settings.tier_groups.filter((_, i) => i !== index) })} title="删除模型组" type="button"><Trash2 /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function OAuthPanel({

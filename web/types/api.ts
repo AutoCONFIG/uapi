@@ -144,6 +144,8 @@ export type Plan = {
   name: string;
   type: string;
   policy_id?: string;
+  model_ratios: string;
+  completion_ratio: string;
   duration_days: number;
   enabled: boolean;
 };
@@ -186,6 +188,7 @@ export type Channel = {
   api_format: string;
   force_stream: boolean;
   affinity_ttl: number;
+  settings: string;
   created_at: string;
   updated_at?: string;
 };

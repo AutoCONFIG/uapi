@@ -512,6 +512,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
 func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, clientFormat, upstreamFormat, start, estTokens, claims, false)
+}
+
+func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -537,6 +541,14 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 	statusCode := upResp.StatusCode()
 	if statusCode >= 400 {
 		bodyCopy := readUpstreamErrorBody(upResp)
+		if !authRetried {
+			if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, bodyCopy); ok {
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, clientFormat, upstreamFormat, start, estTokens, claims, true)
+				return
+			}
+		}
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
@@ -664,8 +676,30 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	statusCode := upResp.StatusCode()
 	if statusCode >= 400 {
 		bodyCopy := readUpstreamErrorBody(upResp)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
-		return
+		if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, bodyCopy); ok {
+			upReq.Reset()
+			upResp.Reset()
+			upReq.SetRequestURI(url)
+			upReq.Header.SetMethodBytes([]byte("POST"))
+			upReq.SetBody(body)
+			if err := adaptor.SetupRequestHeader(upReq, refreshedCreds); err != nil {
+				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
+				return
+			}
+			if err := streamingClient.Do(upReq, upResp); err != nil {
+				logger.Warnf("relay.upstream", "force stream request failed after oauth refresh", logger.Err(err))
+				r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
+				return
+			}
+			statusCode = upResp.StatusCode()
+			if statusCode >= 400 {
+				bodyCopy = readUpstreamErrorBody(upResp)
+			}
+		}
+		if statusCode >= 400 {
+			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
+			return
+		}
 	}
 
 	// Buffer entire stream. Read one byte past the limit so oversized upstream
@@ -789,6 +823,35 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	statusCode := upResp.StatusCode()
 	respBody := copyBody(upResp)
 	if statusCode >= 400 {
+		if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, respBody); ok {
+			upReq.Reset()
+			upResp.Reset()
+			upReq.SetRequestURI(url)
+			if ch.Type == "antigravity" {
+				upReq.Header.SetMethod(fasthttp.MethodPost)
+			} else {
+				upReq.Header.SetMethodBytes(ctx.Method())
+			}
+			upReq.SetBody(body)
+			if ch.Type == "antigravity" {
+				upReq.Header.SetContentType("application/json")
+			} else if contentType := ctx.Request.Header.ContentType(); len(contentType) > 0 {
+				upReq.Header.SetBytesV("Content-Type", contentType)
+			}
+			if err := adaptor.SetupRequestHeader(upReq, refreshedCreds); err != nil {
+				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
+				return
+			}
+			if err := bufferedClient.Do(upReq, upResp); err != nil {
+				logger.Warnf("relay.media", "upstream media request failed after oauth refresh", logger.F("request_type", string(requestType)), logger.Err(err))
+				r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
+				return
+			}
+			statusCode = upResp.StatusCode()
+			respBody = copyBody(upResp)
+		}
+	}
+	if statusCode >= 400 {
 		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, provider.FormatOpenAIResponses, claims, tokenPlanID)
 		return
 	}
@@ -870,6 +933,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	respAccount := acc
 	currentCreds := creds
 	currentAccount := acc
+	refreshedAuthAccounts := make(map[uuid.UUID]bool)
 
 	for retry := 0; retry < 3; retry++ {
 		upReq := fasthttp.AcquireRequest()
@@ -911,6 +975,16 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			// Medium/long delay or unknown: switch account
 			shouldRetry = true
 			r.markAutoDisable(currentAccount, "quota_exhausted")
+		} else if currentAccount != nil && !refreshedAuthAccounts[currentAccount.ID] && isOAuthAuthFailure(currentAccount, upResp.StatusCode(), upResp.Body()) {
+			respBody = copyBody(upResp)
+			statusCode = upResp.StatusCode()
+			copyHeaders(upResp, &respHeaders)
+			if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, currentAccount, statusCode, respBody); ok {
+				refreshedAuthAccounts[currentAccount.ID] = true
+				currentCreds = refreshedCreds
+				fasthttp.ReleaseResponse(upResp)
+				continue
+			}
 		} else if upResp.StatusCode() >= 500 {
 			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
 			respBody = copyBody(upResp)
@@ -928,7 +1002,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			}
 			respAccount = currentAccount
 			adaptor.Init(ch, currentAccount)
-			currentCreds, err = r.ensureCredentials(currentAccount)
+			currentCreds, err = r.ensureCredentials(ch, currentAccount)
 			if err != nil {
 				logger.Warnf("relay.credentials", "credential error on retry", logger.F("retry", retry), logger.Err(err))
 				currentAccount = r.retryNext(ch, currentAccount)
@@ -937,7 +1011,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				}
 				respAccount = currentAccount
 				adaptor.Init(ch, currentAccount)
-				currentCreds, err = r.ensureCredentials(currentAccount)
+				currentCreds, err = r.ensureCredentials(ch, currentAccount)
 				if err != nil {
 					logger.Warnf("relay.credentials", "credential error on replacement retry", logger.F("retry", retry), logger.Err(err))
 					break
@@ -974,6 +1048,12 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 					statusCode = retryStatus
 					model = fallbackModel
 				}
+			}
+		}
+		if ch.APIFormat == "antigravity" && antigravityTierFallbackEnabled(ch) && isAntigravityTierExhausted(statusCode, respBody) {
+			if retryBody, retryStatus, ok := r.retryAntigravityTierFallback(ctx, ch, adaptor, url, body, currentCreds, model, &respHeaders); ok {
+				respBody = retryBody
+				statusCode = retryStatus
 			}
 		}
 		if statusCode >= 400 {
@@ -1191,6 +1271,101 @@ func (r *Relayer) retryGeminiCodeFallback(ctx *fasthttp.RequestCtx, adaptor prov
 	return copyBody(upResp), upResp.StatusCode(), true
 }
 
+func (r *Relayer) retryAntigravityTierFallback(ctx *fasthttp.RequestCtx, ch *db.Channel, adaptor provider.Adaptor, url string, body []byte, creds string, model string, headers *fasthttp.ResponseHeader) ([]byte, int, bool) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, 0, false
+	}
+	currentModel, _ := payload["model"].(string)
+	settings := antigravity.DefaultChannelSettings()
+	if ch != nil {
+		settings = antigravity.ParseChannelSettings(ch.Settings)
+	}
+	for _, fallbackModel := range antigravity.FallbackUpstreamModelsWithSettings(model, currentModel, settings) {
+		fallbackBody, ok := antigravityTierFallbackBody(payload, fallbackModel)
+		if !ok {
+			continue
+		}
+		upReq := fasthttp.AcquireRequest()
+		upResp := fasthttp.AcquireResponse()
+		upReq.SetRequestURI(url)
+		upReq.Header.SetMethodBytes(ctx.Method())
+		upReq.SetBody(fallbackBody)
+		if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			return nil, 0, false
+		}
+		err := bufferedClient.Do(upReq, upResp)
+		fasthttp.ReleaseRequest(upReq)
+		if err != nil {
+			fasthttp.ReleaseResponse(upResp)
+			logger.Warnf("relay.antigravity", "tier fallback upstream error", logger.F("fallback_model", fallbackModel), logger.Err(err))
+			continue
+		}
+		statusCode := upResp.StatusCode()
+		respBody := copyBody(upResp)
+		if headers != nil {
+			copyHeaders(upResp, headers)
+		}
+		fasthttp.ReleaseResponse(upResp)
+		if statusCode < 400 {
+			logger.Infof("relay.antigravity", "tier fallback succeeded", logger.F("model", model), logger.F("fallback_model", fallbackModel))
+			return respBody, statusCode, true
+		}
+		if !isAntigravityTierExhausted(statusCode, respBody) {
+			return respBody, statusCode, true
+		}
+	}
+	return nil, 0, false
+}
+
+func antigravityTierFallbackBody(payload map[string]interface{}, fallbackModel string) ([]byte, bool) {
+	clone := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		clone[key] = value
+	}
+	clone["model"] = fallbackModel
+	clone["requestType"] = antigravityRequestTypeForRelay(fallbackModel)
+	if request, ok := clone["request"].(map[string]interface{}); ok {
+		requestClone := make(map[string]interface{}, len(request))
+		for key, value := range request {
+			requestClone[key] = value
+		}
+		requestClone["model"] = fallbackModel
+		clone["request"] = requestClone
+	}
+	updated, err := json.Marshal(clone)
+	return updated, err == nil
+}
+
+func antigravityTierFallbackEnabled(ch *db.Channel) bool {
+	if ch == nil {
+		return false
+	}
+	settings := antigravity.ParseChannelSettings(ch.Settings)
+	return settings.ThinkingRouting && settings.TierFallback
+}
+
+func isAntigravityTierExhausted(statusCode int, body []byte) bool {
+	if statusCode != fasthttp.StatusTooManyRequests && statusCode != fasthttp.StatusServiceUnavailable {
+		return false
+	}
+	text := strings.ToUpper(string(body))
+	return strings.Contains(text, "RESOURCE_EXHAUSTED") ||
+		strings.Contains(text, "RESOURCE HAS BEEN EXHAUSTED") ||
+		strings.Contains(text, "QUOTA") ||
+		strings.Contains(text, "CAPACITY") ||
+		strings.Contains(text, "NO CAPACITY")
+}
+
+func antigravityRequestTypeForRelay(model string) string {
+	if strings.Contains(strings.ToLower(model), "image") {
+		return "image_gen"
+	}
+	return "agent"
+}
+
 func isGeminiQuotaExhausted(statusCode int, body []byte) bool {
 	if statusCode != fasthttp.StatusTooManyRequests {
 		return false
@@ -1286,7 +1461,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 		if adaptor == nil {
 			return nil, nil, nil, "", fmt.Errorf("unsupported channel type")
 		}
-		creds, err := r.ensureCredentials(acc)
+		creds, err := r.ensureCredentials(ch, acc)
 		if err != nil {
 			return nil, nil, nil, "", fmt.Errorf("credential error: %w", err)
 		}
@@ -1310,7 +1485,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 	if adaptor == nil {
 		return nil, nil, nil, "", fmt.Errorf("unsupported channel type")
 	}
-	creds, err := r.ensureCredentials(&acc)
+	creds, err := r.ensureCredentials(&ch, &acc)
 	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("credential error: %w", err)
 	}
@@ -1420,16 +1595,16 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 	if !ok {
 		return nil, nil, "", fmt.Errorf("no available account")
 	}
-	creds, err := r.ensureCredentials(account)
+	creds, err := r.ensureCredentials(&ch, account)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("credential error: %w", err)
 	}
 	return account, adaptor, creds, nil
 }
 
-func (r *Relayer) ensureCredentials(account *db.Account) (string, error) {
+func (r *Relayer) ensureCredentials(ch *db.Channel, account *db.Account) (string, error) {
 	before := oauthAccountSyncSnapshot(account)
-	credential, err := EnsureValidCredentials(account, r.db)
+	credential, err := EnsureValidCredentialsForChannel(account, ch, r.db)
 	if err == nil && r.db == nil && account != nil && oauthAccountChanged(before, account) {
 		r.runtimeMu.Lock()
 		if _, ok := r.runtimeAccounts[account.ID]; ok {
@@ -1439,6 +1614,58 @@ func (r *Relayer) ensureCredentials(account *db.Account) (string, error) {
 		r.pushRuntimeAccountUpdate(account)
 	}
 	return credential, err
+}
+
+func (r *Relayer) refreshOAuthCredentialsAfterAuthFailure(ch *db.Channel, account *db.Account, statusCode int, body []byte) (string, bool) {
+	if !isOAuthAuthFailure(account, statusCode, body) {
+		return "", false
+	}
+	before := oauthAccountSyncSnapshot(account)
+	credential, err := RefreshOAuthCredentialsForChannel(account, ch, r.db)
+	if err != nil {
+		logger.Warnf("relay.oauth", "refresh after upstream auth failure failed", logger.F("account_id", account.ID.String()), logger.F("status", statusCode), logger.Err(err))
+		return "", false
+	}
+	if r.db == nil && oauthAccountChanged(before, account) {
+		r.runtimeMu.Lock()
+		if _, ok := r.runtimeAccounts[account.ID]; ok {
+			r.runtimeAccounts[account.ID] = *account
+		}
+		r.runtimeMu.Unlock()
+		r.pushRuntimeAccountUpdate(account)
+	}
+	if ch != nil {
+		logger.Infof("relay.oauth", "refreshed oauth credentials after upstream auth failure", logger.F("channel_id", ch.ID.String()), logger.F("account_id", account.ID.String()), logger.F("status", statusCode))
+	}
+	return credential, true
+}
+
+func isOAuthAuthFailure(account *db.Account, statusCode int, body []byte) bool {
+	if account == nil || account.CredType != "oauth_token" || strings.TrimSpace(account.RefreshToken) == "" {
+		return false
+	}
+	if statusCode == fasthttp.StatusUnauthorized {
+		return true
+	}
+	if statusCode != fasthttp.StatusForbidden {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"invalid_token",
+		"expired token",
+		"access token expired",
+		"token expired",
+		"unauthenticated",
+		"unauthorized",
+		"invalid authentication",
+		"invalid credentials",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type oauthSyncSnapshot struct {

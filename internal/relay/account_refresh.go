@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,23 +30,26 @@ var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 var refreshGroup singleflight.Group
 
 const (
-	defaultOAuthRefreshSkew = 2 * time.Minute
-	claudeOAuthRefreshSkew  = 5 * time.Minute
-	geminiOAuthRefreshSkew  = 5 * time.Minute
-	codexRefreshInterval    = 8 * 24 * time.Hour
+	minOAuthRefreshSkew  = 5 * time.Minute
+	maxOAuthRefreshSkew  = 15 * time.Minute
+	codexRefreshInterval = 8 * 24 * time.Hour
 )
 
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
 // Returns the decrypted credential string ready for API use.
 func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, error) {
+	return EnsureValidCredentialsForChannel(account, nil, database)
+}
+
+func EnsureValidCredentialsForChannel(account *db.Account, ch *db.Channel, database *gorm.DB) (string, error) {
 	if account.CredType == "api_key" || account.CredType == "" {
 		return crypto.Decrypt(account.Credentials)
 	}
 
-	if shouldRefreshOAuthCredentials(account) {
+	if shouldRefreshOAuthCredentialsForChannel(account, ch) {
 		accountID := account.ID.String()
 		v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
-			return refreshOAuthToken(account, database)
+			return refreshOAuthTokenForChannel(account, ch, database)
 		})
 		if err != nil {
 			return "", err
@@ -53,7 +57,7 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 		return v.(string), nil
 	}
 
-	if oauthProviderKey(account) == "gemini" && isGoogleOAuthTokenURL(account.TokenURL) && shouldSyncGeminiCodeSetup(account.Metadata) {
+	if oauthProviderKeyForChannel(account, ch) == "gemini" && isGoogleOAuthTokenURL(oauthTokenURLForChannel(account, ch)) && shouldSyncGeminiCodeSetup(account.Metadata) {
 		credential, err := crypto.Decrypt(account.Credentials)
 		if err != nil {
 			return "", err
@@ -69,7 +73,7 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 			logger.Warnf("relay.oauth", "sync gemini code setup metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		}
 	}
-	if err := ensureOAuthAccountReady(account); err != nil {
+	if err := ensureOAuthAccountReadyForChannel(account, ch); err != nil {
 		return "", err
 	}
 	return crypto.Decrypt(account.Credentials)
@@ -77,12 +81,16 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 
 // RefreshOAuthCredentials forces an OAuth refresh and metadata sync for scheduler-driven maintenance.
 func RefreshOAuthCredentials(account *db.Account, database *gorm.DB) (string, error) {
+	return RefreshOAuthCredentialsForChannel(account, nil, database)
+}
+
+func RefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel, database *gorm.DB) (string, error) {
 	if account.CredType != "oauth_token" {
 		return "", fmt.Errorf("account %s is not an oauth account", account.ID)
 	}
 	accountID := account.ID.String()
 	v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
-		return refreshOAuthToken(account, database)
+		return refreshOAuthTokenForChannel(account, ch, database)
 	})
 	if err != nil {
 		return "", err
@@ -95,23 +103,33 @@ func IsIdleRefreshProvider(tokenURL string) bool {
 }
 
 func shouldRefreshOAuthCredentials(account *db.Account) bool {
+	return shouldRefreshOAuthCredentialsForChannel(account, nil)
+}
+
+func shouldRefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel) bool {
 	now := time.Now()
-	switch {
-	case isOpenAIOAuthTokenURL(account.TokenURL):
-		if account.TokenExpiry != nil && !account.TokenExpiry.After(now) {
-			return true
-		}
+	if account.TokenExpiry != nil {
+		return !account.TokenExpiry.After(now) || now.Add(oauthRefreshSkew(account)).After(*account.TokenExpiry)
+	}
+	if strings.TrimSpace(account.RefreshToken) != "" {
 		if lastRefresh, ok := oauthLastRefresh(account.Metadata); ok {
 			return lastRefresh.Before(now.Add(-codexRefreshInterval))
 		}
-		return account.TokenExpiry == nil
-	case isAnthropicOAuthTokenURL(account.TokenURL):
-		return account.TokenExpiry != nil && now.Add(claudeOAuthRefreshSkew).After(*account.TokenExpiry)
-	case isGoogleOAuthTokenURL(account.TokenURL):
-		return account.TokenExpiry != nil && now.Add(geminiOAuthRefreshSkew).After(*account.TokenExpiry)
-	default:
-		return account.TokenExpiry != nil && now.Add(defaultOAuthRefreshSkew).After(*account.TokenExpiry)
+		return true
 	}
+	return false
+}
+
+func oauthRefreshSkew(account *db.Account) time.Duration {
+	if account == nil {
+		return minOAuthRefreshSkew
+	}
+	span := int((maxOAuthRefreshSkew - minOAuthRefreshSkew) / time.Minute)
+	if span <= 0 {
+		return minOAuthRefreshSkew
+	}
+	minutes := int(minOAuthRefreshSkew/time.Minute) + int(binary.BigEndian.Uint64(account.ID[:8])%uint64(span+1))
+	return time.Duration(minutes) * time.Minute
 }
 
 func oauthLastRefresh(metadata map[string]interface{}) (time.Time, bool) {
@@ -129,6 +147,10 @@ func oauthLastRefresh(metadata map[string]interface{}) (time.Time, bool) {
 }
 
 func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
+	return refreshOAuthTokenForChannel(account, nil, database)
+}
+
+func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *gorm.DB) (string, error) {
 	refreshToken, err := crypto.Decrypt(account.RefreshToken)
 	if err != nil {
 		return "", fmt.Errorf("decrypt refresh token: %w", err)
@@ -137,8 +159,13 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		return "", fmt.Errorf("oauth account %s has no refresh token", account.ID)
 	}
 
-	if oauthProviderKey(account) == "antigravity" {
-		return refreshAntigravityOAuthToken(account, database, refreshToken)
+	providerKey := oauthProviderKeyForChannel(account, ch)
+	tokenURL := oauthTokenURLForChannel(account, ch)
+	if tokenURL == "" {
+		return "", fmt.Errorf("oauth account %s has no token url", account.ID)
+	}
+	if providerKey == "antigravity" {
+		return refreshAntigravityOAuthToken(account, database, refreshToken, tokenURL)
 	}
 
 	data := url.Values{
@@ -155,7 +182,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	}
 
 	var resp *http.Response
-	if isAnthropicOAuthTokenURL(account.TokenURL) {
+	if providerKey == "anthropic" {
 		payload := map[string]interface{}{
 			"grant_type":    "refresh_token",
 			"refresh_token": refreshToken,
@@ -163,13 +190,13 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 			"scope":         anthropic.ClaudeAIRefreshScope,
 		}
 		body, _ := json.Marshal(payload)
-		req, reqErr := http.NewRequest(http.MethodPost, account.TokenURL, bytes.NewReader(body))
+		req, reqErr := http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(body))
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthHTTPClient.Do(req)
-	} else if isOpenAIOAuthTokenURL(account.TokenURL) {
+	} else if providerKey == "openai" {
 		clientSecret := ""
 		if account.ClientSecret != "" {
 			var secretErr error
@@ -178,13 +205,13 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 				return "", fmt.Errorf("decrypt client secret: %w", secretErr)
 			}
 		}
-		req, reqErr := openai.NewRefreshTokenRequest(account.TokenURL, refreshToken, account.ClientID, clientSecret)
+		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, account.ClientID, clientSecret)
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
 		resp, err = oauthHTTPClient.Do(req)
 	} else {
-		resp, err = oauthHTTPClient.PostForm(account.TokenURL, data)
+		resp, err = oauthHTTPClient.PostForm(tokenURL, data)
 	}
 	if err != nil {
 		return "", fmt.Errorf("refresh request failed: %w", err)
@@ -216,7 +243,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		return "", fmt.Errorf("refresh response missing access token")
 	}
 
-	if result.IDToken != "" && strings.Contains(account.TokenURL, "auth.openai.com") {
+	if result.IDToken != "" && providerKey == "openai" {
 		if metadata, err := openai.ParseIDTokenMetadata(result.IDToken); err == nil {
 			if account.Metadata == nil {
 				account.Metadata = map[string]interface{}{}
@@ -254,7 +281,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 			account.RefreshToken = newRefresh
 		}
 	}
-	if isAnthropicOAuthTokenURL(account.TokenURL) {
+	if providerKey == "anthropic" {
 		scopes := strings.Fields(result.Scope)
 		if len(scopes) == 0 {
 			scopes = strings.Fields(anthropic.ClaudeAIRefreshScope)
@@ -265,9 +292,9 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 		} else {
 			logger.Warnf("relay.oauth", "sync anthropic oauth metadata failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		}
-	} else if isOpenAIOAuthTokenURL(account.TokenURL) && account.Metadata != nil {
+	} else if providerKey == "openai" && account.Metadata != nil {
 		updates["metadata"] = account.Metadata
-	} else if oauthProviderKey(account) == "gemini" && isGoogleOAuthTokenURL(account.TokenURL) {
+	} else if providerKey == "gemini" {
 		projectID := geminiProjectID(account.Metadata)
 		if metadata, err := gemini.FetchCodeAssistMetadata(result.AccessToken, projectID); err == nil {
 			updates["metadata"] = metadata
@@ -285,7 +312,7 @@ func refreshOAuthToken(account *db.Account, database *gorm.DB) (string, error) {
 	return result.AccessToken, nil
 }
 
-func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refreshToken string) (string, error) {
+func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refreshToken, tokenURL string) (string, error) {
 	clientSecret := ""
 	if account.ClientSecret != "" {
 		decrypted, err := crypto.Decrypt(account.ClientSecret)
@@ -294,7 +321,7 @@ func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refres
 		}
 		clientSecret = decrypted
 	}
-	result, err := antigravity.RefreshToken(account.TokenURL, refreshToken, account.ClientID, clientSecret)
+	result, err := antigravity.RefreshToken(tokenURL, refreshToken, account.ClientID, clientSecret)
 	if err != nil {
 		return "", err
 	}
@@ -350,20 +377,66 @@ func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refres
 }
 
 func oauthProviderKey(account *db.Account) string {
+	return oauthProviderKeyForChannel(account, nil)
+}
+
+func oauthProviderKeyForChannel(account *db.Account, ch *db.Channel) string {
+	if ch != nil {
+		switch strings.ToLower(strings.TrimSpace(ch.APIFormat)) {
+		case "codex":
+			return "openai"
+		case "claude_code":
+			return "anthropic"
+		case "gemini_code":
+			return "gemini"
+		case "antigravity":
+			return "antigravity"
+		}
+	}
 	if account != nil && account.Metadata != nil {
 		if value, ok := account.Metadata["oauth_provider"].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.ToLower(strings.TrimSpace(value))
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value == "codex" {
+				return "openai"
+			}
+			if value == "claude_code" {
+				return "anthropic"
+			}
+			if value == "gemini_code" {
+				return "gemini"
+			}
+			return value
 		}
 	}
 	if account != nil {
-		if isOpenAIOAuthTokenURL(account.TokenURL) {
+		tokenURL := strings.TrimSpace(account.TokenURL)
+		if isOpenAIOAuthTokenURL(tokenURL) {
 			return "openai"
 		}
-		if isAnthropicOAuthTokenURL(account.TokenURL) {
+		if isAnthropicOAuthTokenURL(tokenURL) {
 			return "anthropic"
 		}
-		if isGoogleOAuthTokenURL(account.TokenURL) {
+		if isGoogleOAuthTokenURL(tokenURL) {
 			return "gemini"
+		}
+	}
+	return ""
+}
+
+func oauthTokenURLForChannel(account *db.Account, ch *db.Channel) string {
+	if account != nil && strings.TrimSpace(account.TokenURL) != "" {
+		return strings.TrimSpace(account.TokenURL)
+	}
+	if ch != nil {
+		switch strings.ToLower(strings.TrimSpace(ch.APIFormat)) {
+		case "codex":
+			return openai.DefaultTokenURL
+		case "claude_code":
+			return anthropic.DefaultTokenURL
+		case "gemini_code":
+			return gemini.DefaultTokenURL
+		case "antigravity":
+			return antigravity.DefaultTokenURL
 		}
 	}
 	return ""
@@ -385,7 +458,11 @@ func shouldSyncGeminiCodeSetup(metadata map[string]interface{}) bool {
 }
 
 func ensureOAuthAccountReady(account *db.Account) error {
-	if account == nil || account.CredType != "oauth_token" || oauthProviderKey(account) != "gemini" || !isGoogleOAuthTokenURL(account.TokenURL) || account.Metadata == nil {
+	return ensureOAuthAccountReadyForChannel(account, nil)
+}
+
+func ensureOAuthAccountReadyForChannel(account *db.Account, ch *db.Channel) error {
+	if account == nil || account.CredType != "oauth_token" || oauthProviderKeyForChannel(account, ch) != "gemini" || !isGoogleOAuthTokenURL(oauthTokenURLForChannel(account, ch)) || account.Metadata == nil {
 		return nil
 	}
 	if status, _ := account.Metadata["setup_status"].(string); status == "validation_required" {

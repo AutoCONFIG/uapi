@@ -227,23 +227,16 @@ func antigravityEntryFromMap(fallbackName string, m map[string]interface{}) (mod
 
 func convertAntigravityModels(models []modelEntry, metadata map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
-	seen := map[string]struct{}{}
+	indexByKey := map[string]int{}
 
 	for _, m := range models {
 		name := strings.TrimPrefix(m.Name, "models/")
 		spec, ok := antigravity.CanonicalModel(name)
-		if !ok && hasRelevantAntigravityModels(models) {
-			continue
-		}
 		label := antigravity.DisplayName(name)
 		dedupeKey := name
 		if ok {
 			dedupeKey = spec.ID
 		}
-		if _, exists := seen[dedupeKey]; exists {
-			continue
-		}
-		seen[dedupeKey] = struct{}{}
 		pct := int(m.RemainingFraction * 100)
 		if pct < 0 {
 			pct = 0
@@ -251,6 +244,16 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 		if pct > 100 {
 			pct = 100
 		}
+		if idx, exists := indexByKey[dedupeKey]; exists {
+			if pct < qd.Buckets[idx].RemainingPercent {
+				qd.Buckets[idx].RemainingPercent = pct
+			}
+			if resetUnix(m.ResetTime) > 0 && (resetUnix(qd.Buckets[idx].ResetTime) == 0 || resetUnix(m.ResetTime) < resetUnix(qd.Buckets[idx].ResetTime)) {
+				qd.Buckets[idx].ResetTime = m.ResetTime
+			}
+			continue
+		}
+		indexByKey[dedupeKey] = len(qd.Buckets)
 		qd.Buckets = append(qd.Buckets, QuotaBucket{
 			Label:            label,
 			RemainingPercent: pct,
@@ -269,15 +272,6 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 	}
 
 	return qd
-}
-
-func hasRelevantAntigravityModels(models []modelEntry) bool {
-	for _, m := range models {
-		if _, ok := antigravity.CanonicalModel(m.Name); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func extractCredits(paidTier map[string]interface{}) *CreditsInfo {

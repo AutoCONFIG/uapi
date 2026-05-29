@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"math/big"
 	"sync"
 	"time"
 
@@ -48,18 +50,18 @@ func StartLogCleanup(database *gorm.DB, cfg *config.Config) {
 	}()
 }
 
-// OAuthIdleMaintainer keeps idle Claude Code/Gemini Code OAuth accounts from
-// expiring before their next user request. It is expiry-driven: each account gets one
-// timer derived from token_expiry instead of a periodic table scan. Codex is
-// intentionally excluded because Codex has its own upstream-aligned on-use
-// proactive refresh rule.
+// OAuthIdleMaintainer keeps idle OAuth accounts fresh with one expiry-derived
+// timer per account. Accounts refresh in a stable jitter window before expiry;
+// if the window was missed or the access token is already expired, refresh runs
+// immediately. Transient failures get a small number of randomly jittered retries.
 type OAuthIdleMaintainer struct {
 	db          *gorm.DB
 	refreshPool func(channelID string)
 
-	mu      sync.Mutex
-	timers  map[uuid.UUID]*time.Timer
-	stopped bool
+	mu          sync.Mutex
+	timers      map[uuid.UUID]*time.Timer
+	retryCounts map[uuid.UUID]int
+	stopped     bool
 }
 
 // StartOAuthIdleMaintenance restores timers for existing OAuth accounts.
@@ -68,6 +70,7 @@ func StartOAuthIdleMaintenance(database *gorm.DB, refreshPool func(channelID str
 		db:          database,
 		refreshPool: refreshPool,
 		timers:      make(map[uuid.UUID]*time.Timer),
+		retryCounts: make(map[uuid.UUID]int),
 	}
 	m.restore()
 	return m
@@ -94,7 +97,7 @@ func (m *OAuthIdleMaintainer) ScheduleAccount(account *db.Account) {
 	if m == nil || account == nil {
 		return
 	}
-	if account.CredType != "oauth_token" || !account.Enabled || account.DeletedAt != nil || account.TokenExpiry == nil || !relay.IsIdleRefreshProvider(account.TokenURL) {
+	if account.CredType != "oauth_token" || !account.Enabled || account.DeletedAt != nil || account.TokenExpiry == nil {
 		m.CancelAccount(account.ID)
 		return
 	}
@@ -112,6 +115,7 @@ func (m *OAuthIdleMaintainer) ScheduleAccount(account *db.Account) {
 		timer.Stop()
 	}
 	accountID := account.ID
+	delete(m.retryCounts, accountID)
 	m.timers[accountID] = time.AfterFunc(delay, func() {
 		m.runAccount(accountID)
 	})
@@ -142,6 +146,7 @@ func (m *OAuthIdleMaintainer) CancelAccount(accountID uuid.UUID) {
 		timer.Stop()
 		delete(m.timers, accountID)
 	}
+	delete(m.retryCounts, accountID)
 }
 
 // Stop cancels all maintenance timers.
@@ -156,6 +161,9 @@ func (m *OAuthIdleMaintainer) Stop() {
 		timer.Stop()
 		delete(m.timers, accountID)
 	}
+	for accountID := range m.retryCounts {
+		delete(m.retryCounts, accountID)
+	}
 }
 
 func (m *OAuthIdleMaintainer) runAccount(accountID uuid.UUID) {
@@ -167,54 +175,57 @@ func (m *OAuthIdleMaintainer) runAccount(accountID uuid.UUID) {
 	if err := m.db.Where("id = ? AND deleted_at IS NULL", accountID).First(&account).Error; err != nil {
 		return
 	}
-	if account.CredType != "oauth_token" || !account.Enabled || account.TokenExpiry == nil || !relay.IsIdleRefreshProvider(account.TokenURL) {
+	if account.CredType != "oauth_token" || !account.Enabled || account.TokenExpiry == nil {
 		return
 	}
 	if time.Now().Before(idleRefreshAfter(&account)) {
 		m.ScheduleAccount(&account)
 		return
 	}
-	if _, err := relay.RefreshOAuthCredentials(&account, m.db); err != nil {
-		logger.Warnf("admin.scheduler", "oauth idle maintenance failed", logger.F("account_id", account.ID.String()), logger.Err(err))
-		m.ScheduleRetry(account.ID, account.TokenExpiry)
+	var channel db.Channel
+	if err := m.db.Where("id = ? AND deleted_at IS NULL", account.ChannelID).First(&channel).Error; err != nil {
+		logger.Warnf("admin.scheduler", "oauth idle maintenance channel lookup failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		m.ScheduleRetry(account.ID)
 		return
 	}
+	if _, err := relay.RefreshOAuthCredentialsForChannel(&account, &channel, m.db); err != nil {
+		logger.Warnf("admin.scheduler", "oauth idle maintenance failed", logger.F("account_id", account.ID.String()), logger.Err(err))
+		m.ScheduleRetry(account.ID)
+		return
+	}
+	m.resetRetry(account.ID)
 	if m.refreshPool != nil {
 		m.refreshPool(account.ChannelID.String())
 	}
 	m.ScheduleAccountID(account.ID)
 }
 
-// ScheduleRetry retries failed maintenance conservatively without falling back
-// to polling. The next successful refresh replaces this timer with one based on
-// the provider's new expiry.
-func (m *OAuthIdleMaintainer) ScheduleRetry(accountID uuid.UUID, expiry *time.Time) {
-	if expiry == nil || time.Now().After(*expiry) {
-		return
-	}
-	remaining := time.Until(*expiry)
-	if remaining <= time.Minute {
-		return
-	}
-	delay := 15 * time.Minute
-	if remaining < delay*2 {
-		delay = remaining / 2
-	}
-	if delay < time.Minute {
-		delay = time.Minute
-	}
-
+// ScheduleRetry retries failed maintenance at most twice with randomized delay.
+func (m *OAuthIdleMaintainer) ScheduleRetry(accountID uuid.UUID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped {
 		return
 	}
+	attempt := m.retryCounts[accountID]
+	if attempt >= 2 {
+		delete(m.retryCounts, accountID)
+		return
+	}
+	m.retryCounts[accountID] = attempt + 1
 	if timer, ok := m.timers[accountID]; ok {
 		timer.Stop()
 	}
+	delay := randomOAuthRetryDelay(attempt)
 	m.timers[accountID] = time.AfterFunc(delay, func() {
 		m.runAccount(accountID)
 	})
+}
+
+func (m *OAuthIdleMaintainer) resetRetry(accountID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.retryCounts, accountID)
 }
 
 func idleRefreshAfter(account *db.Account) time.Time {
@@ -222,6 +233,22 @@ func idleRefreshAfter(account *db.Account) time.Time {
 	// per account so restarts do not cluster refreshes.
 	jitterMinutes := 5 + int(binary.BigEndian.Uint64(account.ID[:8])%56)
 	return account.TokenExpiry.Add(-time.Duration(jitterMinutes) * time.Minute)
+}
+
+func randomOAuthRetryDelay(attempt int) time.Duration {
+	minSeconds := int64(45)
+	maxSeconds := int64(210)
+	if attempt > 0 {
+		minSeconds = 90
+		maxSeconds = 360
+	}
+	span := maxSeconds - minSeconds + 1
+	n, err := rand.Int(rand.Reader, big.NewInt(span))
+	if err != nil {
+		fallback := minSeconds + int64(time.Now().Nanosecond())%span
+		return time.Duration(fallback) * time.Second
+	}
+	return time.Duration(minSeconds+n.Int64()) * time.Second
 }
 
 // InitPools loads all channels and their accounts into the pool manager at startup.

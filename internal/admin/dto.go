@@ -19,6 +19,7 @@ type CreateChannelRequest struct {
 	APIFormat    string `json:"api_format"`
 	ForceStream  bool   `json:"force_stream"`
 	AffinityTTL  int    `json:"affinity_ttl"`
+	Settings     string `json:"settings"`
 }
 
 // UpdateChannelRequest is the request DTO for updating a channel.
@@ -32,6 +33,7 @@ type UpdateChannelRequest struct {
 	APIFormat    *string `json:"api_format,omitempty"`
 	ForceStream  *bool   `json:"force_stream,omitempty"`
 	AffinityTTL  *int    `json:"affinity_ttl,omitempty"`
+	Settings     *string `json:"settings,omitempty"`
 	Enabled      *bool   `json:"enabled,omitempty"`
 }
 

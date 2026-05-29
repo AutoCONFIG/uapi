@@ -24,6 +24,63 @@ type AntigravityAdaptor struct {
 	isStream bool
 }
 
+type ChannelSettings struct {
+	ThinkingRouting      bool        `json:"thinking_routing"`
+	TierFallback         bool        `json:"tier_fallback"`
+	MediumTokenThreshold int         `json:"medium_token_threshold"`
+	LongTokenThreshold   int         `json:"long_token_threshold"`
+	TierGroups           []TierGroup `json:"tier_groups"`
+}
+
+type TierGroup struct {
+	PublicModel   string   `json:"public_model"`
+	Aliases       []string `json:"aliases,omitempty"`
+	High          string   `json:"high,omitempty"`
+	Medium        string   `json:"medium,omitempty"`
+	Low           string   `json:"low,omitempty"`
+	FallbackOrder []string `json:"fallback_order,omitempty"`
+}
+
+func DefaultChannelSettings() ChannelSettings {
+	return ChannelSettings{
+		ThinkingRouting:      false,
+		TierFallback:         false,
+		MediumTokenThreshold: 8000,
+		LongTokenThreshold:   32000,
+		TierGroups:           DefaultTierGroups(),
+	}
+}
+
+func ParseChannelSettings(raw string) ChannelSettings {
+	settings := DefaultChannelSettings()
+	if strings.TrimSpace(raw) == "" {
+		return settings
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return settings
+	}
+	if value, ok := decoded["thinking_routing"].(bool); ok {
+		settings.ThinkingRouting = value
+	}
+	if value, ok := decoded["tier_fallback"].(bool); ok {
+		settings.TierFallback = value
+	}
+	if value, ok := intSetting(decoded["medium_token_threshold"]); ok && value > 0 {
+		settings.MediumTokenThreshold = value
+	}
+	if value, ok := intSetting(decoded["long_token_threshold"]); ok && value > 0 {
+		settings.LongTokenThreshold = value
+	}
+	if groups, ok := tierGroupsSetting(decoded["tier_groups"]); ok {
+		settings.TierGroups = groups
+	}
+	if settings.LongTokenThreshold <= settings.MediumTokenThreshold {
+		settings.LongTokenThreshold = settings.MediumTokenThreshold + 1
+	}
+	return settings
+}
+
 func (a *AntigravityAdaptor) Init(channel *db.Channel, account *db.Account) {
 	a.channel = channel
 	a.account = account
@@ -69,7 +126,12 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	if clientModel == "" {
 		clientModel = a.model
 	}
-	model := UpstreamModelID(clientModel)
+	settings := DefaultChannelSettings()
+	if a.channel != nil {
+		settings = ParseChannelSettings(a.channel.Settings)
+	}
+	effort := antigravityReasoningEffort(req)
+	model := UpstreamModelIDForEffortWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings)
 	reqCopy := *req
 	reqCopy.Model = model
 	gemBody, err := convert.InternalToGemini(provider.FromProviderInternal(&reqCopy))
@@ -104,6 +166,162 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 		}
 	}
 	return json.Marshal(body)
+}
+
+func antigravityReasoningEffort(req *provider.InternalRequest) string {
+	if req == nil {
+		return ""
+	}
+	if effort := stringFromAnyPath(req.Reasoning, "effort"); effort != "" {
+		return effort
+	}
+	if effort := stringFromAnyPath(req.Thinking, "thinkingLevel"); effort != "" {
+		return effort
+	}
+	if effort := stringFromAnyPath(req.Thinking, "effort"); effort != "" {
+		return effort
+	}
+	if req.ExtraParams != nil {
+		if effort := stringFromAnyPath(req.ExtraParams["reasoning_effort"]); effort != "" {
+			return effort
+		}
+		if effort := stringFromAnyPath(req.ExtraParams["reasoning"], "effort"); effort != "" {
+			return effort
+		}
+	}
+	return ""
+}
+
+func stringFromAnyPath(value interface{}, path ...string) string {
+	if value == nil {
+		return ""
+	}
+	if raw, ok := value.(json.RawMessage); ok {
+		var decoded interface{}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return strings.TrimSpace(string(raw))
+		}
+		value = decoded
+	}
+	if len(path) == 0 {
+		if s, ok := value.(string); ok {
+			return strings.ToLower(strings.TrimSpace(s))
+		}
+		return ""
+	}
+	current := value
+	for _, key := range path {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		current = m[key]
+	}
+	if s, ok := current.(string); ok {
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+	return ""
+}
+
+func intSetting(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case json.Number:
+		i, err := strconv.Atoi(v.String())
+		return i, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func tierGroupsSetting(value interface{}) ([]TierGroup, bool) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var groups []TierGroup
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return nil, false
+	}
+	out := make([]TierGroup, 0, len(groups))
+	for _, group := range groups {
+		group.PublicModel = strings.TrimSpace(group.PublicModel)
+		group.High = strings.TrimSpace(group.High)
+		group.Medium = strings.TrimSpace(group.Medium)
+		group.Low = strings.TrimSpace(group.Low)
+		group.Aliases = cleanStrings(group.Aliases)
+		group.FallbackOrder = cleanStrings(group.FallbackOrder)
+		if group.PublicModel == "" || (group.High == "" && group.Medium == "" && group.Low == "") {
+			continue
+		}
+		out = append(out, group)
+	}
+	return out, true
+}
+
+func cleanStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func antigravityRequestSize(req *provider.InternalRequest, settings ChannelSettings) string {
+	tokens := estimateAntigravityTokens(req)
+	switch {
+	case tokens > settings.LongTokenThreshold:
+		return "long"
+	case tokens > settings.MediumTokenThreshold:
+		return "medium"
+	default:
+		return "short"
+	}
+}
+
+func estimateAntigravityTokens(req *provider.InternalRequest) int {
+	if req == nil {
+		return 0
+	}
+	chars := 0
+	if req.Instructions != nil {
+		chars += len(*req.Instructions)
+	}
+	for _, msg := range req.Messages {
+		for _, part := range msg.Content {
+			switch {
+			case part.Text != "":
+				chars += len(part.Text)
+			case part.ImageURL != nil:
+				chars += 4096
+			default:
+				chars += len(part.Type)
+			}
+		}
+		for _, call := range msg.ToolCalls {
+			chars += len(call.Name) + len(call.Arguments)
+		}
+		if msg.ToolResult != nil {
+			chars += len(msg.ToolResult.Content)
+		}
+	}
+	tokens := chars / 4
+	if req.MaxTokens != nil {
+		tokens += *req.MaxTokens
+	}
+	return tokens
 }
 
 func (a *AntigravityAdaptor) ParseUsage(respBody []byte) (int, int, error) {

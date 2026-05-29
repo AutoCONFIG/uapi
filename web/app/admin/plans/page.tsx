@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Plus, Save, Trash2 } from "lucide-react";
+import { Copy, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import { formatQuota } from "@/lib/format";
-import type { AccessPolicy, Plan, RedeemCode } from "@/types/api";
+import type { AccessPolicy, Channel, Plan, RedeemCode } from "@/types/api";
 
 type PolicyDraft = {
   allowed_models: string;
@@ -18,6 +18,11 @@ type PolicyDraft = {
 type PlanDraft = {
   type: string;
   duration_days: string;
+};
+
+type ModelRatioDraft = {
+  model: string;
+  ratio: string;
 };
 
 const defaultMonthlyLimitForType = (type: string) => type === "count_based" ? 1000 : 100000;
@@ -55,6 +60,69 @@ function monthlyQuotaLabel(type: string) {
   return type === "count_based" ? "每月次数" : "每月 Token";
 }
 
+function csvModels(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function parseModelRatios(raw?: string): Record<string, number> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === "number")) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+function modelRatioDraft(plan: Plan, allowedModels: string): ModelRatioDraft[] {
+  const ratios = parseModelRatios(plan.model_ratios);
+  const models = [...new Set([...csvModels(allowedModels), ...Object.keys(ratios)])];
+  return models.map((model) => ({ model, ratio: String(ratios[model] ?? 1) }));
+}
+
+function modelRatiosJSON(rows: ModelRatioDraft[]): string {
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    const model = row.model.trim();
+    if (!model) continue;
+    const ratio = Number(row.ratio || 0);
+    if (!Number.isFinite(ratio) || ratio < 0) throw new Error("模型倍率必须是非负数字");
+    if (!/^\d+$/.test(row.ratio.trim())) throw new Error("模型倍率必须是非负整数");
+    out[model] = ratio;
+  }
+  return JSON.stringify(out);
+}
+
+function publicChannelModels(channel: Channel): string[] {
+  const aliases = parseAliases(channel.model_aliases || "");
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of csvModels(channel.models || "")) {
+    const model = aliases.upstreamToPublic.get(raw) || raw;
+    if (seen.has(model)) continue;
+    seen.add(model);
+    out.push(model);
+  }
+  return out;
+}
+
+function parseAliases(raw: string) {
+  const upstreamToPublic = new Map<string, string>();
+  for (const entry of raw.replace(/\r\n/g, "\n").replace(/;/g, "\n").split(/[\n,]/)) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sep = ["=>", "=", ":"].find((item) => trimmed.includes(item));
+    if (!sep) continue;
+    const [upstream, ...rest] = trimmed.split(sep);
+    const publicName = rest.join(sep).trim();
+    if (upstream.trim() && publicName && !upstreamToPublic.has(upstream.trim())) {
+      upstreamToPublic.set(upstream.trim(), publicName);
+    }
+  }
+  return { upstreamToPublic };
+}
+
 function policyFromDraft(id: string, draft: PolicyDraft, existing?: AccessPolicy): AccessPolicy {
   return {
     id,
@@ -72,6 +140,7 @@ function policyFromDraft(id: string, draft: PolicyDraft, existing?: AccessPolicy
 export default function AdminPlansPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [policies, setPolicies] = useState<AccessPolicy[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -79,6 +148,7 @@ export default function AdminPlansPage() {
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>(emptyPolicyDraft());
   const [editingPolicies, setEditingPolicies] = useState<Record<string, PolicyDraft>>({});
   const [editingPlans, setEditingPlans] = useState<Record<string, PlanDraft>>({});
+  const [editingModelRatios, setEditingModelRatios] = useState<Record<string, ModelRatioDraft[]>>({});
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [copiedCodeID, setCopiedCodeID] = useState("");
@@ -92,9 +162,11 @@ export default function AdminPlansPage() {
     Promise.all([
       adminApi.plans(token, 1, 100).then((data) => data.items).catch(() => []),
       adminApi.accessPolicies(token, 1, 100).then((data) => data.items).catch(() => []),
-    ]).then(([planItems, policyItems]) => {
+      adminApi.channels(token, 1, 500).then((data) => data.items).catch(() => []),
+    ]).then(([planItems, policyItems, channelItems]) => {
       setPlans(planItems);
       setPolicies(policyItems);
+      setChannels(channelItems);
       setLoading(false);
     });
   }, []);
@@ -108,6 +180,18 @@ export default function AdminPlansPage() {
   }, [redeemStatus]);
 
   const policyByID = useMemo(() => new Map(policies.map((policy) => [policy.id, policy])), [policies]);
+  const visibleModels = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const channel of channels) {
+      for (const model of publicChannelModels(channel)) {
+        if (seen.has(model)) continue;
+        seen.add(model);
+        out.push(model);
+      }
+    }
+    return out;
+  }, [channels]);
 
   function openCreate() {
     setDraft({ name: "", type: "count_based", duration_days: 30, enabled: true });
@@ -153,6 +237,7 @@ export default function AdminPlansPage() {
     const currentPolicy = plan.policy_id ? policyByID.get(plan.policy_id) : undefined;
     const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy);
     const currentMeta = planDraft(plan);
+    const ratioRows = editingModelRatios[plan.id] || modelRatioDraft(plan, currentDraft.allowed_models);
     const durationDays = Number(currentMeta.duration_days || 30);
     if (durationDays < 1) {
       setError("有效天数必须大于 0");
@@ -162,9 +247,11 @@ export default function AdminPlansPage() {
     setError("");
     setNotice("");
     try {
+      const modelRatios = modelRatiosJSON(ratioRows);
       const nextPlan = await adminApi.updatePlan(token, plan.id, {
         type: currentMeta.type,
         duration_days: durationDays,
+        model_ratios: modelRatios,
         ...policyBody(currentDraft),
       });
       if (nextPlan.policy_id) {
@@ -182,6 +269,11 @@ export default function AdminPlansPage() {
         return next;
       });
       setEditingPolicies((cur) => {
+        const next = { ...cur };
+        delete next[plan.id];
+        return next;
+      });
+      setEditingModelRatios((cur) => {
         const next = { ...cur };
         delete next[plan.id];
         return next;
@@ -233,6 +325,19 @@ export default function AdminPlansPage() {
 
   function setRowDraft(planID: string, next: PolicyDraft) {
     setEditingPolicies((cur) => ({ ...cur, [planID]: next }));
+  }
+
+  function ratioDraftRows(plan: Plan, allowedModels: string): ModelRatioDraft[] {
+    return editingModelRatios[plan.id] || modelRatioDraft(plan, allowedModels);
+  }
+
+  function setRatioDraftRows(planID: string, next: ModelRatioDraft[]) {
+    setEditingModelRatios((cur) => ({ ...cur, [planID]: next }));
+  }
+
+  function autofillRatioRows(plan: Plan) {
+    const current = parseModelRatios(plan.model_ratios);
+    setRatioDraftRows(plan.id, visibleModels.map((model) => ({ model, ratio: String(current[model] ?? 1) })));
   }
 
   async function loadRedeemCodes(status = redeemStatus) {
@@ -293,7 +398,12 @@ export default function AdminPlansPage() {
       <PageHead
         title="套餐"
         description="配置套餐额度，并在套餐内维护对应的模型、并发和请求窗口限制。"
-        action={<button className="btn primary" onClick={openCreate}><Plus /> 新建套餐</button>}
+        action={
+          <div className="row-actions">
+            <button className="btn" onClick={() => document.getElementById("model-ratio-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">模型倍率</button>
+            <button className="btn primary" onClick={openCreate}><Plus /> 新建套餐</button>
+          </div>
+        }
       />
       {creating ? (
         <div className="modal-backdrop" role="presentation">
@@ -438,6 +548,57 @@ export default function AdminPlansPage() {
             );
           })}
           {plans.length === 0 && !loading ? <EmptyPlanMobile /> : null}
+        </div>
+      </section>
+
+      <section className="card card-pad model-ratio-panel" id="model-ratio-panel" style={{ marginTop: 16 }}>
+        <div className="section-head">
+          <div>
+            <h2>模型倍率</h2>
+            <p className="muted">按套餐调整模型消耗倍率，倍率为非负整数。</p>
+          </div>
+        </div>
+        <div className="model-ratio-plan-grid">
+          {plans.map((plan) => {
+            const draftRow = rowDraft(plan);
+            const ratioRows = ratioDraftRows(plan, draftRow.allowed_models);
+            return (
+              <article className="model-ratio-plan" key={`ratio-${plan.id}`}>
+                <div className="model-ratio-plan-head">
+                  <div>
+                    <strong>{plan.name}</strong>
+                    <span className="muted">{planDraft(plan).type === "count_based" ? "按次数" : "按 Token"}</span>
+                  </div>
+                  <div className="row-actions">
+                    <button className="btn" disabled={visibleModels.length === 0} onClick={() => autofillRatioRows(plan)} type="button"><RefreshCw /> 自动填入</button>
+                    <button className="btn icon-only" onClick={() => setRatioDraftRows(plan.id, [...ratioRows, { model: "", ratio: "1" }])} title="新增模型倍率" type="button"><Plus /></button>
+                  </div>
+                </div>
+                <div className="model-ratio-editor standalone">
+                  {ratioRows.map((row, index) => (
+                    <div className="model-ratio-row" key={`${plan.id}-ratio-${index}`}>
+                      <input className="input" value={row.model} onChange={(e) => {
+                        const next = [...ratioRows];
+                        next[index] = { ...row, model: e.target.value };
+                        setRatioDraftRows(plan.id, next);
+                      }} placeholder="模型 ID" />
+                      <input className="input model-ratio-input" min={0} step={1} type="number" value={row.ratio} onChange={(e) => {
+                        const next = [...ratioRows];
+                        next[index] = { ...row, ratio: e.target.value };
+                        setRatioDraftRows(plan.id, next);
+                      }} />
+                      <button className="btn danger icon-only" onClick={() => setRatioDraftRows(plan.id, ratioRows.filter((_, i) => i !== index))} title="删除倍率" type="button"><Trash2 /></button>
+                    </div>
+                  ))}
+                  {ratioRows.length === 0 ? <div className="empty-state"><strong>暂无模型倍率</strong></div> : null}
+                </div>
+                <div className="form-actions">
+                  <button className="btn" disabled={saving} onClick={() => savePlan(plan)} type="button"><Save /> 保存倍率</button>
+                </div>
+              </article>
+            );
+          })}
+          {plans.length === 0 && !loading ? <div className="empty-state"><strong>暂无套餐</strong></div> : null}
         </div>
       </section>
 

@@ -13,6 +13,7 @@ type Channel struct {
 	APIFormat    string `gorm:"size:20;default:'standard'" json:"api_format"`
 	ForceStream  bool   `gorm:"default:false" json:"force_stream"`
 	AffinityTTL  int    `gorm:"default:0" json:"affinity_ttl"`
+	Settings     string `gorm:"type:jsonb" json:"settings"`
 }
 
 func (Channel) TableName() string { return "channels" }

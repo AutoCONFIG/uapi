@@ -60,7 +60,7 @@ func (h *WSHandler) httpBridgeFallback(
 	}
 
 	// Refresh credentials (handles OAuth token expiry)
-	creds, err = EnsureValidCredentials(acc, h.db)
+	creds, err = EnsureValidCredentialsForChannel(acc, ch, h.db)
 	if err != nil {
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)

@@ -3,6 +3,8 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -66,6 +68,11 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
 		return
 	}
+	modelRatios, msg := normalizeModelRatios(req.ModelRatios)
+	if msg != "" {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+		return
+	}
 	var p db.Plan
 	var policy db.AccessPolicy
 	if err := h.db.Transaction(func(tx *gorm.DB) error {
@@ -86,7 +93,7 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 			Name:            req.Name,
 			Type:            req.Type,
 			PolicyID:        &policyID,
-			ModelRatios:     req.ModelRatios,
+			ModelRatios:     modelRatios,
 			CompletionRatio: req.CompletionRatio,
 			Enabled:         req.Enabled,
 			DurationDays:    durationDays,
@@ -131,7 +138,12 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		updates["type"] = *req.Type
 	}
 	if req.ModelRatios != nil {
-		updates["model_ratios"] = *req.ModelRatios
+		modelRatios, msg := normalizeModelRatios(*req.ModelRatios)
+		if msg != "" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+			return
+		}
+		updates["model_ratios"] = modelRatios
 	}
 	if req.CompletionRatio != nil {
 		updates["completion_ratio"] = *req.CompletionRatio
@@ -270,6 +282,55 @@ func valueOrZero(value *int) int {
 		return 0
 	}
 	return *value
+}
+
+func normalizeModelRatios(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}", ""
+	}
+	var ratios map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &ratios); err != nil {
+		return "", "model_ratios must be a JSON object"
+	}
+	if ratios == nil {
+		return "{}", ""
+	}
+	out := make(map[string]int, len(ratios))
+	for model, value := range ratios {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return "", "model ratio model name cannot be empty"
+		}
+		ratio, ok := numericRatio(value)
+		if !ok || ratio < 0 {
+			return "", "model ratio must be a non-negative number"
+		}
+		rounded := math.Round(ratio)
+		if math.Abs(ratio-rounded) > 0.000001 {
+			return "", "model ratio must be a non-negative integer"
+		}
+		out[model] = int(rounded)
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Sprintf("encode model ratios: %v", err)
+	}
+	return string(encoded), ""
+}
+
+func numericRatio(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (h *Handler) deletePlan(ctx *fasthttp.RequestCtx) {

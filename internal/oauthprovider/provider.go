@@ -193,7 +193,7 @@ func init() {
 		spec: Spec{
 			Key: "gemini", Label: "Gemini Code", ChannelType: "gemini", APIFormat: "gemini_code",
 			DefaultEndpoint: "https://generativelanguage.googleapis.com",
-			Models:          "auto,pro,flash,flash-lite,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview",
+			Models:          "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview",
 			Quota:           true,
 		},
 		channelAllowed: func(ch db.Channel) bool { return strings.EqualFold(ch.Type, "gemini") && ch.APIFormat == "gemini_code" },
