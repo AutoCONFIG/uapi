@@ -229,26 +229,20 @@ func (m *OAuthIdleMaintainer) resetRetry(accountID uuid.UUID) {
 }
 
 func idleRefreshAfter(account *db.Account) time.Time {
-	// Spread accounts across the final hour before expiry. The jitter is stable
+	// Spread accounts across the final fifteen minutes before expiry. The jitter is stable
 	// per account so restarts do not cluster refreshes.
-	jitterMinutes := 5 + int(binary.BigEndian.Uint64(account.ID[:8])%56)
+	jitterMinutes := int(binary.BigEndian.Uint64(account.ID[:8]) % 16)
 	return account.TokenExpiry.Add(-time.Duration(jitterMinutes) * time.Minute)
 }
 
 func randomOAuthRetryDelay(attempt int) time.Duration {
-	minSeconds := int64(45)
-	maxSeconds := int64(210)
-	if attempt > 0 {
-		minSeconds = 90
-		maxSeconds = 360
-	}
-	span := maxSeconds - minSeconds + 1
-	n, err := rand.Int(rand.Reader, big.NewInt(span))
+	const maxSeconds = int64(15 * 60)
+	n, err := rand.Int(rand.Reader, big.NewInt(maxSeconds+1))
 	if err != nil {
-		fallback := minSeconds + int64(time.Now().Nanosecond())%span
+		fallback := int64(time.Now().Nanosecond()) % (maxSeconds + 1)
 		return time.Duration(fallback) * time.Second
 	}
-	return time.Duration(minSeconds+n.Int64()) * time.Second
+	return time.Duration(n.Int64()) * time.Second
 }
 
 // InitPools loads all channels and their accounts into the pool manager at startup.

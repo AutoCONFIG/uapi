@@ -2,7 +2,6 @@ package relay
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,9 +29,11 @@ var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 var refreshGroup singleflight.Group
 
 const (
-	minOAuthRefreshSkew  = 5 * time.Minute
-	maxOAuthRefreshSkew  = 15 * time.Minute
-	codexRefreshInterval = 8 * 24 * time.Hour
+	codexAccessTokenRefreshWindow     = 5 * time.Minute
+	googleAccessTokenRefreshWindow    = 5 * time.Minute
+	antigravityAccessTokenRefreshSkew = 5 * time.Minute
+	anthropicAccessTokenRefreshWindow = 5 * time.Minute
+	codexRefreshInterval              = 8 * 24 * time.Hour
 )
 
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
@@ -109,7 +110,7 @@ func shouldRefreshOAuthCredentials(account *db.Account) bool {
 func shouldRefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel) bool {
 	now := time.Now()
 	if account.TokenExpiry != nil {
-		return !account.TokenExpiry.After(now) || now.Add(oauthRefreshSkew(account)).After(*account.TokenExpiry)
+		return !account.TokenExpiry.After(now) || now.Add(oauthAccessTokenRefreshWindow(account, ch)).After(*account.TokenExpiry)
 	}
 	if strings.TrimSpace(account.RefreshToken) != "" {
 		if lastRefresh, ok := oauthLastRefresh(account.Metadata); ok {
@@ -120,16 +121,19 @@ func shouldRefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel
 	return false
 }
 
-func oauthRefreshSkew(account *db.Account) time.Duration {
-	if account == nil {
-		return minOAuthRefreshSkew
+func oauthAccessTokenRefreshWindow(account *db.Account, ch *db.Channel) time.Duration {
+	switch oauthProviderKeyForChannel(account, ch) {
+	case "openai":
+		return codexAccessTokenRefreshWindow
+	case "gemini":
+		return googleAccessTokenRefreshWindow
+	case "antigravity":
+		return antigravityAccessTokenRefreshSkew
+	case "anthropic":
+		return anthropicAccessTokenRefreshWindow
+	default:
+		return 0
 	}
-	span := int((maxOAuthRefreshSkew - minOAuthRefreshSkew) / time.Minute)
-	if span <= 0 {
-		return minOAuthRefreshSkew
-	}
-	minutes := int(minOAuthRefreshSkew/time.Minute) + int(binary.BigEndian.Uint64(account.ID[:8])%uint64(span+1))
-	return time.Duration(minutes) * time.Minute
 }
 
 func oauthLastRefresh(metadata map[string]interface{}) (time.Time, bool) {

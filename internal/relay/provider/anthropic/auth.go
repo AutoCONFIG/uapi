@@ -28,8 +28,9 @@ const (
 	DefaultScope         = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	ClaudeAIRefreshScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	OAuthBetaHeader      = "oauth-2025-04-20"
-	ClaudeCLIUserAgent   = "claude-cli/unknown (external, cli)"
-	ClaudeCodeUserAgent  = "claude-code/unknown"
+	ClaudeCodeVersion    = "2.1.156"
+	ClaudeCLIUserAgent   = "claude-cli/" + ClaudeCodeVersion + " (external, cli)"
+	ClaudeCodeUserAgent  = "claude-code/" + ClaudeCodeVersion
 	RolesURL             = DefaultAPIBaseURL + "/api/oauth/claude_cli/roles"
 	ProfileURL           = DefaultAPIBaseURL + "/api/oauth/profile"
 	FirstTokenDateURL    = DefaultAPIBaseURL + "/api/organization/claude_code_first_token_date"

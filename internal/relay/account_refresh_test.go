@@ -10,19 +10,36 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestShouldRefreshOAuthCredentialsUsesStableJitterWindow(t *testing.T) {
+func TestShouldRefreshOAuthCredentialsUsesProviderRefreshWindow(t *testing.T) {
 	account := &db.Account{Base: db.Base{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001")}, CredType: "oauth_token"}
-	expirySoon := time.Now().Add(oauthRefreshSkew(account) - time.Second)
-	account.TokenExpiry = &expirySoon
 
-	if !shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: "gemini_code"}) {
-		t.Fatalf("account inside stable refresh window should refresh")
+	tests := []struct {
+		name      string
+		format    string
+		inside    time.Duration
+		outside   time.Duration
+		wantEarly bool
+	}{
+		{name: "codex", format: "codex", inside: codexAccessTokenRefreshWindow - time.Second, outside: codexAccessTokenRefreshWindow + time.Minute, wantEarly: true},
+		{name: "gemini", format: "gemini_code", inside: googleAccessTokenRefreshWindow - time.Second, outside: googleAccessTokenRefreshWindow + time.Minute, wantEarly: true},
+		{name: "antigravity", format: "antigravity", inside: antigravityAccessTokenRefreshSkew - time.Second, outside: antigravityAccessTokenRefreshSkew + time.Minute, wantEarly: true},
+		{name: "claude", format: "claude_code", inside: anthropicAccessTokenRefreshWindow - time.Second, outside: anthropicAccessTokenRefreshWindow + time.Minute, wantEarly: true},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expirySoon := time.Now().Add(tt.inside)
+			account.TokenExpiry = &expirySoon
+			gotSoon := shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: tt.format})
+			if gotSoon != tt.wantEarly {
+				t.Fatalf("inside refresh window = %v, want %v", gotSoon, tt.wantEarly)
+			}
 
-	expiryLater := time.Now().Add(oauthRefreshSkew(account) + time.Minute)
-	account.TokenExpiry = &expiryLater
-	if shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: "gemini_code"}) {
-		t.Fatalf("account outside stable refresh window should not refresh")
+			expiryLater := time.Now().Add(tt.outside)
+			account.TokenExpiry = &expiryLater
+			if shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: tt.format}) {
+				t.Fatalf("account outside request refresh window should not refresh")
+			}
+		})
 	}
 }
 

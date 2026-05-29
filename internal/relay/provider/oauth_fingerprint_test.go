@@ -73,10 +73,10 @@ func TestClaudeCodeVerifierAndUserAgentFingerprint(t *testing.T) {
 	if len(verifier) != 43 {
 		t.Fatalf("Claude verifier should be 32 random bytes base64url length 43, got %d", len(verifier))
 	}
-	if anthropic.ClaudeCLIUserAgent != "claude-cli/unknown (external, cli)" {
+	if anthropic.ClaudeCLIUserAgent != "claude-cli/2.1.156 (external, cli)" {
 		t.Fatalf("unexpected Claude CLI UA: %s", anthropic.ClaudeCLIUserAgent)
 	}
-	if anthropic.ClaudeCodeUserAgent != "claude-code/unknown" {
+	if anthropic.ClaudeCodeUserAgent != "claude-code/2.1.156" {
 		t.Fatalf("unexpected Claude Code UA: %s", anthropic.ClaudeCodeUserAgent)
 	}
 	if anthropic.ClaudeCodeSessionID == "" {

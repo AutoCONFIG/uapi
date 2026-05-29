@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
 )
 
@@ -37,5 +38,28 @@ func TestOAuthIdleMaintainerScheduleRetryStopsAfterTwoAttempts(t *testing.T) {
 	m.ScheduleRetry(accountID)
 	if _, ok := m.retryCounts[accountID]; ok {
 		t.Fatalf("retry count should be cleared after max retries")
+	}
+}
+
+func TestIdleRefreshAfterUsesFinalFifteenMinuteWindow(t *testing.T) {
+	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
+	for i := 0; i < 64; i++ {
+		account := &db.Account{Base: db.Base{ID: uuid.New()}, TokenExpiry: &expiry}
+		refreshAt := idleRefreshAfter(account)
+		if refreshAt.After(expiry) {
+			t.Fatalf("refresh time %s is after expiry %s", refreshAt, expiry)
+		}
+		if refreshAt.Before(expiry.Add(-15 * time.Minute)) {
+			t.Fatalf("refresh time %s is before final 15 minute window ending at %s", refreshAt, expiry)
+		}
+	}
+}
+
+func TestRandomOAuthRetryDelayUsesFifteenMinuteWindow(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		delay := randomOAuthRetryDelay(i % 2)
+		if delay < 0 || delay > 15*time.Minute {
+			t.Fatalf("retry delay %s outside 0-15 minute window", delay)
+		}
 	}
 }

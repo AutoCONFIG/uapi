@@ -711,7 +711,7 @@ export function AdminChannelConsole() {
                           const tier = stringValue(q?.tier) || "";
                           if (!tier) return null;
                           const t = tier.toUpperCase();
-                          const tierLabel = t.includes("ULTRA") || t.includes("MAX") ? "U" : t.includes("PRO") ? "P" : t.includes("TEAM") ? "T" : t.includes("ENTERPRISE") ? "E" : "F";
+                          const tierLabel = t.includes("ULTRA") || t.includes("MAX") ? "Ultra" : t.includes("PRO") ? "Pro" : t.includes("TEAM") ? "Team" : t.includes("ENTERPRISE") ? "Enterprise" : "Free";
                           const tierClass = t.includes("ULTRA") || t.includes("MAX") ? "tier-ultra" : t.includes("PRO") || t.includes("TEAM") || t.includes("ENTERPRISE") ? "tier-pro" : "tier-free";
                           return <span className={`badge ${tierClass}`}>{tierLabel}</span>;
                         })()}
