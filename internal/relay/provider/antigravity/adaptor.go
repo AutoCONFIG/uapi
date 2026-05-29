@@ -131,7 +131,7 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 		settings = ParseChannelSettings(a.channel.Settings)
 	}
 	effort := antigravityReasoningEffort(req)
-	model := UpstreamModelIDForEffortWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings)
+	model := ResolveRequestModelWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings, channelModels(a.channel))
 	reqCopy := *req
 	reqCopy.Model = model
 	gemBody, err := convert.InternalToGemini(provider.FromProviderInternal(&reqCopy))
@@ -166,6 +166,13 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 		}
 	}
 	return json.Marshal(body)
+}
+
+func channelModels(ch *db.Channel) []string {
+	if ch == nil {
+		return nil
+	}
+	return strings.Split(ch.Models, ",")
 }
 
 func antigravityReasoningEffort(req *provider.InternalRequest) string {

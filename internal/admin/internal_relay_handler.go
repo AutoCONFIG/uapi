@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay"
 	"github.com/google/uuid"
@@ -45,6 +46,9 @@ type UsageEventRequest struct {
 	ChannelID        uuid.UUID `json:"channel_id"`
 	AccountID        uuid.UUID `json:"account_id"`
 	Model            string    `json:"model"`
+	RoutedModel      string    `json:"routed_model"`
+	ClientFormat     string    `json:"client_format"`
+	UpstreamFormat   string    `json:"upstream_format"`
 	IsStream         bool      `json:"is_stream"`
 	PromptTokens     int       `json:"prompt_tokens"`
 	CompletionTokens int       `json:"completion_tokens"`
@@ -164,7 +168,7 @@ func (h *Handler) UsageEvent(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.RequestID == "" || req.TokenID == uuid.Nil || req.ChannelID == uuid.Nil || req.AccountID == uuid.Nil || req.Model == "" {
+	if req.RequestID == "" || req.TokenID == uuid.Nil || req.ChannelID == uuid.Nil || req.AccountID == uuid.Nil || req.Model == "" || req.RoutedModel == "" {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "missing required fields")
 		return
 	}
@@ -216,7 +220,7 @@ func (h *Handler) RelayAccountUpdate(ctx *fasthttp.RequestCtx) {
 
 func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 	return h.db.Transaction(func(tx *gorm.DB) error {
-		event := db.UsageEvent{ID: uuid.New(), RequestID: req.RequestID, TokenID: req.TokenID, TokenPlanID: req.TokenPlanID, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, IsStream: req.IsStream, PromptTokens: req.PromptTokens, CompletionTokens: req.CompletionTokens, EstimatedTokens: req.EstimatedTokens, StatusCode: req.StatusCode, LatencyMs: req.LatencyMs, Settled: false, CreatedAt: time.Now()}
+		event := db.UsageEvent{ID: uuid.New(), RequestID: req.RequestID, TokenID: req.TokenID, TokenPlanID: req.TokenPlanID, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: req.PromptTokens, CompletionTokens: req.CompletionTokens, EstimatedTokens: req.EstimatedTokens, StatusCode: req.StatusCode, LatencyMs: req.LatencyMs, Settled: false, CreatedAt: time.Now()}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&event).Error; err != nil {
 			return err
 		}
@@ -227,7 +231,7 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 		if existing.Settled {
 			return nil
 		}
-		logEntry := db.Log{TokenID: req.TokenID, ClientIP: req.ClientIP, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
+		logEntry := db.Log{TokenID: req.TokenID, ClientIP: req.ClientIP, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
 		if err := tx.Create(&logEntry).Error; err != nil {
 			return err
 		}
@@ -235,7 +239,8 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 		if planID == uuid.Nil {
 			planID = existing.TokenPlanID
 		}
-		if err := relay.RefundAndSettleTxForPlan(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, 0, 0, req.Model); err != nil {
+		modelRatios := appsettings.Get(h.db, appsettings.ModelRatios, "{}")
+		if err := relay.RefundAndSettleTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, 0, 0, req.Model, modelRatios); err != nil {
 			return err
 		}
 		return tx.Model(&existing).Updates(map[string]interface{}{
@@ -247,6 +252,9 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 			"latency_ms":        req.LatencyMs,
 			"is_stream":         req.IsStream,
 			"model":             req.Model,
+			"routed_model":      req.RoutedModel,
+			"client_format":     req.ClientFormat,
+			"upstream_format":   req.UpstreamFormat,
 			"settled":           true,
 		}).Error
 	})

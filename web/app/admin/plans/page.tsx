@@ -18,6 +18,7 @@ type PolicyDraft = {
 type PlanDraft = {
   type: string;
   duration_days: string;
+  public: boolean;
 };
 
 type ModelRatioDraft = {
@@ -61,7 +62,14 @@ function monthlyQuotaLabel(type: string) {
 }
 
 function csvModels(value: string): string[] {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean).forEach((item) => {
+    if (seen.has(item)) return;
+    seen.add(item);
+    out.push(item);
+  });
+  return out;
 }
 
 function parseModelRatios(raw?: string): Record<string, number> {
@@ -75,9 +83,9 @@ function parseModelRatios(raw?: string): Record<string, number> {
   }
 }
 
-function modelRatioDraft(plan: Plan, allowedModels: string): ModelRatioDraft[] {
-  const ratios = parseModelRatios(plan.model_ratios);
-  const models = [...new Set([...csvModels(allowedModels), ...Object.keys(ratios)])];
+function modelRatioDraft(rawRatios: string, models: string[]): ModelRatioDraft[] {
+  const ratios = parseModelRatios(rawRatios);
+  models = [...new Set([...models, ...Object.keys(ratios)])];
   return models.map((model) => ({ model, ratio: String(ratios[model] ?? 1) }));
 }
 
@@ -94,33 +102,71 @@ function modelRatiosJSON(rows: ModelRatioDraft[]): string {
   return JSON.stringify(out);
 }
 
-function publicChannelModels(channel: Channel): string[] {
+function modelCSV(values: string[]): string {
+  return csvModels(values.join(",")).join(",");
+}
+
+function preserveCursor(input: HTMLInputElement, update: (value: string) => void) {
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  update(input.value);
+  window.requestAnimationFrame(() => {
+    if (document.activeElement === input && start !== null && end !== null) {
+      input.setSelectionRange(start, end);
+    }
+  });
+}
+
+function allPolicyChannelModels(channel: Channel): string[] {
   const aliases = parseAliases(channel.model_aliases || "");
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of csvModels(channel.models || "")) {
-    const model = aliases.upstreamToPublic.get(raw) || raw;
-    if (seen.has(model)) continue;
-    seen.add(model);
-    out.push(model);
-  }
-  return out;
+  return modelCSV([
+    ...csvModels(channel.models || ""),
+    ...aliases.publicToUpstream.keys(),
+    ...(channel.api_format === "antigravity" ? antigravityThinkingModels(channel.settings) : []),
+  ]).split(",").filter(Boolean);
 }
 
 function parseAliases(raw: string) {
-  const upstreamToPublic = new Map<string, string>();
+  const publicToUpstream = new Map<string, string>();
   for (const entry of raw.replace(/\r\n/g, "\n").replace(/;/g, "\n").split(/[\n,]/)) {
     const trimmed = entry.trim();
     if (!trimmed) continue;
     const sep = ["=>", "=", ":"].find((item) => trimmed.includes(item));
     if (!sep) continue;
-    const [upstream, ...rest] = trimmed.split(sep);
-    const publicName = rest.join(sep).trim();
-    if (upstream.trim() && publicName && !upstreamToPublic.has(upstream.trim())) {
-      upstreamToPublic.set(upstream.trim(), publicName);
+    const [publicPart, ...rest] = trimmed.split(sep);
+    const publicID = publicPart.trim();
+    const upstream = rest.join(sep).trim();
+    if (publicID && upstream && !publicToUpstream.has(publicID)) {
+      publicToUpstream.set(publicID, upstream);
     }
   }
-  return { upstreamToPublic };
+  return { publicToUpstream };
+}
+
+type AntigravityPlanTierGroup = { public_model: string; aliases: string[]; high: string; medium: string; low: string };
+
+function antigravityTierGroups(raw?: string): AntigravityPlanTierGroup[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const groups = Array.isArray(parsed?.tier_groups) ? parsed.tier_groups : [];
+    return groups.map((item: unknown): AntigravityPlanTierGroup => {
+      const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+      return {
+        public_model: String(record.public_model || "").trim(),
+        aliases: Array.isArray(record.aliases) ? record.aliases.map((alias) => String(alias).trim()).filter(Boolean) : csvModels(String(record.aliases || "")),
+        high: String(record.high || "").trim(),
+        medium: String(record.medium || "").trim(),
+        low: String(record.low || "").trim(),
+      };
+    }).filter((group: AntigravityPlanTierGroup) => group.public_model);
+  } catch {
+    return [];
+  }
+}
+
+function antigravityThinkingModels(raw?: string): string[] {
+  return antigravityTierGroups(raw).map((group) => group.public_model).filter(Boolean);
 }
 
 function policyFromDraft(id: string, draft: PolicyDraft, existing?: AccessPolicy): AccessPolicy {
@@ -144,11 +190,12 @@ export default function AdminPlansPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState({ name: "", type: "count_based", duration_days: 30, enabled: true });
+  const [draft, setDraft] = useState({ name: "", type: "count_based", duration_days: 30, enabled: true, public: false });
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>(emptyPolicyDraft());
   const [editingPolicies, setEditingPolicies] = useState<Record<string, PolicyDraft>>({});
   const [editingPlans, setEditingPlans] = useState<Record<string, PlanDraft>>({});
-  const [editingModelRatios, setEditingModelRatios] = useState<Record<string, ModelRatioDraft[]>>({});
+  const [modelRatios, setModelRatios] = useState("");
+  const [editingModelRatios, setEditingModelRatios] = useState<ModelRatioDraft[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [copiedCodeID, setCopiedCodeID] = useState("");
@@ -163,10 +210,14 @@ export default function AdminPlansPage() {
       adminApi.plans(token, 1, 100).then((data) => data.items).catch(() => []),
       adminApi.accessPolicies(token, 1, 100).then((data) => data.items).catch(() => []),
       adminApi.channels(token, 1, 500).then((data) => data.items).catch(() => []),
-    ]).then(([planItems, policyItems, channelItems]) => {
+      adminApi.settings(token).catch(() => undefined),
+    ]).then(([planItems, policyItems, channelItems, settings]) => {
       setPlans(planItems);
       setPolicies(policyItems);
       setChannels(channelItems);
+      const ratios = settings?.model_ratios || "{}";
+      setModelRatios(ratios);
+      setEditingModelRatios(modelRatioDraft(ratios, []));
       setLoading(false);
     });
   }, []);
@@ -180,11 +231,11 @@ export default function AdminPlansPage() {
   }, [redeemStatus]);
 
   const policyByID = useMemo(() => new Map(policies.map((policy) => [policy.id, policy])), [policies]);
-  const visibleModels = useMemo(() => {
+  const policyModelIDs = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const channel of channels) {
-      for (const model of publicChannelModels(channel)) {
+      for (const model of allPolicyChannelModels(channel)) {
         if (seen.has(model)) continue;
         seen.add(model);
         out.push(model);
@@ -194,7 +245,7 @@ export default function AdminPlansPage() {
   }, [channels]);
 
   function openCreate() {
-    setDraft({ name: "", type: "count_based", duration_days: 30, enabled: true });
+    setDraft({ name: "", type: "count_based", duration_days: 30, enabled: true, public: false });
     setPolicyDraft({ ...emptyPolicyDraft(), hourly_limit: "1000", weekly_limit: "1000", monthly_limit: "1000" });
     setError("");
     setNotice("");
@@ -213,9 +264,8 @@ export default function AdminPlansPage() {
         name: draft.name.trim(),
         type: draft.type,
         duration_days: draft.duration_days,
-        model_ratios: "{}",
-        completion_ratio: "{}",
         enabled: draft.enabled,
+        public: draft.public,
         ...policyBody(policyDraft),
       });
       if (createdPlan.policy_id) {
@@ -237,7 +287,6 @@ export default function AdminPlansPage() {
     const currentPolicy = plan.policy_id ? policyByID.get(plan.policy_id) : undefined;
     const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy);
     const currentMeta = planDraft(plan);
-    const ratioRows = editingModelRatios[plan.id] || modelRatioDraft(plan, currentDraft.allowed_models);
     const durationDays = Number(currentMeta.duration_days || 30);
     if (durationDays < 1) {
       setError("有效天数必须大于 0");
@@ -247,11 +296,10 @@ export default function AdminPlansPage() {
     setError("");
     setNotice("");
     try {
-      const modelRatios = modelRatiosJSON(ratioRows);
       const nextPlan = await adminApi.updatePlan(token, plan.id, {
         type: currentMeta.type,
         duration_days: durationDays,
-        model_ratios: modelRatios,
+        public: currentMeta.public,
         ...policyBody(currentDraft),
       });
       if (nextPlan.policy_id) {
@@ -273,11 +321,6 @@ export default function AdminPlansPage() {
         delete next[plan.id];
         return next;
       });
-      setEditingModelRatios((cur) => {
-        const next = { ...cur };
-        delete next[plan.id];
-        return next;
-      });
       setNotice(`${plan.name} 已保存。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
@@ -290,6 +333,7 @@ export default function AdminPlansPage() {
     return editingPlans[plan.id] || {
       type: plan.type,
       duration_days: String(plan.duration_days || 30),
+      public: Boolean(plan.public),
     };
   }
 
@@ -327,17 +371,28 @@ export default function AdminPlansPage() {
     setEditingPolicies((cur) => ({ ...cur, [planID]: next }));
   }
 
-  function ratioDraftRows(plan: Plan, allowedModels: string): ModelRatioDraft[] {
-    return editingModelRatios[plan.id] || modelRatioDraft(plan, allowedModels);
+  function autofillRatioRows() {
+    const current = parseModelRatios(modelRatios);
+    setEditingModelRatios(policyModelIDs.map((model) => ({ model, ratio: String(current[model] ?? 1) })));
   }
 
-  function setRatioDraftRows(planID: string, next: ModelRatioDraft[]) {
-    setEditingModelRatios((cur) => ({ ...cur, [planID]: next }));
-  }
-
-  function autofillRatioRows(plan: Plan) {
-    const current = parseModelRatios(plan.model_ratios);
-    setRatioDraftRows(plan.id, visibleModels.map((model) => ({ model, ratio: String(current[model] ?? 1) })));
+  async function saveModelRatios() {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const nextRatios = modelRatiosJSON(editingModelRatios);
+      const updated = await adminApi.updateSettings(token, { model_ratios: nextRatios });
+      setModelRatios(updated.model_ratios || "{}");
+      setEditingModelRatios(modelRatioDraft(updated.model_ratios || "{}", []));
+      setNotice("全局模型倍率已保存。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存倍率失败");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function loadRedeemCodes(status = redeemStatus) {
@@ -436,9 +491,17 @@ export default function AdminPlansPage() {
                 <label>有效天数</label>
                 <input className="input" type="number" min={1} value={draft.duration_days} onChange={(e) => setDraft((d) => ({ ...d, duration_days: Number(e.target.value) }))} />
               </div>
+              <label className="check-row">
+                <input type="checkbox" checked={draft.public} onChange={(e) => setDraft((d) => ({ ...d, public: e.target.checked }))} />
+                用户可见
+              </label>
             </div>
             <div className="plan-create-policy">
-              <div className="field plan-create-models"><label>允许模型</label><input className="input" value={policyDraft.allowed_models} onChange={(e) => setPolicyDraft((d) => ({ ...d, allowed_models: e.target.value }))} placeholder="留空不限制" /></div>
+              <div className="field plan-create-models">
+                <label>允许模型</label>
+                <input className="input" value={policyDraft.allowed_models} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPolicyDraft((d) => ({ ...d, allowed_models: value })))} placeholder="留空不限制" />
+                <button className="btn subtle" disabled={policyModelIDs.length === 0} onClick={() => setPolicyDraft((d) => ({ ...d, allowed_models: modelCSV(policyModelIDs) }))} type="button"><RefreshCw /> 填入全部</button>
+              </div>
               <div className="field plan-create-monthly"><label>{monthlyQuotaLabel(draft.type)}</label><input className="input" min={0} type="number" value={policyDraft.monthly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, monthly_limit: e.target.value }))} /></div>
               <div className="field"><label>最大并发</label><input className="input" min={0} type="number" value={policyDraft.max_concurrency} onChange={(e) => setPolicyDraft((d) => ({ ...d, max_concurrency: e.target.value }))} /></div>
               <div className="field"><label>每 5 小时窗口</label><input className="input" min={0} type="number" value={policyDraft.hourly_limit} onChange={(e) => setPolicyDraft((d) => ({ ...d, hourly_limit: e.target.value }))} /></div>
@@ -454,59 +517,66 @@ export default function AdminPlansPage() {
       ) : null}
       {error && !creating ? <p className="form-error">{error}</p> : null}
       {notice && !creating ? <p className="form-success">{notice}</p> : null}
-      <section className="card">
-        <div className="table-wrap plans-table-wrap">
-          <table>
-            <thead><tr><th>套餐</th><th>有效期</th><th>使用策略</th><th>状态</th><th></th></tr></thead>
-            <tbody>
-              {plans.map((p) => {
-                const draftRow = rowDraft(p);
-                const metaDraft = planDraft(p);
-                return (
-                  <tr key={p.id}>
-                    <td className="plan-name-cell">
-                      <strong>{p.name}</strong>
-                      <div className="field compact-field">
-                        <label>计费类型</label>
-                        <select className="input" value={metaDraft.type} onChange={(e) => {
-                          const type = e.target.value;
-                          setPlanDraft(p.id, { ...metaDraft, type });
-                        }}>
-                          <option value="count_based">按次数</option>
-                          <option value="token_based">按 Token</option>
-                        </select>
+      <section className="card card-pad plan-list-panel">
+        <div className="plan-desktop-list">
+          {plans.map((p) => {
+            const draftRow = rowDraft(p);
+            const metaDraft = planDraft(p);
+            return (
+              <article className="plan-row-card" key={p.id}>
+                <div className="plan-row-head">
+                  <div>
+                    <strong>{p.name}</strong>
+                    <span>{metaDraft.type === "count_based" ? "按次数" : "按 Token"} · {metaDraft.duration_days || 30} 天</span>
+                  </div>
+                  <div className="row-actions">
+                    <button className="btn plan-status-button" onClick={() => togglePlan(p)} type="button">
+                      <StatusBadge value={p.enabled ? "enabled" : "disabled"} />
+                    </button>
+                    <span className={`badge ${metaDraft.public ? "green" : ""}`}>{metaDraft.public ? "公开" : "隐藏"}</span>
+                    <button className="btn danger icon-only" onClick={() => deletePlan(p.id)} title="删除套餐" type="button"><Trash2 /></button>
+                  </div>
+                </div>
+                <div className="plan-row-grid">
+                  <div className="plan-row-basic">
+                    <div className="field compact-field">
+                      <label>计费类型</label>
+                      <select className="input" value={metaDraft.type} onChange={(e) => {
+                        const type = e.target.value;
+                        setPlanDraft(p.id, { ...metaDraft, type });
+                      }}>
+                        <option value="count_based">按次数</option>
+                        <option value="token_based">按 Token</option>
+                      </select>
+                    </div>
+                    <div className="field compact-field">
+                      <label>有效天数</label>
+                      <input className="input" inputMode="numeric" value={metaDraft.duration_days} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, duration_days: value }))} />
+                    </div>
+                    <label className="check-row plan-public-toggle">
+                      <input type="checkbox" checked={metaDraft.public} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, public: e.target.checked })} />
+                      用户可见
+                    </label>
+                  </div>
+                  <div className="plan-row-policy">
+                    <div className="field compact-field plan-policy-models">
+                      <label>允许模型</label>
+                      <div className="plan-model-input-row">
+                        <input className="input" value={draftRow.allowed_models} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, allowed_models: value }))} placeholder="不限制" />
+                        <button className="btn subtle" disabled={policyModelIDs.length === 0} onClick={() => setRowDraft(p.id, { ...draftRow, allowed_models: modelCSV(policyModelIDs) })} type="button"><RefreshCw /> 填入全部</button>
                       </div>
-                    </td>
-                    <td className="plan-duration-cell">
-                      <div className="field compact-field">
-                        <label>天数</label>
-                        <input className="input" min={1} type="number" value={metaDraft.duration_days} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, duration_days: e.target.value })} />
-                      </div>
-                    </td>
-                    <td className="plan-policy-cell">
-                      <div className="plan-policy-editor">
-                        <div className="field compact-field plan-policy-models"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
-                        <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
-                        <div className="field compact-field"><label>5 小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
-                        <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
-                        <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
-                        <button className="btn plan-policy-save" disabled={saving} onClick={() => savePlan(p)} title="保存套餐"><Save /> 保存</button>
-                      </div>
-                    </td>
-                    <td className="plan-status-cell">
-                      <button className="btn plan-table-action" onClick={() => togglePlan(p)} type="button">
-                        <StatusBadge value={p.enabled ? "enabled" : "disabled"} />
-                      </button>
-                    </td>
-                    <td className="plan-delete-cell"><button className="btn danger icon-only plan-table-action" onClick={() => deletePlan(p.id)} title="删除套餐" type="button"><Trash2 /></button></td>
-                  </tr>
-                );
-              })}
-              {plans.length === 0 && !loading && (
-                <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 24 }}>{loading ? "加载中…" : "暂无套餐"}</td></tr>
-              )}
-            </tbody>
-          </table>
+                    </div>
+                    <div className="field compact-field"><label>并发</label><input className="input" inputMode="numeric" value={draftRow.max_concurrency} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, max_concurrency: value }))} /></div>
+                    <div className="field compact-field"><label>5 小时</label><input className="input" inputMode="numeric" value={draftRow.hourly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, hourly_limit: value }))} /></div>
+                    <div className="field compact-field"><label>周</label><input className="input" inputMode="numeric" value={draftRow.weekly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, weekly_limit: value }))} /></div>
+                    <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" inputMode="numeric" value={draftRow.monthly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, monthly_limit: value }))} /></div>
+                    <button className="btn plan-policy-save" disabled={saving} onClick={() => savePlan(p)} title="保存套餐"><Save /> 保存</button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+          {plans.length === 0 && !loading ? <div className="empty-state"><strong>暂无套餐</strong></div> : null}
         </div>
         <div className="plan-mobile-list">
           {plans.map((p) => {
@@ -532,12 +602,20 @@ export default function AdminPlansPage() {
                       <option value="token_based">按 Token</option>
                     </select>
                   </div>
-                  <div className="field compact-field"><label>有效天数</label><input className="input" min={1} type="number" value={metaDraft.duration_days} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, duration_days: e.target.value })} /></div>
-                  <div className="field compact-field"><label>允许模型</label><input className="input" value={draftRow.allowed_models} onChange={(e) => setRowDraft(p.id, { ...draftRow, allowed_models: e.target.value })} placeholder="不限制" /></div>
-                  <div className="field compact-field"><label>并发</label><input className="input" type="number" value={draftRow.max_concurrency} onChange={(e) => setRowDraft(p.id, { ...draftRow, max_concurrency: e.target.value })} /></div>
-                  <div className="field compact-field"><label>5 小时</label><input className="input" type="number" value={draftRow.hourly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, hourly_limit: e.target.value })} /></div>
-                  <div className="field compact-field"><label>周</label><input className="input" type="number" value={draftRow.weekly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, weekly_limit: e.target.value })} /></div>
-                  <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" type="number" value={draftRow.monthly_limit} onChange={(e) => setRowDraft(p.id, { ...draftRow, monthly_limit: e.target.value })} /></div>
+                  <div className="field compact-field"><label>有效天数</label><input className="input" inputMode="numeric" value={metaDraft.duration_days} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, duration_days: value }))} /></div>
+                  <label className="check-row">
+                    <input type="checkbox" checked={metaDraft.public} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, public: e.target.checked })} />
+                    用户可见
+                  </label>
+                  <div className="field compact-field">
+                    <label>允许模型</label>
+                    <input className="input" value={draftRow.allowed_models} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, allowed_models: value }))} placeholder="不限制" />
+                    <button className="btn subtle" disabled={policyModelIDs.length === 0} onClick={() => setRowDraft(p.id, { ...draftRow, allowed_models: modelCSV(policyModelIDs) })} type="button"><RefreshCw /> 填入全部</button>
+                  </div>
+                  <div className="field compact-field"><label>并发</label><input className="input" inputMode="numeric" value={draftRow.max_concurrency} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, max_concurrency: value }))} /></div>
+                  <div className="field compact-field"><label>5 小时</label><input className="input" inputMode="numeric" value={draftRow.hourly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, hourly_limit: value }))} /></div>
+                  <div className="field compact-field"><label>周</label><input className="input" inputMode="numeric" value={draftRow.weekly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, weekly_limit: value }))} /></div>
+                  <div className="field compact-field"><label>{monthlyQuotaLabel(metaDraft.type)}</label><input className="input" inputMode="numeric" value={draftRow.monthly_limit} onChange={(e) => preserveCursor(e.currentTarget, (value) => setRowDraft(p.id, { ...draftRow, monthly_limit: value }))} /></div>
                 </div>
                 <div className="plan-mobile-actions">
                   <button className="btn" disabled={saving} onClick={() => savePlan(p)} type="button"><Save /> 保存</button>
@@ -555,50 +633,39 @@ export default function AdminPlansPage() {
         <div className="section-head">
           <div>
             <h2>模型倍率</h2>
-            <p className="muted">按套餐调整模型消耗倍率，倍率为非负整数。</p>
+            <p className="muted">全局模型消耗倍率，所有套餐共用，倍率为非负整数。</p>
+          </div>
+          <div className="row-actions">
+            <button className="btn" disabled={policyModelIDs.length === 0} onClick={autofillRatioRows} type="button"><RefreshCw /> 自动填入</button>
+            <button className="btn icon-only" onClick={() => setEditingModelRatios((rows) => [...rows, { model: "", ratio: "1" }])} title="新增模型倍率" type="button"><Plus /></button>
           </div>
         </div>
-        <div className="model-ratio-plan-grid">
-          {plans.map((plan) => {
-            const draftRow = rowDraft(plan);
-            const ratioRows = ratioDraftRows(plan, draftRow.allowed_models);
-            return (
-              <article className="model-ratio-plan" key={`ratio-${plan.id}`}>
-                <div className="model-ratio-plan-head">
-                  <div>
-                    <strong>{plan.name}</strong>
-                    <span className="muted">{planDraft(plan).type === "count_based" ? "按次数" : "按 Token"}</span>
-                  </div>
-                  <div className="row-actions">
-                    <button className="btn" disabled={visibleModels.length === 0} onClick={() => autofillRatioRows(plan)} type="button"><RefreshCw /> 自动填入</button>
-                    <button className="btn icon-only" onClick={() => setRatioDraftRows(plan.id, [...ratioRows, { model: "", ratio: "1" }])} title="新增模型倍率" type="button"><Plus /></button>
-                  </div>
-                </div>
-                <div className="model-ratio-editor standalone">
-                  {ratioRows.map((row, index) => (
-                    <div className="model-ratio-row" key={`${plan.id}-ratio-${index}`}>
-                      <input className="input" value={row.model} onChange={(e) => {
-                        const next = [...ratioRows];
-                        next[index] = { ...row, model: e.target.value };
-                        setRatioDraftRows(plan.id, next);
-                      }} placeholder="模型 ID" />
-                      <input className="input model-ratio-input" min={0} step={1} type="number" value={row.ratio} onChange={(e) => {
-                        const next = [...ratioRows];
-                        next[index] = { ...row, ratio: e.target.value };
-                        setRatioDraftRows(plan.id, next);
-                      }} />
-                      <button className="btn danger icon-only" onClick={() => setRatioDraftRows(plan.id, ratioRows.filter((_, i) => i !== index))} title="删除倍率" type="button"><Trash2 /></button>
-                    </div>
-                  ))}
-                  {ratioRows.length === 0 ? <div className="empty-state"><strong>暂无模型倍率</strong></div> : null}
-                </div>
-                <div className="form-actions">
-                  <button className="btn" disabled={saving} onClick={() => savePlan(plan)} type="button"><Save /> 保存倍率</button>
-                </div>
-              </article>
-            );
-          })}
-          {plans.length === 0 && !loading ? <div className="empty-state"><strong>暂无套餐</strong></div> : null}
+        <div className="model-ratio-editor standalone">
+          {editingModelRatios.map((row, index) => (
+            <div className="model-ratio-row" key={`global-ratio-${index}`}>
+              <div className="field compact-field model-ratio-model-field">
+                <label>模型</label>
+                <input className="input" value={row.model} onChange={(e) => preserveCursor(e.currentTarget, (value) => {
+                  const next = [...editingModelRatios];
+                  next[index] = { ...row, model: value };
+                  setEditingModelRatios(next);
+                })} placeholder="模型 ID" />
+              </div>
+              <div className="field compact-field model-ratio-value-field">
+                <label>倍率</label>
+                <input className="input model-ratio-input" min={0} step={1} type="number" value={row.ratio} onChange={(e) => {
+                  const next = [...editingModelRatios];
+                  next[index] = { ...row, ratio: e.target.value };
+                  setEditingModelRatios(next);
+                }} />
+              </div>
+              <button className="btn danger icon-only" onClick={() => setEditingModelRatios((rows) => rows.filter((_, i) => i !== index))} title="删除倍率" type="button"><Trash2 /></button>
+            </div>
+          ))}
+          {editingModelRatios.length === 0 ? <div className="empty-state"><strong>暂无模型倍率</strong></div> : null}
+        </div>
+        <div className="form-actions">
+          <button className="btn" disabled={saving} onClick={saveModelRatios} type="button"><Save /> 保存倍率</button>
         </div>
       </section>
 

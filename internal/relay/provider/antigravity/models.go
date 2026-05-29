@@ -15,14 +15,15 @@ type ModelSpec struct {
 }
 
 var modelCatalog = []ModelSpec{
+	{ID: "gemini-3-pro", DisplayName: "Gemini 3 Pro", UpstreamID: "gemini-3-pro", Aliases: []string{"gemini-3-pro"}},
 	{
 		ID:               "gemini-3.5-flash",
 		DisplayName:      "Gemini 3.5 Flash",
-		UpstreamID:       "gemini-3-flash-agent",
+		UpstreamID:       "gemini-3-flash",
 		LowUpstreamID:    "gemini-3.5-flash-low",
 		MediumUpstreamID: "gemini-3.5-flash-medium",
-		HighUpstreamID:   "gemini-3-flash-agent",
-		Aliases:          []string{"gemini-3-flash", "gemini-3-flash-agent", "gemini-3.5-flash-low", "gemini-3.5-flash-medium", "gemini-3.5-flash-high", "MODEL_PLACEHOLDER_M18"},
+		HighUpstreamID:   "gemini-3-flash",
+		Aliases:          []string{"gemini-3-flash", "gemini-3.5-flash-low", "gemini-3.5-flash-medium", "gemini-3.5-flash-high", "MODEL_PLACEHOLDER_M18"},
 	},
 	{
 		ID:             "gemini-3.1-pro",
@@ -30,12 +31,13 @@ var modelCatalog = []ModelSpec{
 		UpstreamID:     "gemini-pro-agent",
 		LowUpstreamID:  "gemini-3.1-pro-low",
 		HighUpstreamID: "gemini-pro-agent",
-		Aliases:        []string{"gemini-3-pro", "gemini-3.1-pro-low", "gemini-3.1-pro-high", "gemini-3-pro-low", "gemini-3-pro-high", "MODEL_PLACEHOLDER_M7", "MODEL_PLACEHOLDER_M8", "MODEL_PLACEHOLDER_M36", "MODEL_PLACEHOLDER_M37"},
+		Aliases:        []string{"gemini-pro-agent", "gemini-3.1-pro-low", "gemini-3.1-pro-high", "gemini-3-pro-low", "gemini-3-pro-high", "MODEL_PLACEHOLDER_M7", "MODEL_PLACEHOLDER_M8", "MODEL_PLACEHOLDER_M36", "MODEL_PLACEHOLDER_M37"},
 	},
-	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)", UpstreamID: "claude-sonnet-4-6", Aliases: []string{"claude-sonnet-4-6-thinking", "MODEL_PLACEHOLDER_M35"}},
-	{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 (Thinking)", UpstreamID: "claude-opus-4-6-thinking", Aliases: []string{"claude-opus-4-6", "MODEL_PLACEHOLDER_M26"}},
-	{ID: "gpt-oss-120b", DisplayName: "GPT-OSS 120B", UpstreamID: "gpt-oss-120b-medium", Aliases: []string{"gpt-oss-120b-medium", "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"}},
-	{ID: "nano-banana-2", DisplayName: "Nano Banana 2", UpstreamID: "gemini-3.1-flash-image", Aliases: []string{"gpt-image-1", "gemini-3.1-flash-image", "gemini-3.1-flash-image-preview", "gemini-3-pro-image", "gemini-3-pro-image-preview"}},
+	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)", UpstreamID: "claude-sonnet-4-6", HighUpstreamID: "claude-sonnet-4-6", Aliases: []string{"MODEL_PLACEHOLDER_M35"}},
+	{ID: "claude-opus-4-6", DisplayName: "Claude Opus 4.6 (Thinking)", UpstreamID: "claude-opus-4-6-thinking", HighUpstreamID: "claude-opus-4-6-thinking", Aliases: []string{"MODEL_PLACEHOLDER_M26"}},
+	{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 (Thinking)", UpstreamID: "claude-opus-4-6-thinking"},
+	{ID: "gpt-oss-120b", DisplayName: "GPT-OSS 120B", UpstreamID: "gpt-oss-120b", LowUpstreamID: "gpt-oss-120b-medium", HighUpstreamID: "gpt-oss-120b", Aliases: []string{"gpt-oss-120b-medium", "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"}},
+	{ID: "nano-banana-2", DisplayName: "Nano Banana 2", UpstreamID: "gemini-3.1-flash-image", Aliases: []string{"gemini-3.1-flash-image", "gemini-3-pro-image", "gemini-3-pro-image-preview"}},
 }
 
 var unavailableModelIDs = map[string]struct{}{
@@ -45,6 +47,30 @@ var unavailableModelIDs = map[string]struct{}{
 	"tab_jump_flash_lite_preview": {},
 	"gemini-2.5-flash-thinking":   {},
 	"gemini-2.5-pro":              {},
+}
+
+var visibleModelIDs = []string{
+	"claude-opus-4-6",
+	"claude-sonnet-4-6",
+	"gemini-3.1-pro",
+	"gemini-pro-agent",
+	"gemini-3.5-flash",
+	"gpt-oss-120b",
+	"nano-banana-2",
+	"gemini-3.5-flash-medium",
+	"gemini-3-flash",
+	"gemini-3.5-flash-low",
+	"gemini-3.1-pro-low",
+	"gemini-3.1-pro-high",
+	"gemini-3-pro-high",
+	"gemini-3-pro-low",
+	"claude-sonnet-4-6-thinking",
+	"claude-opus-4-6-thinking",
+	"gpt-oss-120b-medium",
+	"gemini-3.1-flash-image",
+	"gemini-3-pro-image",
+	"gemini-3-pro-image-preview",
+	"gemini-3-pro",
 }
 
 var modelByAlias = buildModelAliasMap()
@@ -195,13 +221,22 @@ func DefaultTierGroups() []TierGroup {
 		if spec.HighUpstreamID == "" && spec.MediumUpstreamID == "" && spec.LowUpstreamID == "" {
 			continue
 		}
+		fallbackOrder := []string{"high", "medium", "low"}
+		switch spec.ID {
+		case "gemini-3.5-flash":
+			fallbackOrder = []string{"medium", "low", "high"}
+		case "gemini-3.1-pro":
+			fallbackOrder = []string{"low", "high"}
+		case "gpt-oss-120b":
+			fallbackOrder = []string{"low", "high"}
+		}
 		groups = append(groups, TierGroup{
 			PublicModel:   spec.ID,
 			Aliases:       spec.Aliases,
 			High:          spec.HighUpstreamID,
 			Medium:        spec.MediumUpstreamID,
 			Low:           spec.LowUpstreamID,
-			FallbackOrder: []string{"high", "medium", "low"},
+			FallbackOrder: fallbackOrder,
 		})
 	}
 	return groups
@@ -298,8 +333,14 @@ func PublicModelCSV() string {
 }
 
 func PublicModels() []ModelSpec {
-	out := make([]ModelSpec, len(modelCatalog))
-	copy(out, modelCatalog)
+	out := make([]ModelSpec, 0, len(visibleModelIDs))
+	for _, id := range visibleModelIDs {
+		if spec, ok := CanonicalModel(id); ok {
+			spec.ID = id
+			spec.DisplayName = visibleDisplayName(id, spec.DisplayName)
+			out = append(out, spec)
+		}
+	}
 	return out
 }
 
@@ -313,10 +354,19 @@ func CanonicalModel(model string) (ModelSpec, bool) {
 }
 
 func DisplayName(model string) string {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
 	if spec, ok := CanonicalModel(model); ok {
 		return spec.DisplayName
 	}
-	return strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	return model
+}
+
+func PublicDisplayName(model string) string {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if display := visibleDisplayName(model, ""); display != "" {
+		return display
+	}
+	return DisplayName(model)
 }
 
 func IsImageToolModel(model string) bool {
@@ -332,7 +382,7 @@ func NormalizeAvailableModels(models []string) []string {
 		if model == "" {
 			continue
 		}
-		if _, skip := unavailableModelIDs[model]; skip {
+		if IsHiddenModelID(model) {
 			continue
 		}
 		available[normalizeModelKey(model)] = struct{}{}
@@ -349,6 +399,150 @@ func NormalizeAvailableModels(models []string) []string {
 		out = append(out, spec.ID)
 	}
 	return out
+}
+
+func PublicModelForSettings(model string, settings ChannelSettings) string {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" || IsHiddenModelID(model) {
+		return ""
+	}
+	if group, ok := findTierGroup(model, settings.TierGroups); ok && strings.TrimSpace(group.PublicModel) != "" {
+		return strings.TrimSpace(group.PublicModel)
+	}
+	return ""
+}
+
+func PublicListForSettings(models []string, settings ChannelSettings) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		public := PublicModelForSettings(model, settings)
+		if public == "" {
+			continue
+		}
+		if _, ok := seen[public]; ok {
+			continue
+		}
+		seen[public] = struct{}{}
+		out = append(out, public)
+	}
+	return out
+}
+
+func SupportsModelInList(model string, models []string, settings ChannelSettings) bool {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" {
+		return false
+	}
+	for _, public := range PublicListForSettings(models, settings) {
+		if public == model {
+			return true
+		}
+	}
+	if IsDirectUpstreamModelForSettings(model, settings) {
+		return true
+	}
+	for _, raw := range models {
+		if strings.TrimPrefix(strings.TrimSpace(raw), "models/") == model {
+			return true
+		}
+	}
+	return false
+}
+
+func ResolveRequestModelWithSettings(model, effort, requestSize string, settings ChannelSettings, availableModels []string) string {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" {
+		return ""
+	}
+	if IsTierPublicModelForSettings(model, settings) {
+		return UpstreamModelIDForEffortWithSettings(model, effort, requestSize, settings)
+	}
+	if IsDirectUpstreamModelForSettings(model, settings) {
+		return model
+	}
+	for _, available := range availableModels {
+		if strings.TrimPrefix(strings.TrimSpace(available), "models/") == model {
+			return model
+		}
+	}
+	return model
+}
+
+func IsTierPublicModelForSettings(model string, settings ChannelSettings) bool {
+	model = normalizeModelKey(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
+	if model == "" {
+		return false
+	}
+	for _, group := range settings.TierGroups {
+		if normalizeModelKey(group.PublicModel) == model {
+			return true
+		}
+	}
+	return false
+}
+
+func IsDirectUpstreamModelForSettings(model string, settings ChannelSettings) bool {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" {
+		return false
+	}
+	for _, group := range settings.TierGroups {
+		for _, upstream := range []string{group.High, group.Medium, group.Low} {
+			if strings.TrimPrefix(strings.TrimSpace(upstream), "models/") == model {
+				return true
+			}
+		}
+	}
+	return explicitTierUpstreamID(model) == model
+}
+
+func SupportsWithSettings(model string, settings ChannelSettings) bool {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" {
+		return false
+	}
+	if _, ok := findTierGroup(model, settings.TierGroups); ok {
+		return true
+	}
+	return Supports(model)
+}
+
+func Supports(model string) bool {
+	_, ok := CanonicalModel(model)
+	return ok
+}
+
+func IsHiddenModelID(model string) bool {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if model == "" {
+		return true
+	}
+	if _, skip := unavailableModelIDs[model]; skip {
+		return true
+	}
+	key := strings.ToLower(model)
+	return strings.HasPrefix(key, "model_placeholder") || strings.HasPrefix(key, "chat_") || strings.HasPrefix(key, "tab_")
+}
+
+func visibleDisplayName(model, fallback string) string {
+	switch normalizeModelKey(model) {
+	case "gemini35flashmedium":
+		return "Gemini 3.5 Flash (Medium)"
+	case "gemini3flash", "gemini35flashhigh":
+		return "Gemini 3.5 Flash (High)"
+	case "gemini35flashlow":
+		return "Gemini 3.5 Flash (Low)"
+	case "gemini31prolow", "gemini3prolow":
+		return "Gemini 3.1 Pro (Low)"
+	case "gemini31prohigh", "gemini3prohigh":
+		return "Gemini 3.1 Pro (High)"
+	case "gptoss120bmedium":
+		return "GPT-OSS 120B (Medium)"
+	case "gemini31flashimage", "nanobanana2", "gemini3proimagepreview":
+		return "Nano Banana 2"
+	}
+	return fallback
 }
 
 func modelSpecAvailable(spec ModelSpec, available map[string]struct{}) bool {
@@ -401,14 +595,22 @@ func explicitTierUpstreamID(model string) string {
 		return "gemini-3.5-flash-low"
 	case "gemini35flashmedium":
 		return "gemini-3.5-flash-medium"
-	case "gemini35flashhigh", "gemini3flashagent":
-		return "gemini-3-flash-agent"
+	case "gemini35flashhigh":
+		return "gemini-3-flash"
 	case "gemini31prolow", "gemini3prolow", "modelplaceholderm7", "modelplaceholderm36":
 		return "gemini-3.1-pro-low"
-	case "gemini31prohigh", "gemini3prohigh", "geminiproagent", "modelplaceholderm8", "modelplaceholderm37":
-		return "gemini-pro-agent"
+	case "gemini31prohigh", "gemini3prohigh", "modelplaceholderm8", "modelplaceholderm37":
+		return "gemini-3.1-pro-high"
 	case "gptoss120bmedium", "modelopenaigptoss120bmedium":
 		return "gpt-oss-120b-medium"
+	case "claudesonnet46thinking":
+		return "claude-sonnet-4-6-thinking"
+	case "claudeopus46thinking":
+		return "claude-opus-4-6-thinking"
+	case "nanobanana2", "gemini31flashimage":
+		return "gemini-3.1-flash-image"
+	case "gemini3proimage", "gemini3proimagepreview":
+		return "gemini-3-pro-image"
 	}
 	return ""
 }

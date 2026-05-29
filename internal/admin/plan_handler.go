@@ -68,11 +68,6 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
 		return
 	}
-	modelRatios, msg := normalizeModelRatios(req.ModelRatios)
-	if msg != "" {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
-		return
-	}
 	var p db.Plan
 	var policy db.AccessPolicy
 	if err := h.db.Transaction(func(tx *gorm.DB) error {
@@ -90,13 +85,12 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		}
 		policyID := policy.ID
 		p = db.Plan{
-			Name:            req.Name,
-			Type:            req.Type,
-			PolicyID:        &policyID,
-			ModelRatios:     modelRatios,
-			CompletionRatio: req.CompletionRatio,
-			Enabled:         req.Enabled,
-			DurationDays:    durationDays,
+			Name:         req.Name,
+			Type:         req.Type,
+			PolicyID:     &policyID,
+			Enabled:      req.Enabled,
+			Public:       req.Public,
+			DurationDays: durationDays,
 		}
 		p.ID = uuid.New()
 		return tx.Create(&p).Error
@@ -137,19 +131,11 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		}
 		updates["type"] = *req.Type
 	}
-	if req.ModelRatios != nil {
-		modelRatios, msg := normalizeModelRatios(*req.ModelRatios)
-		if msg != "" {
-			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
-			return
-		}
-		updates["model_ratios"] = modelRatios
-	}
-	if req.CompletionRatio != nil {
-		updates["completion_ratio"] = *req.CompletionRatio
-	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
+	}
+	if req.Public != nil {
+		updates["is_public"] = *req.Public
 	}
 	if req.DurationDays != nil {
 		if *req.DurationDays <= 0 {

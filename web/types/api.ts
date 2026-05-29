@@ -31,6 +31,10 @@ export type User = {
 export type AdminSettings = {
   log_retention_days: number;
   redeem_code_retention_days: number;
+  model_ratios: string;
+  admin_username: string;
+  admin_password?: string;
+  max_keys_per_user: number;
   background: "aurora" | "silk" | "mesh" | "topography" | "noir" | "custom";
   public_base_url?: string;
   wallpaper_url?: string;
@@ -40,6 +44,11 @@ export type PublicSettings = {
   background: AdminSettings["background"];
   public_base_url?: string;
   wallpaper_url?: string;
+};
+
+export type AvailableModels = {
+  models: string[];
+  model_ratios: Array<{ model: string; ratio: number }>;
 };
 
 export type RedeemCode = {
@@ -95,6 +104,9 @@ export type UsageLogItem = {
   id: number;
   created_at: string;
   model: string;
+  routed_model: string;
+  client_format?: string;
+  upstream_format?: string;
   user_id?: string;
   username?: string;
   user_email?: string;
@@ -144,10 +156,24 @@ export type Plan = {
   name: string;
   type: string;
   policy_id?: string;
-  model_ratios: string;
-  completion_ratio: string;
   duration_days: number;
   enabled: boolean;
+  public: boolean;
+};
+
+export type PublicPlanWindow = {
+  type: "hour" | "week" | "month";
+  limit: number;
+};
+
+export type PublicPlan = {
+  id: string;
+  name: string;
+  type: string;
+  duration_days: number;
+  allowed_models: string;
+  max_concurrency: number;
+  windows: PublicPlanWindow[];
 };
 
 export type ChannelModelSync = {
@@ -164,6 +190,7 @@ export type ChannelPresetDTO = {
   auth: "oauth" | "apikey";
   endpoint: string;
   models: string;
+  model_aliases?: string;
   note: string;
   manual_callback?: boolean;
   device_flow?: boolean;

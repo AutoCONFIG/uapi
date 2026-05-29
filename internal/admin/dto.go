@@ -97,6 +97,7 @@ type ChannelPresetDTO struct {
 	Auth           string `json:"auth"`
 	Endpoint       string `json:"endpoint"`
 	Models         string `json:"models"`
+	ModelAliases   string `json:"model_aliases,omitempty"`
 	Note           string `json:"note"`
 	ManualCallback bool   `json:"manual_callback,omitempty"`
 	DeviceFlow     bool   `json:"device_flow,omitempty"`
@@ -158,32 +159,30 @@ type UpdateAccessPolicyRequest struct {
 
 // CreatePlanRequest is the request DTO for creating a plan.
 type CreatePlanRequest struct {
-	Name            string `json:"name"`
-	Type            string `json:"type"`
-	ModelRatios     string `json:"model_ratios"`
-	CompletionRatio string `json:"completion_ratio"`
-	Enabled         bool   `json:"enabled"`
-	DurationDays    int    `json:"duration_days"`
-	AllowedModels   string `json:"allowed_models"`
-	MaxConcurrency  int    `json:"max_concurrency"`
-	HourlyLimit     int    `json:"hourly_limit"`
-	WeeklyLimit     int    `json:"weekly_limit"`
-	MonthlyLimit    int    `json:"monthly_limit"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	Enabled        bool   `json:"enabled"`
+	Public         bool   `json:"public"`
+	DurationDays   int    `json:"duration_days"`
+	AllowedModels  string `json:"allowed_models"`
+	MaxConcurrency int    `json:"max_concurrency"`
+	HourlyLimit    int    `json:"hourly_limit"`
+	WeeklyLimit    int    `json:"weekly_limit"`
+	MonthlyLimit   int    `json:"monthly_limit"`
 }
 
 // UpdatePlanRequest is the request DTO for updating a plan.
 type UpdatePlanRequest struct {
-	Name            *string `json:"name,omitempty"`
-	Type            *string `json:"type,omitempty"`
-	ModelRatios     *string `json:"model_ratios,omitempty"`
-	CompletionRatio *string `json:"completion_ratio,omitempty"`
-	Enabled         *bool   `json:"enabled,omitempty"`
-	DurationDays    *int    `json:"duration_days,omitempty"`
-	AllowedModels   *string `json:"allowed_models,omitempty"`
-	MaxConcurrency  *int    `json:"max_concurrency,omitempty"`
-	HourlyLimit     *int    `json:"hourly_limit,omitempty"`
-	WeeklyLimit     *int    `json:"weekly_limit,omitempty"`
-	MonthlyLimit    *int    `json:"monthly_limit,omitempty"`
+	Name           *string `json:"name,omitempty"`
+	Type           *string `json:"type,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
+	Public         *bool   `json:"public,omitempty"`
+	DurationDays   *int    `json:"duration_days,omitempty"`
+	AllowedModels  *string `json:"allowed_models,omitempty"`
+	MaxConcurrency *int    `json:"max_concurrency,omitempty"`
+	HourlyLimit    *int    `json:"hourly_limit,omitempty"`
+	WeeklyLimit    *int    `json:"weekly_limit,omitempty"`
+	MonthlyLimit   *int    `json:"monthly_limit,omitempty"`
 }
 
 // --- User DTOs ---

@@ -70,6 +70,9 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
+		if s.relayer != nil {
+			s.relayer.SetOAuthRefreshHook(s.oauthIdle.ScheduleAccountID)
+		}
 		s.userHandler = user.NewHandler(userSvc)
 	}
 	if cfg.Server.Mode == "all" && s.relayer != nil && database != nil {
@@ -251,6 +254,8 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/user/usage", userAuth(s.userHandler.GetUsage))
 	r.GET("/api/user/usage/logs", userAuth(s.userHandler.GetUsageLogs))
 	r.GET("/api/user/subscription", userAuth(s.userHandler.GetSubscription))
+	r.GET("/api/user/plans", userAuth(s.userHandler.ListPlans))
+	r.GET("/api/user/models", userAuth(s.userHandler.AvailableModels))
 	r.POST("/api/user/redeem", userAuth(s.userHandler.RedeemCode))
 
 	s.router = r

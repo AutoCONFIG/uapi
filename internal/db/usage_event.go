@@ -14,6 +14,9 @@ type UsageEvent struct {
 	ChannelID        uuid.UUID `gorm:"type:uuid;index;not null" json:"channel_id"`
 	AccountID        uuid.UUID `gorm:"type:uuid;index;not null" json:"account_id"`
 	Model            string    `gorm:"size:100;index" json:"model"`
+	RoutedModel      string    `gorm:"size:100;index" json:"routed_model"`
+	ClientFormat     string    `gorm:"size:50;index" json:"client_format"`
+	UpstreamFormat   string    `gorm:"size:50;index" json:"upstream_format"`
 	IsStream         bool      `json:"is_stream"`
 	PromptTokens     int       `json:"prompt_tokens"`
 	CompletionTokens int       `json:"completion_tokens"`

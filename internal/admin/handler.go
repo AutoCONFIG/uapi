@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -65,6 +66,7 @@ func (h *Handler) HandleChannelCatalog(ctx *fasthttp.RequestCtx) {
 			Auth:           "oauth",
 			Endpoint:       spec.DefaultEndpoint,
 			Models:         spec.Models,
+			ModelAliases:   spec.ModelAliases,
 			Note:           spec.Label + " OAuth",
 			ManualCallback: spec.ManualCallback,
 			DeviceFlow:     spec.DeviceFlow,
@@ -144,14 +146,15 @@ func (h *Handler) authDurations() (time.Duration, time.Duration) {
 }
 
 func (h *Handler) issueAdminTokenPair() (*AuthResponse, error) {
+	username, passwordHash := h.adminCredentials()
 	accessExpiry, refreshExpiry := h.authDurations()
 	now := time.Now()
-	version := auth.SecretVersion(h.cfg.Security.AdminPasswordHash)
-	accessToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdmin, accessExpiry, version)
+	version := auth.SecretVersion(passwordHash)
+	accessToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", username, auth.TokenTypeAdmin, accessExpiry, version)
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", h.cfg.Security.AdminUsername, auth.TokenTypeAdminRefresh, refreshExpiry, version)
+	refreshToken, err := auth.GenerateTokenWithVersion(h.cfg.Security.JWTSecret, "admin", username, auth.TokenTypeAdminRefresh, refreshExpiry, version)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +164,20 @@ func (h *Handler) issueAdminTokenPair() (*AuthResponse, error) {
 		AccessExpiresAt:  now.Add(accessExpiry).Unix(),
 		RefreshExpiresAt: now.Add(refreshExpiry).Unix(),
 	}, nil
+}
+
+func (h *Handler) adminCredentials() (string, string) {
+	username := appsettings.Get(h.db, appsettings.AdminUsername, "admin")
+	if username == "" {
+		username = "admin"
+	}
+	passwordHash := appsettings.Get(h.db, appsettings.AdminPasswordHash, "")
+	return username, passwordHash
+}
+
+func (h *Handler) adminInitialized() bool {
+	_, passwordHash := h.adminCredentials()
+	return passwordHash != ""
 }
 
 // HandleLogin authenticates the admin and returns an access/refresh token pair.
@@ -176,12 +193,13 @@ func (h *Handler) HandleLogin(ctx *fasthttp.RequestCtx) {
 
 	// Always run bcrypt comparison to avoid timing leaks
 	matchedPassword := false
-	if subtle.ConstantTimeCompare([]byte(req.Email), []byte(h.cfg.Security.AdminUsername)) == 1 {
-		if h.cfg.Security.AdminPasswordHash == "" {
+	adminUsername, adminPasswordHash := h.adminCredentials()
+	if subtle.ConstantTimeCompare([]byte(req.Email), []byte(adminUsername)) == 1 {
+		if adminPasswordHash == "" {
 			h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
 			return
 		}
-		if bcrypt.CompareHashAndPassword([]byte(h.cfg.Security.AdminPasswordHash), []byte(req.Password)) == nil {
+		if bcrypt.CompareHashAndPassword([]byte(adminPasswordHash), []byte(req.Password)) == nil {
 			matchedPassword = true
 		}
 	} else {
@@ -212,11 +230,12 @@ func (h *Handler) HandleRefresh(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	claims, err := auth.ParseToken(h.cfg.Security.JWTSecret, req.RefreshToken)
-	if err != nil || claims.Type != auth.TokenTypeAdminRefresh || claims.Username != h.cfg.Security.AdminUsername || claims.Version != auth.SecretVersion(h.cfg.Security.AdminPasswordHash) {
+	adminUsername, adminPasswordHash := h.adminCredentials()
+	if err != nil || claims.Type != auth.TokenTypeAdminRefresh || claims.Username != adminUsername || claims.Version != auth.SecretVersion(adminPasswordHash) {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid refresh token")
 		return
 	}
-	if h.cfg.Security.AdminPasswordHash == "" {
+	if adminPasswordHash == "" {
 		h.jsonError(ctx, fasthttp.StatusForbidden, "admin password not configured")
 		return
 	}
@@ -268,14 +287,14 @@ func (h *Handler) getAdminUser(ctx *fasthttp.RequestCtx) string {
 // HandleInitStatus returns whether the system has been initialized.
 func (h *Handler) HandleInitStatus(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, map[string]interface{}{
-		"initialized": h.cfg.Initialized(),
+		"initialized": h.adminInitialized(),
 	})
 }
 
 // HandleSetup performs the initial admin setup (username + password).
 func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 	// Fast path: already initialized at config level
-	if h.cfg.Initialized() {
+	if h.adminInitialized() {
 		h.jsonError(ctx, fasthttp.StatusForbidden, "already initialized")
 		return
 	}
@@ -311,13 +330,11 @@ func (h *Handler) HandleSetup(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Update in-memory config
-	h.cfg.Security.AdminUsername = req.Email
-	h.cfg.Security.AdminPasswordHash = string(hash)
-
-	// Persist to config file
-	if err := config.Save(h.cfg, h.cfgPath); err != nil {
-		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save config failed")
+	if err := appsettings.SetMany(h.db, map[string]string{
+		appsettings.AdminUsername:     req.Email,
+		appsettings.AdminPasswordHash: string(hash),
+	}); err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save setup failed")
 		return
 	}
 

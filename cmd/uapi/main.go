@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/admin"
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -47,6 +48,10 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("database connected")
+		if err := appsettings.Bootstrap(database); err != nil {
+			log.Error("init system settings failed", logger.Err(err))
+			os.Exit(1)
+		}
 
 		billing = relay.NewBillingService(database)
 
@@ -58,7 +63,7 @@ func main() {
 		}
 		log.Info("account pools loaded")
 
-		admin.StartLogCleanup(database, cfg)
+		admin.StartLogCleanup(database)
 
 		accessTokenExpiry := 15 * time.Minute
 		if cfg.Auth.AccessTokenExpiry != "" {
@@ -72,7 +77,7 @@ func main() {
 				refreshTokenExpiry = d
 			}
 		}
-		userSvc = user.NewService(database, cfg.Security.JWTSecret, accessTokenExpiry, refreshTokenExpiry, cfg.User.MaxKeysPerUser)
+		userSvc = user.NewService(database, cfg.Security.JWTSecret, accessTokenExpiry, refreshTokenExpiry)
 	}
 
 	srv := server.New(cfg, database, pools, billing, userSvc, *configPath)

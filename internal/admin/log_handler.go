@@ -24,6 +24,9 @@ type AdminUsageLogItem struct {
 	AccountName      string    `json:"account_name,omitempty"`
 	AccountCredType  string    `json:"account_cred_type,omitempty"`
 	Model            string    `json:"model"`
+	RoutedModel      string    `json:"routed_model"`
+	ClientFormat     string    `json:"client_format"`
+	UpstreamFormat   string    `json:"upstream_format"`
 	IsStream         bool      `json:"is_stream"`
 	PromptTokens     int64     `json:"prompt_tokens"`
 	CompletionTokens int64     `json:"completion_tokens"`
@@ -42,7 +45,7 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 	page, limit := h.parsePagination(ctx)
 	offset := (page - 1) * limit
 	query := h.db.Table("logs").
-		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, logs.model, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
+		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
 		Joins("LEFT JOIN tokens ON tokens.id = logs.token_id").
 		Joins("LEFT JOIN users ON users.id::text = tokens.user_id").
 		Joins("LEFT JOIN channels ON channels.id = logs.channel_id").
@@ -55,7 +58,7 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 		query = query.Where("logs.client_ip ILIKE ?", "%"+ip+"%")
 	}
 	if model := strings.TrimSpace(string(ctx.QueryArgs().Peek("model"))); model != "" {
-		query = query.Where("logs.model ILIKE ?", "%"+model+"%")
+		query = query.Where("logs.model ILIKE ? OR logs.routed_model ILIKE ?", "%"+model+"%", "%"+model+"%")
 	}
 	if startRaw := strings.TrimSpace(string(ctx.QueryArgs().Peek("start"))); startRaw != "" {
 		if start, err := time.Parse(time.RFC3339, startRaw); err == nil {

@@ -41,7 +41,7 @@ func TestOAuthIdleMaintainerScheduleRetryStopsAfterTwoAttempts(t *testing.T) {
 	}
 }
 
-func TestIdleRefreshAfterUsesFinalFifteenMinuteWindow(t *testing.T) {
+func TestIdleRefreshAfterUsesFinalOneToFiveMinuteWindow(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
 	for i := 0; i < 64; i++ {
 		account := &db.Account{Base: db.Base{ID: uuid.New()}, TokenExpiry: &expiry}
@@ -49,8 +49,26 @@ func TestIdleRefreshAfterUsesFinalFifteenMinuteWindow(t *testing.T) {
 		if refreshAt.After(expiry) {
 			t.Fatalf("refresh time %s is after expiry %s", refreshAt, expiry)
 		}
-		if refreshAt.Before(expiry.Add(-15 * time.Minute)) {
-			t.Fatalf("refresh time %s is before final 15 minute window ending at %s", refreshAt, expiry)
+		if refreshAt.Before(expiry.Add(-idleRefreshWindow)) || refreshAt.After(expiry.Add(-idleRefreshMinLead)) {
+			t.Fatalf("refresh time %s outside final 1-5 minute window ending at %s", refreshAt, expiry)
+		}
+	}
+}
+
+func TestIdleRefreshWindowStartUsesFiveMinuteBoundary(t *testing.T) {
+	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
+	account := &db.Account{Base: db.Base{ID: uuid.New()}, TokenExpiry: &expiry}
+	want := expiry.Add(-idleRefreshWindow)
+	if got := idleRefreshWindowStart(account); !got.Equal(want) {
+		t.Fatalf("idle refresh window start = %s, want %s", got, want)
+	}
+}
+
+func TestRandomIdleRefreshLeadUsesOneToFiveMinuteWindow(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		lead := randomIdleRefreshLead()
+		if lead < idleRefreshMinLead || lead > idleRefreshWindow {
+			t.Fatalf("idle refresh lead %s outside 1-5 minute window", lead)
 		}
 	}
 }

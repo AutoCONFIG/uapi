@@ -20,8 +20,10 @@ type chatToAnthropicState struct {
 	toolCallArgs        *strings.Builder
 
 	// State flags
-	hasStarted  bool
-	hasFinished bool
+	hasStarted      bool
+	hasTextBlock    bool
+	hasStoppedBlock bool
+	hasFinished     bool
 }
 
 // chatToAnthropicPool is the sync.Pool for converter state
@@ -95,7 +97,7 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 		c.state.hasStarted = true
 
 		if deltaData.Role != "" {
-			return sseJSON(map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": event.ID, "type": "message", "model": event.Model, "role": deltaData.Role, "usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0}}})
+			return c.messageStartEvent()
 		}
 		return nil
 
@@ -106,7 +108,7 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 			c.state.model = event.Model
 			c.state.hasStarted = true
 		}
-		return sseJSON(map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "text_delta", "text": deltaData.Content}})
+		return append(c.ensureTextBlockStarted(), sseEventJSON("content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "text_delta", "text": deltaData.Content}})...)
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -139,7 +141,7 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 		}
 
 		if anthropicReason != "" {
-			return sseJSON(map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": anthropicReason}, "usage": map[string]interface{}{"output_tokens": 0}})
+			return append(c.ensureTextBlockStopped(), c.messageDeltaAndStopEvents(anthropicReason)...)
 		}
 		return nil
 	}
@@ -149,9 +151,62 @@ func (c *chatToAnthropicConverter) Convert(line []byte) []byte {
 
 func (c *chatToAnthropicConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return sseJSON(map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "end_turn"}, "usage": map[string]interface{}{"output_tokens": 0}})
+		return append(c.ensureTextBlockStopped(), c.messageDeltaAndStopEvents("end_turn")...)
 	}
 	return nil
+}
+
+func (c *chatToAnthropicConverter) messageStartEvent() []byte {
+	return sseEventJSON("message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":    c.state.id,
+			"type":  "message",
+			"model": c.state.model,
+			"role":  "assistant",
+			"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+		},
+	})
+}
+
+func (c *chatToAnthropicConverter) ensureMessageStarted() []byte {
+	if c.state.hasStarted {
+		return nil
+	}
+	if c.state.id == "" {
+		c.state.id = randomID("msg_")
+	}
+	c.state.hasStarted = true
+	return c.messageStartEvent()
+}
+
+func (c *chatToAnthropicConverter) ensureTextBlockStarted() []byte {
+	out := c.ensureMessageStarted()
+	if c.state.hasTextBlock {
+		return out
+	}
+	c.state.hasTextBlock = true
+	return append(out, sseEventJSON("content_block_start", map[string]interface{}{
+		"type":          "content_block_start",
+		"index":         0,
+		"content_block": map[string]interface{}{"type": "text", "text": ""},
+	})...)
+}
+
+func (c *chatToAnthropicConverter) ensureTextBlockStopped() []byte {
+	if !c.state.hasTextBlock || c.state.hasStoppedBlock {
+		return nil
+	}
+	c.state.hasStoppedBlock = true
+	return sseEventJSON("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0})
+}
+
+func (c *chatToAnthropicConverter) messageDeltaAndStopEvents(reason string) []byte {
+	c.state.hasFinished = true
+	return append(
+		sseEventJSON("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": reason}, "usage": map[string]interface{}{"output_tokens": 0}}),
+		sseEventJSON("message_stop", map[string]interface{}{"type": "message_stop"})...,
+	)
 }
 
 func (c *chatToAnthropicConverter) Reset() {
@@ -159,6 +214,8 @@ func (c *chatToAnthropicConverter) Reset() {
 	c.state.currentToolCallID = ""
 	c.state.currentToolCallName = ""
 	c.state.hasStarted = false
+	c.state.hasTextBlock = false
+	c.state.hasStoppedBlock = false
 	c.state.hasFinished = false
 	c.state.id = ""
 	c.state.model = ""

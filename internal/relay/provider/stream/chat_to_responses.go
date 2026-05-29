@@ -21,8 +21,12 @@ type chatToResponsesState struct {
 	toolCallArgs      map[string]*strings.Builder
 
 	// State flags
-	hasStarted  bool
-	hasFinished bool
+	hasStarted     bool
+	hasOutputItem  bool
+	hasContentPart bool
+	hasFinished    bool
+	outputItemID   string
+	outputText     strings.Builder
 }
 
 // chatToResponsesPool is the sync.Pool for converter state
@@ -90,22 +94,46 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 	}
 	json.Unmarshal(delta, &deltaData)
 
-	switch {
-	// First message with role
-	case c.state.id == "" && event.ID != "":
+	var prefix []byte
+	if c.state.id == "" && event.ID != "" {
 		c.state.id = event.ID
 		c.state.model = event.Model
 		c.state.created = event.Created
+		c.state.outputItemID = event.ID + "_msg"
+	}
+	if !c.state.hasStarted && c.state.id != "" {
 		c.state.hasStarted = true
+		prefix = sseEventJSON("response.created", map[string]interface{}{
+			"type": "response.created",
+			"response": map[string]interface{}{
+				"id":         c.state.id,
+				"object":     "response",
+				"created_at": c.state.created,
+				"status":     "in_progress",
+				"model":      c.state.model,
+				"output":     []interface{}{},
+			},
+		})
+	}
 
-		if deltaData.Role != "" {
-			return sseJSON(map[string]interface{}{"type": "response.created", "id": event.ID, "model": event.Model, "role": deltaData.Role})
-		}
-		return nil
-
+	switch {
 	// Content delta
 	case deltaData.Content != "":
-		return sseJSON(map[string]interface{}{"type": "response.output_text.delta", "delta": map[string]interface{}{"text": deltaData.Content}})
+		if c.state.outputItemID == "" {
+			c.state.outputItemID = event.ID + "_msg"
+		}
+		c.state.outputText.WriteString(deltaData.Content)
+		out := append(prefix, c.ensureOutputTextPart()...)
+		return append(out, sseEventJSON("response.output_text.delta", map[string]interface{}{
+			"type":          "response.output_text.delta",
+			"item_id":       c.state.outputItemID,
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         deltaData.Content,
+		})...)
+
+	case deltaData.Role != "":
+		return prefix
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -118,16 +146,16 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 					c.state.toolCallNames[tc.ID] = tc.Function.Name
 					c.state.toolCallArgs[tc.ID] = &strings.Builder{}
 				}
-				return sseJSON(map[string]interface{}{"type": "response.output_item.added", "item": map[string]interface{}{"type": "function_call", "id": tc.ID, "name": tc.Function.Name, "call_id": tc.ID}})
+				return append(prefix, sseJSON(map[string]interface{}{"type": "response.output_item.added", "item": map[string]interface{}{"type": "function_call", "id": tc.ID, "name": tc.Function.Name, "call_id": tc.ID}})...)
 			} else if tc.Function.Arguments != "" {
 				// Tool call arguments delta
 				if args, ok := c.state.toolCallArgs[tc.ID]; ok {
 					args.WriteString(tc.Function.Arguments)
-					return sseJSON(map[string]interface{}{"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": tc.ID, "arguments": tc.Function.Arguments}})
+					return append(prefix, sseJSON(map[string]interface{}{"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": tc.ID, "arguments": tc.Function.Arguments}})...)
 				}
 			}
 		}
-		return nil
+		return prefix
 
 	// Finish reason
 	case event.Choices[0].FinishReason != "":
@@ -135,21 +163,126 @@ func (c *chatToResponsesConverter) Convert(line []byte) []byte {
 		finishReason := event.Choices[0].FinishReason
 		if finishReason == "stop" || finishReason == "length" {
 			if finishReason == "length" {
-				return sseJSON(map[string]interface{}{"type": "response.incomplete"})
+				return append(prefix, sseEventJSON("response.incomplete", map[string]interface{}{"type": "response.incomplete"})...)
 			}
-			return sseJSON(map[string]interface{}{"type": "response.completed"})
+			return append(prefix, c.completedEvent()...)
 		}
-		return sseJSON(map[string]interface{}{"type": "response.completed"})
+		return append(prefix, c.completedEvent()...)
 	}
 
-	return nil
+	return prefix
 }
 
 func (c *chatToResponsesConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return sseJSON(map[string]interface{}{"type": "response.completed"})
+		return c.completedEvent()
 	}
 	return nil
+}
+
+func (c *chatToResponsesConverter) ensureOutputTextPart() []byte {
+	var out []byte
+	if c.state.outputItemID == "" {
+		c.state.outputItemID = c.state.id + "_msg"
+	}
+	if !c.state.hasOutputItem {
+		c.state.hasOutputItem = true
+		out = append(out, sseEventJSON("response.output_item.added", map[string]interface{}{
+			"type":         "response.output_item.added",
+			"output_index": 0,
+			"item": map[string]interface{}{
+				"id":      c.state.outputItemID,
+				"type":    "message",
+				"status":  "in_progress",
+				"role":    "assistant",
+				"content": []interface{}{},
+			},
+		})...)
+	}
+	if !c.state.hasContentPart {
+		c.state.hasContentPart = true
+		out = append(out, sseEventJSON("response.content_part.added", map[string]interface{}{
+			"type":          "response.content_part.added",
+			"item_id":       c.state.outputItemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]interface{}{
+				"type":        "output_text",
+				"text":        "",
+				"annotations": []interface{}{},
+			},
+		})...)
+	}
+	return out
+}
+
+func (c *chatToResponsesConverter) completedEvent() []byte {
+	c.state.hasFinished = true
+	output := []interface{}{}
+	var out []byte
+	text := c.state.outputText.String()
+	if c.state.hasOutputItem {
+		out = append(out, sseEventJSON("response.output_text.done", map[string]interface{}{
+			"type":          "response.output_text.done",
+			"item_id":       c.state.outputItemID,
+			"output_index":  0,
+			"content_index": 0,
+			"text":          text,
+		})...)
+		out = append(out, sseEventJSON("response.content_part.done", map[string]interface{}{
+			"type":          "response.content_part.done",
+			"item_id":       c.state.outputItemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]interface{}{
+				"type":        "output_text",
+				"text":        text,
+				"annotations": []interface{}{},
+			},
+		})...)
+		out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{
+			"type":         "response.output_item.done",
+			"output_index": 0,
+			"item": map[string]interface{}{
+				"id":     c.state.outputItemID,
+				"type":   "message",
+				"status": "completed",
+				"role":   "assistant",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":        "output_text",
+						"text":        text,
+						"annotations": []interface{}{},
+					},
+				},
+			},
+		})...)
+		output = append(output, map[string]interface{}{
+			"id":     c.state.outputItemID,
+			"type":   "message",
+			"status": "completed",
+			"role":   "assistant",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type":        "output_text",
+					"text":        text,
+					"annotations": []interface{}{},
+				},
+			},
+		})
+	}
+	out = append(out, sseEventJSON("response.completed", map[string]interface{}{
+		"type": "response.completed",
+		"response": map[string]interface{}{
+			"id":         c.state.id,
+			"object":     "response",
+			"created_at": c.state.created,
+			"status":     "completed",
+			"model":      c.state.model,
+			"output":     output,
+		},
+	})...)
+	return out
 }
 
 func (c *chatToResponsesConverter) Reset() {
@@ -167,10 +300,14 @@ func (c *chatToResponsesConverter) Reset() {
 		delete(c.state.toolCallArgs, k)
 	}
 	c.state.hasStarted = false
+	c.state.hasOutputItem = false
+	c.state.hasContentPart = false
 	c.state.hasFinished = false
 	c.state.model = ""
 	c.state.id = ""
 	c.state.created = 0
+	c.state.outputItemID = ""
+	c.state.outputText.Reset()
 
 	// Return to pool
 	chatToResponsesPool.Put(c.state)

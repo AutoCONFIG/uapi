@@ -13,17 +13,16 @@ func Parse(raw string) Mapping {
 		PublicToUpstream: map[string]string{},
 	}
 	for _, entry := range splitEntries(raw) {
-		upstream, public := splitPair(entry)
+		public, upstream := splitPair(entry)
 		if upstream == "" || public == "" {
-			continue
-		}
-		if _, exists := m.UpstreamToPublic[upstream]; exists {
 			continue
 		}
 		if _, exists := m.PublicToUpstream[public]; exists {
 			continue
 		}
-		m.UpstreamToPublic[upstream] = public
+		if _, exists := m.UpstreamToPublic[upstream]; !exists {
+			m.UpstreamToPublic[upstream] = public
+		}
 		m.PublicToUpstream[public] = upstream
 	}
 	return m
@@ -56,16 +55,8 @@ func Supports(public, models, aliases string) bool {
 		return true
 	}
 	public = strings.TrimSpace(public)
-	parsed := Parse(aliases)
-	if _, hidden := parsed.UpstreamToPublic[public]; hidden {
-		return false
-	}
-	upstream := public
-	if mapped := parsed.PublicToUpstream[public]; mapped != "" {
-		upstream = mapped
-	}
 	for _, model := range strings.Split(models, ",") {
-		if strings.TrimSpace(model) == upstream {
+		if strings.TrimSpace(model) == public {
 			return true
 		}
 	}
@@ -73,17 +64,22 @@ func Supports(public, models, aliases string) bool {
 }
 
 func PublicList(models, aliases string) []string {
-	parsed := Parse(aliases)
-	seen := map[string]struct{}{}
-	out := make([]string, 0)
+	modelSet := map[string]struct{}{}
 	for _, model := range strings.Split(models, ",") {
 		model = strings.TrimSpace(model)
-		if model == "" {
+		if model != "" {
+			modelSet[model] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, entry := range splitEntries(aliases) {
+		public, upstream := splitPair(entry)
+		if upstream == "" || public == "" {
 			continue
 		}
-		public := model
-		if alias := parsed.UpstreamToPublic[model]; alias != "" {
-			public = alias
+		if _, ok := modelSet[public]; !ok {
+			continue
 		}
 		if _, ok := seen[public]; ok {
 			continue

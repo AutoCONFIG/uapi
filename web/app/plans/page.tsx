@@ -5,7 +5,7 @@ import { CalendarDays, Check, Gift, ShieldCheck, WalletCards } from "lucide-reac
 import { AppShell, PageHead } from "@/components/shell";
 import { userApi } from "@/lib/api";
 import { formatQuota } from "@/lib/format";
-import type { Subscription, SubscriptionWindow } from "@/types/api";
+import type { AvailableModels, PublicPlan, Subscription, SubscriptionWindow } from "@/types/api";
 
 function quotaValues(subscription: Subscription) {
   const monthly = subscription.windows.find((item) => item.type === "month");
@@ -25,8 +25,14 @@ function percent(used: number, limit: number): number {
   return Math.min(100, Math.max(0, (used / limit) * 100));
 }
 
+function planWindow(plan: PublicPlan, type: SubscriptionWindow["type"]) {
+  return plan.windows.find((item) => item.type === type)?.limit ?? 0;
+}
+
 export default function PlansPage() {
   const [subscription, setSubscription] = useState<Subscription | null>(null);
+  const [plans, setPlans] = useState<PublicPlan[]>([]);
+  const [availableModels, setAvailableModels] = useState<AvailableModels | null>(null);
   const [loading, setLoading] = useState(true);
   const [redeemCode, setRedeemCode] = useState("");
   const [redeemMsg, setRedeemMsg] = useState("");
@@ -34,8 +40,14 @@ export default function PlansPage() {
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.user.token");
     if (!token) { setLoading(false); return; }
-    userApi.subscription(token).catch(() => null).then((sub) => {
+    Promise.all([
+      userApi.subscription(token).catch(() => null),
+      userApi.plans(token).catch(() => []),
+      userApi.models(token).catch(() => null),
+    ]).then(([sub, planItems, models]) => {
       setSubscription(sub);
+      setPlans(planItems);
+      setAvailableModels(models);
       setLoading(false);
     });
   }, []);
@@ -57,12 +69,13 @@ export default function PlansPage() {
   const expiresAt = subscription?.expires_at ? new Date(subscription.expires_at) : null;
   const startsAt = subscription?.starts_at ? new Date(subscription.starts_at) : null;
   const quota = subscription ? quotaValues(subscription) : null;
+  const modelRatios = availableModels?.model_ratios ?? [];
 
   return (
     <AppShell title="套餐">
       <PageHead
         title="套餐权益"
-        description="套餐由管理员分配，或通过兑换码领取。普通用户不能直接浏览和选择后台套餐。"
+        description="查看公开套餐、当前额度和可用模型倍率；隐藏套餐仍可通过兑换码或管理员分配使用。"
       />
       <div className="grid grid-2">
         <section className="card card-pad">
@@ -167,6 +180,48 @@ export default function PlansPage() {
           )}
         </section>
       </div>
+
+      <section className="card card-pad" style={{ marginTop: 16 }}>
+        <h2>公开套餐</h2>
+        {plans.length ? (
+          <div className="grid grid-3" style={{ marginTop: 12 }}>
+            {plans.map((plan) => (
+              <article className="metric-card" key={plan.id}>
+                <span className="muted">{plan.type === "count_based" ? "按次数" : "按 Token"} · {plan.duration_days || 30} 天</span>
+                <strong>{plan.name}</strong>
+                <p className="muted" style={{ margin: "8px 0 0" }}>
+                  月额度 {formatQuota(planWindow(plan, "month"), plan.type)}
+                  {plan.max_concurrency > 0 ? ` · 并发 ${plan.max_concurrency}` : ""}
+                </p>
+                <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                  5 小时 {formatQuota(planWindow(plan, "hour"), plan.type)} · 周 {formatQuota(planWindow(plan, "week"), plan.type)}
+                </p>
+                <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                  {plan.allowed_models ? `模型：${plan.allowed_models}` : "模型不限"}
+                </p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="muted" style={{ margin: "10px 0 0" }}>{loading ? "加载中..." : "暂无公开套餐"}</p>
+        )}
+      </section>
+
+      <section className="card card-pad" style={{ marginTop: 16 }}>
+        <h2>模型倍率</h2>
+        {modelRatios.length ? (
+          <div className="grid grid-3" style={{ marginTop: 12 }}>
+            {modelRatios.map((item) => (
+              <div className="metric-card" key={item.model}>
+                <span className="muted">{item.model}</span>
+                <strong>{item.ratio}x</strong>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted" style={{ margin: "10px 0 0" }}>当前没有单独设置模型倍率，默认按 1x 计费。</p>
+        )}
+      </section>
     </AppShell>
   );
 }

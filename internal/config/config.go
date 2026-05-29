@@ -18,10 +18,7 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Gateway  GatewayConfig  `yaml:"gateway"`
-	Billing  BillingConfig  `yaml:"billing"`
 	Logging  LoggingConfig  `yaml:"logging"`
-	UI       UIConfig       `yaml:"ui"`
-	User     UserConfig     `yaml:"user"`
 	WS       WSServerConfig `yaml:"ws"`
 }
 
@@ -52,11 +49,9 @@ func (d DatabaseConfig) DSN() string {
 }
 
 type SecurityConfig struct {
-	JWTSecret         string   `yaml:"jwt_secret"`
-	EncryptionKey     string   `yaml:"encryption_key"`
-	AdminUsername     string   `yaml:"admin_username,omitempty"`
-	AdminPasswordHash string   `yaml:"admin_password_hash,omitempty"`
-	TrustedProxies    []string `yaml:"trusted_proxies"` // IPs that are allowed to set X-Forwarded-For / X-Real-IP
+	JWTSecret      string   `yaml:"jwt_secret"`
+	EncryptionKey  string   `yaml:"encryption_key"`
+	TrustedProxies []string `yaml:"trusted_proxies"` // IPs that are allowed to set X-Forwarded-For / X-Real-IP
 }
 
 type AuthConfig struct {
@@ -74,9 +69,6 @@ type GatewayConfig struct {
 	ConfigPullInterval string `yaml:"config_pull_interval"`
 }
 
-type BillingConfig struct {
-}
-
 type WSServerConfig struct {
 	Host                     string   `yaml:"host"`
 	Port                     int      `yaml:"port"`
@@ -90,25 +82,8 @@ type WSServerConfig struct {
 	AllowedOrigins           []string `yaml:"allowed_origins"`
 }
 
-type UserConfig struct {
-	MaxKeysPerUser int `yaml:"max_keys_per_user"` // default 1
-}
-
 type LoggingConfig struct {
-	Level                   string `yaml:"level"`
-	RetentionDays           int    `yaml:"retention_days"`
-	RedeemCodeRetentionDays int    `yaml:"redeem_code_retention_days"`
-}
-
-type UIConfig struct {
-	Background    string `yaml:"background"`
-	PublicBaseURL string `yaml:"public_base_url,omitempty"`
-	WallpaperPath string `yaml:"wallpaper_path,omitempty"`
-}
-
-// Initialized returns true if an admin password has been set (setup completed).
-func (c *Config) Initialized() bool {
-	return c.Security.AdminPasswordHash != ""
+	Level string `yaml:"level"`
 }
 
 // Load reads config from path. If the file doesn't exist, it auto-generates
@@ -195,19 +170,11 @@ func defaultConfig() *Config {
 			SSLMode: "disable",
 		},
 		Logging: LoggingConfig{
-			Level:                   "info",
-			RetentionDays:           180,
-			RedeemCodeRetentionDays: 180,
-		},
-		UI: UIConfig{
-			Background: "aurora",
+			Level: "info",
 		},
 		Auth: AuthConfig{
 			AccessTokenExpiry:  "15m",
 			RefreshTokenExpiry: "720h",
-		},
-		User: UserConfig{
-			MaxKeysPerUser: 1,
 		},
 	}
 }

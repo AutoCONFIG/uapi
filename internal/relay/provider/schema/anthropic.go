@@ -46,6 +46,34 @@ type AnthropicMessage struct {
 	Content []AnthropicContentBlock `json:"content"`
 }
 
+// UnmarshalJSON accepts both Anthropic content forms:
+// "content": "text" and "content": [{"type":"text","text":"text"}].
+func (m *AnthropicMessage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Role = raw.Role
+	m.Content = nil
+	if len(raw.Content) == 0 || string(raw.Content) == "null" {
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw.Content, &text); err == nil {
+		m.Content = []AnthropicContentBlock{{Type: "text", Text: text}}
+		return nil
+	}
+	var blocks []AnthropicContentBlock
+	if err := json.Unmarshal(raw.Content, &blocks); err != nil {
+		return err
+	}
+	m.Content = blocks
+	return nil
+}
+
 // AnthropicContentBlock represents a content block in an Anthropic message.
 type AnthropicContentBlock struct {
 	Type       string                `json:"type"`

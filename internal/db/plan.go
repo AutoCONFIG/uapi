@@ -8,13 +8,12 @@ import (
 
 type Plan struct {
 	Base
-	Name            string     `gorm:"size:100;not null" json:"name"`
-	Type            string     `gorm:"size:20;not null" json:"type"`
-	PolicyID        *uuid.UUID `gorm:"type:uuid;index" json:"policy_id,omitempty"`
-	ModelRatios     string     `gorm:"type:jsonb" json:"model_ratios"`
-	CompletionRatio string     `gorm:"type:jsonb" json:"completion_ratio"`
-	Enabled         bool       `gorm:"default:true" json:"enabled"`
-	DurationDays    int        `gorm:"default:30" json:"duration_days"`
+	Name         string     `gorm:"size:100;not null" json:"name"`
+	Type         string     `gorm:"size:20;not null" json:"type"`
+	PolicyID     *uuid.UUID `gorm:"type:uuid;index" json:"policy_id,omitempty"`
+	Enabled      bool       `gorm:"default:true" json:"enabled"`
+	Public       bool       `gorm:"column:is_public;default:false;index" json:"public"`
+	DurationDays int        `gorm:"default:30" json:"duration_days"`
 }
 
 func (Plan) TableName() string { return "plans" }

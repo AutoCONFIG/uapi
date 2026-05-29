@@ -16,8 +16,6 @@ database:
 security:
   jwt_secret: ""
   encryption_key: ""
-  admin_username: "admin"
-  admin_password_hash: ""
   trusted_proxies: []
 
 gateway:
@@ -45,16 +43,5 @@ auth:
   access_token_expiry: "15m"
   refresh_token_expiry: "720h"
 
-billing: {}
-
 logging:
   level: "info"
-  retention_days: 180
-  redeem_code_retention_days: 180
-
-user:
-  max_keys_per_user: 1
-
-ui:
-  background: "aurora"
-  public_base_url: ""

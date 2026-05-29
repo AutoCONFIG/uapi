@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -72,25 +73,40 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		}
 		switch plan.Type {
 		case "count_based":
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(1, model, plan.ModelRatios), true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(1, model, b.modelRatios()), true)
 		case "token_based":
 			if estimatedTokens <= 0 {
 				estimatedTokens = 1
 			}
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(estimatedTokens, model, plan.ModelRatios), true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(estimatedTokens, model, b.modelRatios()), true)
 		}
 		return fmt.Errorf("unsupported plan type: %s", plan.Type)
 	})
 	return planID, err
 }
 
+func (b *BillingService) modelRatios() string {
+	if b != nil && b.db != nil {
+		return appsettings.Get(b.db, appsettings.ModelRatios, "{}")
+	}
+	return "{}"
+}
+
 func (b *BillingService) DBTransactionRefundAndSettle(tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
-		return RefundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model)
+		return refundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model, b.modelRatios())
 	})
 }
 
 func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model string) error {
+	return refundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model, "")
+}
+
+func RefundAndSettleTxForPlanWithRatios(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model, rawRatios string) error {
+	return refundAndSettleTxForPlan(tx, tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, model, rawRatios)
+}
+
+func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, model, rawRatios string) error {
 	// Cache tokens are billed at reduced rates:
 	// cache_creation tokens: 1.25x prompt token cost (provider writes to cache)
 	// cache_read tokens: 0.1x prompt token cost (cache hit, much cheaper)
@@ -128,7 +144,10 @@ func RefundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 		return nil
 	}
 
-	ratios, err := parseMap(plan.ModelRatios)
+	if rawRatios == "" {
+		rawRatios = "{}"
+	}
+	ratios, err := parseMap(rawRatios)
 	if err != nil {
 		return fmt.Errorf("parse model ratios: %w", err)
 	}

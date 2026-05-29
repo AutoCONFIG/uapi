@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Link2, Plus, RefreshCw, Shuffle, Trash2 } from "lucide-react";
+import { Link2, Plus, RefreshCw, Shuffle } from "lucide-react";
 import { AppShell, EmptyState, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { Channel, NodeChannel, RelayNode } from "@/types/api";
@@ -13,7 +13,6 @@ export default function RelayNodesPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [expandedNodeID, setExpandedNodeID] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState({ name: "local-relay", base_url: "http://relay:8081", region: "local", egress_ip: "", weight: "0", max_concurrency: "0" });
@@ -145,7 +144,7 @@ export default function RelayNodesPage() {
   async function autoBalanceBindings() {
     const adminToken = token();
     if (!adminToken || nodes.length === 0 || channels.length === 0) return;
-    if (!confirm("确认自动均分绑定？现有节点绑定会被替换。")) return;
+    if (!confirm("确认自动绑定？现有节点绑定会被替换。")) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -211,7 +210,7 @@ export default function RelayNodesPage() {
       <PageHead
         title="节点"
         description="配置转发节点，并将渠道批量绑定到可用节点。"
-        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn" onClick={autoBalanceBindings} disabled={saving || nodes.length === 0 || channels.length === 0} type="button"><Shuffle /> 自动均分绑定</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
+        action={<><button className="btn" onClick={loadAll} title="刷新" type="button"><RefreshCw /> 刷新</button><button className="btn" onClick={autoBalanceBindings} disabled={saving || nodes.length === 0 || channels.length === 0} type="button"><Shuffle /> 自动绑定</button><button className="btn primary" onClick={() => setCreateOpen(true)} type="button"><Plus /> 新增节点</button></>}
       />
 
       <section className="ops-summary">
@@ -260,7 +259,7 @@ export default function RelayNodesPage() {
           const bindableChannels = unboundChannels(node.id);
           const draftChannelID = bindableChannels.some((channel) => channel.id === draft.channel_id) ? draft.channel_id : "";
           return (
-            <article className={`resource-card node-card${expandedNodeID === node.id ? " expanded" : ""}`} key={node.id}>
+            <article className="resource-card node-card expanded" key={node.id}>
               <div className="resource-main node-card-head">
                 <div>
                   <div className="resource-title">
@@ -270,39 +269,36 @@ export default function RelayNodesPage() {
                   <p className="muted node-meta"><code className="resource-code">{node.base_url}</code><span>{node.current_concurrency || 0} 并发</span><span>{nodeChannelGroups(node.id).length} 渠道</span></p>
                 </div>
                 <div className="resource-actions">
-                  <button className="btn danger icon-only" onClick={() => deleteNode(node.id)} title="删除节点" type="button"><Trash2 /></button>
+                  <button className="btn danger" onClick={() => deleteNode(node.id)} type="button">删除</button>
                 </div>
               </div>
 
               <div className="node-fast-controls">
                 <div className="field compact"><label>权重</label><input className="input" defaultValue={node.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.weight) patchNode(node.id, { weight: value }); }} type="number" /></div>
                 <div className="field compact"><label>并发</label><input className="input" defaultValue={node.max_concurrency} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== node.max_concurrency) patchNode(node.id, { max_concurrency: value }); }} type="number" /></div>
-                <button className="btn primary" onClick={() => setExpandedNodeID(expandedNodeID === node.id ? null : node.id)} type="button"><Link2 /> 绑定管理</button>
               </div>
 
-              {expandedNodeID === node.id ? (
-                <div className="node-quick-drawer">
-                  <div className="node-bind-row">
-                    <div className="field wide"><label>绑定渠道</label><select className="input" value={draftChannelID} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, channel_id: e.target.value } }))}><option value="">选择渠道</option>{bindableChannels.map((channel) => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></div>
-                    <div className="field compact"><label>权重</label><input className="input" type="number" value={draft.weight} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, weight: e.target.value } }))} /></div>
-                    <button className="btn primary form-row-action" disabled={!draftChannelID || bindableChannels.length === 0} onClick={() => createBinding(node.id)} type="button"><Link2 /> 新增绑定</button>
-                  </div>
+              <div className="node-quick-drawer">
+                <div className="node-bind-row">
+                  <div className="field wide"><label>绑定渠道</label><select className="input" value={draftChannelID} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, channel_id: e.target.value } }))}><option value="">选择渠道</option>{bindableChannels.map((channel) => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></div>
+                  <div className="field compact"><label>权重</label><input className="input" type="number" value={draft.weight} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, weight: e.target.value } }))} /></div>
+                  <button className="btn primary form-row-action" disabled={!draftChannelID || bindableChannels.length === 0} onClick={() => createBinding(node.id)} type="button"><Link2 /> 新增绑定</button>
+                </div>
 
-                  <div className="node-bindings-list">
-                    {nodeChannelGroups(node.id).length > 0 ? nodeChannelGroups(node.id).map((group) => (
+                <div className="node-bindings-list">
+                  {nodeChannelGroups(node.id).length > 0 ? nodeChannelGroups(node.id).map((group) => (
                   <div className="credential-pill" key={group.channelID}>
                     <Link2 />
                     <span>{channelName(group.channelID)}</span>
                     <small>渠道</small>
                     <input className="mini-input" defaultValue={group.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== group.weight) patchBinding(group.bindingID, { weight: value }); }} type="number" />
-                    <button onClick={() => deleteChannelBinding([group.bindingID])} title="删除绑定" type="button"><Trash2 /></button>
+                    <button onClick={() => deleteChannelBinding([group.bindingID])} type="button">删除</button>
                   </div>
-                    )) : (
-                      <EmptyState title="暂无渠道绑定" description={bindableChannels.length ? "选择渠道后点击新增绑定。" : "没有可绑定渠道。"} />
-                    )}
-                  </div>
+                  )) : (
+                    <EmptyState title="暂无渠道绑定" description={bindableChannels.length ? "选择渠道后点击新增绑定。" : "没有可绑定渠道。"} />
+                  )}
                 </div>
-              ) : null}
+              </div>
             </article>
           );
         })}

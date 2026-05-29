@@ -10,34 +10,27 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestShouldRefreshOAuthCredentialsUsesProviderRefreshWindow(t *testing.T) {
+func TestShouldRefreshOAuthCredentialsUsesRequestRefreshWindow(t *testing.T) {
 	account := &db.Account{Base: db.Base{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001")}, CredType: "oauth_token"}
 
-	tests := []struct {
-		name      string
-		format    string
-		inside    time.Duration
-		outside   time.Duration
-		wantEarly bool
-	}{
-		{name: "codex", format: "codex", inside: codexAccessTokenRefreshWindow - time.Second, outside: codexAccessTokenRefreshWindow + time.Minute, wantEarly: true},
-		{name: "gemini", format: "gemini_code", inside: googleAccessTokenRefreshWindow - time.Second, outside: googleAccessTokenRefreshWindow + time.Minute, wantEarly: true},
-		{name: "antigravity", format: "antigravity", inside: antigravityAccessTokenRefreshSkew - time.Second, outside: antigravityAccessTokenRefreshSkew + time.Minute, wantEarly: true},
-		{name: "claude", format: "claude_code", inside: anthropicAccessTokenRefreshWindow - time.Second, outside: anthropicAccessTokenRefreshWindow + time.Minute, wantEarly: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			expirySoon := time.Now().Add(tt.inside)
-			account.TokenExpiry = &expirySoon
-			gotSoon := shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: tt.format})
-			if gotSoon != tt.wantEarly {
-				t.Fatalf("inside refresh window = %v, want %v", gotSoon, tt.wantEarly)
+	for _, format := range []string{"codex", "gemini_code", "claude_code", "antigravity"} {
+		t.Run(format, func(t *testing.T) {
+			expiryLater := time.Now().Add(requestAccessTokenRefreshWindow + time.Minute)
+			account.TokenExpiry = &expiryLater
+			if shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: format}) {
+				t.Fatalf("%s account with unexpired token should not refresh on request", format)
 			}
 
-			expiryLater := time.Now().Add(tt.outside)
-			account.TokenExpiry = &expiryLater
-			if shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: tt.format}) {
-				t.Fatalf("account outside request refresh window should not refresh")
+			expirySoon := time.Now().Add(requestAccessTokenRefreshWindow - time.Second)
+			account.TokenExpiry = &expirySoon
+			if !shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: format}) {
+				t.Fatalf("%s account inside request refresh window should refresh on request", format)
+			}
+
+			expired := time.Now().Add(-time.Second)
+			account.TokenExpiry = &expired
+			if !shouldRefreshOAuthCredentialsForChannel(account, &db.Channel{APIFormat: format}) {
+				t.Fatalf("%s expired oauth account should refresh on request", format)
 			}
 		})
 	}
@@ -68,5 +61,20 @@ func TestOAuthProviderAndTokenURLPreferChannelAPIFormat(t *testing.T) {
 	}
 	if got := oauthTokenURLForChannel(&db.Account{}, ch); got != antigravity.DefaultTokenURL {
 		t.Fatalf("token url = %q, want %q", got, antigravity.DefaultTokenURL)
+	}
+}
+
+func TestOAuthRefreshHookReceivesAccountID(t *testing.T) {
+	accountID := uuid.New()
+	var got uuid.UUID
+	r := &Relayer{}
+	r.SetOAuthRefreshHook(func(id uuid.UUID) {
+		got = id
+	})
+
+	r.notifyOAuthAccountRefreshed(accountID)
+
+	if got != accountID {
+		t.Fatalf("hook account id = %s, want %s", got, accountID)
 	}
 }

@@ -88,14 +88,14 @@ func TestSubscriptionsAreUserScopedNotKeyScoped(t *testing.T) {
 	}
 }
 
-func TestUserRoutesDoNotExposePlanCatalogOrSelfSubscribe(t *testing.T) {
+func TestUserRoutesExposePublicPlanCatalogButNoSelfSubscribe(t *testing.T) {
 	server := readRepoFile(t, "internal", "server", "server.go")
-	for _, route := range []string{`"/api/user/plans"`, `"/api/user/subscription/:planID"`} {
+	for _, route := range []string{`"/api/user/subscription/:planID"`} {
 		if strings.Contains(server, route) {
 			t.Fatalf("user self-service plan route must not be registered: %s", route)
 		}
 	}
-	for _, route := range []string{`"/api/user/subscription"`, `"/api/user/redeem"`} {
+	for _, route := range []string{`"/api/user/subscription"`, `"/api/user/plans"`, `"/api/user/redeem"`} {
 		if !strings.Contains(server, route) {
 			t.Fatalf("expected user route to be registered: %s", route)
 		}

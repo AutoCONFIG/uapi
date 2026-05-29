@@ -17,6 +17,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/modelalias"
+	"github.com/AutoCONFIG/uapi/internal/modelvisibility"
 	"github.com/AutoCONFIG/uapi/internal/relay"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/google/uuid"
@@ -66,12 +67,14 @@ type nodeState struct {
 }
 
 type routeCandidate struct {
-	Node           *nodeState
-	ChannelID      uuid.UUID
-	AccountID      uuid.UUID
-	AccountWeight  int
-	ChannelModels  string
-	ChannelAliases string
+	Node             *nodeState
+	ChannelID        uuid.UUID
+	AccountID        uuid.UUID
+	AccountWeight    int
+	ChannelAPIFormat string
+	ChannelModels    string
+	ChannelAliases   string
+	ChannelSettings  string
 }
 
 type tokenCacheEntry struct {
@@ -219,11 +222,11 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 }
 
 func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
-	if string(ctx.Method()) == fasthttp.MethodGet && string(ctx.Path()) == "/v1/models" {
+	if string(ctx.Method()) == fasthttp.MethodGet && isOpenAIModelsPath(string(ctx.Path())) {
 		g.handleModels(ctx)
 		return
 	}
-	if string(ctx.Method()) == fasthttp.MethodGet && string(ctx.Path()) == "/v1beta/models" {
+	if string(ctx.Method()) == fasthttp.MethodGet && isGeminiModelsPath(string(ctx.Path())) {
 		g.handleGeminiModels(ctx)
 		return
 	}
@@ -462,7 +465,7 @@ func (g *Gateway) handleGeminiModels(ctx *fasthttp.RequestCtx) {
 }
 
 func (g *Gateway) authenticateForModels(ctx *fasthttp.RequestCtx) (authenticatedToken, bool) {
-	tokenKey := httputil.ExtractBearerToken(ctx, false)
+	tokenKey := httputil.ExtractBearerToken(ctx, true)
 	if tokenKey == "" {
 		ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
@@ -497,9 +500,10 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 		Models       string
 		ModelAliases string
 		APIFormat    string
+		Settings     string
 	}
 	if err := g.db.Table("channels").
-		Select("DISTINCT channels.models, channels.model_aliases, channels.api_format").
+		Select("DISTINCT channels.models, channels.model_aliases, channels.api_format, channels.settings").
 		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
 		Where("channels.enabled = true AND channels.deleted_at IS NULL AND channels.models <> ''").
 		Scan(&rows).Error; err != nil {
@@ -513,7 +517,8 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 	allowedSet := httputil.CSVSet(allowed)
 	seen := map[string]modelDiscoveryItem{}
 	for _, row := range rows {
-		for _, model := range modelalias.PublicList(row.Models, row.ModelAliases) {
+		rowModels := publicModelsForChannel(row.Models, row.ModelAliases, row.APIFormat, row.Settings)
+		for _, model := range rowModels {
 			if len(allowedSet) > 0 {
 				if _, ok := allowedSet[model]; !ok {
 					continue
@@ -521,7 +526,7 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 			}
 			item := modelDiscoveryItem{ID: model, OwnedBy: "uapi"}
 			if row.APIFormat == "antigravity" {
-				item.DisplayName = antigravity.DisplayName(model)
+				item.DisplayName = antigravity.PublicDisplayName(model)
 			}
 			seen[model] = item
 		}
@@ -537,8 +542,12 @@ func (g *Gateway) availableModelInfos(authInfo authenticatedToken) ([]modelDisco
 	return models, nil
 }
 
+func publicModelsForChannel(models, aliases, apiFormat, settingsRaw string) []string {
+	return modelvisibility.PublicModelsForChannel(models, aliases, apiFormat, settingsRaw)
+}
+
 func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenticatedToken, bool) {
-	tokenKey := httputil.ExtractBearerToken(ctx, false)
+	tokenKey := httputil.ExtractBearerToken(ctx, true)
 	if tokenKey == "" {
 		ctx.Error(`{"error":"missing authorization"}`, fasthttp.StatusUnauthorized)
 		return authenticatedToken{}, false
@@ -577,6 +586,14 @@ func (g *Gateway) authenticate(ctx *fasthttp.RequestCtx, model string) (authenti
 	return authenticatedToken{token: token, policy: policy, hasPolicy: hasPolicy, planType: planType}, true
 }
 
+func isOpenAIModelsPath(path string) bool {
+	return path == "/v1/models" || path == "/v1/models/"
+}
+
+func isGeminiModelsPath(path string) bool {
+	return path == "/v1beta/models" || path == "/v1beta/models/"
+}
+
 func (g *Gateway) getToken(key string) (db.Token, error) {
 	now := time.Now()
 	g.tokenMu.Lock()
@@ -609,7 +626,7 @@ func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
 	bestScore := math.MaxFloat64
 	for _, route := range g.routes {
 		node := route.Node
-		if !modelalias.Supports(model, route.ChannelModels, route.ChannelAliases) {
+		if !channelSupportsGatewayModel(model, route.ChannelAPIFormat, route.ChannelModels, route.ChannelAliases, route.ChannelSettings) {
 			continue
 		}
 		if now.Before(node.FailUntil) {
@@ -661,22 +678,25 @@ func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
 
 func (g *Gateway) reloadLocked() {
 	var rows []struct {
-		NodeID         uuid.UUID
-		NodeName       string
-		BaseURL        string
-		NodeWeight     int
-		MaxConcurrency int
-		ChannelID      uuid.UUID
-		AccountID      uuid.UUID
-		AccountWeight  int
-		ChannelModels  string
-		ChannelAliases string
+		NodeID           uuid.UUID
+		NodeName         string
+		BaseURL          string
+		NodeWeight       int
+		MaxConcurrency   int
+		ChannelID        uuid.UUID
+		AccountID        uuid.UUID
+		AccountWeight    int
+		ChannelAPIFormat string
+		ChannelModels    string
+		ChannelAliases   string
+		ChannelSettings  string
 	}
 	err := g.db.Table("relay_nodes").
 		Select(`relay_nodes.id AS node_id, relay_nodes.name AS node_name, relay_nodes.base_url,
 			relay_nodes.weight AS node_weight, relay_nodes.max_concurrency,
 			node_channels.channel_id, accounts.id AS account_id, node_channels.weight AS account_weight,
-			channels.models AS channel_models, channels.model_aliases AS channel_aliases`).
+			channels.api_format AS channel_api_format, channels.models AS channel_models, channels.model_aliases AS channel_aliases,
+			channels.settings AS channel_settings`).
 		Joins("JOIN node_channels ON node_channels.relay_node_id = relay_nodes.id AND node_channels.enabled = true AND node_channels.deleted_at IS NULL").
 		Joins("JOIN channels ON channels.id = node_channels.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
 		Joins("JOIN accounts ON accounts.channel_id = channels.id AND accounts.enabled = true AND accounts.deleted_at IS NULL").
@@ -717,17 +737,35 @@ func (g *Gateway) reloadLocked() {
 		state.Weight = row.NodeWeight
 		state.MaxConcurrency = row.MaxConcurrency
 		nextRoutes = append(nextRoutes, &routeCandidate{
-			Node:           state,
-			ChannelID:      row.ChannelID,
-			AccountID:      row.AccountID,
-			AccountWeight:  row.AccountWeight,
-			ChannelModels:  row.ChannelModels,
-			ChannelAliases: row.ChannelAliases,
+			Node:             state,
+			ChannelID:        row.ChannelID,
+			AccountID:        row.AccountID,
+			AccountWeight:    row.AccountWeight,
+			ChannelAPIFormat: row.ChannelAPIFormat,
+			ChannelModels:    row.ChannelModels,
+			ChannelAliases:   row.ChannelAliases,
+			ChannelSettings:  row.ChannelSettings,
 		})
 	}
 	g.nodes = nextNodes
 	g.routes = nextRoutes
 	g.lastError = nil
+}
+
+func channelSupportsGatewayModel(model, apiFormat, models, aliases string, settingsRaw ...string) bool {
+	if apiFormat != "antigravity" {
+		return modelalias.Supports(model, models, aliases)
+	}
+	settingsRawValue := ""
+	if len(settingsRaw) > 0 {
+		settingsRawValue = settingsRaw[0]
+	}
+	for _, public := range publicModelsForChannel(models, aliases, apiFormat, settingsRawValue) {
+		if public == strings.TrimPrefix(strings.TrimSpace(model), "models/") {
+			return true
+		}
+	}
+	return antigravity.SupportsModelInList(model, httputil.CSVList(models), antigravity.ParseChannelSettings(settingsRawValue))
 }
 
 func (g *Gateway) markPassiveFailure(id uuid.UUID) {

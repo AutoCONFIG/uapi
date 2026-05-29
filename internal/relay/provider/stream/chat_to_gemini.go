@@ -14,9 +14,9 @@ type chatToGeminiState struct {
 	model string
 
 	// Tool call tracking
-	currentToolCallID   string
-	currentToolCallName string
-	toolCallArgs        *strings.Builder
+	toolCallIDs   map[int]string
+	toolCallNames map[int]string
+	toolCallArgs  map[int]*strings.Builder
 
 	// State flags
 	hasStarted  bool
@@ -27,7 +27,9 @@ type chatToGeminiState struct {
 var chatToGeminiPool = sync.Pool{
 	New: func() interface{} {
 		return &chatToGeminiState{
-			toolCallArgs: &strings.Builder{},
+			toolCallIDs:   make(map[int]string),
+			toolCallNames: make(map[int]string),
+			toolCallArgs:  make(map[int]*strings.Builder),
 		}
 	},
 }
@@ -76,6 +78,7 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 		Role      string `json:"role"`
 		Content   string `json:"content"`
 		ToolCalls []struct {
+			Index    int    `json:"index"`
 			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {
@@ -99,40 +102,34 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 		if c.state.model == "" {
 			c.state.model = event.Model
 		}
-		// Gemini wrapped format: {"method":"generateContentStream","params":{"candidates":[{"content":{"parts":[{"text":"..."}]}}]}}
-		return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"text": deltaData.Content}}}, "finishReason": "NOT_STARTED"}}}})
+		return geminiStreamEvent(deltaData.Content, "NOT_STARTED")
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
+		var out []byte
 		for _, tc := range deltaData.ToolCalls {
-			if tc.Function.Name != "" && tc.Function.Arguments == "" {
-				// Tool call start
-				c.state.currentToolCallID = tc.ID
-				c.state.currentToolCallName = tc.Function.Name
-				c.state.toolCallArgs.Reset()
-				// Gemini function call format
-				functionCall := map[string]interface{}{
-					"name": tc.Function.Name,
-					"args": map[string]interface{}{},
+			idx := tc.Index
+			if tc.ID != "" {
+				c.state.toolCallIDs[idx] = tc.ID
+			}
+			if tc.Function.Name != "" {
+				c.state.toolCallNames[idx] = tc.Function.Name
+				if c.state.toolCallArgs[idx] == nil {
+					c.state.toolCallArgs[idx] = &strings.Builder{}
 				}
-				funcCallJSON, _ := json.Marshal(functionCall)
-				var functionCallValue interface{}
-				if err := json.Unmarshal(funcCallJSON, &functionCallValue); err != nil {
-					return nil
+			}
+			if tc.Function.Arguments != "" {
+				if c.state.toolCallArgs[idx] == nil {
+					c.state.toolCallArgs[idx] = &strings.Builder{}
 				}
-				return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"functionCall": functionCallValue}}}, "finishReason": "NOT_STARTED"}}}})
-			} else if tc.Function.Arguments != "" {
-				// Tool call arguments - need to accumulate and emit as complete
-				c.state.toolCallArgs.WriteString(tc.Function.Arguments)
-				// For streaming, we emit partial arguments as JSON
-				var args interface{}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					return nil
-				}
-				return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{map[string]interface{}{"functionCall": map[string]interface{}{"name": c.state.currentToolCallName, "args": args}}}}, "finishReason": "NOT_STARTED"}}}})
+				c.state.toolCallArgs[idx].WriteString(tc.Function.Arguments)
+			}
+			if event.Choices[0].FinishReason == "tool_calls" {
+				c.state.hasFinished = true
+				out = append(out, c.geminiFunctionCallEvent(idx)...)
 			}
 		}
-		return nil
+		return out
 
 	// Finish reason
 	case event.Choices[0].FinishReason != "":
@@ -147,8 +144,11 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 			geminiReason = "MAX_TOKENS"
 		}
 
+		if finishReason == "tool_calls" {
+			return c.geminiFunctionCallEvents()
+		}
 		if geminiReason != "" {
-			return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{}}, "finishReason": geminiReason}}}})
+			return geminiStreamFinishEvent(geminiReason)
 		}
 		return nil
 	}
@@ -158,15 +158,96 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 
 func (c *chatToGeminiConverter) Done() []byte {
 	if !c.state.hasFinished {
-		return sseJSON(map[string]interface{}{"method": "generateContentStream", "params": map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"parts": []interface{}{}}, "finishReason": "STOP"}}}})
+		return geminiStreamFinishEvent("STOP")
 	}
 	return nil
 }
 
+func (c *chatToGeminiConverter) geminiFunctionCallEvents() []byte {
+	var out []byte
+	for idx := range c.state.toolCallNames {
+		out = append(out, c.geminiFunctionCallEvent(idx)...)
+	}
+	return out
+}
+
+func (c *chatToGeminiConverter) geminiFunctionCallEvent(idx int) []byte {
+	name := c.state.toolCallNames[idx]
+	if name == "" {
+		return nil
+	}
+	args := map[string]interface{}{}
+	if b := c.state.toolCallArgs[idx]; b != nil && b.Len() > 0 {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(b.String()), &parsed); err == nil {
+			if parsedMap, ok := parsed.(map[string]interface{}); ok {
+				args = parsedMap
+			} else {
+				args = map[string]interface{}{"value": parsed}
+			}
+		} else {
+			args = map[string]interface{}{"arguments": b.String()}
+		}
+	}
+	return sseJSON(map[string]interface{}{
+		"method": "generateContentStream",
+		"params": map[string]interface{}{
+			"candidates": []interface{}{map[string]interface{}{
+				"content": map[string]interface{}{
+					"parts": []interface{}{map[string]interface{}{
+						"functionCall": map[string]interface{}{
+							"name": name,
+							"args": args,
+						},
+					}},
+				},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+}
+
+func geminiStreamEvent(text string, finishReason string) []byte {
+	return sseJSON(map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []interface{}{map[string]interface{}{"text": text}},
+				},
+				"finishReason": finishReason,
+			},
+		},
+	})
+}
+
+func geminiStreamFinishEvent(finishReason string) []byte {
+	return sseJSON(map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []interface{}{},
+				},
+				"finishReason": finishReason,
+			},
+		},
+	})
+}
+
 func (c *chatToGeminiConverter) Reset() {
-	c.state.toolCallArgs.Reset()
-	c.state.currentToolCallID = ""
-	c.state.currentToolCallName = ""
+	for k := range c.state.toolCallIDs {
+		delete(c.state.toolCallIDs, k)
+	}
+	for k := range c.state.toolCallNames {
+		delete(c.state.toolCallNames, k)
+	}
+	for k, v := range c.state.toolCallArgs {
+		if v != nil {
+			v.Reset()
+		}
+		delete(c.state.toolCallArgs, k)
+	}
 	c.state.hasStarted = false
 	c.state.hasFinished = false
 	c.state.model = ""

@@ -4,6 +4,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 )
 
 type testUsageParser struct{}
@@ -286,6 +288,76 @@ func TestStreamAndForwardConvertedResponsesToChatSendsDone(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "data: [DONE]") {
 		t.Fatalf("converted Chat SSE must include [DONE], got %s", out)
+	}
+}
+
+func TestStreamAndForwardChatToResponsesCompletesLifecycle(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIResponses)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed {
+		t.Fatalf("chat to responses stream must finalize successfully: %+v", result)
+	}
+	got := string(out)
+	for _, want := range []string{
+		"event: response.created",
+		"event: response.output_text.delta",
+		"event: response.output_text.done",
+		"event: response.content_part.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+		`"delta":"hi"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("converted Responses SSE missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestStreamConverterFuncClosesOnTerminalEventWithoutDone(t *testing.T) {
+	convert := newStreamConverterFunc(provider.FormatOpenAIResponses, provider.FormatOpenAIChatCompletions)
+	if convert == nil {
+		t.Fatalf("missing responses to chat converter")
+	}
+	out := convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"m"}}` + "\n\n"))
+	if !strings.Contains(string(out), `"finish_reason":"stop"`) {
+		t.Fatalf("terminal Responses event was not converted to Chat finish: %s", out)
+	}
+	if got := convert([]byte("data: [DONE]\n\n")); got != nil {
+		t.Fatalf("converter should be closed after terminal event, got %s", got)
+	}
+}
+
+func TestStreamAndForwardConvertedAnthropicMessageDeltaFinalizes(t *testing.T) {
+	body := "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := func([]byte) []byte {
+		return []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}` + "\n\n")
+	}
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed {
+		t.Fatalf("anthropic message_delta stop_reason must finalize converted stream: %+v", result)
 	}
 }
 

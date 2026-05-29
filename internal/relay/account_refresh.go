@@ -29,11 +29,8 @@ var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 var refreshGroup singleflight.Group
 
 const (
-	codexAccessTokenRefreshWindow     = 5 * time.Minute
-	googleAccessTokenRefreshWindow    = 5 * time.Minute
-	antigravityAccessTokenRefreshSkew = 5 * time.Minute
-	anthropicAccessTokenRefreshWindow = 5 * time.Minute
-	codexRefreshInterval              = 8 * 24 * time.Hour
+	requestAccessTokenRefreshWindow = 5 * time.Minute
+	codexRefreshInterval            = 8 * 24 * time.Hour
 )
 
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
@@ -110,7 +107,7 @@ func shouldRefreshOAuthCredentials(account *db.Account) bool {
 func shouldRefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel) bool {
 	now := time.Now()
 	if account.TokenExpiry != nil {
-		return !account.TokenExpiry.After(now) || now.Add(oauthAccessTokenRefreshWindow(account, ch)).After(*account.TokenExpiry)
+		return !account.TokenExpiry.After(now) || now.Add(requestAccessTokenRefreshWindow).After(*account.TokenExpiry)
 	}
 	if strings.TrimSpace(account.RefreshToken) != "" {
 		if lastRefresh, ok := oauthLastRefresh(account.Metadata); ok {
@@ -119,21 +116,6 @@ func shouldRefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel
 		return true
 	}
 	return false
-}
-
-func oauthAccessTokenRefreshWindow(account *db.Account, ch *db.Channel) time.Duration {
-	switch oauthProviderKeyForChannel(account, ch) {
-	case "openai":
-		return codexAccessTokenRefreshWindow
-	case "gemini":
-		return googleAccessTokenRefreshWindow
-	case "antigravity":
-		return antigravityAccessTokenRefreshSkew
-	case "anthropic":
-		return anthropicAccessTokenRefreshWindow
-	default:
-		return 0
-	}
 }
 
 func oauthLastRefresh(metadata map[string]interface{}) (time.Time, bool) {

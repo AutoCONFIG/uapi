@@ -168,7 +168,8 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "id and password are required")
 		return
 	}
-	if h.cfg.Security.AdminPasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(h.cfg.Security.AdminPasswordHash), []byte(req.Password)) != nil {
+	_, adminPasswordHash := h.adminCredentials()
+	if adminPasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(adminPasswordHash), []byte(req.Password)) != nil {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid password")
 		return
 	}

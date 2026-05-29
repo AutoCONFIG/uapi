@@ -80,9 +80,9 @@ Implemented alignment:
   consistent. Moving OAuth accounts across OAuth channel families is rejected
   unless the account's OAuth token URL matches the target provider.
 - Codex OAuth channel model presets are sourced from
-  `upstream/codex/codex-rs/models-manager/models.json` and currently include
-  `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, and
-  `gpt-image-2`.
+  the Codex upstream model catalogs plus locally confirmed hidden IDs. They
+  currently include the listed Codex models, `gpt-5.5-openai-compact`,
+  `gpt-5.3-codex-spark`, `gpt-image-2`, and `codex-auto-review`.
 
 Standard OpenAI API reference:
 
@@ -144,7 +144,7 @@ Implemented alignment:
   UAPI's internal/Gemini/OpenAI formats.
 - Gemini Code model presets are sourced from
   `upstream/gemini-cli/packages/core/src/config/models.ts` and include the CLI
-  aliases plus stable and preview Gemini model ids.
+  aliases plus stable, preview, custom-tools, and Gemma model ids.
 
 Standard Gemini API reference:
 
@@ -188,7 +188,8 @@ Implemented alignment:
   `anthropic-version: 2023-06-01`.
 - Claude Code model presets are sourced from
   `upstream/claude-code/src/utils/model/configs.ts` and include canonical
-  first-party model ids.
+  first-party model ids plus Claude Code aliases such as `sonnet`, `opus`,
+  `haiku`, `best`, `sonnet[1m]`, `opus[1m]`, and `opusplan`.
 
 Standard Anthropic API reference:
 

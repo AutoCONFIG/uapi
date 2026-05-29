@@ -74,21 +74,33 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 	case "response.created":
 		c.state.hasStarted = true
 		var meta struct {
-			ID    string `json:"id"`
-			Model string `json:"model"`
-			Role  string `json:"role"`
+			ID       string `json:"id"`
+			Model    string `json:"model"`
+			Role     string `json:"role"`
+			Response struct {
+				ID    string `json:"id"`
+				Model string `json:"model"`
+			} `json:"response"`
 		}
 		json.Unmarshal([]byte(data), &meta)
+		if meta.ID == "" {
+			meta.ID = meta.Response.ID
+		}
+		if meta.Model == "" {
+			meta.Model = meta.Response.Model
+		}
 		c.state.id = meta.ID
 		c.state.model = meta.Model
 		return chatChunk(meta.ID, meta.Model, map[string]interface{}{"role": "assistant"}, nil, nil)
 
 	case "response.output_text.delta":
-		var delta struct {
-			Text string `json:"text"`
-		}
-		json.Unmarshal(event.Delta, &delta)
-		return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": delta.Text}, nil, nil)
+		text := responsesTextDelta(event.Delta)
+		c.state.textBuffer.WriteString(text)
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": text}, nil, nil)
+
+	case "response.output_text.done":
+		text := responsesTextDoneText([]byte(data), event.Delta)
+		return c.emitMissingText(text)
 
 	case "response.output_item.added":
 		// Could be message or function_call item
@@ -117,6 +129,12 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 			Arguments string `json:"arguments"`
 		}
 		json.Unmarshal(event.Delta, &delta)
+		if delta.Arguments == "" {
+			delta.Arguments = responsesTextDelta(event.Delta)
+		}
+		if delta.CallID == "" {
+			delta.CallID = event.ItemID
+		}
 		if args, ok := c.state.toolCallArgs[delta.CallID]; ok {
 			args.WriteString(delta.Arguments)
 			idx := c.state.toolCallIDToIndex[delta.CallID]
@@ -128,14 +146,145 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 
 	case "response.completed":
 		c.state.hasFinished = true
-		// Try to parse usage from the event if needed
-		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "stop", nil)
+		var completed struct {
+			Response struct {
+				ID     string                 `json:"id"`
+				Model  string                 `json:"model"`
+				Output []responsesOutputItem  `json:"output"`
+				Usage  map[string]interface{} `json:"usage"`
+			} `json:"response"`
+		}
+		_ = json.Unmarshal([]byte(data), &completed)
+		if c.state.id == "" {
+			c.state.id = completed.Response.ID
+		}
+		if c.state.model == "" {
+			c.state.model = completed.Response.Model
+		}
+		var out []byte
+		for _, item := range completed.Response.Output {
+			if item.Type != "" && item.Type != "message" {
+				continue
+			}
+			for _, content := range item.Content {
+				text := content.Text
+				if text == "" {
+					text = content.OutputText
+				}
+				out = append(out, c.emitMissingText(text)...)
+			}
+		}
+		out = append(out, chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "stop", responsesUsageToChat(completed.Response.Usage))...)
+		return out
 
 	case "response.incomplete":
 		return chatChunk(c.state.id, c.state.model, map[string]interface{}{}, "length", nil)
 	}
 
 	return nil
+}
+
+func responsesTextDelta(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var delta struct {
+		Text      string `json:"text"`
+		Content   string `json:"content"`
+		Delta     string `json:"delta"`
+		Arguments string `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return ""
+	}
+	switch {
+	case delta.Text != "":
+		return delta.Text
+	case delta.Content != "":
+		return delta.Content
+	case delta.Delta != "":
+		return delta.Delta
+	default:
+		return delta.Arguments
+	}
+}
+
+type responsesOutputItem struct {
+	Type    string `json:"type"`
+	Content []struct {
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		OutputText string `json:"output_text"`
+	} `json:"content"`
+}
+
+func responsesTextDoneText(data []byte, raw json.RawMessage) string {
+	var event struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(data, &event); err == nil && event.Text != "" {
+		return event.Text
+	}
+	return responsesTextDelta(raw)
+}
+
+func (c *responsesToChatConverter) emitMissingText(text string) []byte {
+	if text == "" {
+		return nil
+	}
+	current := c.state.textBuffer.String()
+	if strings.HasPrefix(text, current) {
+		missing := strings.TrimPrefix(text, current)
+		if missing == "" {
+			return nil
+		}
+		c.state.textBuffer.WriteString(missing)
+		return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": missing}, nil, nil)
+	}
+	if strings.Contains(current, text) {
+		return nil
+	}
+	c.state.textBuffer.WriteString(text)
+	return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": text}, nil, nil)
+}
+
+func responsesUsageToChat(usage map[string]interface{}) map[string]interface{} {
+	if len(usage) == 0 {
+		return nil
+	}
+	prompt := numericUsageValue(usage, "prompt_tokens", "input_tokens")
+	completion := numericUsageValue(usage, "completion_tokens", "output_tokens")
+	total := numericUsageValue(usage, "total_tokens")
+	if total == 0 && (prompt != 0 || completion != 0) {
+		total = prompt + completion
+	}
+	if prompt == 0 && completion == 0 && total == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		"prompt_tokens":     prompt,
+		"completion_tokens": completion,
+		"total_tokens":      total,
+	}
+}
+
+func numericUsageValue(usage map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		switch v := usage[key].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		case json.Number:
+			n, _ := v.Int64()
+			return int(n)
+		}
+	}
+	return 0
 }
 
 func (c *responsesToChatConverter) Done() []byte {

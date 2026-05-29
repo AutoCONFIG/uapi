@@ -1,6 +1,7 @@
 import type {
   Account,
   AdminSettings,
+  AvailableModels,
   AccessPolicy,
   ApiEnvelope,
   ApiKey,
@@ -18,6 +19,7 @@ import type {
   PaginatedResponse,
   Plan,
   Profile,
+  PublicPlan,
   PublicSettings,
   Subscription,
   UsageLogItem,
@@ -169,6 +171,8 @@ export const userApi = {
   usageLogs: (token: string, page = 1, limit = 20) =>
     request<UsageLogs>(`/api/user/usage/logs?page=${page}&limit=${limit}`, { token }),
   subscription: (token: string) => request<Subscription>("/api/user/subscription", { token }),
+  plans: (token: string) => request<PublicPlan[]>("/api/user/plans", { token }),
+  models: (token: string) => request<AvailableModels>("/api/user/models", { token }),
   redeem: (token: string, code: string) => request<Subscription>("/api/user/redeem", { method: "POST", token, body: { code } }),
 };
 
@@ -256,9 +260,9 @@ export const adminApi = {
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; model_ratios?: string; completion_ratio?: string; duration_days?: number; enabled?: boolean; allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number }) =>
+  createPlan: (token: string, body: { name: string; type: string; duration_days?: number; enabled?: boolean; public?: boolean; allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; model_ratios: string; completion_ratio: string; duration_days: number; enabled: boolean; allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; duration_days: number; enabled: boolean; public: boolean; allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),

@@ -31,6 +31,10 @@ function applyBackground(settings: AdminSettings) {
 export default function AdminSettingsPage() {
   const [logRetention, setLogRetention] = useState(180);
   const [redeemRetention, setRedeemRetention] = useState(180);
+  const [modelRatios, setModelRatios] = useState("{}");
+  const [adminUsername, setAdminUsername] = useState("admin");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [maxKeysPerUser, setMaxKeysPerUser] = useState(1);
   const [background, setBackground] = useState<AdminSettings["background"]>("aurora");
   const [publicBaseURL, setPublicBaseURL] = useState("");
   const [wallpaperURL, setWallpaperURL] = useState("");
@@ -44,6 +48,9 @@ export default function AdminSettingsPage() {
     adminApi.settings(token).then((settings) => {
       setLogRetention(settings.log_retention_days);
       setRedeemRetention(settings.redeem_code_retention_days);
+      setModelRatios(settings.model_ratios || "{}");
+      setAdminUsername(settings.admin_username || "admin");
+      setMaxKeysPerUser(settings.max_keys_per_user ?? 1);
       setBackground(settings.background);
       setPublicBaseURL(settings.public_base_url || "");
       setWallpaperURL(settings.wallpaper_url || "");
@@ -60,11 +67,19 @@ export default function AdminSettingsPage() {
       const updated = await adminApi.updateSettings(token, {
         log_retention_days: logRetention,
         redeem_code_retention_days: redeemRetention,
+        model_ratios: modelRatios.trim() || "{}",
+        admin_username: adminUsername.trim(),
+        ...(adminPassword.trim() ? { admin_password: adminPassword.trim() } : {}),
+        max_keys_per_user: maxKeysPerUser,
         background,
         public_base_url: publicBaseURL.trim(),
       });
       setLogRetention(updated.log_retention_days);
       setRedeemRetention(updated.redeem_code_retention_days);
+      setModelRatios(updated.model_ratios || "{}");
+      setAdminUsername(updated.admin_username || "admin");
+      setAdminPassword("");
+      setMaxKeysPerUser(updated.max_keys_per_user ?? 1);
       setBackground(updated.background);
       setPublicBaseURL(updated.public_base_url || "");
       setWallpaperURL(updated.wallpaper_url || "");
@@ -103,14 +118,27 @@ export default function AdminSettingsPage() {
           <section className="card card-pad settings-section">
             <div>
               <h2>站点参数</h2>
-              <p className="muted">配置公开访问地址、后台清理周期和数据保留策略。</p>
+              <p className="muted">配置公开访问地址、管理员账号和用户侧策略。</p>
             </div>
             <div className="field">
               <label>公开访问地址</label>
-              <input className="input" value={publicBaseURL} onChange={(e) => setPublicBaseURL(e.target.value)} placeholder="https://uapi.hyhy.fun" />
+              <input className="input" value={publicBaseURL} onChange={(e) => setPublicBaseURL(e.target.value)} />
               <span className="muted" style={{ fontSize: 12 }}>用于用户侧快速接入等需要展示真实域名的地方，留空则使用当前浏览器地址。</span>
             </div>
             <div className="grid grid-2">
+              <div className="field">
+                <label>管理员账号</label>
+                <input className="input" value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>管理员新密码</label>
+                <input className="input" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} type="password" />
+                <span className="muted" style={{ fontSize: 12 }}>留空则不修改密码。</span>
+              </div>
+              <div className="field">
+                <label>每个用户最多密钥数</label>
+                <input className="input" type="number" min={0} value={maxKeysPerUser} onChange={(e) => setMaxKeysPerUser(Number(e.target.value))} />
+              </div>
               <div className="field">
                 <label>调用日志保留天数</label>
                 <input className="input" type="number" min={1} value={logRetention} onChange={(e) => setLogRetention(Number(e.target.value))} />
@@ -119,6 +147,11 @@ export default function AdminSettingsPage() {
                 <label>已用兑换码保留天数</label>
                 <input className="input" type="number" min={1} value={redeemRetention} onChange={(e) => setRedeemRetention(Number(e.target.value))} />
               </div>
+            </div>
+            <div className="field">
+              <label>模型倍率 JSON</label>
+              <textarea className="input" rows={6} value={modelRatios} onChange={(e) => setModelRatios(e.target.value)} />
+              <span className="muted" style={{ fontSize: 12 }}>空值会保存为 {"{}"}。</span>
             </div>
           </section>
 

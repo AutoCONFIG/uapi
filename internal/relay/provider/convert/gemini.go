@@ -44,7 +44,7 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 	// Convert contents to messages
 	for _, content := range req.Contents {
 		internalMsg := InternalMessage{
-			Role: content.Role,
+			Role: geminiRoleToInternal(content.Role),
 		}
 
 		for _, part := range content.Parts {
@@ -162,7 +162,7 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	contents := make([]map[string]interface{}, 0)
 	for _, msg := range ir.Messages {
 		contentMap := make(map[string]interface{})
-		contentMap["role"] = msg.Role
+		contentMap["role"] = internalRoleToGemini(msg.Role)
 
 		parts := make([]map[string]interface{}, 0)
 
@@ -302,6 +302,28 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func geminiRoleToInternal(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "model", "assistant":
+		return "assistant"
+	case "user", "tool":
+		return "user"
+	default:
+		return "user"
+	}
+}
+
+func internalRoleToGemini(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "assistant", "model":
+		return "model"
+	case "tool", "function", "user":
+		return "user"
+	default:
+		return "user"
+	}
 }
 
 func geminiFunctionCallingConfig(raw json.RawMessage) (map[string]interface{}, bool) {

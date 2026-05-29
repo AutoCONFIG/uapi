@@ -54,7 +54,7 @@ func TestStreamConvertersAcceptSSEAndEmitValidJSON(t *testing.T) {
 			upstream: convert.FormatOpenAIChatCompletions,
 			client:   convert.FormatGemini,
 			input:    `data: {"id":"chatcmpl_1","model":"gemini","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}` + "\n\n",
-			wantType: "generateContentStream",
+			wantType: "",
 		},
 	}
 
@@ -98,15 +98,90 @@ func TestGeminiStreamIDsAreNotConstant(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamConverterHandlesStandardTextDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	start := converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	if !strings.Contains(string(start), `"id":"resp_1"`) || !strings.Contains(string(start), `"model":"gpt-5"`) {
+		t.Fatalf("response metadata was not converted: %s", start)
+	}
+	delta := converter.Convert([]byte(`data: {"type":"response.output_text.delta","delta":"pong"}` + "\n\n"))
+	if !strings.Contains(string(delta), `"content":"pong"`) {
+		t.Fatalf("string text delta was not converted: %s", delta)
+	}
+}
+
+func TestResponsesStreamConverterEmitsCompletedOutputText(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","output":[{"type":"message","content":[{"type":"output_text","text":"final text"}]}],"usage":{"input_tokens":3,"output_tokens":4}}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"content":"final text"`, `"finish_reason":"stop"`, `"prompt_tokens":3`, `"completion_tokens":4`, `"total_tokens":7`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("completed output text was not converted, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestResponsesStreamConverterDoesNotDuplicateDoneText(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	delta := converter.Convert([]byte(`data: {"type":"response.output_text.delta","delta":"hel"}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.output_text.done","text":"hello"}` + "\n\n"))
+	completed := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}` + "\n\n"))
+	got := string(delta) + string(done) + string(completed)
+	if strings.Count(got, `"content":"hel"`) != 1 || strings.Count(got, `"content":"lo"`) != 1 {
+		t.Fatalf("done text should emit only the missing tail:\n%s", got)
+	}
+	if strings.Count(got, `"content":"hello"`) != 0 {
+		t.Fatalf("completed text duplicated an already streamed message:\n%s", got)
+	}
+}
+
+func TestChatToResponsesEmitsStandardTextDeltaSequence(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"gpt-5","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}` + "\n\n"))
+	for _, want := range []string{`event: response.output_item.added`, `event: response.content_part.added`, `event: response.output_text.delta`, `"delta":"pong"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("missing %q in responses stream:\n%s", want, out)
+		}
+	}
+}
+
+func TestChatToGeminiAccumulatesSplitToolCallArguments(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatGemini)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"gemini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"gemini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\""}}]},"finish_reason":null}]}` + "\n\n"))
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"gemini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"weather\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"gemini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"functionCall"`, `"name":"lookup"`, `"query":"weather"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("split tool-call arguments were not accumulated, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestChatToAnthropicEmitsTextBlockBeforeDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"claude","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"claude","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}` + "\n\n"))
+	start := strings.Index(string(out), `"type":"content_block_start"`)
+	delta := strings.Index(string(out), `"type":"content_block_delta"`)
+	if start < 0 || delta < 0 || start > delta {
+		t.Fatalf("anthropic stream must start text block before delta:\n%s", out)
+	}
+}
+
 func TestStreamConvertersUseClientToProviderDirection(t *testing.T) {
 	input := []byte(`data: {"id":"chatcmpl_1","model":"model","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}` + "\n\n")
 	tests := []struct {
-		name     string
-		client   convert.Format
-		wantType string
+		name   string
+		client convert.Format
+		want   string
 	}{
-		{name: "anthropic", client: convert.FormatAnthropic, wantType: "content_block_delta"},
-		{name: "gemini", client: convert.FormatGemini, wantType: "generateContentStream"},
+		{name: "anthropic", client: convert.FormatAnthropic, want: `"type":"content_block_start"`},
+		{name: "gemini", client: convert.FormatGemini, want: `"candidates"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,10 +198,8 @@ func TestStreamConvertersUseClientToProviderDirection(t *testing.T) {
 			if err := json.Unmarshal([]byte(payload), &obj); err != nil {
 				t.Fatalf("invalid JSON output: %v\n%s", err, out)
 			}
-			if typ, _ := obj["type"].(string); typ != tt.wantType {
-				if method, _ := obj["method"].(string); method != tt.wantType {
-					t.Fatalf("unexpected reverse event: %#v", obj)
-				}
+			if !strings.Contains(string(out), tt.want) {
+				t.Fatalf("unexpected reverse event: %s", out)
 			}
 		})
 	}

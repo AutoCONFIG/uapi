@@ -156,6 +156,31 @@ func TestOpenAIChatToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatToGeminiNormalizesRolesForPrivateAPIs(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"tool","tool_call_id":"lookup","content":"done"}]}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got struct {
+		Contents []struct {
+			Role string `json:"role"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	want := []string{"user", "model", "user"}
+	if len(got.Contents) != len(want) {
+		t.Fatalf("contents length = %d, want %d: %s", len(got.Contents), len(want), converted)
+	}
+	for i, role := range want {
+		if got.Contents[i].Role != role {
+			t.Fatalf("contents[%d].role = %q, want %q; body=%s", i, got.Contents[i].Role, role, converted)
+		}
+	}
+}
+
 func TestAntigravityAdaptorToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) {
 	adaptor := &antigravity.AntigravityAdaptor{}
 	adaptor.Init(&db.Channel{Type: "antigravity", APIFormat: "antigravity"}, &db.Account{})
@@ -191,6 +216,27 @@ func TestAntigravityAdaptorToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) 
 	}
 	if fcConfig["mode"] != "AUTO" {
 		t.Fatalf("mode = %#v, want AUTO; body=%s", fcConfig["mode"], converted)
+	}
+}
+
+func TestAntigravityAdaptorNormalizesGeminiRoles(t *testing.T) {
+	adaptor := &antigravity.AntigravityAdaptor{}
+	adaptor.Init(&db.Channel{Type: "antigravity", APIFormat: "antigravity"}, &db.Account{})
+	body := []byte(`{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}`)
+
+	converted, err := provider.ConvertRequestWithAdaptor(provider.FormatOpenAIChatCompletions, provider.FormatAntigravity, body, adaptor)
+	if err != nil {
+		t.Fatalf("ConvertRequestWithAdaptor: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	request := got["request"].(map[string]interface{})
+	contents := request["contents"].([]interface{})
+	second := contents[1].(map[string]interface{})
+	if second["role"] != "model" {
+		t.Fatalf("assistant role should be model for antigravity: %s", converted)
 	}
 }
 

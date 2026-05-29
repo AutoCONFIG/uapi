@@ -6,15 +6,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
-	"github.com/AutoCONFIG/uapi/internal/config"
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/valyala/fasthttp"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AdminSettingsResponse struct {
 	LogRetentionDays        int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays int    `json:"redeem_code_retention_days"`
+	ModelRatios             string `json:"model_ratios"`
+	AdminUsername           string `json:"admin_username"`
+	MaxKeysPerUser          int    `json:"max_keys_per_user"`
 	Background              string `json:"background"`
 	PublicBaseURL           string `json:"public_base_url,omitempty"`
 	WallpaperURL            string `json:"wallpaper_url,omitempty"`
@@ -23,6 +28,10 @@ type AdminSettingsResponse struct {
 type UpdateAdminSettingsRequest struct {
 	LogRetentionDays        *int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays *int    `json:"redeem_code_retention_days"`
+	ModelRatios             *string `json:"model_ratios"`
+	AdminUsername           *string `json:"admin_username"`
+	AdminPassword           *string `json:"admin_password"`
+	MaxKeysPerUser          *int    `json:"max_keys_per_user"`
 	Background              *string `json:"background"`
 	PublicBaseURL           *string `json:"public_base_url"`
 }
@@ -49,7 +58,6 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "log_retention_days must be greater than 0")
 				return
 			}
-			h.cfg.Logging.RetentionDays = *req.LogRetentionDays
 			changes["log_retention_days"] = *req.LogRetentionDays
 		}
 		if req.RedeemCodeRetentionDays != nil {
@@ -57,8 +65,45 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "redeem_code_retention_days must be greater than 0")
 				return
 			}
-			h.cfg.Logging.RedeemCodeRetentionDays = *req.RedeemCodeRetentionDays
 			changes["redeem_code_retention_days"] = *req.RedeemCodeRetentionDays
+		}
+		if req.ModelRatios != nil {
+			modelRatios, msg := normalizeModelRatios(*req.ModelRatios)
+			if msg != "" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+				return
+			}
+			changes["model_ratios"] = modelRatios
+		}
+		if req.AdminUsername != nil {
+			adminUsername := strings.TrimSpace(*req.AdminUsername)
+			if adminUsername == "" {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "admin_username is required")
+				return
+			}
+			changes["admin_username"] = adminUsername
+		}
+		if req.AdminPassword != nil {
+			adminPassword := strings.TrimSpace(*req.AdminPassword)
+			if adminPassword != "" {
+				if len(adminPassword) < 8 {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "admin_password must be at least 8 characters")
+					return
+				}
+				hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+				if err != nil {
+					h.jsonError(ctx, fasthttp.StatusInternalServerError, "hash password failed")
+					return
+				}
+				changes["admin_password_hash"] = string(hash)
+			}
+		}
+		if req.MaxKeysPerUser != nil {
+			if *req.MaxKeysPerUser < 0 {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "max_keys_per_user must be greater than or equal to 0")
+				return
+			}
+			changes["max_keys_per_user"] = *req.MaxKeysPerUser
 		}
 		if req.Background != nil {
 			background := normalizeBackground(*req.Background)
@@ -66,7 +111,6 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "unsupported background")
 				return
 			}
-			h.cfg.UI.Background = background
 			changes["background"] = background
 		}
 		if req.PublicBaseURL != nil {
@@ -75,14 +119,13 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "public_base_url must be a valid http or https URL")
 				return
 			}
-			h.cfg.UI.PublicBaseURL = publicBaseURL
 			changes["public_base_url"] = publicBaseURL
 		}
 		if len(changes) == 0 {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")
 			return
 		}
-		if err := config.Save(h.cfg, h.cfgPath); err != nil {
+		if err := h.saveSettings(changes); err != nil {
 			h.jsonError(ctx, fasthttp.StatusInternalServerError, "save settings failed")
 			return
 		}
@@ -94,15 +137,22 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *Handler) settingsResponse() AdminSettingsResponse {
-	background := normalizeBackground(h.cfg.UI.Background)
+	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "aurora"))
 	if background == "" {
 		background = "aurora"
 	}
+	modelRatios := appsettings.Get(h.db, appsettings.ModelRatios, "{}")
+	if modelRatios == "" {
+		modelRatios = "{}"
+	}
 	return AdminSettingsResponse{
-		LogRetentionDays:        h.cfg.Logging.RetentionDays,
-		RedeemCodeRetentionDays: h.cfg.Logging.RedeemCodeRetentionDays,
+		LogRetentionDays:        appsettings.GetInt(h.db, appsettings.LogRetentionDays, 180),
+		RedeemCodeRetentionDays: appsettings.GetInt(h.db, appsettings.RedeemCodeRetentionDays, 180),
+		ModelRatios:             modelRatios,
+		AdminUsername:           appsettings.Get(h.db, appsettings.AdminUsername, "admin"),
+		MaxKeysPerUser:          appsettings.GetInt(h.db, appsettings.UserMaxKeysPerUser, 1),
 		Background:              background,
-		PublicBaseURL:           h.cfg.UI.PublicBaseURL,
+		PublicBaseURL:           appsettings.Get(h.db, appsettings.UIPublicBaseURL, ""),
 		WallpaperURL:            h.wallpaperURL(),
 	}
 }
@@ -112,11 +162,36 @@ func (h *Handler) HandlePublicSettings(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	background := normalizeBackground(h.cfg.UI.Background)
+	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "aurora"))
 	if background == "" {
 		background = "aurora"
 	}
-	h.jsonResponse(ctx, 200, PublicSettingsResponse{Background: background, PublicBaseURL: h.cfg.UI.PublicBaseURL, WallpaperURL: h.wallpaperURL()})
+	h.jsonResponse(ctx, 200, PublicSettingsResponse{Background: background, PublicBaseURL: appsettings.Get(h.db, appsettings.UIPublicBaseURL, ""), WallpaperURL: h.wallpaperURL()})
+}
+
+func (h *Handler) saveSettings(changes map[string]interface{}) error {
+	values := make(map[string]string, len(changes))
+	for key, value := range changes {
+		switch key {
+		case "log_retention_days":
+			values[appsettings.LogRetentionDays] = strconv.Itoa(value.(int))
+		case "redeem_code_retention_days":
+			values[appsettings.RedeemCodeRetentionDays] = strconv.Itoa(value.(int))
+		case "model_ratios":
+			values[appsettings.ModelRatios] = value.(string)
+		case "admin_username":
+			values[appsettings.AdminUsername] = value.(string)
+		case "admin_password_hash":
+			values[appsettings.AdminPasswordHash] = value.(string)
+		case "max_keys_per_user":
+			values[appsettings.UserMaxKeysPerUser] = strconv.Itoa(value.(int))
+		case "background":
+			values[appsettings.UIBackground] = value.(string)
+		case "public_base_url":
+			values[appsettings.UIPublicBaseURL] = value.(string)
+		}
+	}
+	return appsettings.SetMany(h.db, values)
 }
 
 func normalizeBackground(value string) string {
@@ -179,9 +254,10 @@ func (h *Handler) HandleWallpaperUpload(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	cleanupOldWallpapers(dir, target)
-	h.cfg.UI.Background = "custom"
-	h.cfg.UI.WallpaperPath = target
-	if err := config.Save(h.cfg, h.cfgPath); err != nil {
+	if err := appsettings.SetMany(h.db, map[string]string{
+		appsettings.UIBackground:    "custom",
+		appsettings.UIWallpaperPath: target,
+	}); err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save settings failed")
 		return
 	}
@@ -203,7 +279,7 @@ func (h *Handler) HandlePublicWallpaper(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	path := h.cfg.UI.WallpaperPath
+	path := appsettings.Get(h.db, appsettings.UIWallpaperPath, "")
 	if path == "" {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "wallpaper not configured")
 		return
@@ -226,10 +302,11 @@ func (h *Handler) HandlePublicWallpaper(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *Handler) wallpaperURL() string {
-	if h.cfg.UI.WallpaperPath == "" {
+	path := appsettings.Get(h.db, appsettings.UIWallpaperPath, "")
+	if path == "" {
 		return ""
 	}
-	info, err := os.Stat(h.cfg.UI.WallpaperPath)
+	info, err := os.Stat(path)
 	if err != nil {
 		return ""
 	}

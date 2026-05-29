@@ -2,12 +2,11 @@ package admin
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"math/big"
 	"sync"
 	"time"
 
-	"github.com/AutoCONFIG/uapi/internal/config"
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay"
@@ -27,22 +26,16 @@ func CleanupOldRedeemCodes(database *gorm.DB, retentionDays int) error {
 	return database.Where("status = ? AND updated_at < ?", "used", cutoff).Delete(&db.RedeemCode{}).Error
 }
 
-func StartLogCleanup(database *gorm.DB, cfg *config.Config) {
+func StartLogCleanup(database *gorm.DB) {
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			retentionDays := cfg.Logging.RetentionDays
-			if retentionDays <= 0 {
-				retentionDays = 180
-			}
+			retentionDays := appsettings.GetInt(database, appsettings.LogRetentionDays, 180)
 			if err := CleanupOldLogs(database, retentionDays); err != nil {
 				logger.Warnf("admin.scheduler", "log cleanup failed", logger.Err(err))
 			}
-			redeemRetentionDays := cfg.Logging.RedeemCodeRetentionDays
-			if redeemRetentionDays <= 0 {
-				redeemRetentionDays = 180
-			}
+			redeemRetentionDays := appsettings.GetInt(database, appsettings.RedeemCodeRetentionDays, 180)
 			if err := CleanupOldRedeemCodes(database, redeemRetentionDays); err != nil {
 				logger.Warnf("admin.scheduler", "redeem cleanup failed", logger.Err(err))
 			}
@@ -50,10 +43,10 @@ func StartLogCleanup(database *gorm.DB, cfg *config.Config) {
 	}()
 }
 
-// OAuthIdleMaintainer keeps idle OAuth accounts fresh with one expiry-derived
-// timer per account. Accounts refresh in a stable jitter window before expiry;
-// if the window was missed or the access token is already expired, refresh runs
-// immediately. Transient failures get a small number of randomly jittered retries.
+// OAuthIdleMaintainer keeps idle OAuth accounts fresh with one timer per account.
+// Accounts refresh at a random point in the final five minutes before expiry; if
+// a request refreshes first, the relayer asks the maintainer to reschedule from
+// the new expiry. Transient failures get a small number of randomized retries.
 type OAuthIdleMaintainer struct {
 	db          *gorm.DB
 	refreshPool func(channelID string)
@@ -63,6 +56,11 @@ type OAuthIdleMaintainer struct {
 	retryCounts map[uuid.UUID]int
 	stopped     bool
 }
+
+const (
+	idleRefreshMinLead = time.Minute
+	idleRefreshWindow  = 5 * time.Minute
+)
 
 // StartOAuthIdleMaintenance restores timers for existing OAuth accounts.
 func StartOAuthIdleMaintenance(database *gorm.DB, refreshPool func(channelID string)) *OAuthIdleMaintainer {
@@ -178,7 +176,7 @@ func (m *OAuthIdleMaintainer) runAccount(accountID uuid.UUID) {
 	if account.CredType != "oauth_token" || !account.Enabled || account.TokenExpiry == nil {
 		return
 	}
-	if time.Now().Before(idleRefreshAfter(&account)) {
+	if time.Now().Before(idleRefreshWindowStart(&account)) {
 		m.ScheduleAccount(&account)
 		return
 	}
@@ -229,10 +227,22 @@ func (m *OAuthIdleMaintainer) resetRetry(accountID uuid.UUID) {
 }
 
 func idleRefreshAfter(account *db.Account) time.Time {
-	// Spread accounts across the final fifteen minutes before expiry. The jitter is stable
-	// per account so restarts do not cluster refreshes.
-	jitterMinutes := int(binary.BigEndian.Uint64(account.ID[:8]) % 16)
-	return account.TokenExpiry.Add(-time.Duration(jitterMinutes) * time.Minute)
+	return account.TokenExpiry.Add(-randomIdleRefreshLead())
+}
+
+func idleRefreshWindowStart(account *db.Account) time.Time {
+	return account.TokenExpiry.Add(-idleRefreshWindow)
+}
+
+func randomIdleRefreshLead() time.Duration {
+	const minSeconds = int64(idleRefreshMinLead / time.Second)
+	const spanSeconds = int64((idleRefreshWindow - idleRefreshMinLead) / time.Second)
+	n, err := rand.Int(rand.Reader, big.NewInt(spanSeconds+1))
+	if err != nil {
+		fallback := int64(time.Now().Nanosecond()) % (spanSeconds + 1)
+		return time.Duration(minSeconds+fallback) * time.Second
+	}
+	return time.Duration(minSeconds+n.Int64()) * time.Second
 }
 
 func randomOAuthRetryDelay(attempt int) time.Duration {

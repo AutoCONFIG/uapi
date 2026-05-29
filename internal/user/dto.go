@@ -87,6 +87,9 @@ type UsageLogItem struct {
 	ID               int64  `json:"id"`
 	CreatedAt        string `json:"created_at"`
 	Model            string `json:"model"`
+	RoutedModel      string `json:"routed_model"`
+	ClientFormat     string `json:"client_format"`
+	UpstreamFormat   string `json:"upstream_format"`
 	ClientIP         string `json:"client_ip,omitempty"`
 	IsStream         bool   `json:"is_stream"`
 	PromptTokens     int64  `json:"prompt_tokens"`
@@ -112,6 +115,31 @@ type SubscriptionResponse struct {
 	StartsAt  string               `json:"starts_at"`
 	ExpiresAt string               `json:"expires_at"`
 	Status    string               `json:"status"`
+}
+
+type PublicPlanResponse struct {
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	Type           string             `json:"type"`
+	DurationDays   int                `json:"duration_days"`
+	AllowedModels  string             `json:"allowed_models"`
+	MaxConcurrency int                `json:"max_concurrency"`
+	Windows        []PublicPlanWindow `json:"windows"`
+}
+
+type ModelRatioResponse struct {
+	Model string `json:"model"`
+	Ratio int    `json:"ratio"`
+}
+
+type AvailableModelsResponse struct {
+	Models      []string             `json:"models"`
+	ModelRatios []ModelRatioResponse `json:"model_ratios"`
+}
+
+type PublicPlanWindow struct {
+	Type  string `json:"type"`
+	Limit int    `json:"limit"`
 }
 
 type SubscriptionWindow struct {

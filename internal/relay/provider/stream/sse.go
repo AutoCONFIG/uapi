@@ -38,6 +38,17 @@ func sseJSON(v interface{}) []byte {
 	return []byte("data: " + string(body) + "\n\n")
 }
 
+func sseEventJSON(event string, v interface{}) []byte {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	if event == "" {
+		return []byte("data: " + string(body) + "\n\n")
+	}
+	return []byte("event: " + event + "\n" + "data: " + string(body) + "\n\n")
+}
+
 func randomID(prefix string) string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err == nil {

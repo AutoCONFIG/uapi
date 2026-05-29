@@ -234,6 +234,35 @@ func (h *Handler) GetSubscription(ctx *fasthttp.RequestCtx) {
 	sendSuccess(ctx, sub)
 }
 
+func (h *Handler) ListPlans(ctx *fasthttp.RequestCtx) {
+	userID := getUserID(ctx)
+	if userID == "" {
+		sendError(ctx, 401, "unauthorized")
+		return
+	}
+
+	plans, err := h.service.ListPublicPlans()
+	if err != nil {
+		sendError(ctx, 500, err.Error())
+		return
+	}
+	sendSuccess(ctx, plans)
+}
+
+func (h *Handler) AvailableModels(ctx *fasthttp.RequestCtx) {
+	userID := getUserID(ctx)
+	if userID == "" {
+		sendError(ctx, 401, "unauthorized")
+		return
+	}
+	models, err := h.service.AvailableModels(userID)
+	if err != nil {
+		sendError(ctx, 404, err.Error())
+		return
+	}
+	sendSuccess(ctx, models)
+}
+
 func (h *Handler) RedeemCode(ctx *fasthttp.RequestCtx) {
 	userID := getUserID(ctx)
 	if userID == "" {

@@ -38,6 +38,7 @@ type Spec struct {
 	APIFormat       string `json:"api_format"`
 	DefaultEndpoint string `json:"default_endpoint"`
 	Models          string `json:"models"`
+	ModelAliases    string `json:"model_aliases,omitempty"`
 	ManualCallback  bool   `json:"manual_callback"`
 	DeviceFlow      bool   `json:"device_flow"`
 	Quota           bool   `json:"quota"`
@@ -60,6 +61,11 @@ type Provider interface {
 }
 
 var registry = map[string]Provider{}
+
+const codexDefaultModels = "gpt-5.5,gpt-5.5-openai-compact,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark,gpt-5.2,gpt-image-2,codex-auto-review"
+const geminiCodeDefaultModels = "auto,pro,flash,flash-lite,gemini-3.1-pro-preview,gemini-3.1-pro-preview-customtools,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite,gemini-3.1-flash-lite-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemma-4-31b-it,gemma-4-26b-a4b-it"
+const geminiCodeDefaultModelAliases = "gemini-2.5-pro=gemini-2.5-pro\ngemini-2.5-flash=gemini-2.5-flash\ngemini-2.5-flash-lite=gemini-2.5-flash-lite\ngemini-3.1-flash-lite=gemini-3.1-flash-lite-preview\ngemini-3-pro=gemini-3-pro-preview\ngemini-3.1-pro=gemini-3.1-pro-preview\ngemini-3-flash=gemini-3-flash-preview"
+const claudeCodeDefaultModels = "sonnet,opus,haiku,best,sonnet[1m],opus[1m],opusplan,claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022"
 
 func Register(provider Provider) {
 	if provider == nil || strings.TrimSpace(provider.Key()) == "" {
@@ -156,7 +162,7 @@ func init() {
 		spec: Spec{
 			Key: "codex", Label: "Codex", ChannelType: "openai", APIFormat: "codex",
 			DefaultEndpoint: openai.CodexAPIBaseURL,
-			Models:          "gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2,gpt-image-2",
+			Models:          codexDefaultModels,
 			DeviceFlow:      true, Quota: true,
 		},
 		channelAllowed: func(ch db.Channel) bool { return strings.EqualFold(ch.Type, "openai") && ch.APIFormat == "codex" },
@@ -193,7 +199,8 @@ func init() {
 		spec: Spec{
 			Key: "gemini", Label: "Gemini Code", ChannelType: "gemini", APIFormat: "gemini_code",
 			DefaultEndpoint: "https://generativelanguage.googleapis.com",
-			Models:          "gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3-pro-preview,gemini-3.1-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite-preview",
+			Models:          geminiCodeDefaultModels,
+			ModelAliases:    geminiCodeDefaultModelAliases,
 			Quota:           true,
 		},
 		channelAllowed: func(ch db.Channel) bool { return strings.EqualFold(ch.Type, "gemini") && ch.APIFormat == "gemini_code" },
@@ -228,7 +235,7 @@ func init() {
 		spec: Spec{
 			Key: "anthropic", Label: "Claude Code", ChannelType: "anthropic", APIFormat: "claude_code",
 			DefaultEndpoint: "https://api.anthropic.com/v1",
-			Models:          "claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022",
+			Models:          claudeCodeDefaultModels,
 			Quota:           true,
 		},
 		channelAllowed: func(ch db.Channel) bool {

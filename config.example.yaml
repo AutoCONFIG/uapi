@@ -17,8 +17,6 @@ database:
 security:
   jwt_secret: ""
   encryption_key: ""
-  admin_username: "admin"
-  admin_password_hash: ""  # 留空则首次启动自动生成
   trusted_proxies: []
 
 auth:
@@ -34,19 +32,8 @@ gateway:
   relay_node_id: ""        # Relay 节点自身 ID，在管理后台创建节点后获得
   config_pull_interval: "5s"
 
-billing: {}
-
 logging:
   level: "info"
-  retention_days: 180
-  redeem_code_retention_days: 180
-
-ui:
-  background: "aurora"
-  public_base_url: ""
-
-user:
-  max_keys_per_user: 1
 
 ws:
   host: ""

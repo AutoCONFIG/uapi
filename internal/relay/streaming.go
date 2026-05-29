@@ -37,6 +37,7 @@ type streamTracker struct {
 	hasCompletionTokens bool
 	firstPromptTokens   int // first non-zero prompt tokens observed
 	hasFirstPrompt      bool
+	estimatedOutput     int
 	parseErrors         int
 	adaptor             adaptorUsageParser
 }
@@ -53,15 +54,18 @@ func (t *streamTracker) TrackChunk(dataLine []byte) {
 	if len(dataLine) == 0 || len(dataLine) > sseMaxBufSize {
 		return
 	}
+	estimatedOutput := estimateStreamOutputTokens(dataLine)
 	pt, ct, err := t.adaptor.ParseStreamUsage(dataLine)
 	if err != nil {
 		t.mu.Lock()
+		t.estimatedOutput += estimatedOutput
 		t.parseErrors++
 		t.mu.Unlock()
 		return
 	}
-	if pt > 0 || ct > 0 {
+	if pt > 0 || ct > 0 || estimatedOutput > 0 {
 		t.mu.Lock()
+		t.estimatedOutput += estimatedOutput
 		if pt > 0 || !t.hasPromptTokens {
 			t.promptTokens = pt
 			t.hasPromptTokens = pt > 0
@@ -78,6 +82,12 @@ func (t *streamTracker) TrackChunk(dataLine []byte) {
 	}
 }
 
+func (t *streamTracker) EstimatedOutputTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.estimatedOutput
+}
+
 func (t *streamTracker) Result() (int, int, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -89,6 +99,39 @@ func (t *streamTracker) Result() (int, int, bool) {
 		pt = t.firstPromptTokens
 	}
 	return pt, t.completionTokens, t.parseErrors > 0
+}
+
+func estimateStreamOutputTokens(dataLine []byte) int {
+	var root map[string]interface{}
+	if err := json.Unmarshal(dataLine, &root); err != nil {
+		return 0
+	}
+	if choices, ok := root["choices"].([]interface{}); ok {
+		total := 0
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]interface{})
+			delta, _ := choice["delta"].(map[string]interface{})
+			total += estimateJSONValueTokens(delta, false, "")
+		}
+		return total
+	}
+	if candidates, ok := root["candidates"].([]interface{}); ok {
+		total := 0
+		for _, rawCandidate := range candidates {
+			candidate, _ := rawCandidate.(map[string]interface{})
+			content, _ := candidate["content"].(map[string]interface{})
+			total += estimateJSONValueTokens(content, false, "")
+		}
+		return total
+	}
+	eventType, _ := root["type"].(string)
+	switch eventType {
+	case "response.output_text.delta", "response.reasoning.delta", "response.function_call_arguments.delta":
+		return estimateJSONValueTokens(root["delta"], true, "delta")
+	case "content_block_delta":
+		return estimateJSONValueTokens(root["delta"], false, "delta")
+	}
+	return 0
 }
 
 // streamAndForward reads upstream SSE, optionally converts provider-specific
@@ -277,7 +320,24 @@ func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([
 	if converter == nil {
 		return nil
 	}
-	return converter.Convert
+	finished := false
+	return func(line []byte) []byte {
+		if finished {
+			return nil
+		}
+		if strings.TrimSpace(string(line)) == "data: [DONE]" {
+			finished = true
+			out := converter.Done()
+			converter.Reset()
+			return out
+		}
+		out := converter.Convert(line)
+		if streamHasTerminalEvent(out) || streamSawChatFinish(out) {
+			finished = true
+			converter.Reset()
+		}
+		return out
+	}
 }
 
 func relayFormatToStreamFormat(format provider.Format) (streamconvert.Format, bool) {
@@ -460,6 +520,7 @@ func streamHasTerminalEvent(event []byte) bool {
 		strings.Contains(s, `"type":"message_stop"`) ||
 		strings.Contains(s, `"finish_reason":"`) ||
 		strings.Contains(s, `"finishReason":"`) ||
+		strings.Contains(s, `"stop_reason":"`) ||
 		strings.Contains(s, "data: [DONE]") ||
 		strings.Contains(s, "data:[DONE]") {
 		return true
@@ -468,7 +529,10 @@ func streamHasTerminalEvent(event []byte) bool {
 		var envelope struct {
 			Type         string `json:"type"`
 			FinishReason string `json:"finishReason"`
-			Choices      []struct {
+			Delta        struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Choices []struct {
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
 		}
@@ -480,6 +544,9 @@ func streamHasTerminalEvent(event []byte) bool {
 			return true
 		}
 		if envelope.FinishReason != "" {
+			return true
+		}
+		if envelope.Delta.StopReason != "" {
 			return true
 		}
 		for _, choice := range envelope.Choices {

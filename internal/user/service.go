@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/modelvisibility"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -20,16 +23,14 @@ type Service struct {
 	jwtSecret          string
 	accessTokenExpiry  time.Duration
 	refreshTokenExpiry time.Duration
-	maxKeysPerUser     int
 }
 
-func NewService(database *gorm.DB, jwtSecret string, accessTokenExpiry, refreshTokenExpiry time.Duration, maxKeysPerUser int) *Service {
+func NewService(database *gorm.DB, jwtSecret string, accessTokenExpiry, refreshTokenExpiry time.Duration) *Service {
 	return &Service{
 		db:                 database,
 		jwtSecret:          jwtSecret,
 		accessTokenExpiry:  accessTokenExpiry,
 		refreshTokenExpiry: refreshTokenExpiry,
-		maxKeysPerUser:     maxKeysPerUser,
 	}
 }
 
@@ -87,7 +88,7 @@ func (s *Service) Register(req *RegisterRequest) (*LoginResponse, error) {
 			}
 			return err
 		}
-		if s.maxKeysPerUser > 0 {
+		if appsettings.GetInt(tx, appsettings.UserMaxKeysPerUser, 1) > 0 {
 			var err error
 			_, err = createUserTokenTx(tx, newUser.ID.String(), &CreateKeyRequest{Name: "默认密钥"})
 			if err != nil {
@@ -230,7 +231,8 @@ func (s *Service) CreateKey(userID string, req *CreateKeyRequest) (*KeyResponse,
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var keyCount int64
 		tx.Model(&db.Token{}).Where("user_id = ? AND deleted_at IS NULL", userID).Count(&keyCount)
-		if keyCount >= int64(s.maxKeysPerUser) {
+		maxKeysPerUser := appsettings.GetInt(tx, appsettings.UserMaxKeysPerUser, 1)
+		if keyCount >= int64(maxKeysPerUser) {
 			return errors.New("maximum number of API keys reached")
 		}
 		var err error
@@ -332,6 +334,17 @@ func normalizeCSV(value string) string {
 	return strings.Join(out, ",")
 }
 
+func csvSet(value string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out[item] = struct{}{}
+		}
+	}
+	return out
+}
+
 func (s *Service) GetUsage(userID string) (*UsageSummaryResponse, error) {
 	var totals struct {
 		TotalRequests    int64
@@ -402,7 +415,7 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 
 	var logs []db.Log
 	if err := s.db.Table("logs").
-		Select("logs.id, logs.created_at, logs.token_id, logs.client_ip, logs.channel_id, logs.account_id, logs.model, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
+		Select("logs.id, logs.created_at, logs.token_id, logs.client_ip, logs.channel_id, logs.account_id, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
 		Offset(offset).Limit(limit).
 		Order("logs.created_at DESC").
@@ -416,6 +429,9 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 			ID:               log.ID,
 			CreatedAt:        log.CreatedAt.Format(time.RFC3339),
 			Model:            log.Model,
+			RoutedModel:      log.RoutedModel,
+			ClientFormat:     log.ClientFormat,
+			UpstreamFormat:   log.UpstreamFormat,
 			ClientIP:         log.ClientIP,
 			IsStream:         log.IsStream,
 			PromptTokens:     log.PromptTokens,
@@ -456,6 +472,101 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 		ExpiresAt: tokenPlan.ExpiresAt.Format(time.RFC3339),
 		Status:    "active",
 	}, nil
+}
+
+func (s *Service) ListPublicPlans() ([]PublicPlanResponse, error) {
+	visibleModels, err := modelvisibility.PublicModelSet(s.db)
+	if err != nil {
+		return nil, err
+	}
+	var plans []db.Plan
+	if err := s.db.Where("enabled = true AND is_public = true AND deleted_at IS NULL").
+		Order("created_at DESC").
+		Find(&plans).Error; err != nil {
+		return nil, err
+	}
+	items := make([]PublicPlanResponse, 0, len(plans))
+	for _, plan := range plans {
+		item := PublicPlanResponse{
+			ID:           plan.ID.String(),
+			Name:         plan.Name,
+			Type:         plan.Type,
+			DurationDays: plan.DurationDays,
+			Windows:      []PublicPlanWindow{},
+		}
+		if plan.PolicyID != nil && *plan.PolicyID != uuid.Nil {
+			var policy db.AccessPolicy
+			if err := s.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *plan.PolicyID).First(&policy).Error; err == nil {
+				item.AllowedModels = modelvisibility.FilterCSV(policy.AllowedModels, visibleModels)
+				item.MaxConcurrency = policy.MaxConcurrency
+				item.Windows = []PublicPlanWindow{
+					{Type: "hour", Limit: policy.HourlyLimit},
+					{Type: "week", Limit: policy.WeeklyLimit},
+					{Type: "month", Limit: policy.MonthlyLimit},
+				}
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, err
+			}
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *Service) AvailableModels(userID string) (*AvailableModelsResponse, error) {
+	visibleModels, err := modelvisibility.PublicModelSet(s.db)
+	if err != nil {
+		return nil, err
+	}
+	allowedSet, err := s.activePolicyAllowedModelSet(userID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := map[string]struct{}{}
+	for model := range visibleModels {
+		if len(allowedSet) > 0 {
+			if _, ok := allowedSet[model]; !ok {
+				continue
+			}
+		}
+		filtered[model] = struct{}{}
+	}
+	models := make([]string, 0, len(filtered))
+	for model := range filtered {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	rawRatios := appsettings.Get(s.db, appsettings.ModelRatios, "{}")
+	ratioItems := modelvisibility.FilterRatioItems(rawRatios, filtered)
+	resp := &AvailableModelsResponse{Models: models, ModelRatios: make([]ModelRatioResponse, 0, len(ratioItems))}
+	for _, item := range ratioItems {
+		resp.ModelRatios = append(resp.ModelRatios, ModelRatioResponse{Model: item.Model, Ratio: item.Ratio})
+	}
+	return resp, nil
+}
+
+func (s *Service) activePolicyAllowedModelSet(userID string) (map[string]struct{}, error) {
+	var tokenPlan db.TokenPlan
+	if err := s.db.Where("user_id = ? AND starts_at <= ? AND expires_at > ?", userID, time.Now(), time.Now()).
+		Order("token_plans.created_at DESC").
+		First(&tokenPlan).Error; err != nil {
+		return nil, errors.New("no active subscription")
+	}
+	var plan db.Plan
+	if err := s.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", tokenPlan.PlanID).First(&plan).Error; err != nil {
+		return nil, errors.New("plan not found")
+	}
+	if plan.PolicyID == nil || *plan.PolicyID == uuid.Nil {
+		return map[string]struct{}{}, nil
+	}
+	var policy db.AccessPolicy
+	if err := s.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", *plan.PolicyID).First(&policy).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	return csvSet(policy.AllowedModels), nil
 }
 
 func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]SubscriptionWindow, error) {
