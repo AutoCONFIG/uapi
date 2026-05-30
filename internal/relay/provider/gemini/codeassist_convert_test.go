@@ -6,6 +6,8 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
 func TestInternalToGeminiCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
@@ -13,9 +15,9 @@ func TestInternalToGeminiCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
 		Model: "pro",
 		Messages: []provider.InternalMessage{{
 			Role: "user",
-			Parts: []provider.InternalContentItem{{
+			Parts: []convert.InternalContentItem{{
 				Kind:    "content",
-				Content: provider.InternalContentPart{Type: "text", Text: "hello"},
+				Content: schema.ContentPart{Type: "text", Text: "hello"},
 			}},
 		}},
 	}

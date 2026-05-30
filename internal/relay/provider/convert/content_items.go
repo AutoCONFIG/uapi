@@ -22,43 +22,23 @@ func rawJSON(v interface{}) json.RawMessage {
 }
 
 func appendContentItem(msg *InternalMessage, part schema.ContentPart, raw json.RawMessage) {
-	msg.Content = append(msg.Content, part)
 	msg.Parts = append(msg.Parts, InternalContentItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
 func appendReasoningItem(msg *InternalMessage, part schema.ContentPart, raw json.RawMessage) {
-	msg.ReasoningContent = append(msg.ReasoningContent, part)
 	msg.Parts = append(msg.Parts, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
 func appendToolCallItem(msg *InternalMessage, call schema.ToolCall, raw json.RawMessage) {
-	msg.ToolCalls = append(msg.ToolCalls, call)
 	msg.Parts = append(msg.Parts, InternalContentItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
 }
 
 func appendToolResultItem(msg *InternalMessage, result schema.ToolResult, raw json.RawMessage) {
-	msg.ToolResult = &result
 	msg.Parts = append(msg.Parts, InternalContentItem{Kind: contentItemKindToolResult, ToolResult: result, Raw: append(json.RawMessage(nil), raw...)})
 }
 
 func canonicalMessageParts(msg InternalMessage) []InternalContentItem {
-	if len(msg.Parts) > 0 {
-		return msg.Parts
-	}
-	parts := make([]InternalContentItem, 0, len(msg.ReasoningContent)+len(msg.Content)+len(msg.ToolCalls)+1)
-	for _, part := range msg.ReasoningContent {
-		parts = append(parts, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
-	}
-	for _, part := range msg.Content {
-		parts = append(parts, InternalContentItem{Kind: contentItemKindContent, Content: part, Raw: rawJSON(part)})
-	}
-	for _, call := range msg.ToolCalls {
-		parts = append(parts, InternalContentItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: rawJSON(call)})
-	}
-	if msg.ToolResult != nil {
-		parts = append(parts, InternalContentItem{Kind: contentItemKindToolResult, ToolResult: *msg.ToolResult, Raw: rawJSON(msg.ToolResult)})
-	}
-	return parts
+	return msg.Parts
 }
 
 func contentPartsFromItems(items []InternalContentItem) []schema.ContentPart {

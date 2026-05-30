@@ -308,25 +308,28 @@ func estimateAntigravityTokens(req *provider.InternalRequest) int {
 		chars += len(*req.Instructions)
 	}
 	for _, msg := range req.Messages {
-		for _, part := range msg.Content {
-			switch {
-			case part.Text != "":
-				chars += len(part.Text)
-			case part.ImageURL != nil:
-				chars += 4096
-			default:
-				chars += len(part.Type)
+		for _, item := range msg.Parts {
+			switch item.Kind {
+			case "content":
+				part := item.Content
+				switch {
+				case part.Text != "":
+					chars += len(part.Text)
+				case part.ImageURL != nil:
+					chars += 4096
+				default:
+					chars += len(part.Type)
+				}
+			case "tool_call":
+				call := item.ToolCall
+				name := call.Name
+				if name == "" {
+					name = call.Function.Name
+				}
+				chars += len(name) + len(call.Function.Arguments)
+			case "tool_result":
+				chars += len(item.ToolResult.Content)
 			}
-		}
-		for _, call := range msg.ToolCalls {
-			name := call.Name
-			if name == "" {
-				name = call.Function.Name
-			}
-			chars += len(name) + len(call.Function.Arguments)
-		}
-		if msg.ToolResult != nil {
-			chars += len(msg.ToolResult.Content)
 		}
 	}
 	tokens := chars / 4

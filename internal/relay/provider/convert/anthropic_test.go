@@ -8,10 +8,11 @@ func TestAnthropicToInternalAcceptsStringContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnthropicToInternal() error = %v", err)
 	}
-	if len(got.Messages) != 1 || len(got.Messages[0].Content) != 1 {
+	if len(got.Messages) != 1 || len(got.Messages[0].Parts) != 1 {
 		t.Fatalf("messages = %#v", got.Messages)
 	}
-	if got.Messages[0].Content[0].Type != "text" || got.Messages[0].Content[0].Text != "hi" {
-		t.Fatalf("content = %#v", got.Messages[0].Content[0])
+	part := got.Messages[0].Parts[0]
+	if part.Kind != contentItemKindContent || part.Content.Type != "text" || part.Content.Text != "hi" {
+		t.Fatalf("content part = %#v", part)
 	}
 }

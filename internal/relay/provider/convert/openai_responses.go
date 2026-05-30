@@ -272,7 +272,7 @@ func responsesInputItemsFromOrderedParts(msg InternalMessage) []map[string]inter
 		item := map[string]interface{}{
 			"type":    "message",
 			"role":    msg.Role,
-			"content": responsesMessageContent(InternalMessage{Role: msg.Role, Content: pendingContent}),
+			"content": responsesMessageContent(msg.Role, pendingContent),
 		}
 		if msg.ItemID != "" {
 			item["id"] = msg.ItemID
@@ -353,17 +353,17 @@ func copyRawFields(dst map[string]json.RawMessage, src map[string]json.RawMessag
 	}
 }
 
-func responsesMessageContent(msg InternalMessage) interface{} {
-	if len(msg.Content) == 1 && msg.Role != "assistant" {
-		part := msg.Content[0]
+func responsesMessageContent(role string, content []schema.ContentPart) interface{} {
+	if len(content) == 1 && role != "assistant" {
+		part := content[0]
 		if (part.Type == "text" || part.Type == "input_text") && len(part.Extra) == 0 {
 			return part.Text
 		}
 	}
 
-	parts := make([]map[string]interface{}, 0, len(msg.Content))
-	for _, part := range msg.Content {
-		parts = append(parts, responsesContentPartMap(msg.Role, part))
+	parts := make([]map[string]interface{}, 0, len(content))
+	for _, part := range content {
+		parts = append(parts, responsesContentPartMap(role, part))
 	}
 	return parts
 }

@@ -91,21 +91,16 @@ type InternalRequest struct {
 }
 
 // InternalMessage is a compatibility view over an ordered turn. Parts is the
-// only canonical ordering source; Content, ToolCalls, ToolResult, and
-// ReasoningContent are legacy indexed views kept for older adaptors/tests.
+// only canonical ordering source.
 type InternalMessage struct {
-	Role             string
-	Parts            []InternalContentItem
-	Content          []schema.ContentPart
-	ToolCalls        []schema.ToolCall
-	ToolResult       *schema.ToolResult
-	ReasoningContent []schema.ContentPart
-	Name             string // for named messages
-	ItemID           string
-	Status           string
-	Phase            string
-	RawItem          json.RawMessage // original Responses input item for same-format replay
-	Extra            map[string]json.RawMessage
+	Role    string
+	Parts   []InternalContentItem
+	Name    string // for named messages
+	ItemID  string
+	Status  string
+	Phase   string
+	RawItem json.RawMessage // original Responses input item for same-format replay
+	Extra   map[string]json.RawMessage
 }
 
 // InternalContentItem preserves the original ordered content stream for the

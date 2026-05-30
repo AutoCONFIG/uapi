@@ -5,6 +5,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
 func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
@@ -163,6 +164,34 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 	callIdx := indexOrFatal(t, text, `"type":"function_call"`)
 	if !(reasoningIdx < messageIdx && messageIdx < callIdx) {
 		t.Fatalf("IR conversion did not preserve item order:\n%s", converted)
+	}
+}
+
+func TestInternalResponseToIRPreservesUsageAndOrderedItems(t *testing.T) {
+	resp := &convert.InternalResponse{
+		ID:    "chatcmpl_1",
+		Model: "gpt-test",
+		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
+		Choices: []convert.InternalChoice{{
+			Index:        0,
+			Role:         "assistant",
+			Content:      []schema.ContentPart{{Type: "text", Text: "answer"}},
+			ToolCalls:    []schema.ToolCall{{ID: "call_1", Type: "function", Name: "lookup"}},
+			FinishReason: "tool_calls",
+		}},
+	}
+	got := resp.ToIR(convert.FormatOpenAIChatCompletions)
+	if got.SourceProtocol != ir.ProtocolOpenAIChat || got.Usage == nil || got.Usage.CacheReadTokens != 2 {
+		t.Fatalf("response IR metadata/usage not preserved: %#v", got)
+	}
+	if len(got.Choices) != 1 || len(got.Choices[0].Items) != 2 {
+		t.Fatalf("response IR items missing: %#v", got.Choices)
+	}
+	if got.Choices[0].Items[0].Kind != ir.ItemText || got.Choices[0].Items[1].Kind != ir.ItemToolUse {
+		t.Fatalf("response IR item order wrong: %#v", got.Choices[0].Items)
+	}
+	if got.Choices[0].Finish == nil || got.Choices[0].Finish.Reason != ir.FinishToolCall {
+		t.Fatalf("finish reason not normalized: %#v", got.Choices[0].Finish)
 	}
 }
 

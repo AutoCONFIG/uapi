@@ -140,11 +140,6 @@ func firstMessageText(msg provider.InternalMessage) string {
 			return item.Content.Text
 		}
 	}
-	for _, part := range msg.Content {
-		if part.Text != "" {
-			return part.Text
-		}
-	}
 	return ""
 }
 

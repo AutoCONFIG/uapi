@@ -10,7 +10,6 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 	"github.com/valyala/fasthttp"
 )
 
@@ -28,11 +27,6 @@ const (
 
 type InternalRequest = convert.InternalRequest
 type InternalMessage = convert.InternalMessage
-type InternalContentItem = convert.InternalContentItem
-type InternalContentPart = schema.ContentPart
-type InternalToolCall = schema.ToolCall
-type InternalToolResult = schema.ToolResult
-type InternalTool = schema.Tool
 
 type InternalResponse struct {
 	ID       string

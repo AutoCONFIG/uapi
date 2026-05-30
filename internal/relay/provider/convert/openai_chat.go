@@ -49,8 +49,7 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 			Role: msg.Role,
 			Name: msg.Name,
 		}
-		internalMsg.ReasoningContent = append(internalMsg.ReasoningContent, reasoningPartsFromOpenAIChatExtra(msg.Extra)...)
-		for _, part := range internalMsg.ReasoningContent {
+		for _, part := range reasoningPartsFromOpenAIChatExtra(msg.Extra) {
 			internalMsg.Parts = append(internalMsg.Parts, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
 		}
 		if msg.Role != "tool" {
