@@ -67,11 +67,20 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 				}, rawPart)
 			case part.InlineData != nil:
 				dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
-				appendContentItem(&internalMsg, schema.ContentPart{
-					Type:     "image_url",
-					ImageURL: &dataURI,
-					MimeType: part.InlineData.MimeType,
-				}, rawPart)
+				if strings.HasPrefix(part.InlineData.MimeType, "image/") {
+					appendContentItem(&internalMsg, schema.ContentPart{
+						Type:     "image_url",
+						ImageURL: &dataURI,
+						MimeType: part.InlineData.MimeType,
+					}, rawPart)
+				} else {
+					appendContentItem(&internalMsg, schema.ContentPart{
+						Type:     "file",
+						FileData: dataURI,
+						FileType: part.InlineData.MimeType,
+						MimeType: part.InlineData.MimeType,
+					}, rawPart)
+				}
 			case part.FunctionCall != nil:
 				args := string(part.FunctionCall.Args)
 				call := schema.ToolCall{
@@ -99,11 +108,20 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 				}), rawPart)
 			case part.FileData != nil:
 				fileURL := "file://" + part.FileData.FileURI
-				appendContentItem(&internalMsg, schema.ContentPart{
-					Type:     "image_url",
-					ImageURL: &fileURL,
-					MimeType: part.FileData.MimeType,
-				}, rawPart)
+				if strings.HasPrefix(part.FileData.MimeType, "image/") {
+					appendContentItem(&internalMsg, schema.ContentPart{
+						Type:     "image_url",
+						ImageURL: &fileURL,
+						MimeType: part.FileData.MimeType,
+					}, rawPart)
+				} else {
+					appendContentItem(&internalMsg, schema.ContentPart{
+						Type:     "file",
+						FileURL:  fileURL,
+						FileType: part.FileData.MimeType,
+						MimeType: part.FileData.MimeType,
+					}, rawPart)
+				}
 			case part.ExecutableCode != nil:
 				appendContentItem(&internalMsg, schema.ContentPart{
 					Type: "executable_code",
@@ -128,6 +146,9 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 
 	// Generation parameters from GenerationConfig
 	if req.GenerationConfig != nil {
+		if len(req.GenerationConfig.Extra) > 0 {
+			ir.GeminiGenerationConfigExtra = copyRawMap(req.GenerationConfig.Extra)
+		}
 		if req.GenerationConfig.MaxOutputTokens != nil {
 			ir.MaxTokens = req.GenerationConfig.MaxOutputTokens
 		}
@@ -246,6 +267,11 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 		genConfig["responseMimeType"] = mimeType
 		if schema != nil {
 			genConfig["responseSchema"] = schema
+		}
+	}
+	for k, v := range ir.GeminiGenerationConfigExtra {
+		if _, exists := genConfig[k]; !exists {
+			genConfig[k] = v
 		}
 	}
 	if len(genConfig) > 0 {
@@ -401,6 +427,43 @@ func geminiContentPart(c schema.ContentPart) map[string]interface{} {
 				"data":     data,
 			},
 		}
+	case "file", "input_file":
+		mimeType := c.FileType
+		if mimeType == "" {
+			mimeType = c.MimeType
+		}
+		if mimeType == "" {
+			mimeType = mimeTypeFromFilename(c.Filename)
+		}
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		if c.FileURL != "" {
+			fileURI := strings.TrimPrefix(c.FileURL, "file://")
+			return map[string]interface{}{
+				"fileData": map[string]string{
+					"fileUri":  fileURI,
+					"mimeType": mimeType,
+				},
+			}
+		}
+		if c.FileData == "" {
+			return nil
+		}
+		data := c.FileData
+		if strings.HasPrefix(data, "data:") {
+			parsedMime, parsedData, ok := splitDataURI(data)
+			if ok {
+				mimeType = parsedMime
+				data = parsedData
+			}
+		}
+		return map[string]interface{}{
+			"inlineData": map[string]string{
+				"mimeType": mimeType,
+				"data":     data,
+			},
+		}
 	case "executable_code":
 		return map[string]interface{}{
 			"executableCode": map[string]interface{}{
@@ -417,6 +480,30 @@ func geminiContentPart(c schema.ContentPart) map[string]interface{} {
 		}
 	default:
 		return nil
+	}
+}
+
+func mimeTypeFromFilename(filename string) string {
+	lower := strings.ToLower(filename)
+	switch {
+	case strings.HasSuffix(lower, ".pdf"):
+		return "application/pdf"
+	case strings.HasSuffix(lower, ".txt"):
+		return "text/plain"
+	case strings.HasSuffix(lower, ".json"):
+		return "application/json"
+	case strings.HasSuffix(lower, ".csv"):
+		return "text/csv"
+	case strings.HasSuffix(lower, ".md"):
+		return "text/markdown"
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	default:
+		return ""
 	}
 }
 
@@ -549,7 +636,7 @@ func responseFormatFromGemini(mimeType string, schema json.RawMessage) json.RawM
 
 func isGeminiCLIEnvelopeExtra(key string) bool {
 	switch key {
-	case "project", "userAgent", "requestType", "requestId", "sessionId":
+	case "project", "user_prompt_id", "enabled_credit_types", "userAgent", "requestType", "requestId", "sessionId", "session_id":
 		return true
 	default:
 		return false

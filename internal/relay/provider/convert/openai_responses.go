@@ -380,6 +380,21 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 	if part.ImageDetail != "" {
 		out["detail"] = part.ImageDetail
 	}
+	if part.FileData != "" {
+		out["file_data"] = part.FileData
+	}
+	if part.FileURL != "" {
+		out["file_url"] = part.FileURL
+	}
+	if part.FileID != "" {
+		out["file_id"] = part.FileID
+	}
+	if part.Filename != "" {
+		out["filename"] = part.Filename
+	}
+	if part.FileType != "" {
+		out["file_type"] = part.FileType
+	}
 	if part.Data != "" {
 		out["data"] = part.Data
 	}

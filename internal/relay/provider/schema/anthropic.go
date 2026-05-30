@@ -114,6 +114,7 @@ type AnthropicImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+	FileID    string `json:"file_id,omitempty"`
 }
 
 // AnthropicResponse represents an Anthropic Messages API response.

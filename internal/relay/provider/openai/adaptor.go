@@ -82,7 +82,7 @@ func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 	if err != nil {
 		return nil, err
 	}
-	return provider.ToProviderInternal(ir), nil
+	return ir, nil
 }
 
 func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -90,13 +90,11 @@ func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
 		format = convert.FormatOpenAIResponses
 	}
-	// Convert provider.InternalRequest to convert.InternalRequest for conversion
-	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(format)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", format)
 	}
-	return fromInternal(ir)
+	return fromInternal(req)
 }
 
 // --- Response/stream handling ---

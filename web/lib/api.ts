@@ -325,6 +325,18 @@ export const adminApi = {
   updateSettings: (token: string, body: Partial<AdminSettings>) => request<AdminSettings>("/api/admin/settings", { method: "PUT", token, body }),
   exportSettings: (token: string, password: string) => requestBlob("/api/admin/settings/export", { method: "POST", token, body: { password } }),
   exportUsers: (token: string, password: string) => requestBlob("/api/admin/users/export", { method: "POST", token, body: { password } }),
+  importSettings: (token: string, password: string, file: File) => {
+    const body = new FormData();
+    body.set("password", password);
+    body.set("file", file);
+    return uploadForm<Record<string, number>>("/api/admin/settings/import", token, body);
+  },
+  importUsers: (token: string, password: string, file: File) => {
+    const body = new FormData();
+    body.set("password", password);
+    body.set("file", file);
+    return uploadForm<Record<string, number>>("/api/admin/users/import", token, body);
+  },
   uploadWallpaper: (token: string, file: File) => {
     const body = new FormData();
     body.set("file", file);

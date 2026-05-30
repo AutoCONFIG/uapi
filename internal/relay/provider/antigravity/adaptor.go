@@ -118,7 +118,7 @@ func (a *AntigravityAdaptor) ToInternal(body []byte) (*provider.InternalRequest,
 	if err != nil {
 		return nil, err
 	}
-	return provider.ToProviderInternal(ir), nil
+	return ir, nil
 }
 
 func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -134,7 +134,7 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	model := ResolveRequestModelWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings, channelModels(a.channel))
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.InternalToGemini(provider.FromProviderInternal(&reqCopy))
+	gemBody, err := convert.InternalToGemini(&reqCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +189,11 @@ func antigravityReasoningEffort(req *provider.InternalRequest) string {
 	if effort := stringFromAnyPath(req.Thinking, "effort"); effort != "" {
 		return effort
 	}
-	if req.ExtraParams != nil {
-		if effort := stringFromAnyPath(req.ExtraParams["reasoning_effort"]); effort != "" {
+	if req.Extra != nil {
+		if effort := stringFromAnyPath(req.Extra["reasoning_effort"]); effort != "" {
 			return effort
 		}
-		if effort := stringFromAnyPath(req.ExtraParams["reasoning"], "effort"); effort != "" {
+		if effort := stringFromAnyPath(req.Extra["reasoning"], "effort"); effort != "" {
 			return effort
 		}
 	}
@@ -319,7 +319,11 @@ func estimateAntigravityTokens(req *provider.InternalRequest) int {
 			}
 		}
 		for _, call := range msg.ToolCalls {
-			chars += len(call.Name) + len(call.Arguments)
+			name := call.Name
+			if name == "" {
+				name = call.Function.Name
+			}
+			chars += len(name) + len(call.Function.Arguments)
 		}
 		if msg.ToolResult != nil {
 			chars += len(msg.ToolResult.Content)

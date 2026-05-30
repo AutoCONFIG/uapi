@@ -57,16 +57,15 @@ func (a *AnthropicAdaptor) ToInternal(body []byte) (*provider.InternalRequest, e
 	if err != nil {
 		return nil, err
 	}
-	return provider.ToProviderInternal(ir), nil
+	return ir, nil
 }
 
 func (a *AnthropicAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatAnthropic)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatAnthropic)
 	}
-	return fromInternal(ir)
+	return fromInternal(req)
 }
 
 func (a *AnthropicAdaptor) GetChannelType() string { return "anthropic" }

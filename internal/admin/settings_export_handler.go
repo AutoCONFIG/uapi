@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/valyala/fasthttp"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+	"gorm.io/gorm"
 )
 
 type settingsExportSnapshot struct {
@@ -158,12 +160,297 @@ func (h *Handler) verifyExportPassword(ctx *fasthttp.RequestCtx) bool {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "password is required")
 		return false
 	}
-	_, adminPasswordHash := h.adminCredentials()
-	if adminPasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(adminPasswordHash), []byte(req.Password)) != nil {
+	if !h.verifyAdminPasswordValue(req.Password) {
 		h.jsonError(ctx, fasthttp.StatusUnauthorized, "invalid password")
 		return false
 	}
 	return true
+}
+
+func (h *Handler) verifyAdminPasswordValue(password string) bool {
+	_, adminPasswordHash := h.adminCredentials()
+	return adminPasswordHash != "" && bcrypt.CompareHashAndPassword([]byte(adminPasswordHash), []byte(password)) == nil
+}
+
+func (h *Handler) HandleSettingsImport(ctx *fasthttp.RequestCtx) {
+	if string(ctx.Method()) != "POST" {
+		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	snapshot, err := h.parseSettingsImport(ctx)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := h.restoreSettingsSnapshot(snapshot)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "restore settings failed: "+err.Error())
+		return
+	}
+	createAuditLogWithValues(h.db, "import", "settings", "runtime", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(result))
+	h.jsonResponse(ctx, 200, result)
+}
+
+func (h *Handler) parseSettingsImport(ctx *fasthttp.RequestCtx) (settingsExportSnapshot, error) {
+	var snapshot settingsExportSnapshot
+	form, err := ctx.MultipartForm()
+	if err != nil {
+		return snapshot, fmt.Errorf("invalid multipart form")
+	}
+	password := ""
+	if values := form.Value["password"]; len(values) > 0 {
+		password = values[0]
+	}
+	if strings.TrimSpace(password) == "" {
+		return snapshot, fmt.Errorf("password is required")
+	}
+	if !h.verifyAdminPasswordValue(password) {
+		return snapshot, fmt.Errorf("invalid password")
+	}
+	files := form.File["file"]
+	if len(files) == 0 {
+		return snapshot, fmt.Errorf("file is required")
+	}
+	file := files[0]
+	if file.Size > 16*1024*1024 {
+		return snapshot, fmt.Errorf("file must be 16MB or smaller")
+	}
+	opened, err := file.Open()
+	if err != nil {
+		return snapshot, fmt.Errorf("open file failed")
+	}
+	defer opened.Close()
+	data, err := io.ReadAll(opened)
+	if err != nil {
+		return snapshot, fmt.Errorf("read file failed")
+	}
+	if err := yaml.Unmarshal(data, &snapshot); err != nil {
+		return snapshot, fmt.Errorf("invalid yaml")
+	}
+	if snapshot.SchemaVersion <= 0 {
+		return snapshot, fmt.Errorf("unsupported settings snapshot")
+	}
+	return snapshot, nil
+}
+
+func (h *Handler) restoreSettingsSnapshot(snapshot settingsExportSnapshot) (map[string]int, error) {
+	result := map[string]int{}
+	refreshedChannels := map[string]struct{}{}
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		settings := map[string]string{
+			appsettings.AdminUsername:           snapshot.RuntimeSettings.AdminUsername,
+			appsettings.LogRetentionDays:        intString(snapshot.RuntimeSettings.LogRetentionDays),
+			appsettings.RedeemCodeRetentionDays: intString(snapshot.RuntimeSettings.RedeemCodeRetentionDays),
+			appsettings.UserMaxKeysPerUser:      intString(snapshot.RuntimeSettings.MaxKeysPerUser),
+			appsettings.ModelRatios:             yamlValueString(snapshot.RuntimeSettings.ModelRatios),
+			appsettings.UIBackground:            snapshot.RuntimeSettings.Background,
+			appsettings.UIPublicBaseURL:         snapshot.RuntimeSettings.PublicBaseURL,
+		}
+		if snapshot.RuntimeSettings.AdminPasswordHash != "" {
+			settings[appsettings.AdminPasswordHash] = snapshot.RuntimeSettings.AdminPasswordHash
+		}
+		for _, item := range snapshot.SystemSettings {
+			if exportableSystemSetting(item.Key) && item.Key != "" {
+				settings[item.Key] = yamlValueString(item.Value)
+			}
+		}
+		for key, value := range settings {
+			if key == "" {
+				continue
+			}
+			if err := appsettings.Set(tx, key, value); err != nil {
+				return err
+			}
+			result["system_settings"]++
+		}
+
+		for _, item := range snapshot.AccessPolicies {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			policy := db.AccessPolicy{
+				AllowedModels:  item.AllowedModels,
+				MaxConcurrency: item.MaxConcurrency,
+				HourlyLimit:    item.HourlyLimit,
+				WeeklyLimit:    item.WeeklyLimit,
+				MonthlyLimit:   item.MonthlyLimit,
+				Enabled:        item.Enabled,
+			}
+			policy.ID = id
+			if err := saveBaseModel(tx, &policy); err != nil {
+				return err
+			}
+			result["access_policies"]++
+		}
+
+		for _, item := range snapshot.Channels {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			ch := db.Channel{
+				Name:         item.Name,
+				Type:         item.Type,
+				Group:        normalizeChannelGroup(item.Group),
+				Endpoint:     item.Endpoint,
+				Enabled:      item.Enabled,
+				Models:       item.Models,
+				ModelAliases: item.ModelAliases,
+				Priority:     item.Priority,
+				APIFormat:    item.APIFormat,
+				ForceStream:  item.ForceStream,
+				AffinityTTL:  item.AffinityTTL,
+				Settings:     normalizeChannelSettings(yamlValueString(item.Settings)),
+			}
+			ch.ID = id
+			if err := saveBaseModel(tx, &ch); err != nil {
+				return err
+			}
+			refreshedChannels[id.String()] = struct{}{}
+			result["channels"]++
+		}
+
+		for _, item := range snapshot.Plans {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			var policyID *uuid.UUID
+			if item.PolicyID != "" {
+				parsed, err := uuid.Parse(item.PolicyID)
+				if err != nil {
+					return err
+				}
+				policyID = &parsed
+			}
+			plan := db.Plan{
+				Name:         item.Name,
+				Type:         item.Type,
+				PolicyID:     policyID,
+				Enabled:      item.Enabled,
+				Public:       item.Public,
+				DurationDays: item.DurationDays,
+			}
+			plan.ID = id
+			if err := saveBaseModel(tx, &plan); err != nil {
+				return err
+			}
+			result["plans"]++
+		}
+
+		for _, item := range snapshot.Accounts {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			channelID, err := uuid.Parse(item.ChannelID)
+			if err != nil {
+				return err
+			}
+			credential, err := restoreEncryptedValue(item.Credential, item.StoredCredential)
+			if err != nil {
+				return err
+			}
+			refreshToken, err := restoreOptionalEncryptedValue(item.RefreshToken, item.StoredRefreshToken)
+			if err != nil {
+				return err
+			}
+			clientSecret, err := restoreOptionalEncryptedValue(item.ClientSecret, item.StoredClientSecret)
+			if err != nil {
+				return err
+			}
+			account := db.Account{
+				ChannelID:    channelID,
+				Name:         item.Name,
+				Credentials:  credential,
+				CredType:     item.CredType,
+				Endpoint:     item.Endpoint,
+				Weight:       item.Weight,
+				Enabled:      item.Enabled,
+				RefreshToken: refreshToken,
+				TokenExpiry:  item.TokenExpiry,
+				ClientID:     item.ClientID,
+				ClientSecret: clientSecret,
+				TokenURL:     item.TokenURL,
+				Metadata:     item.Metadata,
+			}
+			account.ID = id
+			if account.CredType == "" {
+				account.CredType = "api_key"
+			}
+			if account.Weight == 0 {
+				account.Weight = 1
+			}
+			if err := saveBaseModel(tx, &account); err != nil {
+				return err
+			}
+			refreshedChannels[channelID.String()] = struct{}{}
+			result["accounts"]++
+		}
+
+		for _, item := range snapshot.RelayNodes {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			node := db.RelayNode{
+				Name:           item.Name,
+				BaseURL:        item.BaseURL,
+				Region:         item.Region,
+				EgressIP:       item.EgressIP,
+				Weight:         item.Weight,
+				MaxConcurrency: item.MaxConcurrency,
+				Status:         item.Status,
+				HealthStatus:   RelayNodeHealthHealthy,
+			}
+			node.ID = id
+			if node.Status == "" {
+				node.Status = RelayNodeStatusDisabled
+			}
+			if err := saveBaseModel(tx, &node); err != nil {
+				return err
+			}
+			result["relay_nodes"]++
+		}
+
+		for _, item := range snapshot.NodeChannels {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			relayNodeID, err := uuid.Parse(item.RelayNodeID)
+			if err != nil {
+				return err
+			}
+			channelID, err := uuid.Parse(item.ChannelID)
+			if err != nil {
+				return err
+			}
+			binding := db.NodeChannel{
+				RelayNodeID: relayNodeID,
+				ChannelID:   channelID,
+				Weight:      item.Weight,
+				Enabled:     item.Enabled,
+			}
+			binding.ID = id
+			if err := saveBaseModel(tx, &binding); err != nil {
+				return err
+			}
+			result["node_channels"]++
+		}
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	for channelID := range refreshedChannels {
+		if h.RefreshPool != nil {
+			h.RefreshPool(channelID)
+		}
+	}
+	result["refreshed_channels"] = len(refreshedChannels)
+	return result, nil
 }
 
 func (h *Handler) buildSettingsExportSnapshot() (settingsExportSnapshot, error) {
@@ -388,4 +675,43 @@ func parseJSONSetting(raw string) interface{} {
 		return raw
 	}
 	return decoded
+}
+
+func intString(value int) string {
+	return fmt.Sprint(value)
+}
+
+func yamlValueString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprint(value)
+	}
+	return string(data)
+}
+
+func restoreEncryptedValue(plain, stored string) (string, error) {
+	if strings.TrimSpace(plain) != "" {
+		return internalcrypto.Encrypt(plain)
+	}
+	if strings.TrimSpace(stored) != "" {
+		return stored, nil
+	}
+	return "", fmt.Errorf("credential is required")
+}
+
+func restoreOptionalEncryptedValue(plain, stored string) (string, error) {
+	if strings.TrimSpace(plain) != "" {
+		return internalcrypto.Encrypt(plain)
+	}
+	return stored, nil
+}
+
+func saveBaseModel(tx *gorm.DB, value interface{}) error {
+	return tx.Unscoped().Save(value).Error
 }

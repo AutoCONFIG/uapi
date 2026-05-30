@@ -17,7 +17,7 @@ func internalToGeminiCodeAssistWithAccount(req *provider.InternalRequest, accoun
 	model := resolveCodeAssistModel(req.Model)
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.InternalToGemini(provider.FromProviderInternal(&reqCopy))
+	gemBody, err := convert.InternalToGemini(&reqCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +85,9 @@ func shouldUseGoogleOneCredits(account *db.Account, model string) bool {
 }
 
 func codeAssistSessionID(req *provider.InternalRequest, account *db.Account) string {
-	if req != nil && req.ExtraParams != nil {
+	if req != nil && req.Extra != nil {
 		for _, key := range []string{"session_id", "sessionId"} {
-			if value := strings.TrimSpace(stringFromAny(req.ExtraParams[key])); value != "" {
+			if value := strings.TrimSpace(stringFromAny(req.Extra[key])); value != "" {
 				return value
 			}
 		}

@@ -35,6 +35,13 @@ func GeminiCLIToInternal(body []byte) (*InternalRequest, error) {
 	if req.Project != "" {
 		ir.Extra["project"] = json.RawMessage(fmt.Sprintf(`%q`, req.Project))
 	}
+	if req.UserPromptID != "" {
+		ir.Extra["user_prompt_id"] = json.RawMessage(fmt.Sprintf(`%q`, req.UserPromptID))
+	}
+	if len(req.EnabledCreditTypes) > 0 {
+		raw, _ := json.Marshal(req.EnabledCreditTypes)
+		ir.Extra["enabled_credit_types"] = raw
+	}
 	if req.UserAgent != "" {
 		ir.Extra["userAgent"] = json.RawMessage(fmt.Sprintf(`%q`, req.UserAgent))
 	}
@@ -79,6 +86,16 @@ func InternalToGeminiCLI(ir *InternalRequest) ([]byte, error) {
 		var project string
 		json.Unmarshal(v, &project)
 		cliReq.Project = project
+	}
+	if v, ok := ir.Extra["user_prompt_id"]; ok {
+		var userPromptID string
+		json.Unmarshal(v, &userPromptID)
+		cliReq.UserPromptID = userPromptID
+	}
+	if v, ok := ir.Extra["enabled_credit_types"]; ok {
+		var enabledCreditTypes []string
+		json.Unmarshal(v, &enabledCreditTypes)
+		cliReq.EnabledCreditTypes = enabledCreditTypes
 	}
 	if v, ok := ir.Extra["userAgent"]; ok {
 		var userAgent string

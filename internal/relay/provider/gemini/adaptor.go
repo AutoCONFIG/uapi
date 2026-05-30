@@ -90,7 +90,7 @@ func (a *GeminiAdaptor) ToInternal(body []byte) (*provider.InternalRequest, erro
 	if err != nil {
 		return nil, err
 	}
-	return provider.ToProviderInternal(ir), nil
+	return ir, nil
 }
 
 func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
@@ -100,12 +100,11 @@ func (a *GeminiAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, err
 	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
 		return internalToGeminiCodeAssistWithAccount(req, a.account)
 	}
-	ir := provider.FromProviderInternal(req)
 	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatGemini)
 	if !ok {
 		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatGemini)
 	}
-	return fromInternal(ir)
+	return fromInternal(req)
 }
 
 func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }

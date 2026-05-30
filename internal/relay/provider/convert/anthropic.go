@@ -80,6 +80,36 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 					}
 					appendContentItem(&internalMsg, part, rawBlock)
 				}
+			case "document":
+				if block.Source != nil {
+					part := schema.ContentPart{
+						Type:     "file",
+						FileType: block.Source.MediaType,
+						MimeType: block.Source.MediaType,
+						Extra:    block.Extra,
+					}
+					if title := rawString(block.Extra["title"]); title != "" {
+						part.Filename = title
+					}
+					switch block.Source.Type {
+					case "base64":
+						if block.Source.MediaType != "" {
+							part.FileData = fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+						} else {
+							part.FileData = block.Source.Data
+						}
+					case "text":
+						part.FileData = block.Source.Data
+						if part.FileType == "" {
+							part.FileType = "text/plain"
+						}
+					case "url":
+						part.FileURL = block.Source.URL
+					case "file":
+						part.FileID = block.Source.FileID
+					}
+					appendContentItem(&internalMsg, part, rawBlock)
+				}
 			case "tool_use":
 				args := rawJSONArgumentString(block.Input)
 				call := schema.ToolCall{
@@ -357,6 +387,49 @@ func anthropicContentBlock(c schema.ContentPart) map[string]interface{} {
 			"type":       "base64",
 			"media_type": mediaType,
 			"data":       data,
+		}
+	case "file", "input_file":
+		mediaType := c.FileType
+		if mediaType == "" {
+			mediaType = c.MimeType
+		}
+		if mediaType == "" {
+			mediaType = mimeTypeFromFilename(c.Filename)
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		block["type"] = "document"
+		if c.Filename != "" {
+			block["title"] = c.Filename
+		}
+		switch {
+		case c.FileURL != "":
+			block["source"] = map[string]string{
+				"type": "url",
+				"url":  strings.TrimPrefix(c.FileURL, "file://"),
+			}
+		case c.FileID != "":
+			block["source"] = map[string]string{
+				"type":    "file",
+				"file_id": c.FileID,
+			}
+		case c.FileData != "":
+			data := c.FileData
+			if strings.HasPrefix(data, "data:") {
+				parsedMime, parsedData, ok := splitDataURI(data)
+				if ok {
+					mediaType = parsedMime
+					data = parsedData
+				}
+			}
+			block["source"] = map[string]string{
+				"type":       "base64",
+				"media_type": mediaType,
+				"data":       data,
+			}
+		default:
+			return nil
 		}
 	default:
 		if c.Type == "" {

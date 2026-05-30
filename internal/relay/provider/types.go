@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 	"github.com/valyala/fasthttp"
 )
 
@@ -24,114 +26,13 @@ const (
 	FormatAntigravity           Format = "antigravity"
 )
 
-type InternalRequest struct {
-	Model          string
-	Messages       []InternalMessage
-	Tools          []InternalTool
-	ToolChoice     *InternalToolChoice
-	Stream         bool
-	MaxTokens      *int
-	MaxTokensField string
-	Temperature    *float64
-	TopP           *float64
-	TopK           *int // Anthropic/Gemini top_k
-	StopWords      []string
-	Metadata       map[string]interface{}
-
-	// Common generation parameters preserved across protocol conversion.
-	FrequencyPenalty  *float64
-	PresencePenalty   *float64
-	N                 *int
-	Seed              *int64
-	LogProbs          bool
-	LogProbsSet       bool
-	TopLogProbs       *int
-	ResponseFormat    interface{} // json_object, json_schema, etc.
-	LogitBias         interface{}
-	ParallelToolCalls *bool
-	ServiceTier       string // auto, default
-	Store             *bool  // OpenAI Responses store
-
-	// Provider-specific reasoning/thinking configuration.
-	Reasoning interface{} // OpenAI Responses reasoning effort; Anthropic thinking budget
-	Thinking  interface{} // Anthropic extended thinking config {type, budget_tokens}
-
-	// Gemini-specific fields.
-	SafetySettings interface{}
-	CandidateCount *int
-	Provider       string // Gemini provider field
-
-	// Unified system prompt (used by OpenAI Responses instructions, Anthropic system, etc.)
-	Instructions *string `json:"instructions,omitempty"`
-
-	// ExtraParams captures fields not explicitly modeled above. During
-	// same-protocol passthrough these are merged back into the output
-	// for lossless round-tripping. During cross-protocol conversion,
-	// unmapped ExtraParams fields are silently dropped with a warning log.
-	ExtraParams map[string]interface{}
-
-	SourceFormat Format
-}
-
-type InternalMessage struct {
-	Role             string
-	Parts            []InternalContentItem
-	Content          []InternalContentPart
-	ToolCalls        []InternalToolCall
-	ToolResult       *InternalToolResult
-	ReasoningContent []InternalContentPart // Extended thinking / reasoning content
-	Name             string                // for named messages
-	ItemID           string
-	Status           string
-	Phase            string
-	RawItem          json.RawMessage
-	Extra            map[string]interface{}
-}
-
-type InternalContentItem struct {
-	Kind       string
-	Content    InternalContentPart
-	ToolCall   InternalToolCall
-	ToolResult InternalToolResult
-	Raw        json.RawMessage
-}
-
-type InternalContentPart struct {
-	Type        string // text, image_url, refusal, reasoning, thinking
-	Text        string
-	ImageURL    *string
-	ImageDetail string
-	Data        string
-	MimeType    string
-	Refusal     string                 // OpenAI Chat Completions API refusal content
-	Extra       map[string]interface{} // Unknown keys (e.g. cache_control) for lossless round-tripping
-}
-
-type InternalToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
-}
-
-type InternalToolResult struct {
-	ToolCallID string
-	Name       string
-	Content    string
-	IsError    bool
-}
-
-type InternalTool struct {
-	Type        string
-	Name        string
-	Description string
-	Parameters  interface{}
-	Raw         json.RawMessage
-}
-
-type InternalToolChoice struct {
-	Type     string // auto, none, required, function
-	Function string
-}
+type InternalRequest = convert.InternalRequest
+type InternalMessage = convert.InternalMessage
+type InternalContentItem = convert.InternalContentItem
+type InternalContentPart = schema.ContentPart
+type InternalToolCall = schema.ToolCall
+type InternalToolResult = schema.ToolResult
+type InternalTool = schema.Tool
 
 type InternalResponse struct {
 	ID       string

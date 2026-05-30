@@ -43,6 +43,8 @@ export default function AdminSettingsPage() {
   const [uploading, setUploading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportingUsers, setExportingUsers] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importingUsers, setImportingUsers] = useState(false);
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
@@ -164,6 +166,48 @@ export default function AdminSettingsPage() {
     }
   }
 
+  function restoreMessage(prefix: string, result: Record<string, number>) {
+    const total = Object.values(result).reduce((sum, value) => sum + value, 0);
+    return `${prefix}完成，写入 ${total} 项`;
+  }
+
+  async function importSettings(file?: File) {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token || !file) return;
+    if (!window.confirm("恢复配置会覆盖同 ID 的渠道、账号、套餐、倍率等运行设置。确认继续？")) return;
+    const password = window.prompt("请输入管理员密码以恢复配置");
+    if (!password) return;
+    setImporting(true);
+    setMessage("");
+    try {
+      const result = await adminApi.importSettings(token, password, file);
+      setMessage(restoreMessage("配置恢复", result));
+      window.location.reload();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "恢复失败");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function importUsers(file?: File) {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token || !file) return;
+    if (!window.confirm("恢复用户数据会覆盖同 ID 的用户、API Key、套餐绑定和配额窗口。确认继续？")) return;
+    const password = window.prompt("请输入管理员密码以恢复用户数据");
+    if (!password) return;
+    setImportingUsers(true);
+    setMessage("");
+    try {
+      const result = await adminApi.importUsers(token, password, file);
+      setMessage(restoreMessage("用户恢复", result));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "恢复失败");
+    } finally {
+      setImportingUsers(false);
+    }
+  }
+
   return (
     <AppShell title="系统设置" variant="admin">
       <PageHead title="系统设置" description="配置日志保留、兑换码清理、壁纸等全局运行参数。" />
@@ -254,6 +298,14 @@ export default function AdminSettingsPage() {
             <div className="settings-action-row">
               <button className="btn" disabled={exporting} onClick={exportSettings} type="button"><Download /> {exporting ? "导出中" : "导出配置"}</button>
               <button className="btn" disabled={exportingUsers} onClick={exportUsers} type="button"><Download /> {exportingUsers ? "导出中" : "导出用户"}</button>
+              <label className="btn" aria-disabled={importing}>
+                <Download /> {importing ? "恢复中" : "恢复配置"}
+                <input accept=".yaml,.yml,application/x-yaml,text/yaml,text/plain" disabled={importing} hidden type="file" onChange={(e) => importSettings(e.target.files?.[0])} />
+              </label>
+              <label className="btn" aria-disabled={importingUsers}>
+                <Download /> {importingUsers ? "恢复中" : "恢复用户"}
+                <input accept=".yaml,.yml,application/x-yaml,text/yaml,text/plain" disabled={importingUsers} hidden type="file" onChange={(e) => importUsers(e.target.files?.[0])} />
+              </label>
               <button className="btn primary" disabled={saving} onClick={save} type="button"><Save /> {saving ? "保存中" : "保存设置"}</button>
             </div>
           </div>

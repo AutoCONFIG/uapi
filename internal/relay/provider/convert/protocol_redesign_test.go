@@ -230,6 +230,24 @@ func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
 	}
 }
 
+func TestProviderInternalBridgeIsCanonicalIdentity(t *testing.T) {
+	ir := &convert.InternalRequest{
+		Model: "gemini-2.5-pro",
+		GeminiGenerationConfigExtra: map[string]json.RawMessage{
+			"routingConfig": json.RawMessage(`{"autoMode":{}}`),
+		},
+		Extra: map[string]json.RawMessage{
+			"user_prompt_id": json.RawMessage(`"prompt-1"`),
+		},
+	}
+	if provider.ToProviderInternal(ir) != ir {
+		t.Fatalf("ToProviderInternal must not create a lossy bridge copy")
+	}
+	if provider.FromProviderInternal(ir) != ir {
+		t.Fatalf("FromProviderInternal must not create a lossy bridge copy")
+	}
+}
+
 func TestGeminiSameFormatPreservesFileAndCodeParts(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[
@@ -246,6 +264,42 @@ func TestGeminiSameFormatPreservesFileAndCodeParts(t *testing.T) {
 		`"fileData":{"fileUri":"files/report.pdf","mimeType":"application/pdf"}`,
 		`"executableCode":{"code":"print(1)","language":"PYTHON"}`,
 		`"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1\n"}`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("same-format Gemini conversion dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestSameFormatGeminiPreservesUnmodeledCodeAssistFields(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"cachedContent":"cachedContents/abc",
+		"labels":{"source":"uapi"},
+		"generationConfig":{
+			"responseLogprobs":true,
+			"logprobs":3,
+			"presencePenalty":0.1,
+			"frequencyPenalty":0.2,
+			"seed":42,
+			"routingConfig":{"autoMode":{}},
+			"responseModalities":["TEXT"],
+			"mediaResolution":"MEDIA_RESOLUTION_LOW",
+			"audioTimestamp":true
+		}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"cachedContent":"cachedContents/abc"`,
+		`"labels":{"source":"uapi"}`,
+		`"responseLogprobs":true`,
+		`"presencePenalty":0.1`,
+		`"routingConfig":{"autoMode":{}}`,
+		`"responseModalities":["TEXT"]`,
+		`"audioTimestamp":true`,
 	} {
 		if !strings.Contains(string(converted), want) {
 			t.Fatalf("same-format Gemini conversion dropped %s:\n%s", want, converted)
@@ -745,6 +799,8 @@ func TestGeminiCLIEnvelopeExtraFieldsStayInsideCLIEnvelope(t *testing.T) {
 	body := []byte(`{
 		"model":"gemini-2.5-pro",
 		"project":"project-1",
+		"user_prompt_id":"prompt-1",
+		"enabled_credit_types":["GOOGLE_ONE_AI"],
 		"userAgent":"gemini-cli",
 		"requestType":"generateContent",
 		"requestId":"req-1",
@@ -759,14 +815,15 @@ func TestGeminiCLIEnvelopeExtraFieldsStayInsideCLIEnvelope(t *testing.T) {
 	if err := json.Unmarshal(converted, &got); err != nil {
 		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
 	}
-	if got["project"] != "project-1" || got["userAgent"] != "gemini-cli" || got["requestType"] != "generateContent" || got["sessionId"] != "sess-1" {
+	credits, _ := got["enabled_credit_types"].([]interface{})
+	if got["project"] != "project-1" || got["user_prompt_id"] != "prompt-1" || len(credits) != 1 || credits[0] != "GOOGLE_ONE_AI" || got["userAgent"] != "gemini-cli" || got["requestType"] != "generateContent" || got["sessionId"] != "sess-1" {
 		t.Fatalf("CLI envelope fields not preserved: %s", converted)
 	}
 	request, ok := got["request"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("request missing: %s", converted)
 	}
-	if containsJSONKey(request, "project") || containsJSONKey(request, "userAgent") || containsJSONKey(request, "requestType") || containsJSONKey(request, "sessionId") {
+	if containsJSONKey(request, "project") || containsJSONKey(request, "user_prompt_id") || containsJSONKey(request, "enabled_credit_types") || containsJSONKey(request, "userAgent") || containsJSONKey(request, "requestType") || containsJSONKey(request, "sessionId") {
 		t.Fatalf("CLI envelope fields leaked into inner Gemini request: %s", converted)
 	}
 	if _, ok := request["custom_inner_only"]; !ok {
@@ -953,6 +1010,99 @@ func TestReasoningConfigMapsToNativeThinkingConfigs(t *testing.T) {
 	}
 	if !strings.Contains(string(anthropic), `"budget_tokens":8192`) {
 		t.Fatalf("Responses reasoning max_tokens not mapped to Anthropic thinking budget:\n%s", anthropic)
+	}
+}
+
+func TestResponsesInputFileConvertsToOpenAIChatFileBlock(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"summarize"},
+			{"type":"input_file","file_data":"data:application/pdf;base64,AA==","filename":"paper.pdf","file_type":"application/pdf"}
+		]}],
+		"temperature":"[undefined]"
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> Chat: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if _, ok := got["temperature"]; ok {
+		t.Fatalf("undefined sentinel was not removed before conversion: %s", converted)
+	}
+	messages := got["messages"].([]interface{})
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	file := content[1].(map[string]interface{})
+	if file["type"] != "file" {
+		t.Fatalf("input_file was not converted to Chat file block: %s", converted)
+	}
+	fileBody := file["file"].(map[string]interface{})
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" || fileBody["file_type"] != "application/pdf" {
+		t.Fatalf("file block lost fields: %s", converted)
+	}
+}
+
+func TestGeminiPDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"text":"summarize"},
+			{"inlineData":{"mimeType":"application/pdf","data":"AA=="}}
+		]}],
+		"generationConfig":{"maxOutputTokens":"[undefined]"}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Gemini -> Chat: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if _, ok := got["max_tokens"]; ok {
+		t.Fatalf("undefined maxOutputTokens should not become max_tokens: %s", converted)
+	}
+	messages := got["messages"].([]interface{})
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	file := content[1].(map[string]interface{})
+	if file["type"] != "file" {
+		t.Fatalf("PDF inlineData was not converted to Chat file block: %s", converted)
+	}
+	fileBody := file["file"].(map[string]interface{})
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["file_type"] != "application/pdf" {
+		t.Fatalf("Gemini PDF file block lost fields: %s", converted)
+	}
+}
+
+func TestOpenAIChatFileConvertsToGeminiInlineData(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[
+		{"type":"text","text":"summarize"},
+		{"type":"file","file":{"file_data":"data:application/pdf;base64,AA==","filename":"paper.pdf"}}
+	]}]}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Chat -> Gemini: %v", err)
+	}
+	if !strings.Contains(string(converted), `"inlineData":{"data":"AA==","mimeType":"application/pdf"}`) {
+		t.Fatalf("Chat file did not become Gemini inlineData PDF: %s", converted)
+	}
+}
+
+func TestAnthropicDocumentConvertsToOpenAIChatFileBlock(t *testing.T) {
+	body := []byte(`{"model":"claude","max_tokens":100,"messages":[{"role":"user","content":[
+		{"type":"text","text":"summarize"},
+		{"type":"document","title":"paper.pdf","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}
+	]}]}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Chat: %v", err)
+	}
+	if !strings.Contains(string(converted), `"type":"file"`) ||
+		!strings.Contains(string(converted), `"file_data":"data:application/pdf;base64,AA=="`) ||
+		!strings.Contains(string(converted), `"filename":"paper.pdf"`) {
+		t.Fatalf("Anthropic document did not become Chat file block: %s", converted)
 	}
 }
 

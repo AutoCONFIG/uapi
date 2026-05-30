@@ -13,6 +13,11 @@ type ContentPart struct {
 	Text        string                     `json:"text,omitempty"`
 	ImageURL    *string                    `json:"image_url,omitempty"`
 	ImageDetail string                     `json:"detail,omitempty"`
+	FileData    string                     `json:"file_data,omitempty"`
+	FileURL     string                     `json:"file_url,omitempty"`
+	FileID      string                     `json:"file_id,omitempty"`
+	Filename    string                     `json:"filename,omitempty"`
+	FileType    string                     `json:"file_type,omitempty"`
 	Data        string                     `json:"data,omitempty"`
 	MimeType    string                     `json:"mime_type,omitempty"`
 	Refusal     string                     `json:"refusal,omitempty"`
@@ -44,6 +49,21 @@ func (p *ContentPart) UnmarshalJSON(data []byte) error {
 	if v, ok := raw["refusal"]; ok {
 		_ = json.Unmarshal(v, &out.Refusal)
 	}
+	if v, ok := raw["file_data"]; ok {
+		_ = json.Unmarshal(v, &out.FileData)
+	}
+	if v, ok := raw["file_url"]; ok {
+		_ = json.Unmarshal(v, &out.FileURL)
+	}
+	if v, ok := raw["file_id"]; ok {
+		_ = json.Unmarshal(v, &out.FileID)
+	}
+	if v, ok := raw["filename"]; ok {
+		_ = json.Unmarshal(v, &out.Filename)
+	}
+	if v, ok := raw["file_type"]; ok {
+		_ = json.Unmarshal(v, &out.FileType)
+	}
 	if v, ok := raw["image_url"]; ok {
 		var imageURL string
 		if err := json.Unmarshal(v, &imageURL); err == nil {
@@ -64,9 +84,27 @@ func (p *ContentPart) UnmarshalJSON(data []byte) error {
 			out.Extra = setPartExtra(out.Extra, "image_url", v)
 		}
 	}
+	if v, ok := raw["file"]; ok {
+		var file struct {
+			FileData string `json:"file_data,omitempty"`
+			FileURL  string `json:"file_url,omitempty"`
+			FileID   string `json:"file_id,omitempty"`
+			Filename string `json:"filename,omitempty"`
+			FileType string `json:"file_type,omitempty"`
+		}
+		if err := json.Unmarshal(v, &file); err == nil {
+			out.FileData = firstNonEmpty(out.FileData, file.FileData)
+			out.FileURL = firstNonEmpty(out.FileURL, file.FileURL)
+			out.FileID = firstNonEmpty(out.FileID, file.FileID)
+			out.Filename = firstNonEmpty(out.Filename, file.Filename)
+			out.FileType = firstNonEmpty(out.FileType, file.FileType)
+		}
+	}
 
 	known := map[string]bool{
 		"type": true, "text": true, "image_url": true, "detail": true,
+		"file": true, "file_data": true, "file_url": true, "file_id": true,
+		"filename": true, "file_type": true,
 		"data": true, "mime_type": true, "refusal": true,
 	}
 	for k, v := range raw {
@@ -93,6 +131,43 @@ func (p ContentPart) MarshalJSON() ([]byte, error) {
 	if p.ImageDetail != "" {
 		out["detail"] = p.ImageDetail
 	}
+	if p.Type == "file" {
+		file := make(map[string]interface{})
+		if p.FileData != "" {
+			file["file_data"] = p.FileData
+		}
+		if p.FileURL != "" {
+			file["file_url"] = p.FileURL
+		}
+		if p.FileID != "" {
+			file["file_id"] = p.FileID
+		}
+		if p.Filename != "" {
+			file["filename"] = p.Filename
+		}
+		if p.FileType != "" {
+			file["file_type"] = p.FileType
+		}
+		if len(file) > 0 {
+			out["file"] = file
+		}
+	} else {
+		if p.FileData != "" {
+			out["file_data"] = p.FileData
+		}
+		if p.FileURL != "" {
+			out["file_url"] = p.FileURL
+		}
+		if p.FileID != "" {
+			out["file_id"] = p.FileID
+		}
+		if p.Filename != "" {
+			out["filename"] = p.Filename
+		}
+		if p.FileType != "" {
+			out["file_type"] = p.FileType
+		}
+	}
 	if p.Data != "" {
 		out["data"] = p.Data
 	}
@@ -106,6 +181,15 @@ func (p ContentPart) MarshalJSON() ([]byte, error) {
 		out[k] = v
 	}
 	return json.Marshal(out)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func setPartExtra(extra map[string]json.RawMessage, key string, value json.RawMessage) map[string]json.RawMessage {

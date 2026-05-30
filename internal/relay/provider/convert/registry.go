@@ -34,6 +34,7 @@ func RegisterFromInternal(f Format, fn fromInternalFunc) {
 // ToInternal converter, then converts InternalRequest to upstreamFormat bytes
 // using upstreamFormat's FromInternal converter.
 func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
+	body = cleanJSONUndefinedPlaceholders(body)
 	if clientFormat == upstreamFormat && clientFormat == FormatOpenAIChatCompletions {
 		return body, nil
 	}
@@ -68,6 +69,7 @@ func dropExtraForCrossProtocol(ir *InternalRequest, clientFormat, upstreamFormat
 // ToInternalOnly converts a request body to InternalRequest without converting back.
 // Useful for extracting model/messages for routing decisions.
 func ToInternalOnly(format Format, body []byte) (*InternalRequest, error) {
+	body = cleanJSONUndefinedPlaceholders(body)
 	toInternal, ok := toInternalRegistry[format]
 	if !ok {
 		return nil, fmt.Errorf("no ToInternal converter for format %q", format)

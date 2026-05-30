@@ -64,6 +64,10 @@ type InternalRequest struct {
 	SafetySettings    json.RawMessage // Gemini safety settings
 	CandidateCount    *int            // Gemini candidate count
 
+	// GeminiGenerationConfigExtra preserves generationConfig keys UAPI does not
+	// model yet, such as responseLogprobs, routingConfig, and media settings.
+	GeminiGenerationConfigExtra map[string]json.RawMessage
+
 	// Extra preserves protocol-specific fields for same-format passthrough.
 	Extra map[string]json.RawMessage
 
@@ -126,4 +130,15 @@ func decodeJSONUseNumber(data []byte, v interface{}) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	return dec.Decode(v)
+}
+
+func copyRawMap(in map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(in))
+	for k, v := range in {
+		out[k] = append(json.RawMessage(nil), v...)
+	}
+	return out
 }

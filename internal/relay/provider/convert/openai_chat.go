@@ -199,7 +199,7 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		chatMsg := schema.ChatMessage{
 			Role:    msg.Role,
 			Name:    msg.Name,
-			Content: schema.NewPartsContent(msg.Content...),
+			Content: schema.NewPartsContent(openAIChatContentParts(msg.Content)...),
 		}
 
 		// Convert tool calls
@@ -310,6 +310,23 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func openAIChatContentParts(parts []schema.ContentPart) []schema.ContentPart {
+	out := make([]schema.ContentPart, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == "input_file" {
+			part.Type = "file"
+		}
+		if part.Type == "input_image" {
+			part.Type = "image_url"
+		}
+		if part.Type == "input_text" || part.Type == "output_text" {
+			part.Type = "text"
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 // joinNonEmpty joins non-empty strings with the given separator.

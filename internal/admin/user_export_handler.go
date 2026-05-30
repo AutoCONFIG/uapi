@@ -2,12 +2,15 @@ package admin
 
 import (
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gopkg.in/yaml.v3"
+	"gorm.io/gorm"
 )
 
 type usersExportSnapshot struct {
@@ -98,6 +101,170 @@ func (h *Handler) HandleUsersExport(ctx *fasthttp.RequestCtx) {
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetBody(data)
 	createAuditLogWithValues(h.db, "export", "users", "runtime", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(map[string]interface{}{"format": "yaml"}))
+}
+
+func (h *Handler) HandleUsersImport(ctx *fasthttp.RequestCtx) {
+	if string(ctx.Method()) != "POST" {
+		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	snapshot, err := h.parseUsersImport(ctx)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := h.restoreUsersSnapshot(snapshot)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "restore users failed: "+err.Error())
+		return
+	}
+	createAuditLogWithValues(h.db, "import", "users", "runtime", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(result))
+	h.jsonResponse(ctx, 200, result)
+}
+
+func (h *Handler) parseUsersImport(ctx *fasthttp.RequestCtx) (usersExportSnapshot, error) {
+	var snapshot usersExportSnapshot
+	form, err := ctx.MultipartForm()
+	if err != nil {
+		return snapshot, fmt.Errorf("invalid multipart form")
+	}
+	password := ""
+	if values := form.Value["password"]; len(values) > 0 {
+		password = values[0]
+	}
+	if strings.TrimSpace(password) == "" {
+		return snapshot, fmt.Errorf("password is required")
+	}
+	if !h.verifyAdminPasswordValue(password) {
+		return snapshot, fmt.Errorf("invalid password")
+	}
+	files := form.File["file"]
+	if len(files) == 0 {
+		return snapshot, fmt.Errorf("file is required")
+	}
+	file := files[0]
+	if file.Size > 16*1024*1024 {
+		return snapshot, fmt.Errorf("file must be 16MB or smaller")
+	}
+	opened, err := file.Open()
+	if err != nil {
+		return snapshot, fmt.Errorf("open file failed")
+	}
+	defer opened.Close()
+	data, err := io.ReadAll(opened)
+	if err != nil {
+		return snapshot, fmt.Errorf("read file failed")
+	}
+	if err := yaml.Unmarshal(data, &snapshot); err != nil {
+		return snapshot, fmt.Errorf("invalid yaml")
+	}
+	if snapshot.SchemaVersion <= 0 {
+		return snapshot, fmt.Errorf("unsupported users snapshot")
+	}
+	return snapshot, nil
+}
+
+func (h *Handler) restoreUsersSnapshot(snapshot usersExportSnapshot) (map[string]int, error) {
+	result := map[string]int{}
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		for _, item := range snapshot.Users {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			user := db.User{
+				Email:        item.Email,
+				Username:     item.Username,
+				PasswordHash: item.PasswordHash,
+				Status:       item.Status,
+			}
+			user.ID = id
+			user.CreatedAt = item.CreatedAt
+			user.UpdatedAt = item.UpdatedAt
+			if user.Status == "" {
+				user.Status = "active"
+			}
+			if err := saveBaseModel(tx, &user); err != nil {
+				return err
+			}
+			result["users"]++
+		}
+
+		for _, item := range snapshot.APIKeys {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			token := db.Token{
+				UserID:      item.UserID,
+				Name:        item.Name,
+				Key:         item.Key,
+				Enabled:     item.Enabled,
+				IPWhitelist: item.IPWhitelist,
+				ExpiresAt:   item.ExpiresAt,
+				Models:      item.Models,
+				Permissions: item.Permissions,
+			}
+			token.ID = id
+			token.CreatedAt = item.CreatedAt
+			token.UpdatedAt = item.UpdatedAt
+			if err := saveBaseModel(tx, &token); err != nil {
+				return err
+			}
+			result["api_keys"]++
+		}
+
+		for _, item := range snapshot.Subscriptions {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			planID, err := uuid.Parse(item.PlanID)
+			if err != nil {
+				return err
+			}
+			tokenPlan := db.TokenPlan{
+				UserID:    item.UserID,
+				PlanID:    planID,
+				StartsAt:  item.StartsAt,
+				ExpiresAt: item.ExpiresAt,
+			}
+			tokenPlan.ID = id
+			tokenPlan.CreatedAt = item.CreatedAt
+			tokenPlan.UpdatedAt = item.UpdatedAt
+			if err := saveBaseModel(tx, &tokenPlan); err != nil {
+				return err
+			}
+			result["subscriptions"]++
+		}
+
+		for _, item := range snapshot.QuotaWindows {
+			id, err := uuid.Parse(item.ID)
+			if err != nil {
+				return err
+			}
+			policyID, err := uuid.Parse(item.PolicyID)
+			if err != nil {
+				return err
+			}
+			window := db.PolicyUsageWindow{
+				ID:          id,
+				PolicyID:    policyID,
+				UserID:      item.UserID,
+				WindowType:  item.WindowType,
+				WindowStart: item.WindowStart,
+				UsedCount:   item.UsedCount,
+				CreatedAt:   item.CreatedAt,
+				UpdatedAt:   item.UpdatedAt,
+			}
+			if err := tx.Save(&window).Error; err != nil {
+				return err
+			}
+			result["quota_windows"]++
+		}
+		return nil
+	})
+	return result, err
 }
 
 func (h *Handler) buildUsersExportSnapshot() (usersExportSnapshot, error) {
