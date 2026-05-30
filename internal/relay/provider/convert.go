@@ -117,6 +117,7 @@ func ToProviderInternal(ir *newconvert.InternalRequest) *InternalRequest {
 		Model:             ir.Model,
 		Stream:            ir.Stream,
 		MaxTokens:         ir.MaxTokens,
+		MaxTokensField:    ir.MaxTokensField,
 		Temperature:       ir.Temperature,
 		TopP:              ir.TopP,
 		TopK:              ir.TopK,
@@ -138,9 +139,11 @@ func ToProviderInternal(ir *newconvert.InternalRequest) *InternalRequest {
 		SafetySettings:    rawToInterface(ir.SafetySettings),
 		CandidateCount:    ir.CandidateCount,
 		ExtraParams:       rawMapToInterface(ir.Extra),
+		SourceFormat:      fromConvertFormat(ir.SourceFormat),
 	}
 	if ir.LogProbs != nil {
 		pr.LogProbs = *ir.LogProbs
+		pr.LogProbsSet = true
 	}
 	pr.Messages = toProviderMessages(ir.Messages)
 	pr.Tools = toProviderTools(ir.Tools)
@@ -151,13 +154,13 @@ func FromProviderInternal(pr *InternalRequest) *newconvert.InternalRequest {
 	if pr == nil {
 		return nil
 	}
-	logProbs := pr.LogProbs
-	return &newconvert.InternalRequest{
+	out := &newconvert.InternalRequest{
 		Model:             pr.Model,
 		Stream:            pr.Stream,
 		Messages:          fromProviderMessages(pr.Messages),
 		Tools:             fromProviderTools(pr.Tools),
 		MaxTokens:         pr.MaxTokens,
+		MaxTokensField:    pr.MaxTokensField,
 		Temperature:       pr.Temperature,
 		TopP:              pr.TopP,
 		TopK:              pr.TopK,
@@ -171,7 +174,6 @@ func FromProviderInternal(pr *InternalRequest) *newconvert.InternalRequest {
 		PresencePenalty:   pr.PresencePenalty,
 		N:                 pr.N,
 		Seed:              pr.Seed,
-		LogProbs:          &logProbs,
 		TopLogProbs:       pr.TopLogProbs,
 		LogitBias:         toRawMessage(pr.LogitBias),
 		ServiceTier:       pr.ServiceTier,
@@ -180,7 +182,41 @@ func FromProviderInternal(pr *InternalRequest) *newconvert.InternalRequest {
 		SafetySettings:    toRawMessage(pr.SafetySettings),
 		CandidateCount:    pr.CandidateCount,
 		Extra:             toRawMessageMap(pr.ExtraParams),
+		SourceFormat:      toConvertFormatOrZero(pr.SourceFormat),
 	}
+	if out.MaxTokensField == "" {
+		out.MaxTokensField = "max_tokens"
+	}
+	if pr.LogProbsSet {
+		logProbs := pr.LogProbs
+		out.LogProbs = &logProbs
+	}
+	return out
+}
+
+func fromConvertFormat(format newconvert.Format) Format {
+	switch format {
+	case newconvert.FormatOpenAIChatCompletions:
+		return FormatOpenAIChatCompletions
+	case newconvert.FormatOpenAIResponses:
+		return FormatOpenAIResponses
+	case newconvert.FormatAnthropic:
+		return FormatAnthropic
+	case newconvert.FormatGemini:
+		return FormatGemini
+	case newconvert.FormatGeminiCLI:
+		return FormatGeminiCLI
+	default:
+		return ""
+	}
+}
+
+func toConvertFormatOrZero(format Format) newconvert.Format {
+	converted, err := toConvertFormat(format)
+	if err != nil {
+		return ""
+	}
+	return converted
 }
 
 func toProviderMessages(messages []newconvert.InternalMessage) []InternalMessage {
@@ -194,6 +230,11 @@ func toProviderMessages(messages []newconvert.InternalMessage) []InternalMessage
 			ToolResult:       toProviderToolResult(m.ToolResult),
 			ReasoningContent: toProviderContentParts(m.ReasoningContent),
 			Name:             m.Name,
+			ItemID:           m.ItemID,
+			Status:           m.Status,
+			Phase:            m.Phase,
+			RawItem:          append(json.RawMessage(nil), m.RawItem...),
+			Extra:            rawMapToInterface(m.Extra),
 		}
 		out = append(out, pm)
 	}
@@ -211,6 +252,11 @@ func fromProviderMessages(messages []InternalMessage) []newconvert.InternalMessa
 			ToolResult:       fromProviderToolResult(m.ToolResult),
 			ReasoningContent: fromProviderContentParts(m.ReasoningContent),
 			Name:             m.Name,
+			ItemID:           m.ItemID,
+			Status:           m.Status,
+			Phase:            m.Phase,
+			RawItem:          append(json.RawMessage(nil), m.RawItem...),
+			Extra:            toRawMessageMap(m.Extra),
 		})
 	}
 	return out
@@ -360,7 +406,13 @@ func toProviderTools(tools []schema.Tool) []InternalTool {
 		if len(parameters) == 0 {
 			parameters = t.InputSchema
 		}
-		out = append(out, InternalTool{Type: t.Type, Name: name, Description: description, Parameters: rawToInterface(parameters)})
+		out = append(out, InternalTool{
+			Type:        t.Type,
+			Name:        name,
+			Description: description,
+			Parameters:  rawToInterface(parameters),
+			Raw:         marshalRaw(t),
+		})
 	}
 	return out
 }
@@ -368,6 +420,13 @@ func toProviderTools(tools []schema.Tool) []InternalTool {
 func fromProviderTools(tools []InternalTool) []schema.Tool {
 	out := make([]schema.Tool, 0, len(tools))
 	for _, t := range tools {
+		if len(t.Raw) > 0 {
+			var tool schema.Tool
+			if err := json.Unmarshal(t.Raw, &tool); err == nil {
+				out = append(out, tool)
+				continue
+			}
+		}
 		out = append(out, schema.Tool{Type: t.Type, Name: t.Name, Description: t.Description, Parameters: toRawMessage(t.Parameters)})
 	}
 	return out
@@ -389,10 +448,18 @@ func rawToInterface(raw json.RawMessage) interface{} {
 		return nil
 	}
 	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := DecodeJSONUseNumber(raw, &v); err != nil {
 		return nil
 	}
 	return v
+}
+
+func marshalRaw(v interface{}) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func rawMapToInterface(raw map[string]json.RawMessage) map[string]interface{} {

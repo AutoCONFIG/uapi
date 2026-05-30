@@ -139,12 +139,46 @@ type Tool struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 	Function    *ToolFunction   `json:"function,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 type ToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	type Alias Tool
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*t = Tool(a)
+	return unmarshalExtra(data, t, &t.Extra)
+}
+
+func (t Tool) MarshalJSON() ([]byte, error) {
+	type Alias Tool
+	return marshalExtra(Alias(t), t.Extra)
+}
+
+func (f *ToolFunction) UnmarshalJSON(data []byte) error {
+	type Alias ToolFunction
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*f = ToolFunction(a)
+	return unmarshalExtra(data, f, &f.Extra)
+}
+
+func (f ToolFunction) MarshalJSON() ([]byte, error) {
+	type Alias ToolFunction
+	return marshalExtra(Alias(f), f.Extra)
 }
 
 type ToolChoice struct {

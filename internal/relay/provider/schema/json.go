@@ -96,7 +96,7 @@ func marshalExtra(v interface{}, extra map[string]json.RawMessage) ([]byte, erro
 // MarshalJSON emits a bare string if Text is set, or an array if Parts is set.
 // If both are set it returns an error; if neither it emits null.
 func (mc MessageContent) MarshalJSON() ([]byte, error) {
-	hasText := mc.Text != nil && *mc.Text != ""
+	hasText := mc.Text != nil
 	hasParts := len(mc.Parts) > 0
 
 	if hasText && hasParts {

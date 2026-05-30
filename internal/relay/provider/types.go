@@ -25,17 +25,18 @@ const (
 )
 
 type InternalRequest struct {
-	Model       string
-	Messages    []InternalMessage
-	Tools       []InternalTool
-	ToolChoice  *InternalToolChoice
-	Stream      bool
-	MaxTokens   *int
-	Temperature *float64
-	TopP        *float64
-	TopK        *int // Anthropic/Gemini top_k
-	StopWords   []string
-	Metadata    map[string]interface{}
+	Model          string
+	Messages       []InternalMessage
+	Tools          []InternalTool
+	ToolChoice     *InternalToolChoice
+	Stream         bool
+	MaxTokens      *int
+	MaxTokensField string
+	Temperature    *float64
+	TopP           *float64
+	TopK           *int // Anthropic/Gemini top_k
+	StopWords      []string
+	Metadata       map[string]interface{}
 
 	// Common generation parameters preserved across protocol conversion.
 	FrequencyPenalty  *float64
@@ -43,6 +44,7 @@ type InternalRequest struct {
 	N                 *int
 	Seed              *int64
 	LogProbs          bool
+	LogProbsSet       bool
 	TopLogProbs       *int
 	ResponseFormat    interface{} // json_object, json_schema, etc.
 	LogitBias         interface{}
@@ -67,6 +69,8 @@ type InternalRequest struct {
 	// for lossless round-tripping. During cross-protocol conversion,
 	// unmapped ExtraParams fields are silently dropped with a warning log.
 	ExtraParams map[string]interface{}
+
+	SourceFormat Format
 }
 
 type InternalMessage struct {
@@ -77,6 +81,11 @@ type InternalMessage struct {
 	ToolResult       *InternalToolResult
 	ReasoningContent []InternalContentPart // Extended thinking / reasoning content
 	Name             string                // for named messages
+	ItemID           string
+	Status           string
+	Phase            string
+	RawItem          json.RawMessage
+	Extra            map[string]interface{}
 }
 
 type InternalContentItem struct {
@@ -116,6 +125,7 @@ type InternalTool struct {
 	Name        string
 	Description string
 	Parameters  interface{}
+	Raw         json.RawMessage
 }
 
 type InternalToolChoice struct {

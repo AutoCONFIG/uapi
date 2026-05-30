@@ -135,6 +135,101 @@ func TestOpenAIResponsesSameFormatPreservesRichInputItems(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatSameFormatPreservesExplicitFalseAndNativeFields(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[
+			{"role":"user","content":""},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"n\":9007199254740993}"}}]}
+		],
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"},"strict":true},"cache_control":{"type":"ephemeral"}}],
+		"max_completion_tokens":123,
+		"logprobs":false,
+		"parallel_tool_calls":false,
+		"store":false,
+		"stream_options":{"include_usage":true}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"content":""`,
+		`"max_completion_tokens":123`,
+		`"logprobs":false`,
+		`"parallel_tool_calls":false`,
+		`"store":false`,
+		`"stream_options":{"include_usage":true}`,
+		`"strict":true`,
+		`"cache_control":{"type":"ephemeral"}`,
+		`9007199254740993`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("same-format Chat conversion dropped %s:\n%s", want, converted)
+		}
+	}
+	if strings.Contains(string(converted), `"max_tokens":123`) {
+		t.Fatalf("max_completion_tokens was rewritten as max_tokens:\n%s", converted)
+	}
+}
+
+func TestOpenAIChatToolExtensionsSurviveCrossProtocolConversion(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"},"strict":true},"cache_control":{"type":"ephemeral"}}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"strict":true`,
+		`"cache_control":{"type":"ephemeral"}`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("tool extension dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"id":"msg_1","type":"message","role":"user","status":"completed","content":[
+				{"type":"input_text","text":"read this","cache_control":{"type":"ephemeral"}}
+			]},
+			{"id":"fs_1","type":"file_search_call","status":"completed","queries":["uapi"],"score":9007199254740993}
+		],
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"},"strict":true},"cache_control":{"type":"ephemeral"}}],
+		"include":["reasoning.encrypted_content"],
+		"parallel_tool_calls":false
+	}`)
+	ir, err := convert.OpenAIResponsesToInternal(body)
+	if err != nil {
+		t.Fatalf("OpenAIResponsesToInternal: %v", err)
+	}
+	bridged := provider.FromProviderInternal(provider.ToProviderInternal(ir))
+	converted, err := convert.InternalToOpenAIResponses(bridged)
+	if err != nil {
+		t.Fatalf("InternalToOpenAIResponses: %v", err)
+	}
+	for _, want := range []string{
+		`"id":"msg_1"`,
+		`"status":"completed"`,
+		`"type":"file_search_call"`,
+		`9007199254740993`,
+		`"strict":true`,
+		`"cache_control":{"type":"ephemeral"}`,
+		`"parallel_tool_calls":false`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("provider bridge dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
 func TestGeminiSameFormatPreservesFileAndCodeParts(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[

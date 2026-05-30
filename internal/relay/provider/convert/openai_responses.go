@@ -204,7 +204,7 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 	for _, msg := range ir.Messages {
 		if ir.SourceFormat == FormatOpenAIResponses && len(msg.RawItem) > 0 {
 			var raw map[string]interface{}
-			if err := json.Unmarshal(msg.RawItem, &raw); err == nil {
+			if err := decodeJSONUseNumber(msg.RawItem, &raw); err == nil {
 				input = append(input, raw)
 				continue
 			}

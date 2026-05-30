@@ -34,6 +34,9 @@ func RegisterFromInternal(f Format, fn fromInternalFunc) {
 // ToInternal converter, then converts InternalRequest to upstreamFormat bytes
 // using upstreamFormat's FromInternal converter.
 func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
+	if clientFormat == upstreamFormat && clientFormat == FormatOpenAIChatCompletions {
+		return body, nil
+	}
 	toInternal, ok := toInternalRegistry[clientFormat]
 	if !ok {
 		return nil, fmt.Errorf("no ToInternal converter for format %q", clientFormat)

@@ -100,10 +100,12 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 	// Generation parameters
 	if req.MaxTokens != nil {
 		ir.MaxTokens = req.MaxTokens
+		ir.MaxTokensField = "max_tokens"
 	}
 	if req.MaxCompletionTokens != nil {
 		// Prefer max_completion_tokens if set
 		ir.MaxTokens = req.MaxCompletionTokens
+		ir.MaxTokensField = "max_completion_tokens"
 	}
 	if req.Temperature != nil {
 		ir.Temperature = req.Temperature
@@ -136,8 +138,8 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 		seed := int64(*req.Seed)
 		ir.Seed = &seed
 	}
-	if req.LogProbs {
-		ir.LogProbs = &req.LogProbs
+	if req.LogProbs != nil {
+		ir.LogProbs = req.LogProbs
 	}
 	if req.TopLogProbs != nil {
 		ir.TopLogProbs = req.TopLogProbs
@@ -148,14 +150,14 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 	if req.LogitBias != nil {
 		ir.LogitBias = req.LogitBias
 	}
-	if req.ParallelToolCalls {
-		ir.ParallelToolCalls = &req.ParallelToolCalls
+	if req.ParallelToolCalls != nil {
+		ir.ParallelToolCalls = req.ParallelToolCalls
 	}
 	if req.ServiceTier != "" {
 		ir.ServiceTier = req.ServiceTier
 	}
-	if req.Store {
-		ir.Store = &req.Store
+	if req.Store != nil {
+		ir.Store = req.Store
 	}
 	if req.ReasoningEffort != "" {
 		ir.Reasoning = json.RawMessage(fmt.Sprintf(`{"effort":%q}`, req.ReasoningEffort))
@@ -245,7 +247,11 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 
 	// Generation parameters
 	if ir.MaxTokens != nil {
-		req.MaxTokens = ir.MaxTokens
+		if ir.MaxTokensField == "max_completion_tokens" {
+			req.MaxCompletionTokens = ir.MaxTokens
+		} else {
+			req.MaxTokens = ir.MaxTokens
+		}
 	}
 	if ir.Temperature != nil {
 		req.Temperature = ir.Temperature
@@ -276,7 +282,7 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		req.Seed = &seed
 	}
 	if ir.LogProbs != nil {
-		req.LogProbs = *ir.LogProbs
+		req.LogProbs = ir.LogProbs
 	}
 	if ir.TopLogProbs != nil {
 		req.TopLogProbs = ir.TopLogProbs
@@ -288,13 +294,13 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		req.LogitBias = ir.LogitBias
 	}
 	if ir.ParallelToolCalls != nil {
-		req.ParallelToolCalls = *ir.ParallelToolCalls
+		req.ParallelToolCalls = ir.ParallelToolCalls
 	}
 	if ir.ServiceTier != "" {
 		req.ServiceTier = ir.ServiceTier
 	}
 	if ir.Store != nil {
-		req.Store = *ir.Store
+		req.Store = ir.Store
 	}
 	if ir.Tools != nil {
 		req.Tools = ir.Tools

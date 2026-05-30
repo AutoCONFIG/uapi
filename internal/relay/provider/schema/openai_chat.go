@@ -19,16 +19,16 @@ type OpenAIChatRequest struct {
 	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
 	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
 	Seed                *int            `json:"seed,omitempty"`
-	LogProbs            bool            `json:"logprobs,omitempty"`
+	LogProbs            *bool           `json:"logprobs,omitempty"`
 	TopLogProbs         *int            `json:"top_logprobs,omitempty"`
 	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
 	LogitBias           json.RawMessage `json:"logit_bias,omitempty"`
 	Tools               []Tool          `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls   bool            `json:"parallel_tool_calls,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
 	ServiceTier         string          `json:"service_tier,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
-	Store               bool            `json:"store,omitempty"`
+	Store               *bool           `json:"store,omitempty"`
 	User                string          `json:"user,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`

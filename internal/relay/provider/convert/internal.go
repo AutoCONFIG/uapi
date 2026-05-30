@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
@@ -38,11 +39,12 @@ type InternalRequest struct {
 	InstructionsRaw json.RawMessage
 
 	// Generation parameters (pointer = unset vs zero value)
-	MaxTokens   *int
-	Temperature *float64
-	TopP        *float64
-	TopK        *int
-	StopWords   []string
+	MaxTokens      *int
+	MaxTokensField string
+	Temperature    *float64
+	TopP           *float64
+	TopK           *int
+	StopWords      []string
 
 	// Protocol-specific fields passed through as raw JSON
 	Reasoning         json.RawMessage
@@ -118,4 +120,10 @@ type InternalChoice struct {
 	FinishReason     string
 	ReasoningContent []schema.ContentPart
 	Refusal          string
+}
+
+func decodeJSONUseNumber(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
 }
