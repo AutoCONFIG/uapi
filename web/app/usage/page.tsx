@@ -137,15 +137,7 @@ export default function UsagePage() {
                 <tr key={log.id}>
                   <td>{new Date(log.created_at).toLocaleString()}</td>
                   <td className="muted" style={{ fontSize: 12 }}>{log.client_ip || "-"}</td>
-                  <td>
-                    <div style={{ whiteSpace: "nowrap" }}>
-                      <span>{log.model || "-"}</span>
-                      <span className="muted" style={{ fontSize: 12 }}> → {log.routed_model || "-"}</span>
-                    </div>
-                    {log.client_format || log.upstream_format ? (
-                      <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{log.client_format || "-"} → {log.upstream_format || "-"}</div>
-                    ) : null}
-                  </td>
+                  <td>{log.model || "-"}</td>
                   <td>{log.is_stream ? "流式" : "普通"}</td>
                   <td><StatusBadge value={logStatus(log)} /></td>
                   <td>

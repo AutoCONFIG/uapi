@@ -2774,8 +2774,8 @@ th {
 
 .model-ratio-editor.standalone {
   grid-column: auto;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
 }
 
 .model-ratio-head {
@@ -2790,14 +2790,18 @@ th {
 
 .model-ratio-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 76px 34px;
-  align-items: end;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 58px 30px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   border: 1px solid rgba(203, 213, 225, 0.68);
   border-radius: 8px;
-  padding: 8px;
+  padding: 6px;
   background: rgba(255, 255, 255, 0.36);
+}
+
+.model-ratio-panel .model-ratio-row label {
+  display: none;
 }
 
 .model-ratio-model-field,
@@ -2805,8 +2809,64 @@ th {
   min-width: 0;
 }
 
+.model-ratio-row .input {
+  min-height: 32px;
+  padding: 5px 8px;
+}
+
 .model-ratio-input {
   text-align: right;
+}
+
+.model-ratio-row .icon-only {
+  width: 30px;
+  min-width: 30px;
+  height: 32px;
+}
+
+.model-ratio-summary h2 {
+  margin-bottom: 8px;
+}
+
+.model-ratio-compact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.model-ratio-chip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.22);
+  padding: 7px 10px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.68) inset;
+}
+
+.model-ratio-chip span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-ratio-chip strong {
+  min-width: 42px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.10);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 780;
+  line-height: 1;
+  padding: 5px 8px;
+  text-align: center;
 }
 
 .field.compact-field {
@@ -4106,6 +4166,81 @@ tr:last-child td {
 .row-actions .btn.danger,
 .account-card-actions .btn.danger {
   background: rgba(255, 255, 255, 0.44);
+}
+
+.plan-create-backdrop {
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.plan-create-modal {
+  width: min(820px, calc(100vw - 32px));
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.plan-create-modal .modal-head {
+  align-items: flex-start;
+}
+
+.plan-create-basic {
+  grid-template-columns: minmax(0, 1.35fr) minmax(170px, 0.8fr) minmax(110px, 0.45fr);
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.plan-create-basic .check-row {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 30px;
+}
+
+.plan-create-policy {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.plan-create-policy .field {
+  min-width: 0;
+}
+
+.plan-create-models {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.plan-create-models label {
+  grid-column: 1 / -1;
+}
+
+.plan-create-models .btn {
+  min-width: 136px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.plan-create-modal .form-actions {
+  margin-top: 20px;
+}
+
+@media (max-width: 760px) {
+  .plan-create-basic,
+  .plan-create-policy,
+  .plan-create-models {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-create-models label,
+  .plan-create-models .btn,
+  .plan-create-basic .check-row {
+    grid-column: auto;
+  }
+
+  .plan-create-models .btn {
+    width: 100%;
+  }
 }
 
 @keyframes fadeIn {

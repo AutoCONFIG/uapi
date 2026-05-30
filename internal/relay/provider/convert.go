@@ -46,6 +46,9 @@ func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte,
 	if err != nil {
 		return nil, fmt.Errorf("ToInternal(%s): %w", clientFormat, err)
 	}
+	if clientFormat != upstreamFormat {
+		internal.Extra = nil
+	}
 	if adaptor != nil {
 		return adaptor.FromInternal(ToProviderInternal(internal))
 	}

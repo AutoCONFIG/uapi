@@ -102,7 +102,7 @@ func (h *WSHandler) httpBridgeFallback(
 	}
 
 	// 5. Bridge SSE response → WS messages in a goroutine
-	go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, acc, model, estTokens, tokenPlanID, start)
+	go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, acc, model, estTokens, tokenPlanID, start, body)
 	return true
 }
 
@@ -118,6 +118,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	estTokens int,
 	tokenPlanID uuid.UUID,
 	start time.Time,
+	requestBody []byte,
 ) {
 	turnFinalized := false
 	defer func() {
@@ -293,6 +294,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	if pt == 0 && ct == 0 && (responsesPromptTokens > 0 || responsesCompletionTokens > 0) {
 		pt, ct = responsesPromptTokens, responsesCompletionTokens
 	}
+	estimateMissingUsage(&pt, &ct, requestBody, nil, tracker.EstimatedOutputTokens())
 	h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model)
 	if ch.AffinityTTL > 0 {
 		h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
@@ -355,7 +357,7 @@ func wsCreateToHTTPBody(msg []byte) []byte {
 	}
 
 	data, _ := json.Marshal(bodyMap)
-	return data
+	return cleanJSONUndefinedPlaceholders(data)
 }
 
 // adaptorUpstreamFormat returns the upstream API format based on channel config.

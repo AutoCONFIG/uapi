@@ -296,12 +296,25 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 		}
 	}
 
-	// Add Extra fields
+	// Add Extra fields. Gemini CLI envelope fields belong outside the inner
+	// request and must not be echoed into request.*.
 	for k, v := range ir.Extra {
+		if ir.SourceFormat == FormatGeminiCLI && isGeminiCLIEnvelopeExtra(k) {
+			continue
+		}
 		req[k] = v
 	}
 
 	return json.Marshal(req)
+}
+
+func isGeminiCLIEnvelopeExtra(key string) bool {
+	switch key {
+	case "project", "userAgent", "requestType", "requestId", "sessionId":
+		return true
+	default:
+		return false
+	}
 }
 
 func geminiRoleToInternal(role string) string {

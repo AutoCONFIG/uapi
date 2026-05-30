@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -12,6 +13,21 @@ type testUsageParser struct{}
 
 func (testUsageParser) ParseStreamUsage([]byte) (int, int, error) {
 	return 0, 0, nil
+}
+
+type responsesUsageParser struct{}
+
+func (responsesUsageParser) ParseStreamUsage(chunk []byte) (int, int, error) {
+	var event struct {
+		Response struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	_ = json.Unmarshal(chunk, &event)
+	return event.Response.Usage.InputTokens, event.Response.Usage.OutputTokens, nil
 }
 
 func TestStreamAndForwardRawPreservesMultiLineSSEEvent(t *testing.T) {
@@ -246,6 +262,31 @@ func TestStreamAndForwardConvertedFinalizesOnResponsesCompleted(t *testing.T) {
 	}
 }
 
+func TestStreamAndForwardConvertedTracksUsageFromNamedResponsesEvent(t *testing.T) {
+	body := "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	convert := func(line []byte) []byte {
+		return line
+	}
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(responsesUsageParser{}), convert, nil, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.promptTokens != 11 || result.completionTokens != 13 {
+		t.Fatalf("usage from named Responses SSE event = (%d,%d), want (11,13)", result.promptTokens, result.completionTokens)
+	}
+	if !result.finalized || result.failed {
+		t.Fatalf("named Responses terminal should finalize successfully: %+v", result)
+	}
+}
+
 func TestStreamAndForwardResponsesIncompleteIsSuccessfulTerminal(t *testing.T) {
 	body := "event: response.incomplete\n" +
 		"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"
@@ -337,6 +378,21 @@ func TestStreamConverterFuncClosesOnTerminalEventWithoutDone(t *testing.T) {
 	}
 	if got := convert([]byte("data: [DONE]\n\n")); got != nil {
 		t.Fatalf("converter should be closed after terminal event, got %s", got)
+	}
+}
+
+func TestStreamConverterFuncKeepsGeminiNotStartedOpen(t *testing.T) {
+	convert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatGemini)
+	if convert == nil {
+		t.Fatalf("missing chat to gemini converter")
+	}
+	first := convert([]byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}` + "\n\n"))
+	second := convert([]byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"second"},"finish_reason":null}]}` + "\n\n"))
+	if !strings.Contains(string(first), `"text":"first"`) {
+		t.Fatalf("first Gemini chunk missing: %s", first)
+	}
+	if !strings.Contains(string(second), `"text":"second"`) {
+		t.Fatalf("converter closed on NOT_STARTED finishReason, second chunk: %s", second)
 	}
 }
 

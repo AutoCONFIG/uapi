@@ -220,13 +220,8 @@ func streamAndForward(
 		// Track usage from normalized OpenAI data before the final client-format conversion.
 		segments := splitSSEEvents(forwardLine)
 		for _, segBytes := range segments {
-			seg := strings.TrimSpace(string(segBytes))
-			if strings.HasPrefix(seg, "data: ") {
-				data := strings.TrimPrefix(seg, "data: ")
-				if data == "[DONE]" {
-					break
-				}
-				tracker.TrackChunk([]byte(data))
+			for _, payload := range sseDataPayloads(segBytes) {
+				tracker.TrackChunk([]byte(payload))
 			}
 		}
 
@@ -519,7 +514,6 @@ func streamHasTerminalEvent(event []byte) bool {
 		strings.Contains(s, "event: message_stop\r\n") ||
 		strings.Contains(s, `"type":"message_stop"`) ||
 		strings.Contains(s, `"finish_reason":"`) ||
-		strings.Contains(s, `"finishReason":"`) ||
 		strings.Contains(s, `"stop_reason":"`) ||
 		strings.Contains(s, "data: [DONE]") ||
 		strings.Contains(s, "data:[DONE]") {
@@ -529,7 +523,10 @@ func streamHasTerminalEvent(event []byte) bool {
 		var envelope struct {
 			Type         string `json:"type"`
 			FinishReason string `json:"finishReason"`
-			Delta        struct {
+			Candidates   []struct {
+				FinishReason string `json:"finishReason"`
+			} `json:"candidates"`
+			Delta struct {
 				StopReason string `json:"stop_reason"`
 			} `json:"delta"`
 			Choices []struct {
@@ -543,8 +540,13 @@ func streamHasTerminalEvent(event []byte) bool {
 		case "response.completed", "response.incomplete", "message_stop":
 			return true
 		}
-		if envelope.FinishReason != "" {
+		if isTerminalGeminiFinishReason(envelope.FinishReason) {
 			return true
+		}
+		for _, candidate := range envelope.Candidates {
+			if isTerminalGeminiFinishReason(candidate.FinishReason) {
+				return true
+			}
 		}
 		if envelope.Delta.StopReason != "" {
 			return true
@@ -556,6 +558,15 @@ func streamHasTerminalEvent(event []byte) bool {
 		}
 	}
 	return false
+}
+
+func isTerminalGeminiFinishReason(reason string) bool {
+	switch reason {
+	case "", "NOT_STARTED", "FINISH_REASON_UNSPECIFIED":
+		return false
+	default:
+		return true
+	}
 }
 
 func streamHasFailureEvent(event []byte) bool {

@@ -77,10 +77,11 @@ func (h *WSHandler) tryNativeUpstream(
 		return false
 	}
 
-	// 3. Forward response.create to upstream as-is
+	// 3. Forward response.create to upstream after request cleanup.
 	// The client sends the flat format that OpenAI expects directly.
+	forwardMsg := cleanJSONUndefinedPlaceholders(msg)
 	upstreamConn.writeMu.Lock()
-	err = upstreamConn.conn.WriteMessage(ws.TextMessage, msg)
+	err = upstreamConn.conn.WriteMessage(ws.TextMessage, forwardMsg)
 	upstreamConn.writeMu.Unlock()
 	if err != nil {
 		h.upstream.Discard(upstreamConn)
@@ -100,7 +101,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 	upstreamConn.conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
-	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout)
+	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout, forwardMsg)
 
 	return true
 }
@@ -118,6 +119,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 	start time.Time,
 	ts *turnState,
 	idleTimeout time.Duration,
+	requestBody []byte,
 ) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -188,6 +190,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 			// Settle billing
 			promptTokens, completionTokens := ts.usage()
+			estimateMissingUsage(&promptTokens, &completionTokens, wsCreateToHTTPBody(requestBody), msg, 0)
 			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, model)
 			if ch.AffinityTTL > 0 {
 				h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)

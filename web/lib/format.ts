@@ -4,12 +4,7 @@ export function formatNumber(n: number): string {
   return String(n);
 }
 
-export function formatQuota(value: number, type?: string): string {
-  if (type === "count_based" || value < 1_000_000) {
-    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-    return String(value);
-  }
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+export function formatQuota(value: number, _type?: string): string {
   return String(value);
 }
 

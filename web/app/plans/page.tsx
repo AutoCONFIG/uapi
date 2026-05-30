@@ -207,13 +207,13 @@ export default function PlansPage() {
         )}
       </section>
 
-      <section className="card card-pad" style={{ marginTop: 16 }}>
+      <section className="card card-pad model-ratio-summary" style={{ marginTop: 16 }}>
         <h2>模型倍率</h2>
         {modelRatios.length ? (
-          <div className="grid grid-3" style={{ marginTop: 12 }}>
+          <div className="model-ratio-compact-grid">
             {modelRatios.map((item) => (
-              <div className="metric-card" key={item.model}>
-                <span className="muted">{item.model}</span>
+              <div className="model-ratio-chip" key={item.model} title={`${item.model} · ${item.ratio}x`}>
+                <span>{item.model}</span>
                 <strong>{item.ratio}x</strong>
               </div>
             ))}

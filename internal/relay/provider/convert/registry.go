@@ -47,11 +47,19 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("ToInternal(%s): %w", clientFormat, err)
 	}
+	dropExtraForCrossProtocol(ir, clientFormat, upstreamFormat)
 	result, err := fromInternal(ir)
 	if err != nil {
 		return nil, fmt.Errorf("FromInternal(%s): %w", upstreamFormat, err)
 	}
 	return result, nil
+}
+
+func dropExtraForCrossProtocol(ir *InternalRequest, clientFormat, upstreamFormat Format) {
+	if ir == nil || clientFormat == upstreamFormat {
+		return
+	}
+	ir.Extra = nil
 }
 
 // ToInternalOnly converts a request body to InternalRequest without converting back.

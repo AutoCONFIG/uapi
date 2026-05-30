@@ -276,3 +276,158 @@ func TestOpenAIChatToolChoiceWithoutToolsOmitsGeminiToolConfig(t *testing.T) {
 		t.Fatalf("toolConfig should be omitted without tools: %s", converted)
 	}
 }
+
+func TestCrossProtocolRequestConversionDropsSourceExtraFields(t *testing.T) {
+	responsesBody := []byte(`{
+		"model":"gpt-5",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"include":["reasoning.encrypted_content"],
+		"previous_response_id":"resp_1",
+		"conversation":"conv_1",
+		"metadata":{"trace":"abc"},
+		"prompt_cache_key":"cache",
+		"safety_identifier":"safe",
+		"custom_source_only":true
+	}`)
+	chatBody := []byte(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"custom_source_only":true
+	}`)
+
+	tests := []struct {
+		name   string
+		source convert.Format
+		target convert.Format
+		body   []byte
+		absent []string
+	}{
+		{
+			name:   "responses to gemini",
+			source: convert.FormatOpenAIResponses,
+			target: convert.FormatGemini,
+			body:   responsesBody,
+			absent: []string{"include", "previous_response_id", "conversation", "metadata", "prompt_cache_key", "safety_identifier", "custom_source_only"},
+		},
+		{
+			name:   "responses to anthropic",
+			source: convert.FormatOpenAIResponses,
+			target: convert.FormatAnthropic,
+			body:   responsesBody,
+			absent: []string{"include", "previous_response_id", "conversation", "metadata", "prompt_cache_key", "safety_identifier", "custom_source_only"},
+		},
+		{
+			name:   "chat to gemini",
+			source: convert.FormatOpenAIChatCompletions,
+			target: convert.FormatGemini,
+			body:   chatBody,
+			absent: []string{"custom_source_only"},
+		},
+		{
+			name:   "gemini to chat",
+			source: convert.FormatGemini,
+			target: convert.FormatOpenAIChatCompletions,
+			body:   []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"custom_source_only":true}`),
+			absent: []string{"custom_source_only"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted, err := convert.ConvertRequest(tt.source, tt.target, tt.body)
+			if err != nil {
+				t.Fatalf("ConvertRequest: %v", err)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(converted, &got); err != nil {
+				t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+			}
+			for _, key := range tt.absent {
+				if containsJSONKey(got, key) {
+					t.Fatalf("source-only key %q leaked into converted body: %s", key, converted)
+				}
+			}
+		})
+	}
+}
+
+func TestGeminiCLIEnvelopeExtraFieldsStayInsideCLIEnvelope(t *testing.T) {
+	body := []byte(`{
+		"model":"gemini-2.5-pro",
+		"project":"project-1",
+		"userAgent":"gemini-cli",
+		"requestType":"generateContent",
+		"requestId":"req-1",
+		"sessionId":"sess-1",
+		"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"custom_inner_only":true}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGeminiCLI, convert.FormatGeminiCLI, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if got["project"] != "project-1" || got["userAgent"] != "gemini-cli" || got["requestType"] != "generateContent" || got["sessionId"] != "sess-1" {
+		t.Fatalf("CLI envelope fields not preserved: %s", converted)
+	}
+	request, ok := got["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("request missing: %s", converted)
+	}
+	if containsJSONKey(request, "project") || containsJSONKey(request, "userAgent") || containsJSONKey(request, "requestType") || containsJSONKey(request, "sessionId") {
+		t.Fatalf("CLI envelope fields leaked into inner Gemini request: %s", converted)
+	}
+	if _, ok := request["custom_inner_only"]; !ok {
+		t.Fatalf("same-format Gemini CLI inner extra should be preserved: %s", converted)
+	}
+}
+
+func TestAdaptorCrossProtocolConversionDropsSourceExtraFields(t *testing.T) {
+	adaptor := &antigravity.AntigravityAdaptor{}
+	adaptor.Init(&db.Channel{Type: "antigravity", APIFormat: "antigravity"}, &db.Account{})
+	body := []byte(`{
+		"model":"gpt-oss-120b-medium",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"conversation":"conv_1",
+		"metadata":{"trace":"abc"},
+		"prompt_cache_key":"cache",
+		"custom_source_only":true
+	}`)
+
+	converted, err := provider.ConvertRequestWithAdaptor(provider.FormatOpenAIResponses, provider.FormatAntigravity, body, adaptor)
+	if err != nil {
+		t.Fatalf("ConvertRequestWithAdaptor: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	for _, key := range []string{"conversation", "metadata", "prompt_cache_key", "custom_source_only"} {
+		if containsJSONKey(got, key) {
+			t.Fatalf("source-only key %q leaked into adaptor body: %s", key, converted)
+		}
+	}
+}
+
+func containsJSONKey(v interface{}, key string) bool {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		if _, ok := typed[key]; ok {
+			return true
+		}
+		for _, child := range typed {
+			if containsJSONKey(child, key) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			if containsJSONKey(child, key) {
+				return true
+			}
+		}
+	}
+	return false
+}

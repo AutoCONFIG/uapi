@@ -88,15 +88,7 @@ export default function LogsPage() {
                     <strong>{row.account_name || shortID(row.account_id)}</strong>
                     <div className="muted" style={{ fontSize: 12 }}>{row.channel_name || shortID(row.channel_id)} · {row.account_cred_type || "-"}</div>
                   </td>
-                  <td>
-                    <div style={{ whiteSpace: "nowrap" }}>
-                      <span>{row.model || "-"}</span>
-                      <span className="muted" style={{ fontSize: 12 }}> → {row.routed_model || "-"}</span>
-                    </div>
-                    {row.client_format || row.upstream_format ? (
-                      <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{row.client_format || "-"} → {row.upstream_format || "-"}</div>
-                    ) : null}
-                  </td>
+                  <td>{row.model || "-"}</td>
                   <td>{row.is_stream ? "流式" : "普通"}</td>
                   <td><StatusBadge value={String(row.status_code)} /></td>
                   <td>

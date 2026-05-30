@@ -461,8 +461,8 @@ export default function AdminPlansPage() {
         }
       />
       {creating ? (
-        <div className="modal-backdrop" role="presentation">
-          <section aria-modal="true" className="modal" role="dialog">
+        <div className="modal-backdrop plan-create-backdrop" role="presentation">
+          <section aria-modal="true" className="modal plan-create-modal" role="dialog">
             <div className="modal-head">
               <div>
                 <p className="eyebrow">New Plan</p>
@@ -645,7 +645,7 @@ export default function AdminPlansPage() {
             <div className="model-ratio-row" key={`global-ratio-${index}`}>
               <div className="field compact-field model-ratio-model-field">
                 <label>模型</label>
-                <input className="input" value={row.model} onChange={(e) => preserveCursor(e.currentTarget, (value) => {
+                <input aria-label="模型" className="input" value={row.model} onChange={(e) => preserveCursor(e.currentTarget, (value) => {
                   const next = [...editingModelRatios];
                   next[index] = { ...row, model: value };
                   setEditingModelRatios(next);
@@ -653,7 +653,7 @@ export default function AdminPlansPage() {
               </div>
               <div className="field compact-field model-ratio-value-field">
                 <label>倍率</label>
-                <input className="input model-ratio-input" min={0} step={1} type="number" value={row.ratio} onChange={(e) => {
+                <input aria-label="倍率" className="input model-ratio-input" min={0} placeholder="1" step={1} type="number" value={row.ratio} onChange={(e) => {
                   const next = [...editingModelRatios];
                   next[index] = { ...row, ratio: e.target.value };
                   setEditingModelRatios(next);
