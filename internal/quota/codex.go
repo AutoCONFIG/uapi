@@ -50,14 +50,18 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 	qd := &QuotaData{}
 
 	limits := raw
-	if rl, ok := raw["rate_limits"].(map[string]interface{}); ok {
+	if rl, ok := raw["rate_limit"].(map[string]interface{}); ok {
+		limits = rl
+	} else if rl, ok := raw["rate_limits"].(map[string]interface{}); ok {
 		limits = rl
 	} else if rl, ok := raw["rateLimits"].(map[string]interface{}); ok {
 		limits = rl
 	}
 
-	addCodexWindow(qd, "Codex 5小时窗口", mapValue(limits, "primary"))
-	addCodexWindow(qd, "Codex 每周窗口", mapValue(limits, "secondary"))
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary_window"), "Codex 5小时窗口"), mapValue(limits, "primary_window"))
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary_window"), "Codex 每周窗口"), mapValue(limits, "secondary_window"))
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary"), "Codex 5小时窗口"), mapValue(limits, "primary"))
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary"), "Codex 每周窗口"), mapValue(limits, "secondary"))
 	if len(qd.Buckets) == 0 {
 		collectCodexWindows(qd, "", limits)
 		normalizeCodexWindowLabels(qd)
@@ -88,6 +92,9 @@ func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}) 
 		return
 	}
 	if remainingPct := codexRemainingPercent(window); remainingPct != nil {
+		if quotaBucketExists(qd, label) {
+			return
+		}
 		qd.Buckets = append(qd.Buckets, QuotaBucket{
 			Label:            label,
 			RemainingPercent: clampPercent(*remainingPct),
@@ -153,13 +160,59 @@ func normalizeCodexWindowLabels(qd *QuotaData) {
 func codexWindowLabel(label string) string {
 	lower := strings.ToLower(strings.TrimSpace(label))
 	switch {
-	case strings.Contains(lower, "weekly"), strings.Contains(lower, "week"), strings.Contains(lower, "secondary"):
+	case strings.Contains(lower, "weekly"), strings.Contains(lower, "week"):
 		return "每周窗口"
-	case strings.Contains(lower, "5h"), strings.Contains(lower, "five"), strings.Contains(lower, "primary"):
+	case strings.Contains(lower, "5h"), strings.Contains(lower, "five"):
 		return "5小时窗口"
+	case strings.Contains(lower, "primary_window"), strings.Contains(lower, "primary"):
+		return "5小时窗口"
+	case strings.Contains(lower, "secondary_window"), strings.Contains(lower, "secondary"):
+		return "每周窗口"
 	default:
 		return strings.TrimSpace(label)
 	}
+}
+
+func codexWindowDisplayLabel(window map[string]interface{}, fallback string) string {
+	if window == nil {
+		return fallback
+	}
+	if label := codexWindowDurationLabel(window); label != "" {
+		return "Codex " + label
+	}
+	return fallback
+}
+
+func codexWindowDurationLabel(window map[string]interface{}) string {
+	seconds := firstFloat(window, "limit_window_seconds", "limitWindowSeconds", "window_seconds", "windowSeconds")
+	if seconds == nil || *seconds <= 0 {
+		return ""
+	}
+	minutes := int64((*seconds / 60) + 0.5)
+	switch {
+	case approximateMinutes(minutes, 5*60):
+		return "5小时窗口"
+	case approximateMinutes(minutes, 24*60):
+		return "每日窗口"
+	case approximateMinutes(minutes, 7*24*60):
+		return "每周窗口"
+	case approximateMinutes(minutes, 30*24*60):
+		return "每月窗口"
+	case approximateMinutes(minutes, 365*24*60):
+		return "每年窗口"
+	default:
+		return ""
+	}
+}
+
+func approximateMinutes(value, expected int64) bool {
+	if value < 0 {
+		value = 0
+	}
+	min := float64(expected) * 0.95
+	max := float64(expected) * 1.05
+	actual := float64(value)
+	return actual >= min && actual <= max
 }
 
 func resetUnix(value string) int64 {
@@ -218,13 +271,16 @@ func codexResetTime(m map[string]interface{}) string {
 		}
 	}
 	for _, key := range []string{"resets_at", "reset_at", "resetAt"} {
-		if v, ok := m[key].(float64); ok {
-			seconds := int64(v)
+		if v := firstFloat(m, key); v != nil {
+			seconds := int64(*v)
 			if seconds > 0 {
 				return time.Unix(seconds, 0).UTC().Format(time.RFC3339)
 			}
 			return fmt.Sprintf("%d", seconds)
 		}
+	}
+	if v := firstFloat(m, "reset_after_seconds", "resetAfterSeconds"); v != nil && *v > 0 {
+		return time.Now().UTC().Add(time.Duration(*v) * time.Second).Format(time.RFC3339)
 	}
 	return ""
 }

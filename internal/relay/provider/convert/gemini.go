@@ -229,11 +229,7 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 
 		parts := make([]map[string]interface{}, 0)
 
-		if len(msg.Parts) > 0 {
-			parts = geminiPartsFromItems(ir.SourceFormat, msg, toolCallNames)
-		} else {
-			parts = geminiPartsFromLegacyMessage(msg, toolCallNames)
-		}
+		parts = geminiPartsFromItems(ir.SourceFormat, msg, toolCallNames)
 
 		contentMap["parts"] = parts
 		contents = append(contents, contentMap)
@@ -314,8 +310,9 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 }
 
 func geminiPartsFromItems(source Format, msg InternalMessage, toolCallNames map[string]string) []map[string]interface{} {
-	parts := make([]map[string]interface{}, 0, len(msg.Parts))
-	for _, item := range msg.Parts {
+	items := canonicalMessageParts(msg)
+	parts := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
 		if (source == FormatGemini || source == FormatGeminiCLI) && len(item.Raw) > 0 {
 			var raw map[string]interface{}
 			if err := json.Unmarshal(item.Raw, &raw); err == nil {
@@ -326,27 +323,6 @@ func geminiPartsFromItems(source Format, msg InternalMessage, toolCallNames map[
 		if part := geminiPartFromItem(item, toolCallNames); part != nil {
 			parts = append(parts, part)
 		}
-	}
-	return parts
-}
-
-func geminiPartsFromLegacyMessage(msg InternalMessage, toolCallNames map[string]string) []map[string]interface{} {
-	parts := make([]map[string]interface{}, 0)
-	for _, rc := range msg.ReasoningContent {
-		if part := geminiReasoningPart(rc); part != nil {
-			parts = append(parts, part)
-		}
-	}
-	for _, c := range msg.Content {
-		if part := geminiContentPart(c); part != nil {
-			parts = append(parts, part)
-		}
-	}
-	for _, tc := range msg.ToolCalls {
-		parts = append(parts, geminiToolCallPart(tc))
-	}
-	if msg.ToolResult != nil {
-		parts = append(parts, geminiToolResultPart(*msg.ToolResult, toolCallNames))
 	}
 	return parts
 }
@@ -534,7 +510,7 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 func toolCallNameByID(messages []InternalMessage) map[string]string {
 	names := make(map[string]string)
 	for _, msg := range messages {
-		for _, call := range msg.ToolCalls {
+		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
 			if call.ID == "" || call.Name == "" {
 				continue
 			}

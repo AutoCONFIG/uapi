@@ -125,15 +125,27 @@ func codeAssistSessionSeed(req *provider.InternalRequest, account *db.Account) s
 			if !strings.EqualFold(msg.Role, "user") {
 				continue
 			}
-			for _, part := range msg.Content {
-				if part.Text != "" {
-					parts = append(parts, part.Text)
-					return strings.Join(parts, "\n")
-				}
+			if text := firstMessageText(msg); text != "" {
+				parts = append(parts, text)
+				return strings.Join(parts, "\n")
 			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func firstMessageText(msg provider.InternalMessage) string {
+	for _, item := range msg.Parts {
+		if item.Kind == "content" && item.Content.Text != "" {
+			return item.Content.Text
+		}
+	}
+	for _, part := range msg.Content {
+		if part.Text != "" {
+			return part.Text
+		}
+	}
+	return ""
 }
 
 func stringFromAny(value interface{}) string {

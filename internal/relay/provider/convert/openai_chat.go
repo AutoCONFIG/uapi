@@ -196,16 +196,21 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 
 	// Convert InternalMessages to ChatMessages
 	for _, msg := range ir.Messages {
+		items := canonicalMessageParts(msg)
+		content := contentPartsFromItems(items)
+		toolCalls := toolCallsFromItems(items)
+		toolResult := toolResultFromItems(items)
+		reasoningContent := reasoningPartsFromItems(items)
 		chatMsg := schema.ChatMessage{
 			Role:    msg.Role,
 			Name:    msg.Name,
-			Content: schema.NewPartsContent(openAIChatContentParts(msg.Content)...),
+			Content: schema.NewPartsContent(openAIChatContentParts(content)...),
 		}
 
 		// Convert tool calls
-		if len(msg.ToolCalls) > 0 {
-			chatMsg.ToolCalls = make([]schema.ToolCall, len(msg.ToolCalls))
-			for i, tc := range msg.ToolCalls {
+		if len(toolCalls) > 0 {
+			chatMsg.ToolCalls = make([]schema.ToolCall, len(toolCalls))
+			for i, tc := range toolCalls {
 				chatMsg.ToolCalls[i] = schema.ToolCall{
 					ID:   tc.ID,
 					Type: tc.Type,
@@ -222,10 +227,10 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		}
 
 		// Convert tool result
-		if msg.ToolResult != nil {
-			chatMsg.ToolCallID = msg.ToolResult.ToolCallID
+		if toolResult != nil {
+			chatMsg.ToolCallID = toolResult.ToolCallID
 		}
-		if reasoning := contentPartsText(msg.ReasoningContent); reasoning != "" {
+		if reasoning := contentPartsText(reasoningContent); reasoning != "" {
 			raw, _ := json.Marshal(reasoning)
 			if chatMsg.Extra == nil {
 				chatMsg.Extra = make(map[string]json.RawMessage)
@@ -233,7 +238,7 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 			chatMsg.Extra["reasoning_content"] = raw
 			chatMsg.Extra["reasoning"] = raw
 		}
-		if details := reasoningDetailsFromParts(msg.ReasoningContent); len(details) > 0 {
+		if details := reasoningDetailsFromParts(reasoningContent); len(details) > 0 {
 			raw, _ := json.Marshal(details)
 			if chatMsg.Extra == nil {
 				chatMsg.Extra = make(map[string]json.RawMessage)

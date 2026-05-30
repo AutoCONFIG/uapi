@@ -107,11 +107,3 @@ func preserveOpenAIChatReasoningAlias(body []byte) []byte {
 	}
 	return out
 }
-
-func ToProviderInternal(ir *newconvert.InternalRequest) *InternalRequest {
-	return ir
-}
-
-func FromProviderInternal(pr *InternalRequest) *newconvert.InternalRequest {
-	return pr
-}

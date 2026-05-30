@@ -12,8 +12,11 @@ func TestInternalToGeminiCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
 	req := &provider.InternalRequest{
 		Model: "pro",
 		Messages: []provider.InternalMessage{{
-			Role:    "user",
-			Content: []provider.InternalContentPart{{Type: "text", Text: "hello"}},
+			Role: "user",
+			Parts: []provider.InternalContentItem{{
+				Kind:    "content",
+				Content: provider.InternalContentPart{Type: "text", Text: "hello"},
+			}},
 		}},
 	}
 	account := &db.Account{Metadata: map[string]interface{}{"project_id": "project-1"}}

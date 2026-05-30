@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
@@ -18,14 +19,23 @@ const (
 	FormatGeminiCLI             Format = "gemini_cli"
 )
 
-// InternalRequest is the protocol-neutral intermediate representation.
-// System/developer messages are extracted into Instructions; Messages
-// only contains user, assistant, and tool roles.
+// InternalRequest is the compatibility shim used by existing provider
+// adaptors while request conversion migrates to ir.Request. New conversion
+// logic should treat IR and InternalMessage.Parts as canonical, and the
+// remaining legacy fields as indexed compatibility views.
 type InternalRequest struct {
 	Model    string
 	Stream   bool
 	Messages []InternalMessage
 	Tools    []schema.Tool
+	// RawRequestBody preserves the exact client payload for same-protocol
+	// replay/audit and for the new IR native envelope.
+	RawRequestBody json.RawMessage
+
+	// IR is the canonical protocol-neutral representation used by the
+	// migration path. The legacy fields below are compatibility views until all
+	// converters parse and emit provider payloads directly through ir.Request.
+	IR *ir.Request `json:"-"`
 
 	// Instructions carries the unified system prompt extracted from:
 	//   - OpenAI Chat: messages[role=system/developer]
@@ -74,10 +84,15 @@ type InternalRequest struct {
 	// SourceFormat records which protocol this was parsed from,
 	// enabling selective field restoration during FromInternal.
 	SourceFormat Format
+
+	// Losses records known conversion/audit loss before the full IR migration
+	// moves loss accounting into provider-specific emitters.
+	Losses []ir.Loss `json:"-"`
 }
 
-// InternalMessage represents a single message in the intermediate format.
-// Role is always "user", "assistant", or "tool" — never "system" or "developer".
+// InternalMessage is a compatibility view over an ordered turn. Parts is the
+// only canonical ordering source; Content, ToolCalls, ToolResult, and
+// ReasoningContent are legacy indexed views kept for older adaptors/tests.
 type InternalMessage struct {
 	Role             string
 	Parts            []InternalContentItem
@@ -93,11 +108,8 @@ type InternalMessage struct {
 	Extra            map[string]json.RawMessage
 }
 
-// InternalContentItem preserves the original ordered content stream for
-// protocols whose message bodies are block sequences (Gemini parts,
-// Anthropic content blocks, Responses input/output items). The legacy Content,
-// ToolCalls, ToolResult, and ReasoningContent fields remain as indexed views for
-// converters that do not need exact source ordering.
+// InternalContentItem preserves the original ordered content stream for the
+// compatibility shim. New code should map these items to ir.Item.
 type InternalContentItem struct {
 	Kind       string
 	Content    schema.ContentPart

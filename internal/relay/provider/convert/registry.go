@@ -1,7 +1,11 @@
 package convert
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
 // toInternalFunc converts raw protocol bytes into an InternalRequest.
@@ -51,7 +55,9 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("ToInternal(%s): %w", clientFormat, err)
 	}
+	attachRawRequest(ir, body)
 	dropExtraForCrossProtocol(ir, clientFormat, upstreamFormat)
+	ir.RefreshIR()
 	result, err := fromInternal(ir)
 	if err != nil {
 		return nil, fmt.Errorf("FromInternal(%s): %w", upstreamFormat, err)
@@ -63,7 +69,33 @@ func dropExtraForCrossProtocol(ir *InternalRequest, clientFormat, upstreamFormat
 	if ir == nil || clientFormat == upstreamFormat {
 		return
 	}
+	for key, raw := range ir.Extra {
+		ir.Losses = append(ir.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols by the compatibility converter"))
+	}
 	ir.Extra = nil
+}
+
+func irloss(source, target Format, path, field string, raw []byte, reason string) ir.Loss {
+	return ir.Loss{
+		SourceProtocol: irProtocol(source),
+		TargetProtocol: irProtocol(target),
+		Path:           path,
+		Field:          field,
+		Kind:           "unsupported_field",
+		Reason:         reason,
+		Severity:       ir.LossWarning,
+		ValueHash:      rawHash(raw),
+		Preserved:      len(raw) > 0,
+		Native:         append([]byte(nil), raw...),
+	}
+}
+
+func rawHash(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // ToInternalOnly converts a request body to InternalRequest without converting back.
@@ -74,7 +106,20 @@ func ToInternalOnly(format Format, body []byte) (*InternalRequest, error) {
 	if !ok {
 		return nil, fmt.Errorf("no ToInternal converter for format %q", format)
 	}
-	return toInternal(body)
+	ir, err := toInternal(body)
+	if err != nil {
+		return nil, err
+	}
+	attachRawRequest(ir, body)
+	ir.RefreshIR()
+	return ir, nil
+}
+
+func attachRawRequest(ir *InternalRequest, body []byte) {
+	if ir == nil || len(ir.RawRequestBody) > 0 {
+		return
+	}
+	ir.RawRequestBody = append([]byte(nil), body...)
 }
 
 // response converter types

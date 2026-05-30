@@ -85,8 +85,28 @@ type GeminiFuncCall struct {
 
 // GeminiFuncResponse represents a function response in a Gemini part.
 type GeminiFuncResponse struct {
-	Name     string          `json:"name"`
-	Response json.RawMessage `json:"response"`
+	Name         string                     `json:"name"`
+	Response     json.RawMessage            `json:"response"`
+	ID           string                     `json:"id,omitempty"`
+	WillContinue *bool                      `json:"willContinue,omitempty"`
+	Scheduling   string                     `json:"scheduling,omitempty"`
+	Parts        json.RawMessage            `json:"parts,omitempty"`
+	Extra        map[string]json.RawMessage `json:"-"`
+}
+
+func (r *GeminiFuncResponse) UnmarshalJSON(data []byte) error {
+	type Alias GeminiFuncResponse
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*r = GeminiFuncResponse(a)
+	return unmarshalExtra(data, r, &r.Extra)
+}
+
+func (r GeminiFuncResponse) MarshalJSON() ([]byte, error) {
+	type Alias GeminiFuncResponse
+	return marshalExtra(Alias(r), r.Extra)
 }
 
 // GeminiFileData represents a file reference in a Gemini part.

@@ -263,41 +263,19 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 }
 
 func anthropicBlocksFromMessage(source Format, msg InternalMessage) []map[string]interface{} {
-	if len(msg.Parts) > 0 {
-		blocks := make([]map[string]interface{}, 0, len(msg.Parts))
-		for _, item := range msg.Parts {
-			if source == FormatAnthropic && len(item.Raw) > 0 {
-				var raw map[string]interface{}
-				if err := json.Unmarshal(item.Raw, &raw); err == nil {
-					blocks = append(blocks, raw)
-					continue
-				}
-			}
-			if block := anthropicBlockFromItem(item); block != nil {
-				blocks = append(blocks, block)
+	items := canonicalMessageParts(msg)
+	blocks := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if source == FormatAnthropic && len(item.Raw) > 0 {
+			var raw map[string]interface{}
+			if err := json.Unmarshal(item.Raw, &raw); err == nil {
+				blocks = append(blocks, raw)
+				continue
 			}
 		}
-		return blocks
-	}
-
-	blocks := make([]map[string]interface{}, 0)
-	for _, rc := range msg.ReasoningContent {
-		if block := anthropicReasoningBlock(rc); block != nil {
+		if block := anthropicBlockFromItem(item); block != nil {
 			blocks = append(blocks, block)
 		}
-	}
-	if len(msg.Content) > 0 && msg.ToolResult == nil {
-		for _, c := range msg.Content {
-			if block := anthropicContentBlock(c); block != nil {
-				blocks = append(blocks, block)
-			}
-		}
-	}
-	for _, tc := range msg.ToolCalls {
-		blocks = append(blocks, anthropicToolUseBlock(tc))
-	}
-	if msg.ToolResult != nil {
-		blocks = append(blocks, anthropicToolResultBlock(*msg.ToolResult))
 	}
 	return blocks
 }

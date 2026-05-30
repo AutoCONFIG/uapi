@@ -18,10 +18,11 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	_ = json.Unmarshal(body, &rawRoot)
 
 	ir := &InternalRequest{
-		Model:        req.Model,
-		Stream:       req.Stream,
-		SourceFormat: FormatOpenAIResponses,
-		Extra:        make(map[string]json.RawMessage),
+		Model:          req.Model,
+		Stream:         req.Stream,
+		RawRequestBody: append(json.RawMessage(nil), body...),
+		SourceFormat:   FormatOpenAIResponses,
+		Extra:          make(map[string]json.RawMessage),
 	}
 
 	// Copy Extra fields
@@ -53,10 +54,9 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 
 	if req.Input.Text != nil {
 		// Single string input becomes a user message
-		messages = append(messages, InternalMessage{
-			Role:    "user",
-			Content: []schema.ContentPart{{Type: "text", Text: *req.Input.Text}},
-		})
+		msg := InternalMessage{Role: "user"}
+		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
+		messages = append(messages, msg)
 	} else if len(req.Input.Items) > 0 {
 		inputItems = req.Input.Items
 	} else {
@@ -74,62 +74,71 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 			} else if len(item.Content.Parts) > 0 {
 				content = item.Content.Parts
 			}
-			messages = append(messages, InternalMessage{
+			msg := InternalMessage{
 				Role:    item.Role,
-				Content: content,
 				ItemID:  item.ID,
 				Status:  item.Status,
 				Phase:   item.Phase,
 				RawItem: rawItem,
 				Extra:   item.Extra,
-			})
+			}
+			for _, part := range content {
+				appendContentItem(&msg, part, rawJSON(part))
+			}
+			messages = append(messages, msg)
 
 		case "reasoning":
-			messages = append(messages, InternalMessage{
-				Role:             "assistant",
-				ReasoningContent: reasoningPartsFromResponsesExtra(item.Extra),
-				ItemID:           item.ID,
-				Status:           item.Status,
-				RawItem:          rawItem,
-				Extra:            item.Extra,
-			})
+			msg := InternalMessage{
+				Role:    "assistant",
+				ItemID:  item.ID,
+				Status:  item.Status,
+				RawItem: rawItem,
+				Extra:   item.Extra,
+			}
+			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
+				appendReasoningItem(&msg, part, rawItem)
+			}
+			messages = append(messages, msg)
 
 		case "function_call":
 			// function_call item becomes assistant message with tool calls
-			messages = append(messages, InternalMessage{
-				Role: "assistant",
-				ToolCalls: []schema.ToolCall{{
-					ID:   item.CallID,
-					Type: "function",
-					Name: item.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      item.Name,
-						Arguments: item.Arguments,
-					},
-				}},
+			msg := InternalMessage{
+				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
 				RawItem: rawItem,
 				Extra:   item.Extra,
-			})
+			}
+			appendToolCallItem(&msg, schema.ToolCall{
+				ID:   item.CallID,
+				Type: "function",
+				Name: item.Name,
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      item.Name,
+					Arguments: item.Arguments,
+				},
+			}, rawItem)
+			messages = append(messages, msg)
 
 		case "function_call_output":
 			// function_call_output becomes tool result
-			messages = append(messages, InternalMessage{
-				Role: "tool",
-				ToolResult: &schema.ToolResult{
-					ToolCallID: item.CallID,
-					Content:    item.Output,
-				},
+			msg := InternalMessage{
+				Role:    "tool",
 				ItemID:  item.ID,
 				Status:  item.Status,
 				RawItem: rawItem,
 				Extra:   item.Extra,
-			})
+			}
+			appendToolResultItem(&msg, schema.ToolResult{
+				ToolCallID: item.CallID,
+				Content:    item.Output,
+			}, rawItem)
+			messages = append(messages, msg)
 		default:
+			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item has no compatibility view yet and is preserved only as native raw/opaque IR"))
 			messages = append(messages, InternalMessage{
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -210,73 +219,7 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 			}
 		}
 
-		if len(msg.ReasoningContent) > 0 {
-			reasoning := map[string]interface{}{
-				"type":    "reasoning",
-				"id":      generateResponsesReasoningID(),
-				"summary": responsesReasoningSummary(msg.ReasoningContent),
-			}
-			if msg.ItemID != "" {
-				reasoning["id"] = msg.ItemID
-			}
-			if msg.Status != "" {
-				reasoning["status"] = msg.Status
-			}
-			if encrypted := reasoningEncryptedContent(msg.ReasoningContent); encrypted != "" {
-				reasoning["encrypted_content"] = encrypted
-			}
-			input = append(input, reasoning)
-		}
-
-		switch msg.Role {
-		case "user", "assistant":
-			if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
-				continue
-			}
-			if len(msg.Content) > 0 {
-				item := map[string]interface{}{
-					"type":    "message",
-					"role":    msg.Role,
-					"content": responsesMessageContent(msg),
-				}
-				if msg.ItemID != "" {
-					item["id"] = msg.ItemID
-				}
-				if msg.Status != "" {
-					item["status"] = msg.Status
-				}
-				if msg.Phase != "" {
-					item["phase"] = msg.Phase
-				}
-				for k, v := range msg.Extra {
-					item[k] = v
-				}
-				input = append(input, item)
-			}
-			for _, tc := range msg.ToolCalls {
-				name := tc.Name
-				if name == "" {
-					name = tc.Function.Name
-				}
-				input = append(input, map[string]interface{}{
-					"type":      "function_call",
-					"call_id":   tc.ID,
-					"name":      name,
-					"arguments": tc.Function.Arguments,
-				})
-			}
-
-		case "tool":
-			// Tool result becomes function_call_output
-			if msg.ToolResult == nil {
-				continue
-			}
-			input = append(input, map[string]interface{}{
-				"type":    "function_call_output",
-				"call_id": msg.ToolResult.ToolCallID,
-				"output":  msg.ToolResult.Content,
-			})
-		}
+		input = append(input, responsesInputItemsFromOrderedParts(msg)...)
 	}
 	resp["input"] = input
 
@@ -317,6 +260,82 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func responsesInputItemsFromOrderedParts(msg InternalMessage) []map[string]interface{} {
+	var items []map[string]interface{}
+	var pendingContent []schema.ContentPart
+	flushContent := func() {
+		if len(pendingContent) == 0 {
+			return
+		}
+		item := map[string]interface{}{
+			"type":    "message",
+			"role":    msg.Role,
+			"content": responsesMessageContent(InternalMessage{Role: msg.Role, Content: pendingContent}),
+		}
+		if msg.ItemID != "" {
+			item["id"] = msg.ItemID
+		}
+		if msg.Status != "" {
+			item["status"] = msg.Status
+		}
+		if msg.Phase != "" {
+			item["phase"] = msg.Phase
+		}
+		for k, v := range msg.Extra {
+			item[k] = v
+		}
+		items = append(items, item)
+		pendingContent = nil
+	}
+
+	for _, part := range msg.Parts {
+		switch part.Kind {
+		case contentItemKindContent:
+			if msg.Role != "tool" {
+				pendingContent = append(pendingContent, part.Content)
+			}
+		case contentItemKindReasoning:
+			flushContent()
+			reasoning := map[string]interface{}{
+				"type":    "reasoning",
+				"id":      generateResponsesReasoningID(),
+				"summary": responsesReasoningSummary([]schema.ContentPart{part.Content}),
+			}
+			if msg.ItemID != "" {
+				reasoning["id"] = msg.ItemID
+			}
+			if msg.Status != "" {
+				reasoning["status"] = msg.Status
+			}
+			if encrypted := reasoningEncryptedContent([]schema.ContentPart{part.Content}); encrypted != "" {
+				reasoning["encrypted_content"] = encrypted
+			}
+			items = append(items, reasoning)
+		case contentItemKindToolCall:
+			flushContent()
+			name := part.ToolCall.Name
+			if name == "" {
+				name = part.ToolCall.Function.Name
+			}
+			items = append(items, map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   part.ToolCall.ID,
+				"name":      name,
+				"arguments": part.ToolCall.Function.Arguments,
+			})
+		case contentItemKindToolResult:
+			flushContent()
+			items = append(items, map[string]interface{}{
+				"type":    "function_call_output",
+				"call_id": part.ToolResult.ToolCallID,
+				"output":  part.ToolResult.Content,
+			})
+		}
+	}
+	flushContent()
+	return items
 }
 
 func generateResponsesReasoningID() string {

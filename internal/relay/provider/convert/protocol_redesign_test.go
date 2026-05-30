@@ -210,8 +210,7 @@ func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenAIResponsesToInternal: %v", err)
 	}
-	bridged := provider.FromProviderInternal(provider.ToProviderInternal(ir))
-	converted, err := convert.InternalToOpenAIResponses(bridged)
+	converted, err := convert.InternalToOpenAIResponses(ir)
 	if err != nil {
 		t.Fatalf("InternalToOpenAIResponses: %v", err)
 	}
@@ -227,24 +226,6 @@ func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
 		if !strings.Contains(string(converted), want) {
 			t.Fatalf("provider bridge dropped %s:\n%s", want, converted)
 		}
-	}
-}
-
-func TestProviderInternalBridgeIsCanonicalIdentity(t *testing.T) {
-	ir := &convert.InternalRequest{
-		Model: "gemini-2.5-pro",
-		GeminiGenerationConfigExtra: map[string]json.RawMessage{
-			"routingConfig": json.RawMessage(`{"autoMode":{}}`),
-		},
-		Extra: map[string]json.RawMessage{
-			"user_prompt_id": json.RawMessage(`"prompt-1"`),
-		},
-	}
-	if provider.ToProviderInternal(ir) != ir {
-		t.Fatalf("ToProviderInternal must not create a lossy bridge copy")
-	}
-	if provider.FromProviderInternal(ir) != ir {
-		t.Fatalf("FromProviderInternal must not create a lossy bridge copy")
 	}
 }
 
