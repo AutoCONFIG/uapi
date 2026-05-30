@@ -11,25 +11,26 @@ import (
 func TestPublicModelCatalogHasExpectedModels(t *testing.T) {
 	want := []string{
 		"claude-opus-4-6",
-		"claude-sonnet-4-6",
-		"gemini-3.1-pro",
-		"gemini-pro-agent",
-		"gemini-3.5-flash",
-		"gpt-oss-120b",
-		"nano-banana-2",
-		"gemini-3.5-flash-medium",
-		"gemini-3-flash",
-		"gemini-3.5-flash-low",
-		"gemini-3.1-pro-low",
-		"gemini-3.1-pro-high",
-		"gemini-3-pro-high",
-		"gemini-3-pro-low",
-		"claude-sonnet-4-6-thinking",
 		"claude-opus-4-6-thinking",
-		"gpt-oss-120b-medium",
-		"gemini-3.1-flash-image",
+		"claude-sonnet-4-6",
+		"claude-sonnet-4-6-thinking",
+		"gemini-3-flash",
+		"gemini-3-pro-high",
 		"gemini-3-pro-image",
 		"gemini-3-pro-image-preview",
+		"gemini-3-pro-low",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-pro",
+		"gemini-3.1-pro-high",
+		"gemini-3.1-pro-low",
+		"gemini-3.5-flash",
+		"gemini-3.5-flash-high",
+		"gemini-3.5-flash-low",
+		"gemini-3.5-flash-medium",
+		"gemini-pro-agent",
+		"gpt-oss-120b",
+		"gpt-oss-120b-medium",
+		"nano-banana-2",
 		"gemini-3-pro",
 	}
 
@@ -43,14 +44,14 @@ func TestPublicModelCatalogHasExpectedModels(t *testing.T) {
 
 func TestUpstreamModelIDMapsPublicIDsToAntigravityIDs(t *testing.T) {
 	tests := map[string]string{
-		"gemini-3.5-flash":         "gemini-3-flash",
-		"gemini-3.5-flash-high":    "gemini-3-flash",
+		"gemini-3.5-flash":         "gemini-3.5-flash-high",
+		"gemini-3.5-flash-high":    "gemini-3.5-flash-high",
 		"gemini-3.5-flash-medium":  "gemini-3.5-flash-medium",
 		"gemini-3.5-flash-low":     "gemini-3.5-flash-low",
-		"gemini-3.1-pro":           "gemini-pro-agent",
+		"gemini-3.1-pro":           "gemini-3.1-pro-high",
 		"gemini-3.1-pro-high":      "gemini-3.1-pro-high",
 		"gemini-3.1-pro-low":       "gemini-3.1-pro-low",
-		"claude-sonnet-4-6":        "claude-sonnet-4-6",
+		"claude-sonnet-4-6":        "claude-sonnet-4-6-thinking",
 		"claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
 		"gpt-oss-120b":             "gpt-oss-120b",
 		"nano-banana-2":            "gemini-3.1-flash-image",
@@ -80,23 +81,24 @@ func TestNormalizeAvailableModelsUsesCanonicalPublicOrder(t *testing.T) {
 	want := []string{
 		"claude-opus-4-6",
 		"claude-sonnet-4-6",
-		"gemini-3.1-pro",
-		"gemini-pro-agent",
-		"gemini-3.5-flash",
-		"gpt-oss-120b",
-		"nano-banana-2",
-		"gemini-3.5-flash-medium",
-		"gemini-3-flash",
-		"gemini-3.5-flash-low",
-		"gemini-3.1-pro-low",
-		"gemini-3.1-pro-high",
-		"gemini-3-pro-high",
-		"gemini-3-pro-low",
 		"claude-sonnet-4-6-thinking",
-		"gpt-oss-120b-medium",
-		"gemini-3.1-flash-image",
+		"gemini-3-flash",
+		"gemini-3-pro-high",
 		"gemini-3-pro-image",
 		"gemini-3-pro-image-preview",
+		"gemini-3-pro-low",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-pro",
+		"gemini-3.1-pro-high",
+		"gemini-3.1-pro-low",
+		"gemini-3.5-flash",
+		"gemini-3.5-flash-high",
+		"gemini-3.5-flash-low",
+		"gemini-3.5-flash-medium",
+		"gemini-pro-agent",
+		"gpt-oss-120b",
+		"gpt-oss-120b-medium",
+		"nano-banana-2",
 	}
 
 	if got := antigravity.NormalizeAvailableModels(input); !reflect.DeepEqual(got, want) {
@@ -106,7 +108,7 @@ func TestNormalizeAvailableModelsUsesCanonicalPublicOrder(t *testing.T) {
 
 func TestDisplayNameReturnsFriendlyQuotaLabels(t *testing.T) {
 	tests := map[string]string{
-		"gemini-3-flash":             "Gemini 3.5 Flash",
+		"gemini-3-flash":             "Gemini 3 Flash",
 		"gemini-3.5-flash-medium":    "Gemini 3.5 Flash",
 		"gemini-3.5-flash-high":      "Gemini 3.5 Flash",
 		"gemini-3.5-flash-low":       "Gemini 3.5 Flash",
@@ -152,15 +154,15 @@ func TestUpstreamModelIDForEffortRoutesAntigravityTiers(t *testing.T) {
 		requestSize string
 		want        string
 	}{
-		{name: "flash short defaults high", model: "gemini-3.5-flash", requestSize: "short", want: "gemini-3-flash"},
+		{name: "flash short defaults high", model: "gemini-3.5-flash", requestSize: "short", want: "gemini-3.5-flash-high"},
 		{name: "flash medium defaults medium", model: "gemini-3.5-flash", requestSize: "medium", want: "gemini-3.5-flash-medium"},
 		{name: "flash long defaults low", model: "gemini-3.5-flash", requestSize: "long", want: "gemini-3.5-flash-low"},
 		{name: "pro medium falls back high", model: "gemini-3.1-pro", requestSize: "medium", want: "gemini-pro-agent"},
 		{name: "pro long defaults low", model: "gemini-3.1-pro", requestSize: "long", want: "gemini-3.1-pro-low"},
 		{name: "explicit low overrides short", model: "gemini-3.1-pro", effort: "low", requestSize: "short", want: "gemini-3.1-pro-low"},
-		{name: "explicit high overrides long", model: "gemini-3.1-pro", effort: "high", requestSize: "long", want: "gemini-pro-agent"},
-		{name: "gpt oss short defaults high bucket", model: "gpt-oss-120b", requestSize: "short", want: "gpt-oss-120b"},
-		{name: "gpt oss long defaults medium bucket", model: "gpt-oss-120b", requestSize: "long", want: "gpt-oss-120b-medium"},
+		{name: "explicit high overrides long", model: "gemini-3.1-pro", effort: "high", requestSize: "long", want: "gemini-3.1-pro-high"},
+		{name: "gpt oss short defaults high bucket", model: "gpt-oss-120b", requestSize: "short", want: "gpt-oss-120b-medium"},
+		{name: "gpt oss long defaults low bucket", model: "gpt-oss-120b", requestSize: "long", want: "gpt-oss-120b"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -178,10 +180,10 @@ func TestAntigravityTierFallbackOrder(t *testing.T) {
 		current  string
 		expected []string
 	}{
-		{name: "flash high falls through medium then low", model: "gemini-3.5-flash", current: "gemini-3-flash", expected: []string{"gemini-3.5-flash-medium", "gemini-3.5-flash-low"}},
-		{name: "flash medium tries low then high", model: "gemini-3.5-flash", current: "gemini-3.5-flash-medium", expected: []string{"gemini-3.5-flash-low", "gemini-3-flash"}},
-		{name: "pro low tries high without duplicate medium", model: "gemini-3.1-pro", current: "gemini-3.1-pro-low", expected: []string{"gemini-pro-agent"}},
-		{name: "gpt oss medium tries high bucket", model: "gpt-oss-120b", current: "gpt-oss-120b-medium", expected: []string{"gpt-oss-120b"}},
+		{name: "flash high falls through medium then low", model: "gemini-3.5-flash", current: "gemini-3.5-flash-high", expected: []string{"gemini-3.5-flash-medium", "gemini-3.5-flash-low"}},
+		{name: "flash medium tries low then high", model: "gemini-3.5-flash", current: "gemini-3.5-flash-medium", expected: []string{"gemini-3.5-flash-low", "gemini-3.5-flash-high"}},
+		{name: "pro low tries medium then high", model: "gemini-3.1-pro", current: "gemini-3.1-pro-low", expected: []string{"gemini-pro-agent", "gemini-3.1-pro-high"}},
+		{name: "gpt oss medium tries low bucket", model: "gpt-oss-120b", current: "gpt-oss-120b-medium", expected: []string{"gpt-oss-120b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

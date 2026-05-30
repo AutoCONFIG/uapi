@@ -58,8 +58,7 @@ type OAuthIdleMaintainer struct {
 }
 
 const (
-	idleRefreshMinLead = time.Minute
-	idleRefreshWindow  = 5 * time.Minute
+	oauthRefreshWindow = 5 * time.Minute
 )
 
 // StartOAuthIdleMaintenance restores timers for existing OAuth accounts.
@@ -231,22 +230,21 @@ func idleRefreshAfter(account *db.Account) time.Time {
 }
 
 func idleRefreshWindowStart(account *db.Account) time.Time {
-	return account.TokenExpiry.Add(-idleRefreshWindow)
+	return account.TokenExpiry.Add(-oauthRefreshWindow)
 }
 
 func randomIdleRefreshLead() time.Duration {
-	const minSeconds = int64(idleRefreshMinLead / time.Second)
-	const spanSeconds = int64((idleRefreshWindow - idleRefreshMinLead) / time.Second)
-	n, err := rand.Int(rand.Reader, big.NewInt(spanSeconds+1))
+	maxSeconds := int64(oauthRefreshWindow / time.Second)
+	n, err := rand.Int(rand.Reader, big.NewInt(maxSeconds+1))
 	if err != nil {
-		fallback := int64(time.Now().Nanosecond()) % (spanSeconds + 1)
-		return time.Duration(minSeconds+fallback) * time.Second
+		fallback := int64(time.Now().Nanosecond()) % (maxSeconds + 1)
+		return time.Duration(fallback) * time.Second
 	}
-	return time.Duration(minSeconds+n.Int64()) * time.Second
+	return time.Duration(n.Int64()) * time.Second
 }
 
 func randomOAuthRetryDelay(attempt int) time.Duration {
-	const maxSeconds = int64(15 * 60)
+	maxSeconds := int64(oauthRefreshWindow / time.Second)
 	n, err := rand.Int(rand.Reader, big.NewInt(maxSeconds+1))
 	if err != nil {
 		fallback := int64(time.Now().Nanosecond()) % (maxSeconds + 1)

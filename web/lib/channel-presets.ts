@@ -26,7 +26,7 @@ export const oauthChannelDefaults: Record<string, string> = {
 };
 
 const codexModels = "gpt-5.5,gpt-5.5-openai-compact,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark,gpt-5.2,gpt-image-2,codex-auto-review";
-const geminiCodeModels = "auto,pro,flash,flash-lite,gemini-3.1-pro-preview,gemini-3.1-pro-preview-customtools,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-flash-lite,gemini-3.1-flash-lite-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemma-4-31b-it,gemma-4-26b-a4b-it";
+const geminiCodeModels = "auto,flash,flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.5-pro,gemini-3-flash,gemini-3-flash-preview,gemini-3-pro,gemini-3-pro-preview,gemini-3.1-flash-lite,gemini-3.1-flash-lite-preview,gemini-3.1-pro,gemini-3.1-pro-preview,gemini-3.1-pro-preview-customtools,gemma-4-26b-a4b-it,gemma-4-31b-it,pro";
 const geminiCodeModelAliases = [
   "gemini-2.5-pro=gemini-2.5-pro",
   "gemini-2.5-flash=gemini-2.5-flash",
@@ -37,7 +37,7 @@ const geminiCodeModelAliases = [
   "gemini-3-flash=gemini-3-flash-preview",
 ].join("\n");
 const claudeCodeModels = "sonnet,opus,haiku,best,sonnet[1m],opus[1m],opusplan,claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
-const antigravityModels = "claude-opus-4-6,claude-sonnet-4-6,gemini-3.1-pro,gemini-pro-agent,gemini-3.5-flash,gpt-oss-120b,nano-banana-2,gemini-3.5-flash-medium,gemini-3-flash,gemini-3.5-flash-low,gemini-3.1-pro-low,gemini-3.1-pro-high,gemini-3-pro-high,gemini-3-pro-low,claude-sonnet-4-6-thinking,claude-opus-4-6-thinking,gpt-oss-120b-medium,gemini-3.1-flash-image,gemini-3-pro-image,gemini-3-pro-image-preview,gemini-3-pro";
+const antigravityModels = "claude-opus-4-6,claude-opus-4-6-thinking,claude-sonnet-4-6,claude-sonnet-4-6-thinking,gemini-3-flash,gemini-3-pro-high,gemini-3-pro-image,gemini-3-pro-image-preview,gemini-3-pro-low,gemini-3.1-flash-image,gemini-3.1-pro,gemini-3.1-pro-high,gemini-3.1-pro-low,gemini-3.5-flash,gemini-3.5-flash-high,gemini-3.5-flash-low,gemini-3.5-flash-medium,gemini-pro-agent,gpt-oss-120b,gpt-oss-120b-medium,nano-banana-2,gemini-3-pro";
 
 export const oauthChannelPresets: ChannelPreset[] = [
   { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: oauthChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },

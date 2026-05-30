@@ -16,27 +16,32 @@ type ModelSpec struct {
 
 var modelCatalog = []ModelSpec{
 	{ID: "gemini-3-pro", DisplayName: "Gemini 3 Pro", UpstreamID: "gemini-3-pro", Aliases: []string{"gemini-3-pro"}},
+	{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash", UpstreamID: "gemini-3-flash"},
+	{ID: "gemini-3-pro-high", DisplayName: "Gemini 3 Pro (High)", UpstreamID: "gemini-3-pro-high"},
+	{ID: "gemini-3-pro-low", DisplayName: "Gemini 3 Pro (Low)", UpstreamID: "gemini-3-pro-low"},
 	{
 		ID:               "gemini-3.5-flash",
 		DisplayName:      "Gemini 3.5 Flash",
-		UpstreamID:       "gemini-3-flash",
+		UpstreamID:       "gemini-3.5-flash-high",
 		LowUpstreamID:    "gemini-3.5-flash-low",
 		MediumUpstreamID: "gemini-3.5-flash-medium",
-		HighUpstreamID:   "gemini-3-flash",
-		Aliases:          []string{"gemini-3-flash", "gemini-3.5-flash-low", "gemini-3.5-flash-medium", "gemini-3.5-flash-high", "MODEL_PLACEHOLDER_M18"},
+		HighUpstreamID:   "gemini-3.5-flash-high",
+		Aliases:          []string{"gemini-3.5-flash-low", "gemini-3.5-flash-medium", "gemini-3.5-flash-high", "MODEL_PLACEHOLDER_M18"},
 	},
 	{
-		ID:             "gemini-3.1-pro",
-		DisplayName:    "Gemini 3.1 Pro",
-		UpstreamID:     "gemini-pro-agent",
-		LowUpstreamID:  "gemini-3.1-pro-low",
-		HighUpstreamID: "gemini-pro-agent",
-		Aliases:        []string{"gemini-pro-agent", "gemini-3.1-pro-low", "gemini-3.1-pro-high", "gemini-3-pro-low", "gemini-3-pro-high", "MODEL_PLACEHOLDER_M7", "MODEL_PLACEHOLDER_M8", "MODEL_PLACEHOLDER_M36", "MODEL_PLACEHOLDER_M37"},
+		ID:               "gemini-3.1-pro",
+		DisplayName:      "Gemini 3.1 Pro",
+		UpstreamID:       "gemini-3.1-pro-high",
+		LowUpstreamID:    "gemini-3.1-pro-low",
+		MediumUpstreamID: "gemini-pro-agent",
+		HighUpstreamID:   "gemini-3.1-pro-high",
+		Aliases:          []string{"gemini-pro-agent", "gemini-3.1-pro-low", "gemini-3.1-pro-high", "MODEL_PLACEHOLDER_M7", "MODEL_PLACEHOLDER_M8", "MODEL_PLACEHOLDER_M36", "MODEL_PLACEHOLDER_M37"},
 	},
-	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)", UpstreamID: "claude-sonnet-4-6", HighUpstreamID: "claude-sonnet-4-6", Aliases: []string{"MODEL_PLACEHOLDER_M35"}},
+	{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6 (Thinking)", UpstreamID: "claude-sonnet-4-6-thinking", HighUpstreamID: "claude-sonnet-4-6-thinking", Aliases: []string{"MODEL_PLACEHOLDER_M35"}},
+	{ID: "claude-sonnet-4-6-thinking", DisplayName: "Claude Sonnet 4.6 (Thinking)", UpstreamID: "claude-sonnet-4-6-thinking"},
 	{ID: "claude-opus-4-6", DisplayName: "Claude Opus 4.6 (Thinking)", UpstreamID: "claude-opus-4-6-thinking", HighUpstreamID: "claude-opus-4-6-thinking", Aliases: []string{"MODEL_PLACEHOLDER_M26"}},
 	{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 (Thinking)", UpstreamID: "claude-opus-4-6-thinking"},
-	{ID: "gpt-oss-120b", DisplayName: "GPT-OSS 120B", UpstreamID: "gpt-oss-120b", LowUpstreamID: "gpt-oss-120b-medium", HighUpstreamID: "gpt-oss-120b", Aliases: []string{"gpt-oss-120b-medium", "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"}},
+	{ID: "gpt-oss-120b", DisplayName: "GPT-OSS 120B", UpstreamID: "gpt-oss-120b", LowUpstreamID: "gpt-oss-120b", HighUpstreamID: "gpt-oss-120b-medium", Aliases: []string{"gpt-oss-120b-medium", "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"}},
 	{ID: "nano-banana-2", DisplayName: "Nano Banana 2", UpstreamID: "gemini-3.1-flash-image", Aliases: []string{"gemini-3.1-flash-image", "gemini-3-pro-image", "gemini-3-pro-image-preview"}},
 }
 
@@ -51,25 +56,26 @@ var unavailableModelIDs = map[string]struct{}{
 
 var visibleModelIDs = []string{
 	"claude-opus-4-6",
-	"claude-sonnet-4-6",
-	"gemini-3.1-pro",
-	"gemini-pro-agent",
-	"gemini-3.5-flash",
-	"gpt-oss-120b",
-	"nano-banana-2",
-	"gemini-3.5-flash-medium",
-	"gemini-3-flash",
-	"gemini-3.5-flash-low",
-	"gemini-3.1-pro-low",
-	"gemini-3.1-pro-high",
-	"gemini-3-pro-high",
-	"gemini-3-pro-low",
-	"claude-sonnet-4-6-thinking",
 	"claude-opus-4-6-thinking",
-	"gpt-oss-120b-medium",
-	"gemini-3.1-flash-image",
+	"claude-sonnet-4-6",
+	"claude-sonnet-4-6-thinking",
+	"gemini-3-flash",
+	"gemini-3-pro-high",
 	"gemini-3-pro-image",
 	"gemini-3-pro-image-preview",
+	"gemini-3-pro-low",
+	"gemini-3.1-flash-image",
+	"gemini-3.1-pro",
+	"gemini-3.1-pro-high",
+	"gemini-3.1-pro-low",
+	"gemini-3.5-flash",
+	"gemini-3.5-flash-high",
+	"gemini-3.5-flash-low",
+	"gemini-3.5-flash-medium",
+	"gemini-pro-agent",
+	"gpt-oss-120b",
+	"gpt-oss-120b-medium",
+	"nano-banana-2",
 	"gemini-3-pro",
 }
 
@@ -226,9 +232,9 @@ func DefaultTierGroups() []TierGroup {
 		case "gemini-3.5-flash":
 			fallbackOrder = []string{"medium", "low", "high"}
 		case "gemini-3.1-pro":
-			fallbackOrder = []string{"low", "high"}
+			fallbackOrder = []string{"medium", "low", "high"}
 		case "gpt-oss-120b":
-			fallbackOrder = []string{"low", "high"}
+			fallbackOrder = []string{"high", "low"}
 		}
 		groups = append(groups, TierGroup{
 			PublicModel:   spec.ID,
@@ -596,7 +602,7 @@ func explicitTierUpstreamID(model string) string {
 	case "gemini35flashmedium":
 		return "gemini-3.5-flash-medium"
 	case "gemini35flashhigh":
-		return "gemini-3-flash"
+		return "gemini-3.5-flash-high"
 	case "gemini31prolow", "gemini3prolow", "modelplaceholderm7", "modelplaceholderm36":
 		return "gemini-3.1-pro-low"
 	case "gemini31prohigh", "gemini3prohigh", "modelplaceholderm8", "modelplaceholderm37":

@@ -149,13 +149,13 @@ function defaultAntigravitySettings(enabled = true): AntigravitySettings {
     medium_token_threshold: 8000,
     long_token_threshold: 32000,
     tier_groups: [
-      { public_model: "gemini-3.5-flash", route_type: "tier", aliases: ["gemini-3-flash"], high: "gemini-3-flash", medium: "gemini-3.5-flash-medium", low: "gemini-3.5-flash-low", fallback_order: ["medium", "low", "high"] },
-      { public_model: "gemini-3.1-pro", route_type: "tier", aliases: ["gemini-3.1-pro-high", "gemini-3-pro-high", "gemini-3-pro-low"], high: "gemini-pro-agent", medium: "", low: "gemini-3.1-pro-low", fallback_order: ["low", "high"] },
-      { public_model: "gemini-3-pro", route_type: "public", aliases: [], high: "gemini-3-pro", medium: "", low: "", fallback_order: ["high"] },
       { public_model: "claude-opus-4-6", route_type: "redirect", aliases: [], high: "claude-opus-4-6-thinking", medium: "", low: "", fallback_order: ["high"] },
-      { public_model: "claude-sonnet-4-6", route_type: "public", aliases: ["claude-sonnet-4-6-thinking"], high: "claude-sonnet-4-6", medium: "", low: "", fallback_order: ["high"] },
-      { public_model: "gpt-oss-120b", route_type: "tier", aliases: [], high: "gpt-oss-120b", medium: "", low: "gpt-oss-120b-medium", fallback_order: ["low", "high"] },
-      { public_model: "nano-banana-2", route_type: "tier", aliases: ["gemini-3-pro-image", "gemini-3-pro-image-preview"], high: "gemini-3.1-flash-image", medium: "", low: "gemini-3-pro-image", fallback_order: ["low", "high"] },
+      { public_model: "claude-sonnet-4-6", route_type: "redirect", aliases: [], high: "claude-sonnet-4-6-thinking", medium: "", low: "", fallback_order: ["high"] },
+      { public_model: "gemini-3-flash", route_type: "public", aliases: [], high: "gemini-3-flash", medium: "", low: "", fallback_order: ["high"] },
+      { public_model: "gemini-3.5-flash", route_type: "tier", aliases: ["gemini-3.5-flash"], high: "gemini-3.5-flash-high", medium: "gemini-3.5-flash-medium", low: "gemini-3.5-flash-low", fallback_order: ["medium", "low", "high"] },
+      { public_model: "gemini-3.1-pro", route_type: "tier", aliases: ["gemini-3.1-pro"], high: "gemini-3.1-pro-high", medium: "gemini-pro-agent", low: "gemini-3.1-pro-low", fallback_order: ["medium", "low", "high"] },
+      { public_model: "gemini-3-pro", route_type: "public", aliases: [], high: "gemini-3-pro", medium: "", low: "", fallback_order: ["high"] },
+      { public_model: "gpt-oss-120b", route_type: "tier", aliases: ["gpt-oss-120b"], high: "gpt-oss-120b-medium", medium: "", low: "gpt-oss-120b", fallback_order: ["high", "low"] },
     ],
   };
 }
