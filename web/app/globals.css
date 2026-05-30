@@ -3041,6 +3041,13 @@ th {
   margin: 0;
 }
 
+.settings-action-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .wallpaper-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

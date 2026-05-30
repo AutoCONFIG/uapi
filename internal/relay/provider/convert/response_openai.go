@@ -30,6 +30,9 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 		cachedTokens := usageDetailInt(resp.Usage.PromptTokensDetails, "cached_tokens")
 		ir.Usage.CacheReadInputTokens = cachedTokens
+		if resp.Usage.CompletionTokensDetails != nil {
+			ir.Usage.CompletionTokensDetails = resp.Usage.CompletionTokensDetails
+		}
 	}
 
 	// Convert choices
@@ -49,6 +52,7 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 				{Type: "text", Text: *choice.Message.Content.Text},
 			}
 		}
+		internalChoice.ReasoningContent = append(internalChoice.ReasoningContent, reasoningPartsFromOpenAIChatExtra(choice.Message.Extra)...)
 
 		// Convert tool calls
 		if len(choice.Message.ToolCalls) > 0 {
@@ -151,6 +155,9 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 			TotalTokens:         ir.Usage.TotalTokens,
 			PromptTokensDetails: map[string]interface{}{},
 		}
+		if ir.Usage.CompletionTokensDetails != nil {
+			resp.Usage.CompletionTokensDetails = ir.Usage.CompletionTokensDetails
+		}
 		if ir.Usage.CacheCreationInputTokens > 0 {
 			resp.Usage.PromptTokensDetails["cached_tokens"] = ir.Usage.CacheCreationInputTokens
 		}
@@ -189,6 +196,10 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 				raw, _ := json.Marshal(reasoning)
 				chatChoice.Message.Extra["reasoning_content"] = raw
 				chatChoice.Message.Extra["reasoning"] = raw
+			}
+			if details := reasoningDetailsFromParts(choice.ReasoningContent); len(details) > 0 {
+				raw, _ := json.Marshal(details)
+				chatChoice.Message.Extra["reasoning_details"] = raw
 			}
 		}
 
@@ -254,44 +265,64 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 	}
 
-	// Convert output items
-	for _, item := range resp.Output {
-		choice := InternalChoice{
-			Index: len(ir.Choices),
-			Role:  item.Role,
+	var pendingReasoning []schema.ContentPart
+	flushPendingReasoning := func() {
+		if len(pendingReasoning) == 0 {
+			return
 		}
+		ir.Choices = append(ir.Choices, InternalChoice{
+			Index:            len(ir.Choices),
+			Role:             "assistant",
+			ReasoningContent: pendingReasoning,
+			FinishReason:     "end_turn",
+		})
+		pendingReasoning = nil
+	}
 
+	// Convert output items. Responses can carry reasoning as a separate output
+	// item immediately before the assistant message or tool call it belongs to.
+	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			choice.Content = item.Content
+			choice := InternalChoice{
+				Index:            len(ir.Choices),
+				Role:             item.Role,
+				Content:          item.Content,
+				ReasoningContent: pendingReasoning,
+				FinishReason:     mapResponsesToInternalFinishReason(item.Status),
+			}
+			pendingReasoning = nil
+			ir.Choices = append(ir.Choices, choice)
 
 		case "function_call":
-			choice.ToolCalls = []schema.ToolCall{
-				{
-					ID:   item.CallID,
-					Type: "function",
-					Name: item.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      item.Name,
-						Arguments: item.Arguments,
+			choice := InternalChoice{
+				Index:            len(ir.Choices),
+				Role:             item.Role,
+				ReasoningContent: pendingReasoning,
+				FinishReason:     "tool_use",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   item.CallID,
+						Type: "function",
+						Name: item.Name,
+						Function: struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						}{
+							Name:      item.Name,
+							Arguments: item.Arguments,
+						},
 					},
 				},
 			}
-			choice.FinishReason = "tool_use"
-		}
+			pendingReasoning = nil
+			ir.Choices = append(ir.Choices, choice)
 
-		// Map finish reason
-		if item.Status == "completed" {
-			choice.FinishReason = "end_turn"
-		} else if item.Status == "incomplete" {
-			choice.FinishReason = "max_tokens"
+		case "reasoning":
+			pendingReasoning = append(pendingReasoning, reasoningPartsFromResponsesExtra(item.Extra)...)
 		}
-
-		ir.Choices = append(ir.Choices, choice)
 	}
+	flushPendingReasoning()
 
 	return ir, nil
 }
@@ -329,6 +360,9 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 
 	// Convert choices to output items
 	for _, choice := range ir.Choices {
+		if len(choice.ReasoningContent) > 0 {
+			resp.Output = append(resp.Output, responsesReasoningOutputItem(choice))
+		}
 		if len(choice.ToolCalls) == 0 {
 			if contentItems := responsesContentOutputItems(choice); len(contentItems) > 0 {
 				resp.Output = append(resp.Output, contentItems...)
@@ -382,6 +416,51 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func responsesReasoningOutputItem(choice InternalChoice) schema.ResponsesOutputItem {
+	extra := make(map[string]json.RawMessage)
+	if content := responsesReasoningContent(choice.ReasoningContent); len(content) > 0 {
+		raw, _ := json.Marshal(content)
+		extra["content"] = raw
+	}
+	if summary := responsesReasoningSummary(choice.ReasoningContent); len(summary) > 0 {
+		raw, _ := json.Marshal(summary)
+		extra["summary"] = raw
+	}
+	if encrypted := reasoningEncryptedContent(choice.ReasoningContent); encrypted != "" {
+		raw, _ := json.Marshal(encrypted)
+		extra[reasoningExtraEncryptedContent] = raw
+	}
+	return schema.ResponsesOutputItem{
+		Type:   "reasoning",
+		ID:     generateResponsesReasoningID(),
+		Status: responsesStatusFromFinishReason(choice.FinishReason),
+		Extra:  extra,
+	}
+}
+
+func responsesReasoningContent(parts []schema.ContentPart) []map[string]interface{} {
+	var content []map[string]interface{}
+	for _, part := range parts {
+		if typ := reasoningPartExtraString(part, reasoningExtraType); typ == reasoningDetailTypeSummary || typ == reasoningDetailTypeEncrypted {
+			continue
+		}
+		if part.Text == "" && reasoningSignature([]schema.ContentPart{part}) == "" {
+			continue
+		}
+		block := map[string]interface{}{
+			"type": "reasoning",
+		}
+		if part.Text != "" {
+			block["text"] = part.Text
+		}
+		if sig := reasoningSignature([]schema.ContentPart{part}); sig != "" {
+			block["signature"] = sig
+		}
+		content = append(content, block)
+	}
+	return content
 }
 
 func responsesContentOutputItems(choice InternalChoice) []schema.ResponsesOutputItem {

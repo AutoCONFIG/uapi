@@ -46,16 +46,23 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 		}
 
 		internalMsg := InternalMessage{
-			Role:    msg.Role,
-			Content: content,
-			Name:    msg.Name,
+			Role: msg.Role,
+			Name: msg.Name,
+		}
+		internalMsg.ReasoningContent = append(internalMsg.ReasoningContent, reasoningPartsFromOpenAIChatExtra(msg.Extra)...)
+		for _, part := range internalMsg.ReasoningContent {
+			internalMsg.Parts = append(internalMsg.Parts, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
+		}
+		if msg.Role != "tool" {
+			for _, part := range content {
+				appendContentItem(&internalMsg, part, rawJSON(part))
+			}
 		}
 
 		// Convert tool calls
 		if len(msg.ToolCalls) > 0 {
-			internalMsg.ToolCalls = make([]schema.ToolCall, len(msg.ToolCalls))
-			for i, tc := range msg.ToolCalls {
-				internalMsg.ToolCalls[i] = schema.ToolCall{
+			for _, tc := range msg.ToolCalls {
+				call := schema.ToolCall{
 					ID:   tc.ID,
 					Type: tc.Type,
 					Name: tc.Function.Name,
@@ -67,15 +74,16 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 						Arguments: tc.Function.Arguments,
 					},
 				}
+				appendToolCallItem(&internalMsg, call, rawJSON(tc))
 			}
 		}
 
 		// Convert tool result (role=tool)
 		if msg.Role == "tool" {
-			internalMsg.ToolResult = &schema.ToolResult{
+			appendToolResultItem(&internalMsg, schema.ToolResult{
 				ToolCallID: msg.ToolCallID,
 				Content:    msg.Content.ExtractText(),
-			}
+			}, rawJSON(msg))
 		}
 
 		messages = append(messages, internalMsg)
@@ -214,6 +222,21 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		// Convert tool result
 		if msg.ToolResult != nil {
 			chatMsg.ToolCallID = msg.ToolResult.ToolCallID
+		}
+		if reasoning := contentPartsText(msg.ReasoningContent); reasoning != "" {
+			raw, _ := json.Marshal(reasoning)
+			if chatMsg.Extra == nil {
+				chatMsg.Extra = make(map[string]json.RawMessage)
+			}
+			chatMsg.Extra["reasoning_content"] = raw
+			chatMsg.Extra["reasoning"] = raw
+		}
+		if details := reasoningDetailsFromParts(msg.ReasoningContent); len(details) > 0 {
+			raw, _ := json.Marshal(details)
+			if chatMsg.Extra == nil {
+				chatMsg.Extra = make(map[string]json.RawMessage)
+			}
+			chatMsg.Extra["reasoning_details"] = raw
 		}
 
 		messages = append(messages, chatMsg)

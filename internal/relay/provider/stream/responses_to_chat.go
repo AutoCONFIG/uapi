@@ -16,8 +16,10 @@ type responsesToChatState struct {
 	created int64
 
 	// Text accumulation
-	textOpen   bool
-	textBuffer strings.Builder
+	textOpen             bool
+	textBuffer           strings.Builder
+	reasoningBuffer      strings.Builder
+	reasoningOpaqueStore map[string]bool
 
 	// Tool call tracking
 	toolCallIDToIndex map[string]int
@@ -33,9 +35,10 @@ type responsesToChatState struct {
 var responsesToChatPool = sync.Pool{
 	New: func() interface{} {
 		return &responsesToChatState{
-			toolCallIDToIndex: make(map[string]int),
-			toolCallNames:     make(map[string]string),
-			toolCallArgs:      make(map[string]*strings.Builder),
+			toolCallIDToIndex:    make(map[string]int),
+			toolCallNames:        make(map[string]string),
+			toolCallArgs:         make(map[string]*strings.Builder),
+			reasoningOpaqueStore: make(map[string]bool),
 		}
 	},
 }
@@ -98,6 +101,15 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 		c.state.textBuffer.WriteString(text)
 		return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": text}, nil, nil)
 
+	case "response.reasoning.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+		text := responsesTextDelta(event.Delta)
+		c.state.reasoningBuffer.WriteString(text)
+		return chatChunk(c.state.id, c.state.model, reasoningTextDelta(text, 0, ""), nil, nil)
+
+	case "response.reasoning.done", "response.reasoning_text.done", "response.reasoning_summary_text.done":
+		text := responsesTextDoneText([]byte(data), event.Delta)
+		return c.emitMissingReasoning(text)
+
 	case "response.output_text.done":
 		text := responsesTextDoneText([]byte(data), event.Delta)
 		return c.emitMissingText(text)
@@ -105,12 +117,16 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 	case "response.output_item.added":
 		// Could be message or function_call item
 		var item struct {
-			Type   string `json:"type"`
-			ID     string `json:"id"`
-			CallID string `json:"call_id,omitempty"`
-			Name   string `json:"name,omitempty"`
+			Type   string                     `json:"type"`
+			ID     string                     `json:"id"`
+			CallID string                     `json:"call_id,omitempty"`
+			Name   string                     `json:"name,omitempty"`
+			Extra  map[string]json.RawMessage `json:"-"`
 		}
 		json.Unmarshal(event.Item, &item)
+		if item.Type == "reasoning" {
+			return c.emitReasoningOpaqueFromRaw(event.Item)
+		}
 		if item.Type == "function_call" && item.CallID != "" {
 			idx := len(c.state.toolCallIDToIndex)
 			c.state.toolCallIDToIndex[item.CallID] = idx
@@ -120,6 +136,22 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"tool_calls": []interface{}{
 				map[string]interface{}{"index": idx, "id": item.CallID, "type": "function", "function": map[string]interface{}{"name": item.Name, "arguments": ""}},
 			}}, nil, nil)
+		}
+		return nil
+
+	case "response.output_item.done":
+		var item struct {
+			Type             string `json:"type"`
+			EncryptedContent string `json:"encrypted_content,omitempty"`
+		}
+		var envelope struct {
+			Item json.RawMessage `json:"item"`
+		}
+		if json.Unmarshal([]byte(data), &envelope) == nil && len(envelope.Item) > 0 {
+			_ = json.Unmarshal(envelope.Item, &item)
+			if item.Type == "reasoning" {
+				return c.emitReasoningOpaque(item.EncryptedContent)
+			}
 		}
 		return nil
 
@@ -163,6 +195,13 @@ func (c *responsesToChatConverter) Convert(line []byte) []byte {
 		}
 		var out []byte
 		for _, item := range completed.Response.Output {
+			if item.Type == "reasoning" {
+				for _, summary := range item.Summary {
+					out = append(out, c.emitMissingReasoning(summary.Text)...)
+				}
+				out = append(out, c.emitReasoningOpaque(item.EncryptedContent)...)
+				continue
+			}
 			if item.Type != "" && item.Type != "message" {
 				continue
 			}
@@ -214,12 +253,17 @@ func responsesTextDelta(raw json.RawMessage) string {
 }
 
 type responsesOutputItem struct {
-	Type    string `json:"type"`
-	Content []struct {
+	Type             string `json:"type"`
+	EncryptedContent string `json:"encrypted_content"`
+	Content          []struct {
 		Type       string `json:"type"`
 		Text       string `json:"text"`
 		OutputText string `json:"output_text"`
 	} `json:"content"`
+	Summary []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"summary"`
 }
 
 func responsesTextDoneText(data []byte, raw json.RawMessage) string {
@@ -250,6 +294,50 @@ func (c *responsesToChatConverter) emitMissingText(text string) []byte {
 	}
 	c.state.textBuffer.WriteString(text)
 	return chatChunk(c.state.id, c.state.model, map[string]interface{}{"content": text}, nil, nil)
+}
+
+func (c *responsesToChatConverter) emitMissingReasoning(text string) []byte {
+	if text == "" {
+		return nil
+	}
+	current := c.state.reasoningBuffer.String()
+	if strings.HasPrefix(text, current) {
+		missing := strings.TrimPrefix(text, current)
+		if missing == "" {
+			return nil
+		}
+		c.state.reasoningBuffer.WriteString(missing)
+		return chatChunk(c.state.id, c.state.model, reasoningTextDelta(missing, 0, ""), nil, nil)
+	}
+	if strings.Contains(current, text) {
+		return nil
+	}
+	c.state.reasoningBuffer.WriteString(text)
+	return chatChunk(c.state.id, c.state.model, reasoningTextDelta(text, 0, ""), nil, nil)
+}
+
+func (c *responsesToChatConverter) emitReasoningOpaqueFromRaw(raw json.RawMessage) []byte {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var item struct {
+		EncryptedContent string `json:"encrypted_content"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return nil
+	}
+	return c.emitReasoningOpaque(item.EncryptedContent)
+}
+
+func (c *responsesToChatConverter) emitReasoningOpaque(value string) []byte {
+	if value == "" {
+		return nil
+	}
+	if c.state.reasoningOpaqueStore[value] {
+		return nil
+	}
+	c.state.reasoningOpaqueStore[value] = true
+	return chatChunk(c.state.id, c.state.model, reasoningEncryptedDelta(0, value), nil, nil)
 }
 
 func responsesUsageToChat(usage map[string]interface{}) map[string]interface{} {
@@ -309,6 +397,10 @@ func (c *responsesToChatConverter) Reset() {
 		delete(c.state.toolCallArgs, k)
 	}
 	c.state.textBuffer.Reset()
+	c.state.reasoningBuffer.Reset()
+	for k := range c.state.reasoningOpaqueStore {
+		delete(c.state.reasoningOpaqueStore, k)
+	}
 	c.state.hasStarted = false
 	c.state.hasFinished = false
 	c.state.model = ""

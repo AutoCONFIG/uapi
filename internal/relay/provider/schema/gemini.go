@@ -170,4 +170,5 @@ type GeminiUsageMetadata struct {
 	CandidatesTokenCount    int `json:"candidatesTokenCount,omitempty"`
 	TotalTokenCount         int `json:"totalTokenCount,omitempty"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
 }

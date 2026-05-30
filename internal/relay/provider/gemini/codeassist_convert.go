@@ -1,12 +1,16 @@
 package gemini
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/google/uuid"
 )
 
 func internalToGeminiCodeAssistWithAccount(req *provider.InternalRequest, account *db.Account) ([]byte, error) {
@@ -20,6 +24,9 @@ func internalToGeminiCodeAssistWithAccount(req *provider.InternalRequest, accoun
 	var vertexReq map[string]interface{}
 	if err := provider.DecodeJSONUseNumber(gemBody, &vertexReq); err != nil {
 		return nil, err
+	}
+	if _, ok := vertexReq["session_id"]; !ok {
+		vertexReq["session_id"] = codeAssistSessionID(req, account)
 	}
 	body := map[string]interface{}{
 		"model":          model,
@@ -75,6 +82,73 @@ func shouldUseGoogleOneCredits(account *db.Account, model string) bool {
 		}
 	}
 	return false
+}
+
+func codeAssistSessionID(req *provider.InternalRequest, account *db.Account) string {
+	if req != nil && req.ExtraParams != nil {
+		for _, key := range []string{"session_id", "sessionId"} {
+			if value := strings.TrimSpace(stringFromAny(req.ExtraParams[key])); value != "" {
+				return value
+			}
+		}
+	}
+	if account != nil && account.Metadata != nil {
+		for _, key := range []string{"session_id", "sessionId"} {
+			if value := strings.TrimSpace(stringFromAny(account.Metadata[key])); value != "" {
+				return value
+			}
+		}
+	}
+	seed := codeAssistSessionSeed(req, account)
+	if seed == "" {
+		return "uapi-" + provider.RandomHex(8)
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return "uapi-" + hex.EncodeToString(sum[:8])
+}
+
+func codeAssistSessionSeed(req *provider.InternalRequest, account *db.Account) string {
+	var parts []string
+	if account != nil {
+		if account.ID != uuid.Nil {
+			parts = append(parts, account.ID.String())
+		}
+		if account.Name != "" {
+			parts = append(parts, account.Name)
+		}
+	}
+	if req != nil {
+		if req.Instructions != nil && *req.Instructions != "" {
+			parts = append(parts, *req.Instructions)
+		}
+		for _, msg := range req.Messages {
+			if !strings.EqualFold(msg.Role, "user") {
+				continue
+			}
+			for _, part := range msg.Content {
+				if part.Text != "" {
+					parts = append(parts, part.Text)
+					return strings.Join(parts, "\n")
+				}
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func stringFromAny(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.RawMessage:
+		var out string
+		if err := json.Unmarshal(v, &out); err == nil {
+			return out
+		}
+		return strings.Trim(string(v), `"`)
+	default:
+		return ""
+	}
 }
 
 func isOverageEligibleModel(model string) bool {

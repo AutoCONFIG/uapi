@@ -103,8 +103,10 @@ type ResponsesInputItem struct {
 	Output    string         `json:"output,omitempty"`
 	ID        string         `json:"id,omitempty"`
 	Status    string         `json:"status,omitempty"`
+	Phase     string         `json:"phase,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
+	Raw   json.RawMessage            `json:"-"`
 }
 
 // UnmarshalJSON captures unknown top-level keys into Extra.
@@ -115,6 +117,7 @@ func (item *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*item = ResponsesInputItem(a)
+	item.Raw = append(json.RawMessage(nil), data...)
 	return unmarshalExtra(data, item, &item.Extra)
 }
 

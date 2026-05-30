@@ -49,7 +49,7 @@ func TestSupportsRelayRequestTypeMakesNonTextCapabilitiesExplicit(t *testing.T) 
 }
 
 func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","tools":[{"type":"web_search_preview"}]}`))
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","prompt_cache_key":"thread-1","tools":[{"type":"web_search_preview"}]}`))
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -65,6 +65,15 @@ func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
 	}
 	if body["parallel_tool_calls"] != true {
 		t.Fatalf("parallel_tool_calls = %#v, want true", body["parallel_tool_calls"])
+	}
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %#v, want auto", body["tool_choice"])
+	}
+	if body["prompt_cache_key"] != "thread-1" {
+		t.Fatalf("prompt_cache_key = %#v, want thread-1", body["prompt_cache_key"])
+	}
+	if _, ok := body["include"]; ok {
+		t.Fatalf("include should be omitted when reasoning is absent: %#v", body["include"])
 	}
 	for _, key := range []string{"max_output_tokens", "temperature", "top_k", "service_tier", "user"} {
 		if _, ok := body[key]; ok {
@@ -97,6 +106,18 @@ func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexResponsesRequestIncludesEncryptedReasoningOnlyWithReasoning(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"high"}}`))
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	include, ok := body["include"].([]interface{})
+	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v, want reasoning.encrypted_content", body["include"])
+	}
+}
+
 func TestNormalizeCodexResponsesRequestConvertsSystemInputRole(t *testing.T) {
 	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"system","content":"rules"}],"service_tier":"priority"}`))
 	var body map[string]interface{}
@@ -114,7 +135,7 @@ func TestNormalizeCodexResponsesRequestConvertsSystemInputRole(t *testing.T) {
 }
 
 func TestCleanJSONUndefinedPlaceholdersRemovesCherryStudioSentinels(t *testing.T) {
-	got := cleanJSONUndefinedPlaceholders([]byte(`{"model":"gemini-2.5-pro","temperature":"[undefined]","include":["reasoning.encrypted_content","[undefined]"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":"[undefined]"}]}],"store":false}`))
+	got := cleanJSONUndefinedPlaceholders([]byte(`{"model":"gemini-2.5-pro","temperature":" [undefined] ","include":["reasoning.encrypted_content","[undefined]"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":"[undefined]"}]}],"store":false}`))
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("cleaned body is not JSON: %v", err)

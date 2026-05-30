@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
@@ -29,6 +30,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 
 	// Extract system message to Instructions
 	if req.System != nil {
+		ir.InstructionsRaw = append(json.RawMessage(nil), req.System...)
 		var sysStr string
 		if err := json.Unmarshal(req.System, &sysStr); err == nil {
 			ir.Instructions = &sysStr
@@ -58,24 +60,29 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 
 		// Convert content blocks
 		for _, block := range msg.Content {
+			rawBlock := rawJSON(block)
 			switch block.Type {
 			case "text":
-				internalMsg.Content = append(internalMsg.Content, schema.ContentPart{
-					Type: "text",
-					Text: block.Text,
-				})
+				part := schema.ContentPart{
+					Type:  "text",
+					Text:  block.Text,
+					Extra: block.Extra,
+				}
+				appendContentItem(&internalMsg, part, rawBlock)
 			case "image":
 				if block.Source != nil {
 					dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
-					internalMsg.Content = append(internalMsg.Content, schema.ContentPart{
+					part := schema.ContentPart{
 						Type:     "image_url",
 						ImageURL: &dataURI,
-					})
+						MimeType: block.Source.MediaType,
+						Extra:    block.Extra,
+					}
+					appendContentItem(&internalMsg, part, rawBlock)
 				}
 			case "tool_use":
-				var args string
-				json.Unmarshal(block.Input, &args)
-				internalMsg.ToolCalls = append(internalMsg.ToolCalls, schema.ToolCall{
+				args := rawJSONArgumentString(block.Input)
+				call := schema.ToolCall{
 					ID:   block.ID,
 					Type: "function",
 					Name: block.Name,
@@ -86,18 +93,41 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 						Name:      block.Name,
 						Arguments: args,
 					},
-				})
+				}
+				appendToolCallItem(&internalMsg, call, rawBlock)
 			case "tool_result":
-				internalMsg.ToolResult = &schema.ToolResult{
+				appendToolResultItem(&internalMsg, schema.ToolResult{
 					ToolCallID: block.ToolUseID,
 					Content:    block.ContentStr,
 					IsError:    block.IsError,
-				}
+				}, rawBlock)
 			case "thinking":
-				internalMsg.ReasoningContent = append(internalMsg.ReasoningContent, schema.ContentPart{
-					Type: "thinking",
-					Text: block.Thinking,
-				})
+				extra := map[string]json.RawMessage{}
+				if block.Signature != "" {
+					extra = setRawString(extra, reasoningExtraSignature, block.Signature)
+				}
+				for k, v := range block.Extra {
+					extra[k] = v
+				}
+				appendReasoningItem(&internalMsg, schema.ContentPart{
+					Type:  "thinking",
+					Text:  block.Thinking,
+					Extra: extra,
+				}, rawBlock)
+			case "redacted_thinking":
+				if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
+					appendReasoningItem(&internalMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
+						reasoningExtraData:             raw,
+						reasoningExtraEncryptedContent: raw,
+						reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
+					}), rawBlock)
+				}
+			default:
+				appendContentItem(&internalMsg, schema.ContentPart{
+					Type:  block.Type,
+					Text:  block.Text,
+					Extra: block.Extra,
+				}, rawBlock)
 			}
 		}
 
@@ -149,7 +179,9 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	}
 
 	// Add system message from Instructions
-	if ir.Instructions != nil {
+	if ir.SourceFormat == FormatAnthropic && len(ir.InstructionsRaw) > 0 {
+		req["system"] = ir.InstructionsRaw
+	} else if ir.Instructions != nil {
 		req["system"] = *ir.Instructions
 	}
 
@@ -157,78 +189,15 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	messages := make([]map[string]interface{}, 0)
 	for _, msg := range ir.Messages {
 		msgMap := make(map[string]interface{})
-		msgMap["role"] = msg.Role
+		role := msg.Role
+		if role == "tool" {
+			role = "user"
+		}
+		msgMap["role"] = role
 
-		// Convert content
-		if len(msg.Content) > 0 {
-			blocks := make([]map[string]interface{}, 0)
-			for _, c := range msg.Content {
-				block := map[string]interface{}{"type": c.Type}
-				if c.Text != "" {
-					block["text"] = c.Text
-				}
-				if c.ImageURL != nil {
-					// Parse data URI to extract media type and data
-					dataURI := *c.ImageURL
-					mediaType := "image/png" // default
-					data := dataURI
-					if len(dataURI) > 11 && dataURI[:11] == "data:image/" {
-						endIdx := len(dataURI)
-						for i := 11; i < len(dataURI); i++ {
-							if dataURI[i] == ';' || dataURI[i] == ',' {
-								endIdx = i
-								break
-							}
-						}
-						mediaType = dataURI[11:endIdx]
-						if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
-							for i := endIdx + 1; i < len(dataURI); i++ {
-								if dataURI[i] == ',' {
-									data = dataURI[i+1:]
-									break
-								}
-							}
-						}
-					}
-					block["source"] = map[string]string{
-						"type":       "base64",
-						"media_type": mediaType,
-						"data":       data,
-					}
-				}
-				blocks = append(blocks, block)
-			}
+		blocks := anthropicBlocksFromMessage(ir.SourceFormat, msg)
+		if len(blocks) > 0 {
 			msgMap["content"] = blocks
-		}
-
-		// Add tool calls
-		if len(msg.ToolCalls) > 0 {
-			toolUseBlocks := make([]map[string]interface{}, 0)
-			for _, tc := range msg.ToolCalls {
-				toolUseBlocks = append(toolUseBlocks, map[string]interface{}{
-					"type":  "tool_use",
-					"id":    tc.ID,
-					"name":  tc.Name,
-					"input": tc.Function.Arguments,
-				})
-			}
-			if msgMap["content"] == nil {
-				msgMap["content"] = []map[string]interface{}{}
-			}
-			msgMap["content"] = append(msgMap["content"].([]map[string]interface{}), toolUseBlocks...)
-		}
-
-		// Add tool result
-		if msg.ToolResult != nil {
-			resultBlock := map[string]interface{}{
-				"type":         "tool_result",
-				"tool_use_id":  msg.ToolResult.ToolCallID,
-				"content":      msg.ToolResult.Content,
-			}
-			if msg.ToolResult.IsError {
-				resultBlock["is_error"] = true
-			}
-			msgMap["content"] = append(msgMap["content"].([]map[string]interface{}), resultBlock)
 		}
 
 		messages = append(messages, msgMap)
@@ -248,8 +217,8 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	if len(ir.StopWords) > 0 {
 		req["stop_sequences"] = ir.StopWords
 	}
-	if ir.Thinking != nil {
-		req["thinking"] = ir.Thinking
+	if thinking := anthropicThinkingFromInternal(ir); thinking != nil {
+		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
 		tools, _ := json.Marshal(ir.Tools)
@@ -261,6 +230,169 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func anthropicBlocksFromMessage(source Format, msg InternalMessage) []map[string]interface{} {
+	if len(msg.Parts) > 0 {
+		blocks := make([]map[string]interface{}, 0, len(msg.Parts))
+		for _, item := range msg.Parts {
+			if source == FormatAnthropic && len(item.Raw) > 0 {
+				var raw map[string]interface{}
+				if err := json.Unmarshal(item.Raw, &raw); err == nil {
+					blocks = append(blocks, raw)
+					continue
+				}
+			}
+			if block := anthropicBlockFromItem(item); block != nil {
+				blocks = append(blocks, block)
+			}
+		}
+		return blocks
+	}
+
+	blocks := make([]map[string]interface{}, 0)
+	for _, rc := range msg.ReasoningContent {
+		if block := anthropicReasoningBlock(rc); block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	if len(msg.Content) > 0 && msg.ToolResult == nil {
+		for _, c := range msg.Content {
+			if block := anthropicContentBlock(c); block != nil {
+				blocks = append(blocks, block)
+			}
+		}
+	}
+	for _, tc := range msg.ToolCalls {
+		blocks = append(blocks, anthropicToolUseBlock(tc))
+	}
+	if msg.ToolResult != nil {
+		blocks = append(blocks, anthropicToolResultBlock(*msg.ToolResult))
+	}
+	return blocks
+}
+
+func anthropicBlockFromItem(item InternalContentItem) map[string]interface{} {
+	switch item.Kind {
+	case contentItemKindReasoning:
+		return anthropicReasoningBlock(item.Content)
+	case contentItemKindContent:
+		return anthropicContentBlock(item.Content)
+	case contentItemKindToolCall:
+		return anthropicToolUseBlock(item.ToolCall)
+	case contentItemKindToolResult:
+		return anthropicToolResultBlock(item.ToolResult)
+	default:
+		return nil
+	}
+}
+
+func anthropicReasoningBlock(rc schema.ContentPart) map[string]interface{} {
+	sig := reasoningSignature([]schema.ContentPart{rc})
+	encrypted := reasoningPartEncryptedData(rc)
+	if rc.Text == "" && sig == "" && encrypted == "" {
+		return nil
+	}
+	if rc.Text == "" && encrypted != "" && sig == "" {
+		return map[string]interface{}{
+			"type": "redacted_thinking",
+			"data": encrypted,
+		}
+	}
+	block := map[string]interface{}{
+		"type":     "thinking",
+		"thinking": rc.Text,
+	}
+	if sig != "" {
+		block["signature"] = sig
+	}
+	for k, v := range rc.Extra {
+		if k == reasoningExtraSignature || k == reasoningExtraThoughtSignature || k == reasoningExtraEncryptedContent || k == reasoningExtraData || k == reasoningExtraType {
+			continue
+		}
+		block[k] = v
+	}
+	return block
+}
+
+func anthropicContentBlock(c schema.ContentPart) map[string]interface{} {
+	block := map[string]interface{}{}
+	for k, v := range c.Extra {
+		block[k] = v
+	}
+	switch c.Type {
+	case "text":
+		block["type"] = "text"
+		block["text"] = c.Text
+	case "image_url":
+		if c.ImageURL == nil {
+			return nil
+		}
+		dataURI := *c.ImageURL
+		mediaType := "image/png"
+		if c.MimeType != "" {
+			mediaType = c.MimeType
+		}
+		data := dataURI
+		if strings.HasPrefix(dataURI, "data:") {
+			endIdx := len(dataURI)
+			for i := len("data:"); i < len(dataURI); i++ {
+				if dataURI[i] == ';' || dataURI[i] == ',' {
+					endIdx = i
+					break
+				}
+			}
+			mediaType = dataURI[len("data:"):endIdx]
+			if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
+				for i := endIdx + 1; i < len(dataURI); i++ {
+					if dataURI[i] == ',' {
+						data = dataURI[i+1:]
+						break
+					}
+				}
+			}
+		}
+		block["type"] = "image"
+		block["source"] = map[string]string{
+			"type":       "base64",
+			"media_type": mediaType,
+			"data":       data,
+		}
+	default:
+		if c.Type == "" {
+			return nil
+		}
+		block["type"] = c.Type
+		if c.Text != "" {
+			block["text"] = c.Text
+		}
+	}
+	return block
+}
+
+func anthropicToolUseBlock(tc schema.ToolCall) map[string]interface{} {
+	name := tc.Name
+	if name == "" {
+		name = tc.Function.Name
+	}
+	return map[string]interface{}{
+		"type":  "tool_use",
+		"id":    tc.ID,
+		"name":  name,
+		"input": jsonArgumentValue(tc.Function.Arguments),
+	}
+}
+
+func anthropicToolResultBlock(result schema.ToolResult) map[string]interface{} {
+	block := map[string]interface{}{
+		"type":        "tool_result",
+		"tool_use_id": result.ToolCallID,
+		"content":     result.Content,
+	}
+	if result.IsError {
+		block["is_error"] = true
+	}
+	return block
 }
 
 func init() {

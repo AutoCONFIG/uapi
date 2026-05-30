@@ -73,12 +73,9 @@ func (b *BillingService) PreConsume(tokenID string, model string, estimatedToken
 		}
 		switch plan.Type {
 		case "count_based":
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(1, model, b.modelRatios()), true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, tp.StartsAt, preConsumeChargeForPlan(plan.Type, 0, model, b.modelRatios()), true)
 		case "token_based":
-			if estimatedTokens <= 0 {
-				estimatedTokens = 1
-			}
-			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, applyModelRatio(estimatedTokens, model, b.modelRatios()), true)
+			return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, tp.StartsAt, preConsumeChargeForPlan(plan.Type, estimatedTokens, model, b.modelRatios()), true)
 		}
 		return fmt.Errorf("unsupported plan type: %s", plan.Type)
 	})
@@ -147,15 +144,9 @@ func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 	if rawRatios == "" {
 		rawRatios = "{}"
 	}
-	ratios, err := parseMap(rawRatios)
+	ratio, err := modelRatio(rawRatios, model)
 	if err != nil {
 		return fmt.Errorf("parse model ratios: %w", err)
-	}
-	ratio := 1.0
-	if r, ok := ratios[model]; ok {
-		if f, ok := toFloat(r); ok {
-			ratio = f
-		}
 	}
 
 	// Cache tokens are included in prompt-equivalent tokens at reduced rates
@@ -163,9 +154,10 @@ func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 		int(float64(cacheReadTokens)*cacheReadRatio)
 	actual := int(math.Ceil(float64(promptTokens+cacheEquivalent+completionTokens) * ratio))
 	if actual <= 0 {
-		actual = estTokens
+		actual = preConsumeChargeForPlan(plan.Type, estTokens, model, rawRatios)
 	}
-	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, actual-estTokens, false); err != nil {
+	preConsumed := preConsumeChargeForPlan(plan.Type, estTokens, model, rawRatios)
+	if err := applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, tp.StartsAt, actual-preConsumed, false); err != nil {
 		return err
 	}
 	return nil
@@ -174,6 +166,12 @@ func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UUID, amount int) error {
 	return b.db.Transaction(func(tx *gorm.DB) error {
 		return RefundTxForPlan(tx, tokenID, tokenPlanID, amount)
+	})
+}
+
+func (b *BillingService) DBTransactionRefundPreConsume(tokenID string, tokenPlanID uuid.UUID, estTokens int, model string) error {
+	return b.db.Transaction(func(tx *gorm.DB) error {
+		return RefundPreConsumeTxForPlanWithRatios(tx, tokenID, tokenPlanID, estTokens, model, b.modelRatios())
 	})
 }
 
@@ -208,11 +206,41 @@ func RefundTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, amount 
 	case "count_based":
 		return nil
 	default:
-		return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, -amount, false)
+		return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, tp.StartsAt, -amount, false)
 	}
 }
 
-func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, delta int, enforce bool) error {
+func RefundPreConsumeTxForPlanWithRatios(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID, estTokens int, model, rawRatios string) error {
+	if tokenPlanID == uuid.Nil {
+		return ErrNoActiveSubscription
+	}
+	var tp db.TokenPlan
+	q := tx.Clauses(clause.Locking{Strength: "UPDATE"})
+	q = q.Joins("JOIN tokens ON tokens.user_id = token_plans.user_id AND tokens.id = ? AND tokens.deleted_at IS NULL", tokenID).
+		Where("token_plans.id = ?", tokenPlanID)
+	if err := q.First(&tp).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	var plan db.Plan
+	if err := tx.First(&plan, "id = ? AND deleted_at IS NULL", tp.PlanID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	amount := preConsumeChargeForPlan(plan.Type, estTokens, model, rawRatios)
+	if amount <= 0 {
+		return nil
+	}
+	return applyPolicyWindowDeltaTx(tx, plan.PolicyID, tp.UserID, tp.StartsAt, -amount, false)
+}
+
+func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, planStartsAt time.Time, delta int, enforce bool) error {
 	if delta == 0 {
 		return nil
 	}
@@ -230,14 +258,18 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, d
 		return err
 	}
 	now := time.Now().UTC()
+	fiveHourStart, err := rollingFiveHourStartTx(tx, policy.ID, userID, now)
+	if err != nil {
+		return err
+	}
 	windows := []struct {
 		name  string
 		limit int
 		start time.Time
 	}{
-		{name: "hour", limit: policy.HourlyLimit, start: fixedFiveHour(now)},
-		{name: "week", limit: policy.WeeklyLimit, start: fixedWeek(now)},
-		{name: "month", limit: policy.MonthlyLimit, start: fixedMonth(now)},
+		{name: "hour", limit: policy.HourlyLimit, start: fiveHourStart},
+		{name: "week", limit: policy.WeeklyLimit, start: fixedWeekFromPlanStart(planStartsAt, now)},
+		{name: "month", limit: policy.MonthlyLimit, start: fixedMonthFromPlanStart(planStartsAt, now)},
 	}
 	for _, window := range windows {
 		var usage db.PolicyUsageWindow
@@ -279,20 +311,40 @@ func applyPolicyWindowDeltaTx(tx *gorm.DB, policyID *uuid.UUID, userID string, d
 	return nil
 }
 
-func fixedFiveHour(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/5*5, 0, 0, 0, time.UTC)
-}
-
-func fixedWeek(now time.Time) time.Time {
-	weekday := int(now.Weekday())
-	if weekday == 0 {
-		weekday = 7
+func rollingFiveHourStartTx(tx *gorm.DB, policyID uuid.UUID, userID string, now time.Time) (time.Time, error) {
+	lockKey := "policy_window:" + policyID.String() + ":" + userID + ":hour"
+	if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", lockKey).Error; err != nil {
+		return time.Time{}, err
 	}
-	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
+	var usage db.PolicyUsageWindow
+	err := tx.Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start <= ?", policyID, userID, "hour", now).
+		Order("window_start DESC").
+		First(&usage).Error
+	if err == nil && now.Before(usage.WindowStart.UTC().Add(5*time.Hour)) {
+		return usage.WindowStart.UTC(), nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, err
+	}
+	return now, nil
 }
 
-func fixedMonth(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+func fixedWeekFromPlanStart(planStartsAt time.Time, now time.Time) time.Time {
+	start := planStartsAt.UTC()
+	if start.IsZero() || now.Before(start) {
+		return now
+	}
+	elapsed := now.Sub(start)
+	return start.Add(time.Duration(int64(elapsed/(7*24*time.Hour))) * 7 * 24 * time.Hour)
+}
+
+func fixedMonthFromPlanStart(planStartsAt time.Time, now time.Time) time.Time {
+	start := planStartsAt.UTC()
+	if start.IsZero() || now.Before(start) {
+		return now
+	}
+	elapsed := now.Sub(start)
+	return start.Add(time.Duration(int64(elapsed/(30*24*time.Hour))) * 30 * 24 * time.Hour)
 }
 
 func latestActiveTokenPlan(tx *gorm.DB, tokenID string) *gorm.DB {
@@ -364,9 +416,21 @@ func applyModelRatio(tokens int, model, rawRatios string) int {
 	if tokens <= 0 {
 		return tokens
 	}
-	ratios, err := parseMap(rawRatios)
+	ratio, err := modelRatio(rawRatios, model)
 	if err != nil {
 		return tokens
+	}
+	charged := int(math.Ceil(float64(tokens) * ratio))
+	if charged < 1 && ratio > 0 {
+		return 1
+	}
+	return charged
+}
+
+func modelRatio(rawRatios, model string) (float64, error) {
+	ratios, err := parseMap(rawRatios)
+	if err != nil {
+		return 1, err
 	}
 	ratio := 1.0
 	if r, ok := ratios[model]; ok {
@@ -374,9 +438,19 @@ func applyModelRatio(tokens int, model, rawRatios string) int {
 			ratio = f
 		}
 	}
-	charged := int(math.Ceil(float64(tokens) * ratio))
-	if charged < 1 && ratio > 0 {
-		return 1
+	return ratio, nil
+}
+
+func preConsumeChargeForPlan(planType string, estimatedTokens int, model, rawRatios string) int {
+	switch planType {
+	case "count_based":
+		return applyModelRatio(1, model, rawRatios)
+	case "token_based":
+		if estimatedTokens <= 0 {
+			estimatedTokens = 1
+		}
+		return applyModelRatio(estimatedTokens, model, rawRatios)
+	default:
+		return 0
 	}
-	return charged
 }

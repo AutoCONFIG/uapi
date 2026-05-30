@@ -188,6 +188,7 @@ func toProviderMessages(messages []newconvert.InternalMessage) []InternalMessage
 	for _, m := range messages {
 		pm := InternalMessage{
 			Role:             m.Role,
+			Parts:            toProviderContentItems(m.Parts),
 			Content:          toProviderContentParts(m.Content),
 			ToolCalls:        toProviderToolCalls(m.ToolCalls),
 			ToolResult:       toProviderToolResult(m.ToolResult),
@@ -204,6 +205,7 @@ func fromProviderMessages(messages []InternalMessage) []newconvert.InternalMessa
 	for _, m := range messages {
 		out = append(out, newconvert.InternalMessage{
 			Role:             m.Role,
+			Parts:            fromProviderContentItems(m.Parts),
 			Content:          fromProviderContentParts(m.Content),
 			ToolCalls:        fromProviderToolCalls(m.ToolCalls),
 			ToolResult:       fromProviderToolResult(m.ToolResult),
@@ -214,16 +216,38 @@ func fromProviderMessages(messages []InternalMessage) []newconvert.InternalMessa
 	return out
 }
 
+func toProviderContentItems(items []newconvert.InternalContentItem) []InternalContentItem {
+	out := make([]InternalContentItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, InternalContentItem{
+			Kind:       item.Kind,
+			Content:    toProviderContentPart(item.Content),
+			ToolCall:   toProviderToolCall(item.ToolCall),
+			ToolResult: toProviderToolResultValue(item.ToolResult),
+			Raw:        append(json.RawMessage(nil), item.Raw...),
+		})
+	}
+	return out
+}
+
+func fromProviderContentItems(items []InternalContentItem) []newconvert.InternalContentItem {
+	out := make([]newconvert.InternalContentItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, newconvert.InternalContentItem{
+			Kind:       item.Kind,
+			Content:    fromProviderContentPart(item.Content),
+			ToolCall:   fromProviderToolCall(item.ToolCall),
+			ToolResult: fromProviderToolResultValue(item.ToolResult),
+			Raw:        append(json.RawMessage(nil), item.Raw...),
+		})
+	}
+	return out
+}
+
 func toProviderContentParts(parts []schema.ContentPart) []InternalContentPart {
 	out := make([]InternalContentPart, 0, len(parts))
 	for _, p := range parts {
-		out = append(out, InternalContentPart{
-			Type:     p.Type,
-			Text:     p.Text,
-			ImageURL: p.ImageURL,
-			Refusal:  p.Refusal,
-			Extra:    rawMapToInterface(p.Extra),
-		})
+		out = append(out, toProviderContentPart(p))
 	}
 	return out
 }
@@ -231,25 +255,41 @@ func toProviderContentParts(parts []schema.ContentPart) []InternalContentPart {
 func fromProviderContentParts(parts []InternalContentPart) []schema.ContentPart {
 	out := make([]schema.ContentPart, 0, len(parts))
 	for _, p := range parts {
-		out = append(out, schema.ContentPart{
-			Type:     p.Type,
-			Text:     p.Text,
-			ImageURL: p.ImageURL,
-			Refusal:  p.Refusal,
-			Extra:    toRawMessageMap(p.Extra),
-		})
+		out = append(out, fromProviderContentPart(p))
 	}
 	return out
+}
+
+func toProviderContentPart(p schema.ContentPart) InternalContentPart {
+	return InternalContentPart{
+		Type:        p.Type,
+		Text:        p.Text,
+		ImageURL:    p.ImageURL,
+		ImageDetail: p.ImageDetail,
+		Data:        p.Data,
+		MimeType:    p.MimeType,
+		Refusal:     p.Refusal,
+		Extra:       rawMapToInterface(p.Extra),
+	}
+}
+
+func fromProviderContentPart(p InternalContentPart) schema.ContentPart {
+	return schema.ContentPart{
+		Type:        p.Type,
+		Text:        p.Text,
+		ImageURL:    p.ImageURL,
+		ImageDetail: p.ImageDetail,
+		Data:        p.Data,
+		MimeType:    p.MimeType,
+		Refusal:     p.Refusal,
+		Extra:       toRawMessageMap(p.Extra),
+	}
 }
 
 func toProviderToolCalls(calls []schema.ToolCall) []InternalToolCall {
 	out := make([]InternalToolCall, 0, len(calls))
 	for _, tc := range calls {
-		name := tc.Name
-		if name == "" {
-			name = tc.Function.Name
-		}
-		out = append(out, InternalToolCall{ID: tc.ID, Name: name, Arguments: tc.Function.Arguments})
+		out = append(out, toProviderToolCall(tc))
 	}
 	return out
 }
@@ -257,31 +297,53 @@ func toProviderToolCalls(calls []schema.ToolCall) []InternalToolCall {
 func fromProviderToolCalls(calls []InternalToolCall) []schema.ToolCall {
 	out := make([]schema.ToolCall, 0, len(calls))
 	for _, tc := range calls {
-		out = append(out, schema.ToolCall{
-			ID:   tc.ID,
-			Type: "function",
-			Name: tc.Name,
-			Function: struct {
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
-			}{Name: tc.Name, Arguments: tc.Arguments},
-		})
+		out = append(out, fromProviderToolCall(tc))
 	}
 	return out
+}
+
+func toProviderToolCall(tc schema.ToolCall) InternalToolCall {
+	name := tc.Name
+	if name == "" {
+		name = tc.Function.Name
+	}
+	return InternalToolCall{ID: tc.ID, Name: name, Arguments: tc.Function.Arguments}
+}
+
+func fromProviderToolCall(tc InternalToolCall) schema.ToolCall {
+	return schema.ToolCall{
+		ID:   tc.ID,
+		Type: "function",
+		Name: tc.Name,
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: tc.Name, Arguments: tc.Arguments},
+	}
 }
 
 func toProviderToolResult(result *schema.ToolResult) *InternalToolResult {
 	if result == nil {
 		return nil
 	}
-	return &InternalToolResult{ToolCallID: result.ToolCallID, Content: result.Content, IsError: result.IsError}
+	out := toProviderToolResultValue(*result)
+	return &out
 }
 
 func fromProviderToolResult(result *InternalToolResult) *schema.ToolResult {
 	if result == nil {
 		return nil
 	}
-	return &schema.ToolResult{ToolCallID: result.ToolCallID, Content: result.Content, IsError: result.IsError}
+	out := fromProviderToolResultValue(*result)
+	return &out
+}
+
+func toProviderToolResultValue(result schema.ToolResult) InternalToolResult {
+	return InternalToolResult{ToolCallID: result.ToolCallID, Content: result.Content, IsError: result.IsError}
+}
+
+func fromProviderToolResultValue(result InternalToolResult) schema.ToolResult {
+	return schema.ToolResult{ToolCallID: result.ToolCallID, Content: result.Content, IsError: result.IsError}
 }
 
 func toProviderTools(tools []schema.Tool) []InternalTool {

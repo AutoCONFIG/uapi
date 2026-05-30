@@ -81,9 +81,10 @@ func (c *geminiToChatConverter) convertResponse(body []byte) []byte {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
-					Text         string `json:"text"`
-					Thought      bool   `json:"thought,omitempty"`
-					FunctionCall *struct {
+					Text             string `json:"text"`
+					Thought          bool   `json:"thought,omitempty"`
+					ThoughtSignature string `json:"thoughtSignature,omitempty"`
+					FunctionCall     *struct {
 						Name string `json:"name"`
 						Args any    `json:"args"`
 					} `json:"functionCall,omitempty"`
@@ -140,10 +141,14 @@ func (c *geminiToChatConverter) convertResponse(body []byte) []byte {
 			c.state.textBuffer.WriteString(part.Text)
 			key := "content"
 			if part.Thought {
-				out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{"reasoning_content": part.Text, "reasoning": part.Text}, nil, nil)...)
+				out = append(out, chatChunk(c.state.id, "gemini", reasoningTextDelta(part.Text, 0, part.ThoughtSignature), nil, nil)...)
 				continue
 			}
 			out = append(out, chatChunk(c.state.id, "gemini", map[string]interface{}{key: part.Text}, nil, nil)...)
+			continue
+		}
+		if part.ThoughtSignature != "" {
+			out = append(out, chatChunk(c.state.id, "gemini", reasoningEncryptedDelta(0, part.ThoughtSignature), nil, nil)...)
 			continue
 		}
 

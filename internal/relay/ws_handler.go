@@ -363,25 +363,6 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	}
 }
 
-func wsCurrentHour() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, time.UTC)
-}
-
-func wsCurrentWeek() time.Time {
-	now := time.Now().UTC()
-	weekday := int(now.Weekday())
-	if weekday == 0 {
-		weekday = 7
-	}
-	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
-}
-
-func wsCurrentMonth() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-}
-
 // ── Per-turn billing helpers ───────────────────────────────────────────────────
 
 func (h *WSHandler) settleBilling(tokenID string, tokenPlanID uuid.UUID, estTokens, promptTokens, completionTokens int, model string) {
@@ -395,12 +376,12 @@ func (h *WSHandler) settleBilling(tokenID string, tokenPlanID uuid.UUID, estToke
 	}()
 }
 
-func (h *WSHandler) refundBilling(tokenID string, tokenPlanID uuid.UUID, estTokens int) {
-	if h.billing == nil || estTokens == 0 {
+func (h *WSHandler) refundBilling(tokenID string, tokenPlanID uuid.UUID, estTokens int, model string) {
+	if h.billing == nil {
 		return
 	}
 	go func() {
-		if err := h.billing.DBTransactionRefund(tokenID, tokenPlanID, estTokens); err != nil {
+		if err := h.billing.DBTransactionRefundPreConsume(tokenID, tokenPlanID, estTokens, model); err != nil {
 			logger.Component("relay.ws").Warn("billing refund failed",
 				logger.F("token_id", tokenID),
 				logger.F("error", err.Error()),

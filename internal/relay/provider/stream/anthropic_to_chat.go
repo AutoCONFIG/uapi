@@ -112,6 +112,7 @@ func (c *anthropicToChatConverter) Convert(line []byte) []byte {
 				Type string `json:"type"`
 			} `json:"content_block,omitempty"`
 			TextDelta      string `json:"text_delta,omitempty"`
+			ThinkingDelta  string `json:"thinking_delta,omitempty"`
 			InputJSONDelta string `json:"input_json_delta,omitempty"`
 		}
 		var raw struct {
@@ -119,6 +120,8 @@ func (c *anthropicToChatConverter) Convert(line []byte) []byte {
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
+				Signature   string `json:"signature"`
 				PartialJSON string `json:"partial_json"`
 			} `json:"delta"`
 		}
@@ -127,8 +130,24 @@ func (c *anthropicToChatConverter) Convert(line []byte) []byte {
 		if raw.Delta.Text != "" {
 			delta.TextDelta = raw.Delta.Text
 		}
+		if raw.Delta.Thinking != "" {
+			delta.ThinkingDelta = raw.Delta.Thinking
+		}
 		if raw.Delta.PartialJSON != "" {
 			delta.InputJSONDelta = raw.Delta.PartialJSON
+		}
+
+		if delta.ThinkingDelta != "" {
+			return chatChunk(c.state.id, c.state.model, reasoningTextDelta(delta.ThinkingDelta, raw.Index, ""), nil, nil)
+		}
+		if raw.Delta.Signature != "" {
+			return chatChunk(c.state.id, c.state.model, map[string]interface{}{"reasoning_details": []interface{}{
+				map[string]interface{}{
+					"index":     raw.Index,
+					"type":      streamReasoningTypeText,
+					"signature": raw.Delta.Signature,
+				},
+			}}, nil, nil)
 		}
 
 		// Handle text delta

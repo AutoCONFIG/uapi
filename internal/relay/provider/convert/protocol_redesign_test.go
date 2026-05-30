@@ -61,6 +61,154 @@ func TestCrossProtocolRequestConversions(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesPreservesRichContentAndToolCalls(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"look"},
+				{"type":"image_url","image_url":{"url":"https://example.com/a.png","detail":"high"}}
+			]},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"uapi\"}"}}]}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	message := findObjectByType(input, "message")
+	parts := message["content"].([]interface{})
+	text := parts[0].(map[string]interface{})
+	if text["type"] != "input_text" || text["text"] != "look" {
+		t.Fatalf("text part not converted to Responses input_text: %s", converted)
+	}
+	image := parts[1].(map[string]interface{})
+	if image["type"] != "input_image" || image["image_url"] != "https://example.com/a.png" || image["detail"] != "high" {
+		t.Fatalf("image URL detail not preserved for Responses: %s", converted)
+	}
+	call := findObjectByType(input, "function_call")
+	if call["call_id"] != "call_1" || call["name"] != "lookup" || call["arguments"] == "" {
+		t.Fatalf("assistant tool call not emitted as Responses function_call: %s", converted)
+	}
+}
+
+func TestOpenAIResponsesSameFormatPreservesRichInputItems(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"id":"msg_1","type":"message","role":"user","status":"completed","content":[
+				{"type":"input_text","text":"read this","cache_control":{"type":"ephemeral"}},
+				{"type":"input_file","file_data":"Zm9v","filename":"note.txt","file_type":"text/plain"},
+				{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}
+			]},
+			{"id":"fs_1","type":"file_search_call","status":"completed","queries":["uapi"],"results":[]}
+		],
+		"include":["reasoning.encrypted_content"],
+		"previous_response_id":"resp_1",
+		"metadata":{"trace":"abc"},
+		"parallel_tool_calls":false,
+		"store":false
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"cache_control"`,
+		`"file_data":"Zm9v"`,
+		`"input_audio"`,
+		`"type":"file_search_call"`,
+		`"include":["reasoning.encrypted_content"]`,
+		`"previous_response_id":"resp_1"`,
+		`"metadata":{"trace":"abc"}`,
+		`"parallel_tool_calls":false`,
+		`"store":false`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("same-format Responses conversion dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestGeminiSameFormatPreservesFileAndCodeParts(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"fileData":{"mimeType":"application/pdf","fileUri":"files/report.pdf"}},
+			{"executableCode":{"language":"PYTHON","code":"print(1)"}},
+			{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1\n"}}
+		]}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"fileData":{"fileUri":"files/report.pdf","mimeType":"application/pdf"}`,
+		`"executableCode":{"code":"print(1)","language":"PYTHON"}`,
+		`"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1\n"}`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("same-format Gemini conversion dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestAnthropicSameFormatPreservesSystemAndOrderedBlocks(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":1024,
+		"system":[{"type":"text","text":"cache me","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"plan","signature":"sig"},
+			{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}},
+			{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"uapi"}}
+		]}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	for _, want := range []string{
+		`"system":[{`,
+		`"text":"cache me"`,
+		`"thinking":"plan"`,
+		`"signature":"sig"`,
+		`"cache_control":{"type":"ephemeral"}`,
+		`"type":"tool_use"`,
+		`"input":{"q":"uapi"}`,
+	} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("same-format Anthropic conversion dropped %s:\n%s", want, converted)
+		}
+	}
+	if strings.Index(string(converted), `"type":"thinking"`) > strings.Index(string(converted), `"type":"text"`) {
+		t.Fatalf("Anthropic block order changed:\n%s", converted)
+	}
+}
+
+func TestOpenAIChatToolResultToGeminiDoesNotDuplicateAsText(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"uapi\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"{\"ok\":true}"}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	got := string(converted)
+	if !strings.Contains(got, `"functionResponse"`) || strings.Contains(got, `"text":"{\"ok\":true}"`) {
+		t.Fatalf("tool result must become only Gemini functionResponse:\n%s", got)
+	}
+}
+
 func TestCrossProtocolResponseConversions(t *testing.T) {
 	openAIResp := []byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
 	tests := []struct {
@@ -181,10 +329,135 @@ func TestOpenAIChatToGeminiNormalizesRolesForPrivateAPIs(t *testing.T) {
 	}
 }
 
-func TestAntigravityAdaptorToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) {
+func TestOpenAIChatToGeminiMapsResponseFormatToJSONMode(t *testing.T) {
+	body := []byte(`{
+		"model":"gemini-3.1-pro",
+		"messages":[{"role":"user","content":"hello"}],
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}}}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	genConfig, ok := got["generationConfig"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("generationConfig missing: %s", converted)
+	}
+	if genConfig["responseMimeType"] != "application/json" {
+		t.Fatalf("responseMimeType = %#v, want application/json; body=%s", genConfig["responseMimeType"], converted)
+	}
+	schema, ok := genConfig["responseSchema"].(map[string]interface{})
+	if !ok || schema["type"] != "object" {
+		t.Fatalf("responseSchema not mapped from json_schema: %#v; body=%s", genConfig["responseSchema"], converted)
+	}
+}
+
+func TestOpenAIChatToGeminiCapsExcessiveMaxTokens(t *testing.T) {
+	body := []byte(`{"model":"gemini-3.1-pro","messages":[{"role":"user","content":"hello"}],"max_tokens":128000}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	genConfig := got["generationConfig"].(map[string]interface{})
+	if genConfig["maxOutputTokens"] != float64(65536) {
+		t.Fatalf("maxOutputTokens = %#v, want 65536; body=%s", genConfig["maxOutputTokens"], converted)
+	}
+}
+
+func TestGeminiThinkingConfigNormalizesConflictingAliases(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"generationConfig":{"thinkingConfig":{"thinking_budget":24576,"thinkingLevel":"HIGH","include_thoughts":true}}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	thinking := got["generationConfig"].(map[string]interface{})["thinkingConfig"].(map[string]interface{})
+	if thinking["thinkingBudget"] != float64(24576) {
+		t.Fatalf("thinkingBudget = %#v, want 24576; body=%s", thinking["thinkingBudget"], converted)
+	}
+	if thinking["includeThoughts"] != true {
+		t.Fatalf("includeThoughts = %#v, want true; body=%s", thinking["includeThoughts"], converted)
+	}
+	if _, ok := thinking["thinkingLevel"]; ok {
+		t.Fatalf("thinkingLevel should be removed when thinkingBudget is present: %s", converted)
+	}
+	if _, ok := thinking["thinking_budget"]; ok {
+		t.Fatalf("snake_case thinking_budget should be normalized: %s", converted)
+	}
+}
+
+func TestGeminiJSONModeSurvivesSameFormatConversion(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"object","properties":{"answer":{"type":"string"}}}}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	genConfig := got["generationConfig"].(map[string]interface{})
+	if genConfig["responseMimeType"] != "application/json" {
+		t.Fatalf("responseMimeType = %#v, want application/json; body=%s", genConfig["responseMimeType"], converted)
+	}
+	schema, ok := genConfig["responseSchema"].(map[string]interface{})
+	if !ok || schema["type"] != "object" {
+		t.Fatalf("responseSchema missing after same-format conversion: %#v; body=%s", genConfig["responseSchema"], converted)
+	}
+}
+
+func TestGeminiFunctionDeclarationsSurviveConversion(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"tools":[{"functionDeclarations":[{"name":"lookup","description":"Lookup data","parameters":{"type":"OBJECT","properties":{"query":{"type":"STRING"}},"required":["query"]}}]}],
+		"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	tools, ok := got["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools missing after conversion: %s", converted)
+	}
+	functionDeclarations, ok := tools[0].(map[string]interface{})["functionDeclarations"].([]interface{})
+	if !ok || len(functionDeclarations) != 1 {
+		t.Fatalf("functionDeclarations missing after conversion: %s", converted)
+	}
+	declaration := functionDeclarations[0].(map[string]interface{})
+	if declaration["name"] != "lookup" {
+		t.Fatalf("function declaration name = %#v, want lookup; body=%s", declaration["name"], converted)
+	}
+	if _, ok := declaration["parametersJsonSchema"].(map[string]interface{}); !ok {
+		t.Fatalf("parametersJsonSchema missing after conversion: %s", converted)
+	}
+}
+
+func TestAntigravityAdaptorNormalizesToolsForV1Internal(t *testing.T) {
 	adaptor := &antigravity.AntigravityAdaptor{}
 	adaptor.Init(&db.Channel{Type: "antigravity", APIFormat: "antigravity"}, &db.Account{})
-	body := []byte(`{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","description":"Lookup data","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}],"tool_choice":{"type":"auto"}}`)
+	body := []byte(`{"model":"gpt-oss-120b-medium","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","description":"Lookup data","parameters":{"type":"object","additionalProperties":false,"properties":{"query":{"type":"string","format":"uri"}},"required":["query"]}}}],"tool_choice":{"type":"auto"}}`)
 
 	converted, err := provider.ConvertRequestWithAdaptor(provider.FormatOpenAIChatCompletions, provider.FormatAntigravity, body, adaptor)
 	if err != nil {
@@ -206,6 +479,28 @@ func TestAntigravityAdaptorToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) 
 	if !ok || len(functionDeclarations) != 1 {
 		t.Fatalf("functionDeclarations missing: %s", converted)
 	}
+	declaration := functionDeclarations[0].(map[string]interface{})
+	if _, ok := declaration["parametersJsonSchema"]; ok {
+		t.Fatalf("parametersJsonSchema should be renamed for antigravity v1internal: %s", converted)
+	}
+	params, ok := declaration["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("parameters missing: %s", converted)
+	}
+	if params["type"] != "OBJECT" {
+		t.Fatalf("parameters.type = %#v, want OBJECT; body=%s", params["type"], converted)
+	}
+	if _, ok := params["additionalProperties"]; ok {
+		t.Fatalf("additionalProperties should be stripped for antigravity parameters: %s", converted)
+	}
+	properties := params["properties"].(map[string]interface{})
+	query := properties["query"].(map[string]interface{})
+	if query["type"] != "STRING" {
+		t.Fatalf("query.type = %#v, want STRING; body=%s", query["type"], converted)
+	}
+	if _, ok := query["format"]; ok {
+		t.Fatalf("nested format should be stripped for antigravity parameters: %s", converted)
+	}
 	toolConfig, ok := request["toolConfig"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("toolConfig missing: %s", converted)
@@ -214,8 +509,8 @@ func TestAntigravityAdaptorToolChoiceToGeminiDoesNotEmitEmptyMode(t *testing.T) 
 	if !ok {
 		t.Fatalf("functionCallingConfig missing: %s", converted)
 	}
-	if fcConfig["mode"] != "AUTO" {
-		t.Fatalf("mode = %#v, want AUTO; body=%s", fcConfig["mode"], converted)
+	if fcConfig["mode"] != "VALIDATED" {
+		t.Fatalf("mode = %#v, want VALIDATED; body=%s", fcConfig["mode"], converted)
 	}
 }
 
@@ -409,6 +704,181 @@ func TestAdaptorCrossProtocolConversionDropsSourceExtraFields(t *testing.T) {
 			t.Fatalf("source-only key %q leaked into adaptor body: %s", key, converted)
 		}
 	}
+}
+
+func TestOpenAIToolCallsConvertToAnthropicProtocolObjects(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"uapi\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"{\"result\":\"ok\"}"}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	messages := got["messages"].([]interface{})
+	assistantBlocks := messages[0].(map[string]interface{})["content"].([]interface{})
+	toolUse := findObjectByType(assistantBlocks, "tool_use")
+	if _, ok := toolUse["input"].(map[string]interface{}); !ok {
+		t.Fatalf("Anthropic tool_use input must be an object: %s", converted)
+	}
+	toolResult := messages[1].(map[string]interface{})
+	if toolResult["role"] != "user" {
+		t.Fatalf("OpenAI tool role should become Anthropic user role: %s", converted)
+	}
+}
+
+func TestOpenAIToolCallsConvertToGeminiProtocolObjects(t *testing.T) {
+	body := []byte(`{
+		"model":"gemini-3.1-pro",
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"uapi\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"{\"result\":\"ok\"}"}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	contents := got["contents"].([]interface{})
+	callPart := findObjectWithKey(contents[0].(map[string]interface{})["parts"].([]interface{}), "functionCall")
+	call := callPart["functionCall"].(map[string]interface{})
+	if _, ok := call["args"].(map[string]interface{}); !ok {
+		t.Fatalf("Gemini functionCall args must be an object: %s", converted)
+	}
+	responsePart := findObjectWithKey(contents[1].(map[string]interface{})["parts"].([]interface{}), "functionResponse")
+	response := responsePart["functionResponse"].(map[string]interface{})
+	if response["name"] != "lookup" {
+		t.Fatalf("Gemini functionResponse name should use original tool name: %s", converted)
+	}
+}
+
+func TestAnthropicThinkingSignatureSurvivesResponseConversions(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-sonnet-4-6",
+		"content":[{"type":"thinking","thinking":"think","signature":"sig_1"},{"type":"text","text":"answer"}],
+		"stop_reason":"end_turn",
+		"usage":{"input_tokens":3,"output_tokens":4}
+	}`)
+
+	chat, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Chat: %v", err)
+	}
+	for _, want := range []string{`"reasoning_content":"think"`, `"reasoning_details"`, `"signature":"sig_1"`} {
+		if !strings.Contains(string(chat), want) {
+			t.Fatalf("Anthropic thinking signature missing from Chat response, missing %s:\n%s", want, chat)
+		}
+	}
+
+	gemini, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Gemini: %v", err)
+	}
+	for _, want := range []string{`"thought":true`, `"text":"think"`, `"thoughtSignature":"sig_1"`} {
+		if !strings.Contains(string(gemini), want) {
+			t.Fatalf("Anthropic thinking signature missing from Gemini response, missing %s:\n%s", want, gemini)
+		}
+	}
+}
+
+func TestResponsesReasoningEncryptedContentSurvivesResponseConversions(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"model":"gpt-5",
+		"output":[
+			{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"enc_1"},
+			{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}
+		],
+		"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}
+	}`)
+
+	chat, err := convert.ConvertResponse(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> Chat: %v", err)
+	}
+	for _, want := range []string{`"reasoning_content":"think"`, `"encrypted_content":"enc_1"`, `"data":"enc_1"`} {
+		if !strings.Contains(string(chat), want) {
+			t.Fatalf("Responses encrypted reasoning missing from Chat response, missing %s:\n%s", want, chat)
+		}
+	}
+
+	gemini, err := convert.ConvertResponse(convert.FormatOpenAIResponses, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Responses -> Gemini: %v", err)
+	}
+	if !strings.Contains(string(gemini), `"thoughtSignature":"enc_1"`) {
+		t.Fatalf("Responses encrypted reasoning missing from Gemini response:\n%s", gemini)
+	}
+
+	anthropic, err := convert.ConvertResponse(convert.FormatOpenAIResponses, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("Responses -> Anthropic: %v", err)
+	}
+	if !strings.Contains(string(anthropic), `"type":"redacted_thinking"`) || !strings.Contains(string(anthropic), `"data":"enc_1"`) {
+		t.Fatalf("Responses encrypted reasoning missing from Anthropic redacted thinking:\n%s", anthropic)
+	}
+}
+
+func TestReasoningConfigMapsToNativeThinkingConfigs(t *testing.T) {
+	chatBody := []byte(`{"model":"model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
+	gemini, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatGemini, chatBody)
+	if err != nil {
+		t.Fatalf("Chat -> Gemini: %v", err)
+	}
+	if !strings.Contains(string(gemini), `"thinkingLevel":"HIGH"`) || !strings.Contains(string(gemini), `"includeThoughts":true`) {
+		t.Fatalf("OpenAI reasoning_effort not mapped to Gemini thinkingConfig:\n%s", gemini)
+	}
+	anthropic, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic, chatBody)
+	if err != nil {
+		t.Fatalf("Chat -> Anthropic: %v", err)
+	}
+	if !strings.Contains(string(anthropic), `"thinking":{"type":"enabled"}`) {
+		t.Fatalf("OpenAI reasoning_effort not mapped to Anthropic thinking:\n%s", anthropic)
+	}
+
+	responsesBody := []byte(`{"model":"model","input":"hi","reasoning":{"max_tokens":8192}}`)
+	anthropic, err = convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatAnthropic, responsesBody)
+	if err != nil {
+		t.Fatalf("Responses -> Anthropic: %v", err)
+	}
+	if !strings.Contains(string(anthropic), `"budget_tokens":8192`) {
+		t.Fatalf("Responses reasoning max_tokens not mapped to Anthropic thinking budget:\n%s", anthropic)
+	}
+}
+
+func findObjectByType(items []interface{}, typ string) map[string]interface{} {
+	for _, item := range items {
+		obj, _ := item.(map[string]interface{})
+		if obj["type"] == typ {
+			return obj
+		}
+	}
+	return nil
+}
+
+func findObjectWithKey(items []interface{}, key string) map[string]interface{} {
+	for _, item := range items {
+		obj, _ := item.(map[string]interface{})
+		if _, ok := obj[key]; ok {
+			return obj
+		}
+	}
+	return nil
 }
 
 func containsJSONKey(v interface{}, key string) bool {

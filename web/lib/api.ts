@@ -128,6 +128,54 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 }
 
+async function rawBlobRequest(path: string, options: RequestOptions = {}): Promise<Blob> {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (options.token) {
+    headers.set("Authorization", `Bearer ${options.token}`);
+  }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") || "";
+    let message = response.statusText || "Request failed";
+    if (contentType.toLowerCase().includes("application/json")) {
+      const payload = (await response.json().catch(() => null)) as ApiEnvelope<unknown> | null;
+      message = payload?.message || message;
+    } else {
+      const body = await response.text().catch(() => "");
+      if (body) message = body.slice(0, 160);
+    }
+    const error = new Error(message);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
+  }
+  return response.blob();
+}
+
+async function requestBlob(path: string, options: RequestOptions = {}): Promise<Blob> {
+  try {
+    return await rawBlobRequest(path, options);
+  } catch (error) {
+    const status = (error as Error & { status?: number }).status;
+    const scope = tokenScope(options.token);
+    if (status !== 401 || options.skipAuthRefresh || !scope) {
+      throw error;
+    }
+    const accessToken = await refreshStoredAuth(scope);
+    if (!accessToken) {
+      throw error;
+    }
+    return rawBlobRequest(path, { ...options, token: accessToken, skipAuthRefresh: true });
+  }
+}
+
 async function uploadForm<T>(path: string, token: string, body: FormData): Promise<T> {
   const headers = new Headers();
   headers.set("Authorization", `Bearer ${token}`);
@@ -275,6 +323,8 @@ export const adminApi = {
     request<PaginatedResponse<AuditLogEntry>>(`/api/admin/audit-logs?page=${page}&limit=${limit}`, { token }),
   settings: (token: string) => request<AdminSettings>("/api/admin/settings", { token }),
   updateSettings: (token: string, body: Partial<AdminSettings>) => request<AdminSettings>("/api/admin/settings", { method: "PUT", token, body }),
+  exportSettings: (token: string, password: string) => requestBlob("/api/admin/settings/export", { method: "POST", token, body: { password } }),
+  exportUsers: (token: string, password: string) => requestBlob("/api/admin/users/export", { method: "POST", token, body: { password } }),
   uploadWallpaper: (token: string, file: File) => {
     const body = new FormData();
     body.set("file", file);

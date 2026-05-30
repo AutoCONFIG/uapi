@@ -230,11 +230,13 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/admin/audit-logs", s.handleAdminAuth(s.adminHandler.ListAuditLogs))
 	r.GET("/api/admin/settings", s.handleAdminAuth(s.adminHandler.HandleSettings))
 	r.PUT("/api/admin/settings", s.handleAdminAuth(s.adminHandler.HandleSettings))
+	r.POST("/api/admin/settings/export", s.handleAdminAuth(s.adminHandler.HandleSettingsExport))
 	r.POST("/api/admin/settings/wallpaper", s.handleAdminAuth(s.adminHandler.HandleWallpaperUpload))
 	r.GET("/api/admin/redeem-codes", s.handleAdminAuth(s.adminHandler.HandleRedeemCodes))
 	r.POST("/api/admin/redeem-codes", s.handleAdminAuth(s.adminHandler.HandleRedeemCodes))
 	r.DELETE("/api/admin/redeem-codes", s.handleAdminAuth(s.adminHandler.HandleRedeemCodes))
 	r.GET("/api/admin/users", s.handleAdminAuth(s.adminHandler.ListUsers))
+	r.POST("/api/admin/users/export", s.handleAdminAuth(s.adminHandler.HandleUsersExport))
 	r.PUT("/api/admin/users", s.handleAdminAuth(s.adminHandler.UpdateUser))
 	r.DELETE("/api/admin/users", s.handleAdminAuth(s.adminHandler.DeleteUser))
 

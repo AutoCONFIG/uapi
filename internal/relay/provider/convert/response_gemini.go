@@ -38,6 +38,12 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 			ir.Usage.TotalTokens = ir.Usage.PromptTokens + ir.Usage.CompletionTokens
 		}
 		ir.Usage.CacheReadInputTokens = resp.UsageMetadata.CachedContentTokenCount
+		if resp.UsageMetadata.ThoughtsTokenCount > 0 {
+			if ir.Usage.CompletionTokensDetails == nil {
+				ir.Usage.CompletionTokensDetails = map[string]interface{}{}
+			}
+			ir.Usage.CompletionTokensDetails["reasoning_tokens"] = resp.UsageMetadata.ThoughtsTokenCount
+		}
 	}
 
 	// Convert candidates to choices
@@ -54,9 +60,14 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 			for _, part := range cand.Content.Parts {
 				switch {
 				case part.Text != "" && part.Thought:
+					extra := map[string]json.RawMessage{}
+					if part.ThoughtSignature != "" {
+						extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
+					}
 					choice.ReasoningContent = append(choice.ReasoningContent, schema.ContentPart{
-						Type: "text",
-						Text: part.Text,
+						Type:  "thinking",
+						Text:  part.Text,
+						Extra: extra,
 					})
 				case part.Text != "":
 					choice.Content = append(choice.Content, schema.ContentPart{
@@ -84,6 +95,10 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 					})
 				case part.FunctionResponse != nil:
 					// FunctionResponse is handled in the next turn
+				case part.ThoughtSignature != "":
+					choice.ReasoningContent = append(choice.ReasoningContent, reasoningPartWithExtra("", map[string]json.RawMessage{
+						reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
+					}))
 				}
 			}
 		}
@@ -143,8 +158,24 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 		}
 
 		// Convert content to parts
-		if len(choice.Content) > 0 || len(choice.ToolCalls) > 0 {
+		if len(choice.ReasoningContent) > 0 || len(choice.Content) > 0 || len(choice.ToolCalls) > 0 {
 			parts := make([]map[string]interface{}, 0)
+
+			for _, rc := range choice.ReasoningContent {
+				sig := reasoningOpaqueSignature([]schema.ContentPart{rc})
+				if rc.Text == "" && sig == "" {
+					continue
+				}
+				part := map[string]interface{}{}
+				if rc.Text != "" {
+					part["text"] = rc.Text
+					part["thought"] = true
+				}
+				if sig != "" {
+					part["thoughtSignature"] = sig
+				}
+				parts = append(parts, part)
+			}
 
 			for _, c := range choice.Content {
 				part := map[string]interface{}{"type": c.Type}
@@ -187,7 +218,7 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 				parts = append(parts, map[string]interface{}{
 					"functionCall": map[string]interface{}{
 						"name": tc.Name,
-						"args": tc.Function.Arguments,
+						"args": jsonArgumentValue(tc.Function.Arguments),
 					},
 				})
 			}
@@ -208,6 +239,9 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 			"promptTokenCount":     ir.Usage.PromptTokens,
 			"candidatesTokenCount": ir.Usage.CompletionTokens,
 			"totalTokenCount":      ir.Usage.TotalTokens,
+		}
+		if reasoningTokens := usageDetailInt(ir.Usage.CompletionTokensDetails, "reasoning_tokens"); reasoningTokens > 0 {
+			usage["thoughtsTokenCount"] = reasoningTokens
 		}
 		if ir.Usage.CacheCreationInputTokens > 0 {
 			usage["cachedContentTokenCount"] = ir.Usage.CacheCreationInputTokens

@@ -458,7 +458,7 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 		return nil, errors.New("plan not found")
 	}
 
-	windows, err := s.subscriptionWindows(userID, plan.PolicyID)
+	windows, err := s.subscriptionWindows(userID, plan.PolicyID, tokenPlan.StartsAt)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +569,7 @@ func (s *Service) activePolicyAllowedModelSet(userID string) (map[string]struct{
 	return csvSet(policy.AllowedModels), nil
 }
 
-func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]SubscriptionWindow, error) {
+func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID, planStartsAt time.Time) ([]SubscriptionWindow, error) {
 	if policyID == nil || *policyID == uuid.Nil {
 		return []SubscriptionWindow{}, nil
 	}
@@ -581,15 +581,18 @@ func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]Sub
 		return nil, err
 	}
 	now := time.Now().UTC()
+	fiveHourStart := s.rollingFiveHourStart(*policyID, userID, now)
+	weekStart := currentWeekFromPlanStart(planStartsAt, now)
+	monthStart := currentMonthFromPlanStart(planStartsAt, now)
 	specs := []struct {
 		name  string
 		limit int
 		start time.Time
 		end   time.Time
 	}{
-		{name: "hour", limit: policy.HourlyLimit, start: currentFiveHour(now), end: currentFiveHour(now).Add(5 * time.Hour)},
-		{name: "week", limit: policy.WeeklyLimit, start: currentWeek(now), end: currentWeek(now).AddDate(0, 0, 7)},
-		{name: "month", limit: policy.MonthlyLimit, start: currentMonth(now), end: currentMonth(now).AddDate(0, 1, 0)},
+		{name: "hour", limit: policy.HourlyLimit, start: fiveHourStart, end: fiveHourStart.Add(5 * time.Hour)},
+		{name: "week", limit: policy.WeeklyLimit, start: weekStart, end: weekStart.Add(7 * 24 * time.Hour)},
+		{name: "month", limit: policy.MonthlyLimit, start: monthStart, end: monthStart.Add(30 * 24 * time.Hour)},
 	}
 	windows := make([]SubscriptionWindow, 0, len(specs))
 	for _, spec := range specs {
@@ -617,20 +620,33 @@ func (s *Service) subscriptionWindows(userID string, policyID *uuid.UUID) ([]Sub
 	return windows, nil
 }
 
-func currentFiveHour(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), now.Day(), now.Hour()/5*5, 0, 0, 0, time.UTC)
-}
-
-func currentWeek(now time.Time) time.Time {
-	weekday := int(now.Weekday())
-	if weekday == 0 {
-		weekday = 7
+func (s *Service) rollingFiveHourStart(policyID uuid.UUID, userID string, now time.Time) time.Time {
+	var usage db.PolicyUsageWindow
+	err := s.db.Where("policy_id = ? AND user_id = ? AND window_type = ? AND window_start <= ?", policyID, userID, "hour", now).
+		Order("window_start DESC").
+		First(&usage).Error
+	if err == nil && now.Before(usage.WindowStart.UTC().Add(5*time.Hour)) {
+		return usage.WindowStart.UTC()
 	}
-	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(weekday - 1))
+	return now
 }
 
-func currentMonth(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+func currentWeekFromPlanStart(planStartsAt time.Time, now time.Time) time.Time {
+	start := planStartsAt.UTC()
+	if start.IsZero() || now.Before(start) {
+		return now
+	}
+	elapsed := now.Sub(start)
+	return start.Add(time.Duration(int64(elapsed/(7*24*time.Hour))) * 7 * 24 * time.Hour)
+}
+
+func currentMonthFromPlanStart(planStartsAt time.Time, now time.Time) time.Time {
+	start := planStartsAt.UTC()
+	if start.IsZero() || now.Before(start) {
+		return now
+	}
+	elapsed := now.Sub(start)
+	return start.Add(time.Duration(int64(elapsed/(30*24*time.Hour))) * 30 * 24 * time.Hour)
 }
 
 func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error) {

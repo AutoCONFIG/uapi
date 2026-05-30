@@ -156,7 +156,8 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	request, _ := body["request"].(map[string]interface{})
 	if request != nil {
 		request["sessionId"] = stableSessionID(vertexReq)
-		if _, ok := request["toolConfig"]; ok && strings.Contains(model, "claude") {
+		hasFunctionDeclarations := normalizeAntigravityTools(request)
+		if hasFunctionDeclarations || (strings.Contains(model, "claude") && request["toolConfig"] != nil) {
 			ensureFunctionCallingValidated(request)
 		}
 		if !strings.Contains(model, "claude") {
@@ -331,6 +332,172 @@ func estimateAntigravityTokens(req *provider.InternalRequest) int {
 	return tokens
 }
 
+func normalizeAntigravityTools(request map[string]interface{}) bool {
+	tools, ok := request["tools"].([]interface{})
+	if !ok {
+		return false
+	}
+	hasFunctionDeclarations := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if snakeDecls, ok := tool["function_declarations"]; ok {
+			if _, exists := tool["functionDeclarations"]; !exists {
+				tool["functionDeclarations"] = snakeDecls
+			}
+			delete(tool, "function_declarations")
+		}
+		rawDecls, ok := tool["functionDeclarations"].([]interface{})
+		if !ok {
+			continue
+		}
+		decls := make([]interface{}, 0, len(rawDecls))
+		for _, rawDecl := range rawDecls {
+			decl, ok := rawDecl.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := decl["name"].(string)
+			if strings.TrimSpace(name) == "" {
+				continue
+			}
+			normalizeAntigravityFunctionDeclaration(decl)
+			decls = append(decls, decl)
+		}
+		if len(decls) == 0 {
+			delete(tool, "functionDeclarations")
+			continue
+		}
+		tool["functionDeclarations"] = decls
+		hasFunctionDeclarations = true
+	}
+	return hasFunctionDeclarations
+}
+
+func normalizeAntigravityFunctionDeclaration(decl map[string]interface{}) {
+	for _, key := range []string{"format", "strict", "additionalProperties", "type", "external_web_access"} {
+		delete(decl, key)
+	}
+	params, hasParams := decl["parameters"]
+	if !hasParams || params == nil {
+		if jsonSchema, ok := decl["parametersJsonSchema"]; ok && jsonSchema != nil {
+			params = jsonSchema
+			hasParams = true
+		}
+	}
+	delete(decl, "parametersJsonSchema")
+	if !hasParams || params == nil {
+		params = map[string]interface{}{
+			"type":       "OBJECT",
+			"properties": map[string]interface{}{},
+		}
+	}
+	params = normalizeAntigravitySchemaValue(params, true)
+	if paramsMap, ok := params.(map[string]interface{}); ok {
+		if _, ok := paramsMap["type"]; !ok {
+			paramsMap["type"] = "OBJECT"
+		}
+		if _, ok := paramsMap["properties"]; !ok {
+			paramsMap["properties"] = map[string]interface{}{}
+		}
+	}
+	decl["parameters"] = params
+}
+
+func normalizeAntigravitySchemaValue(value interface{}, root bool) interface{} {
+	switch v := value.(type) {
+	case json.RawMessage:
+		var decoded interface{}
+		if err := provider.DecodeJSONUseNumber(v, &decoded); err == nil {
+			return normalizeAntigravitySchemaValue(decoded, root)
+		}
+		return map[string]interface{}{"type": "OBJECT", "properties": map[string]interface{}{}}
+	case map[string]interface{}:
+		for _, key := range []string{
+			"$schema",
+			"$id",
+			"$defs",
+			"definitions",
+			"title",
+			"default",
+			"examples",
+			"format",
+			"additionalProperties",
+			"external_web_access",
+		} {
+			delete(v, key)
+		}
+		if rawType, ok := v["type"]; ok {
+			if normalized, keep := normalizeAntigravitySchemaType(rawType); keep {
+				v["type"] = normalized
+			} else {
+				delete(v, "type")
+			}
+		}
+		for _, key := range []string{"properties", "patternProperties"} {
+			rawProperties, ok := v[key].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for prop, rawValue := range rawProperties {
+				rawProperties[prop] = normalizeAntigravitySchemaValue(rawValue, false)
+			}
+			if key == "patternProperties" {
+				delete(v, key)
+			}
+		}
+		if rawItems, ok := v["items"]; ok {
+			v["items"] = normalizeAntigravitySchemaValue(rawItems, false)
+		}
+		for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+			rawList, ok := v[key].([]interface{})
+			if !ok {
+				continue
+			}
+			for i, rawItem := range rawList {
+				rawList[i] = normalizeAntigravitySchemaValue(rawItem, false)
+			}
+		}
+		if root {
+			if _, ok := v["type"]; !ok {
+				v["type"] = "OBJECT"
+			}
+		}
+		return v
+	case []interface{}:
+		for i, rawItem := range v {
+			v[i] = normalizeAntigravitySchemaValue(rawItem, false)
+		}
+		return v
+	default:
+		return value
+	}
+}
+
+func normalizeAntigravitySchemaType(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" || strings.EqualFold(v, "null") {
+			return "", false
+		}
+		return strings.ToUpper(v), true
+	case []interface{}:
+		for _, raw := range v {
+			s, ok := raw.(string)
+			if !ok || strings.EqualFold(strings.TrimSpace(s), "null") {
+				continue
+			}
+			return strings.ToUpper(strings.TrimSpace(s)), true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
 func (a *AntigravityAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	usage, err := a.ParseUsageFull(respBody)
 	return usage.PromptTokens, usage.CompletionTokens, err
@@ -421,12 +588,19 @@ func stableSessionID(req map[string]interface{}) string {
 func ensureFunctionCallingValidated(request map[string]interface{}) {
 	toolConfig, _ := request["toolConfig"].(map[string]interface{})
 	if toolConfig == nil {
-		return
+		toolConfig = map[string]interface{}{}
+		request["toolConfig"] = toolConfig
 	}
 	fcc, _ := toolConfig["functionCallingConfig"].(map[string]interface{})
 	if fcc == nil {
 		fcc = map[string]interface{}{}
 		toolConfig["functionCallingConfig"] = fcc
+	}
+	mode, _ := fcc["mode"].(string)
+	switch strings.ToUpper(strings.TrimSpace(mode)) {
+	case "", "AUTO", "MODE_UNSPECIFIED":
+	default:
+		return
 	}
 	fcc["mode"] = "VALIDATED"
 }

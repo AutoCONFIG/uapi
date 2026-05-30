@@ -71,6 +71,7 @@ type InternalRequest struct {
 
 type InternalMessage struct {
 	Role             string
+	Parts            []InternalContentItem
 	Content          []InternalContentPart
 	ToolCalls        []InternalToolCall
 	ToolResult       *InternalToolResult
@@ -78,11 +79,21 @@ type InternalMessage struct {
 	Name             string                // for named messages
 }
 
+type InternalContentItem struct {
+	Kind       string
+	Content    InternalContentPart
+	ToolCall   InternalToolCall
+	ToolResult InternalToolResult
+	Raw        json.RawMessage
+}
+
 type InternalContentPart struct {
 	Type        string // text, image_url, refusal, reasoning, thinking
 	Text        string
 	ImageURL    *string
 	ImageDetail string
+	Data        string
+	MimeType    string
 	Refusal     string                 // OpenAI Chat Completions API refusal content
 	Extra       map[string]interface{} // Unknown keys (e.g. cache_control) for lossless round-tripping
 }

@@ -455,6 +455,19 @@ func TestStreamToNonStreamPreservesLengthFinishWithToolCalls(t *testing.T) {
 	}
 }
 
+func TestStreamToNonStreamPreservesReasoningDetails(t *testing.T) {
+	body := []byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"think","reasoning_details":[{"index":0,"type":"reasoning.text","text":"think"}]},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"reasoning_details":[{"index":1,"type":"reasoning.encrypted","data":"enc_1","encrypted_content":"enc_1"}]},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]}` + "\n\n")
+	out := StreamToNonStream(body)
+	got := string(out)
+	for _, want := range []string{`"reasoning_content":"think"`, `"reasoning_details"`, `"data":"enc_1"`, `"content":"answer"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream-to-non-stream lost reasoning detail %s: %s", want, got)
+		}
+	}
+}
+
 func TestStreamAndForwardConvertedPreservesEventNameForConverter(t *testing.T) {
 	body := "event: response.failed\n" +
 		"data: {\"response\":{\"error\":{\"message\":\"failed\"}}}\n\n"

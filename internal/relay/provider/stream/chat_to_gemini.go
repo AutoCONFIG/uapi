@@ -75,9 +75,12 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 
 	// Parse delta
 	var deltaData struct {
-		Role      string `json:"role"`
-		Content   string `json:"content"`
-		ToolCalls []struct {
+		Role             string          `json:"role"`
+		Content          string          `json:"content"`
+		ReasoningContent string          `json:"reasoning_content"`
+		Reasoning        string          `json:"reasoning"`
+		ReasoningDetails json.RawMessage `json:"reasoning_details"`
+		ToolCalls        []struct {
 			Index    int    `json:"index"`
 			ID       string `json:"id"`
 			Type     string `json:"type"`
@@ -103,6 +106,34 @@ func (c *chatToGeminiConverter) Convert(line []byte) []byte {
 			c.state.model = event.Model
 		}
 		return geminiStreamEvent(deltaData.Content, "NOT_STARTED")
+
+	case deltaData.ReasoningContent != "" || deltaData.Reasoning != "" || len(deltaData.ReasoningDetails) > 0:
+		if c.state.model == "" {
+			c.state.model = event.Model
+		}
+		if details := parseChatReasoningDetails(deltaData.ReasoningDetails); len(details) > 0 {
+			var out []byte
+			for _, detail := range details {
+				text := reasoningDetailText(detail)
+				sig := reasoningDetailEncrypted(detail)
+				if sig == "" {
+					sig = reasoningDetailSignature(detail)
+				}
+				if text != "" {
+					out = append(out, geminiThoughtStreamEvent(text, sig, "NOT_STARTED")...)
+					continue
+				}
+				if sig != "" {
+					out = append(out, geminiThoughtSignatureStreamEvent(sig, "NOT_STARTED")...)
+				}
+			}
+			return out
+		}
+		text := deltaData.ReasoningContent
+		if text == "" {
+			text = deltaData.Reasoning
+		}
+		return geminiThoughtStreamEvent(text, "", "NOT_STARTED")
 
 	// Tool call start
 	case len(deltaData.ToolCalls) > 0:
@@ -214,6 +245,38 @@ func geminiStreamEvent(text string, finishReason string) []byte {
 				"content": map[string]interface{}{
 					"role":  "model",
 					"parts": []interface{}{map[string]interface{}{"text": text}},
+				},
+				"finishReason": finishReason,
+			},
+		},
+	})
+}
+
+func geminiThoughtStreamEvent(text string, thoughtSignature string, finishReason string) []byte {
+	part := map[string]interface{}{"text": text, "thought": true}
+	if thoughtSignature != "" {
+		part["thoughtSignature"] = thoughtSignature
+	}
+	return sseJSON(map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []interface{}{part},
+				},
+				"finishReason": finishReason,
+			},
+		},
+	})
+}
+
+func geminiThoughtSignatureStreamEvent(thoughtSignature string, finishReason string) []byte {
+	return sseJSON(map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []interface{}{map[string]interface{}{"thoughtSignature": thoughtSignature}},
 				},
 				"finishReason": finishReason,
 			},

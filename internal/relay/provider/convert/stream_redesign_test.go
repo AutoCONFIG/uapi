@@ -215,6 +215,62 @@ func TestGeminiStreamConverterHandlesCodeAssistResponseWrapper(t *testing.T) {
 	}
 }
 
+func TestDirectGeminiToAnthropicStreamPreservesThoughtSignature(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatGemini, convert.FormatAnthropic)
+	if converter == nil {
+		t.Fatalf("missing chained gemini -> anthropic converter")
+	}
+	out := converter.Convert([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true,"thoughtSignature":"sig_1"}]},"finishReason":"NOT_STARTED"}]}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"type":"thinking_delta"`, `"thinking":"think"`, `"type":"signature_delta"`, `"signature":"sig_1"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Gemini thought signature not preserved into Anthropic stream, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatGemini)
+	if converter == nil {
+		t.Fatalf("missing chained anthropic -> gemini converter")
+	}
+	_ = converter.Convert([]byte(`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude"}}` + "\n\n"))
+	thinking := converter.Convert([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}` + "\n\n"))
+	signature := converter.Convert([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_1"}}` + "\n\n"))
+	got := string(thinking) + string(signature)
+	for _, want := range []string{`"thought":true`, `"text":"think"`, `"thoughtSignature":"sig_1"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Anthropic signature not preserved into Gemini stream, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestDirectResponsesToGeminiStreamPreservesEncryptedReasoning(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatGemini)
+	if converter == nil {
+		t.Fatalf("missing chained responses -> gemini converter")
+	}
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"enc_1","summary":[]}}` + "\n\n"))
+	if !strings.Contains(string(out), `"thoughtSignature":"enc_1"`) {
+		t.Fatalf("Responses encrypted reasoning not preserved into Gemini thoughtSignature:\n%s", out)
+	}
+}
+
+func TestChatToResponsesUsesDistinctOutputIndexesForReasoningAndText(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+	reasoning := converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"gpt-5","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}` + "\n\n"))
+	text := converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"gpt-5","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}` + "\n\n"))
+	got := string(reasoning) + string(text)
+	if !strings.Contains(got, `"type":"reasoning"`) || !strings.Contains(got, `"output_index":0`) {
+		t.Fatalf("reasoning item missing output_index 0:\n%s", got)
+	}
+	if !strings.Contains(got, `"type":"message"`) || !strings.Contains(got, `"output_index":1`) {
+		t.Fatalf("message item should use output_index 1 after reasoning:\n%s", got)
+	}
+}
+
 func firstSSEPayload(t *testing.T, event []byte) string {
 	t.Helper()
 	for _, line := range strings.Split(string(event), "\n") {

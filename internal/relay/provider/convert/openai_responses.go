@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
@@ -13,6 +14,8 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
 	}
+	var rawRoot map[string]json.RawMessage
+	_ = json.Unmarshal(body, &rawRoot)
 
 	ir := &InternalRequest{
 		Model:        req.Model,
@@ -25,6 +28,19 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	for k, v := range req.Extra {
 		ir.Extra[k] = v
 	}
+	copyRawFields(ir.Extra, rawRoot,
+		"truncation",
+		"stream_options",
+		"metadata",
+		"user",
+		"previous_response_id",
+		"include",
+		"text",
+		"max_tool_calls",
+		"conversation",
+		"prompt_cache_key",
+		"safety_identifier",
+	)
 
 	// Handle Instructions - always set (the bug fix)
 	if req.Instructions != "" {
@@ -49,6 +65,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 
 	// Convert input items to InternalMessages
 	for _, item := range inputItems {
+		rawItem := append(json.RawMessage(nil), item.Raw...)
 		switch item.Type {
 		case "message":
 			var content []schema.ContentPart
@@ -60,6 +77,21 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 			messages = append(messages, InternalMessage{
 				Role:    item.Role,
 				Content: content,
+				ItemID:  item.ID,
+				Status:  item.Status,
+				Phase:   item.Phase,
+				RawItem: rawItem,
+				Extra:   item.Extra,
+			})
+
+		case "reasoning":
+			messages = append(messages, InternalMessage{
+				Role:             "assistant",
+				ReasoningContent: reasoningPartsFromResponsesExtra(item.Extra),
+				ItemID:           item.ID,
+				Status:           item.Status,
+				RawItem:          rawItem,
+				Extra:            item.Extra,
 			})
 
 		case "function_call":
@@ -78,6 +110,10 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 						Arguments: item.Arguments,
 					},
 				}},
+				ItemID:  item.ID,
+				Status:  item.Status,
+				RawItem: rawItem,
+				Extra:   item.Extra,
 			})
 
 		case "function_call_output":
@@ -88,6 +124,18 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 					ToolCallID: item.CallID,
 					Content:    item.Output,
 				},
+				ItemID:  item.ID,
+				Status:  item.Status,
+				RawItem: rawItem,
+				Extra:   item.Extra,
+			})
+		default:
+			messages = append(messages, InternalMessage{
+				ItemID:  item.ID,
+				Status:  item.Status,
+				Phase:   item.Phase,
+				RawItem: rawItem,
+				Extra:   item.Extra,
 			})
 		}
 	}
@@ -104,13 +152,17 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	if req.TopP != nil {
 		ir.TopP = req.TopP
 	}
-	if req.ParallelToolCalls {
+	if _, ok := rawRoot["parallel_tool_calls"]; ok {
+		ir.ParallelToolCalls = &req.ParallelToolCalls
+	} else if req.ParallelToolCalls {
 		ir.ParallelToolCalls = &req.ParallelToolCalls
 	}
 	if req.ServiceTier != "" {
 		ir.ServiceTier = req.ServiceTier
 	}
-	if req.Store {
+	if _, ok := rawRoot["store"]; ok {
+		ir.Store = &req.Store
+	} else if req.Store {
 		ir.Store = &req.Store
 	}
 	if req.Reasoning != nil {
@@ -150,39 +202,79 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 	// Convert messages to input array
 	input := make([]map[string]interface{}, 0)
 	for _, msg := range ir.Messages {
+		if ir.SourceFormat == FormatOpenAIResponses && len(msg.RawItem) > 0 {
+			var raw map[string]interface{}
+			if err := json.Unmarshal(msg.RawItem, &raw); err == nil {
+				input = append(input, raw)
+				continue
+			}
+		}
+
+		if len(msg.ReasoningContent) > 0 {
+			reasoning := map[string]interface{}{
+				"type":    "reasoning",
+				"id":      generateResponsesReasoningID(),
+				"summary": responsesReasoningSummary(msg.ReasoningContent),
+			}
+			if msg.ItemID != "" {
+				reasoning["id"] = msg.ItemID
+			}
+			if msg.Status != "" {
+				reasoning["status"] = msg.Status
+			}
+			if encrypted := reasoningEncryptedContent(msg.ReasoningContent); encrypted != "" {
+				reasoning["encrypted_content"] = encrypted
+			}
+			input = append(input, reasoning)
+		}
+
 		switch msg.Role {
 		case "user", "assistant":
-			// Build content
-			var content interface{}
-			if len(msg.Content) == 1 && msg.Content[0].Type == "text" {
-				content = msg.Content[0].Text
-			} else if len(msg.Content) > 0 {
-				parts := make([]map[string]string, 0, len(msg.Content))
-				for _, p := range msg.Content {
-					part := map[string]string{"type": p.Type}
-					if p.Text != "" {
-						part["text"] = p.Text
-					}
-					if p.ImageURL != nil {
-						part["image_url"] = *p.ImageURL
-					}
-					parts = append(parts, part)
-				}
-				content = parts
+			if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
+				continue
 			}
-
-			input = append(input, map[string]interface{}{
-				"type":    "message",
-				"role":    msg.Role,
-				"content": content,
-			})
+			if len(msg.Content) > 0 {
+				item := map[string]interface{}{
+					"type":    "message",
+					"role":    msg.Role,
+					"content": responsesMessageContent(msg),
+				}
+				if msg.ItemID != "" {
+					item["id"] = msg.ItemID
+				}
+				if msg.Status != "" {
+					item["status"] = msg.Status
+				}
+				if msg.Phase != "" {
+					item["phase"] = msg.Phase
+				}
+				for k, v := range msg.Extra {
+					item[k] = v
+				}
+				input = append(input, item)
+			}
+			for _, tc := range msg.ToolCalls {
+				name := tc.Name
+				if name == "" {
+					name = tc.Function.Name
+				}
+				input = append(input, map[string]interface{}{
+					"type":      "function_call",
+					"call_id":   tc.ID,
+					"name":      name,
+					"arguments": tc.Function.Arguments,
+				})
+			}
 
 		case "tool":
 			// Tool result becomes function_call_output
+			if msg.ToolResult == nil {
+				continue
+			}
 			input = append(input, map[string]interface{}{
-				"type":   "function_call_output",
+				"type":    "function_call_output",
 				"call_id": msg.ToolResult.ToolCallID,
-				"output": msg.ToolResult.Content,
+				"output":  msg.ToolResult.Content,
 			})
 		}
 	}
@@ -225,6 +317,79 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func generateResponsesReasoningID() string {
+	return fmt.Sprintf("rs_%x", time.Now().UnixNano())
+}
+
+func copyRawFields(dst map[string]json.RawMessage, src map[string]json.RawMessage, keys ...string) {
+	if dst == nil || src == nil {
+		return
+	}
+	for _, key := range keys {
+		if raw, ok := src[key]; ok {
+			dst[key] = append(json.RawMessage(nil), raw...)
+		}
+	}
+}
+
+func responsesMessageContent(msg InternalMessage) interface{} {
+	if len(msg.Content) == 1 && msg.Role != "assistant" {
+		part := msg.Content[0]
+		if (part.Type == "text" || part.Type == "input_text") && len(part.Extra) == 0 {
+			return part.Text
+		}
+	}
+
+	parts := make([]map[string]interface{}, 0, len(msg.Content))
+	for _, part := range msg.Content {
+		parts = append(parts, responsesContentPartMap(msg.Role, part))
+	}
+	return parts
+}
+
+func responsesContentPartMap(role string, part schema.ContentPart) map[string]interface{} {
+	out := make(map[string]interface{}, len(part.Extra)+6)
+	for key, value := range part.Extra {
+		out[key] = value
+	}
+
+	partType := part.Type
+	switch partType {
+	case "text":
+		if role == "assistant" {
+			partType = "output_text"
+		} else {
+			partType = "input_text"
+		}
+	case "image_url":
+		partType = "input_image"
+	case "file":
+		partType = "input_file"
+	}
+	if partType != "" {
+		out["type"] = partType
+	}
+	if part.Text != "" {
+		out["text"] = part.Text
+	}
+	if part.ImageURL != nil {
+		out["image_url"] = *part.ImageURL
+	}
+	if part.ImageDetail != "" {
+		out["detail"] = part.ImageDetail
+	}
+	if part.Data != "" {
+		out["data"] = part.Data
+	}
+	if part.MimeType != "" {
+		out["mime_type"] = part.MimeType
+	}
+	if part.Refusal != "" {
+		out["refusal"] = part.Refusal
+	}
+	return out
 }
 
 func init() {

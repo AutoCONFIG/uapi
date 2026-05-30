@@ -134,7 +134,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 		// If turn never completed (e.g., client disconnect), refund billing
 		if !ts.isDone() {
-			h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		}
 	}()
 
@@ -176,7 +176,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 		if IsFailureTerminalEvent(envelope.Type) {
 			ts.markDone()
-			h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
 			return
 		}

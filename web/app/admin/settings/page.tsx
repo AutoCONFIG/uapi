@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Save } from "lucide-react";
+import { Download, Save } from "lucide-react";
 import { AppShell, PageHead } from "@/components/shell";
 import { adminApi } from "@/lib/api";
 import type { AdminSettings } from "@/types/api";
@@ -41,6 +41,8 @@ export default function AdminSettingsPage() {
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportingUsers, setExportingUsers] = useState(false);
 
   useEffect(() => {
     const token = window.localStorage.getItem("uapi.admin.token");
@@ -107,6 +109,58 @@ export default function AdminSettingsPage() {
       setMessage(err instanceof Error ? err.message : "上传失败");
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function exportSettings() {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    const password = window.prompt("请输入管理员密码以导出配置");
+    if (!password) return;
+    setExporting(true);
+    setMessage("");
+    try {
+      const blob = await adminApi.exportSettings(token, password);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      link.href = url;
+      link.download = `uapi-settings-${stamp}.yaml`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setMessage("配置快照已导出");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function exportUsers() {
+    const token = window.localStorage.getItem("uapi.admin.token");
+    if (!token) return;
+    const password = window.prompt("请输入管理员密码以导出用户数据");
+    if (!password) return;
+    setExportingUsers(true);
+    setMessage("");
+    try {
+      const blob = await adminApi.exportUsers(token, password);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      link.href = url;
+      link.download = `uapi-users-${stamp}.yaml`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setMessage("用户数据已导出");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "导出失败");
+    } finally {
+      setExportingUsers(false);
     }
   }
 
@@ -197,7 +251,11 @@ export default function AdminSettingsPage() {
           </div>
           <div className="wallpaper-stage-actions">
             {message ? <p className={message.includes("失败") || message.includes("must") ? "form-error" : "form-success"}>{message}</p> : <span />}
-            <button className="btn primary" disabled={saving} onClick={save} type="button"><Save /> {saving ? "保存中" : "保存设置"}</button>
+            <div className="settings-action-row">
+              <button className="btn" disabled={exporting} onClick={exportSettings} type="button"><Download /> {exporting ? "导出中" : "导出配置"}</button>
+              <button className="btn" disabled={exportingUsers} onClick={exportUsers} type="button"><Download /> {exportingUsers ? "导出中" : "导出用户"}</button>
+              <button className="btn primary" disabled={saving} onClick={save} type="button"><Save /> {saving ? "保存中" : "保存设置"}</button>
+            </div>
           </div>
         </aside>
       </section>

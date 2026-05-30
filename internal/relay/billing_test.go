@@ -32,6 +32,46 @@ func TestApplyModelRatio(t *testing.T) {
 	}
 }
 
+func TestPreConsumeChargeForPlanAppliesModelRatioOnce(t *testing.T) {
+	const ratios = `{"gpt-5":20}`
+	if got := preConsumeChargeForPlan("token_based", 100, "gpt-5", ratios); got != 2000 {
+		t.Fatalf("token pre-consume charge = %d, want 2000", got)
+	}
+	if got := preConsumeChargeForPlan("token_based", 0, "gpt-5", ratios); got != 20 {
+		t.Fatalf("zero estimate token pre-consume charge = %d, want 20", got)
+	}
+	if got := preConsumeChargeForPlan("count_based", 0, "gpt-5", ratios); got != 20 {
+		t.Fatalf("count pre-consume charge = %d, want 20", got)
+	}
+}
+
+func TestSettledDeltaSubtractsRatioAdjustedPreConsume(t *testing.T) {
+	const ratios = `{"gpt-5":20}`
+	preConsumed := preConsumeChargeForPlan("token_based", 100, "gpt-5", ratios)
+	actual := applyModelRatio(100, "gpt-5", ratios)
+	if delta := actual - preConsumed; delta != 0 {
+		t.Fatalf("settlement delta = %d, want 0; successful calls should keep the pre-charge when estimate equals actual", delta)
+	}
+}
+
+func TestPlanAnchoredWeekWindow(t *testing.T) {
+	start := time.Date(2026, 5, 30, 11, 20, 0, 0, time.UTC)
+	now := start.Add(8*24*time.Hour + time.Minute)
+	want := start.Add(7 * 24 * time.Hour)
+	if got := fixedWeekFromPlanStart(start, now); !got.Equal(want) {
+		t.Fatalf("week window start = %s, want %s", got, want)
+	}
+}
+
+func TestPlanAnchoredMonthWindow(t *testing.T) {
+	start := time.Date(2026, 5, 15, 11, 20, 0, 0, time.UTC)
+	now := start.Add(35*24*time.Hour + time.Minute)
+	want := start.Add(30 * 24 * time.Hour)
+	if got := fixedMonthFromPlanStart(start, now); !got.Equal(want) {
+		t.Fatalf("month window start = %s, want %s", got, want)
+	}
+}
+
 func TestBillingPreConsumeBlocksExhaustedCountPlan(t *testing.T) {
 	dsn := os.Getenv("UAPI_TEST_DSN")
 	if dsn == "" {

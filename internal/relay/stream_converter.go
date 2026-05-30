@@ -2,9 +2,22 @@ package relay
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 )
+
+type reasoningDetailAccum struct {
+	typ       string
+	id        string
+	text      strings.Builder
+	summary   strings.Builder
+	signature string
+	data      string
+	encrypted string
+	hasText   bool
+	hasSum    bool
+}
 
 // StreamToNonStream converts a buffered SSE streaming response into a
 // standard non-streaming Chat Completions JSON response.
@@ -16,6 +29,8 @@ func StreamToNonStream(sseBody []byte) []byte {
 func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 	sseBody = normalizeSSEBufferForConversion(sseBody)
 	var contentBuilder strings.Builder
+	var reasoningBuilder strings.Builder
+	reasoningDetails := make(map[int]*reasoningDetailAccum)
 	var toolCalls []map[string]interface{}
 	toolArgsBuilders := make(map[int]*strings.Builder)
 
@@ -94,6 +109,51 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 			contentBuilder.WriteString(content)
 		}
 
+		if rawDetails, ok := delta["reasoning_details"].([]interface{}); ok && len(rawDetails) > 0 {
+			for _, rawDetail := range rawDetails {
+				detail, ok := rawDetail.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				idx := len(reasoningDetails)
+				if v, ok := detail["index"].(float64); ok {
+					idx = int(v)
+				}
+				acc := reasoningDetails[idx]
+				if acc == nil {
+					acc = &reasoningDetailAccum{}
+					reasoningDetails[idx] = acc
+				}
+				if typ, ok := detail["type"].(string); ok && typ != "" {
+					acc.typ = typ
+				}
+				if id, ok := detail["id"].(string); ok && id != "" {
+					acc.id = id
+				}
+				if text, ok := detail["text"].(string); ok && text != "" {
+					acc.text.WriteString(text)
+					acc.hasText = true
+				}
+				if summary, ok := detail["summary"].(string); ok && summary != "" {
+					acc.summary.WriteString(summary)
+					acc.hasSum = true
+				}
+				if signature, ok := detail["signature"].(string); ok && signature != "" {
+					acc.signature = signature
+				}
+				if data, ok := detail["data"].(string); ok && data != "" {
+					acc.data = data
+				}
+				if encrypted, ok := detail["encrypted_content"].(string); ok && encrypted != "" {
+					acc.encrypted = encrypted
+				}
+			}
+		} else if reasoning, ok := delta["reasoning_content"].(string); ok {
+			reasoningBuilder.WriteString(reasoning)
+		} else if reasoning, ok := delta["reasoning"].(string); ok {
+			reasoningBuilder.WriteString(reasoning)
+		}
+
 		// Tool calls delta
 		if tcList, ok := delta["tool_calls"].([]interface{}); ok {
 			for _, tcRaw := range tcList {
@@ -163,6 +223,26 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 		"role":    "assistant",
 		"content": contentBuilder.String(),
 	}
+	if len(reasoningDetails) > 0 {
+		details, reasoning := finalizeStreamReasoningDetails(reasoningDetails)
+		if reasoning != "" {
+			msg["reasoning_content"] = reasoning
+			msg["reasoning"] = reasoning
+		}
+		if len(details) > 0 {
+			msg["reasoning_details"] = details
+		}
+	} else if reasoning := reasoningBuilder.String(); reasoning != "" {
+		msg["reasoning_content"] = reasoning
+		msg["reasoning"] = reasoning
+		msg["reasoning_details"] = []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"type":  "reasoning.text",
+				"text":  reasoning,
+			},
+		}
+	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
 		if contentBuilder.Len() == 0 {
@@ -192,6 +272,63 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 
 	b, _ := json.Marshal(resp)
 	return b, complete
+}
+
+func finalizeStreamReasoningDetails(accums map[int]*reasoningDetailAccum) ([]interface{}, string) {
+	indices := make([]int, 0, len(accums))
+	for idx := range accums {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+
+	details := make([]interface{}, 0, len(indices))
+	var reasoning strings.Builder
+	for _, idx := range indices {
+		acc := accums[idx]
+		if acc == nil {
+			continue
+		}
+		typ := acc.typ
+		if typ == "" {
+			typ = "reasoning.text"
+		}
+		detail := map[string]interface{}{
+			"index": idx,
+			"type":  typ,
+		}
+		if acc.id != "" {
+			detail["id"] = acc.id
+		}
+		if acc.hasText {
+			text := acc.text.String()
+			detail["text"] = text
+			if reasoning.Len() > 0 {
+				reasoning.WriteString("\n")
+			}
+			reasoning.WriteString(text)
+		}
+		if acc.hasSum {
+			summary := acc.summary.String()
+			detail["summary"] = summary
+			if reasoning.Len() > 0 {
+				reasoning.WriteString("\n")
+			}
+			reasoning.WriteString(summary)
+		}
+		if acc.signature != "" {
+			detail["signature"] = acc.signature
+		}
+		if acc.data != "" {
+			detail["data"] = acc.data
+		}
+		if acc.encrypted != "" {
+			detail["encrypted_content"] = acc.encrypted
+		}
+		if len(detail) > 2 {
+			details = append(details, detail)
+		}
+	}
+	return details, reasoning.String()
 }
 
 func normalizeSSEBufferForConversion(sseBody []byte) []byte {

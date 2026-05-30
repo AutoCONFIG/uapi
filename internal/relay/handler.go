@@ -595,12 +595,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 	tracker := newStreamTracker(adaptor)
 
-	inputConvert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions)
-
-	var outputConvert func([]byte) []byte
-	if clientFormat != provider.FormatOpenAIChatCompletions {
-		outputConvert = newStreamConverterFunc(provider.FormatOpenAIChatCompletions, clientFormat)
-	}
+	var inputConvert func([]byte) []byte
+	outputConvert := newStreamConverterFunc(upstreamFormat, clientFormat)
 	sendDone := clientFormat == provider.FormatOpenAIChatCompletions
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
@@ -609,7 +605,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			if rec := recover(); rec != nil {
 				logger.Default().Panic("relay.stream", "stream goroutine panic", rec)
 				if r.billing != nil {
-					go r.billing.DBTransactionRefund(token.ID.String(), tokenPlanID, estTokens)
+					go r.billing.DBTransactionRefundPreConsume(token.ID.String(), tokenPlanID, estTokens, model)
 				}
 			}
 		}()
@@ -2030,14 +2026,14 @@ func cleanJSONUndefinedPlaceholders(body []byte) []byte {
 }
 
 func cleanUndefinedValue(value interface{}, depth int) (interface{}, bool) {
-	if depth > 10 {
+	if depth > 32 {
 		return value, false
 	}
 	changed := false
 	switch v := value.(type) {
 	case map[string]interface{}:
 		for key, child := range v {
-			if s, ok := child.(string); ok && s == "[undefined]" {
+			if s, ok := child.(string); ok && isUndefinedPlaceholder(s) {
 				delete(v, key)
 				changed = true
 				continue
@@ -2052,7 +2048,7 @@ func cleanUndefinedValue(value interface{}, depth int) (interface{}, bool) {
 	case []interface{}:
 		kept := make([]interface{}, 0, len(v))
 		for _, child := range v {
-			if s, ok := child.(string); ok && s == "[undefined]" {
+			if s, ok := child.(string); ok && isUndefinedPlaceholder(s) {
 				changed = true
 				continue
 			}
@@ -2104,8 +2100,15 @@ func normalizeCodexResponsesRequest(body []byte) []byte {
 	}
 	bodyMap["store"] = false
 	bodyMap["stream"] = true
-	bodyMap["parallel_tool_calls"] = true
-	bodyMap["include"] = []string{"reasoning.encrypted_content"}
+	if _, ok := bodyMap["parallel_tool_calls"]; !ok {
+		bodyMap["parallel_tool_calls"] = true
+	}
+	if _, ok := bodyMap["tool_choice"]; !ok {
+		bodyMap["tool_choice"] = "auto"
+	}
+	if _, ok := bodyMap["include"]; !ok && codexResponsesHasReasoning(bodyMap) {
+		bodyMap["include"] = []string{"reasoning.encrypted_content"}
+	}
 	for _, key := range []string{
 		"max_output_tokens",
 		"max_completion_tokens",
@@ -2118,7 +2121,6 @@ func normalizeCodexResponsesRequest(body []byte) []byte {
 		"max_tool_calls",
 		"metadata",
 		"previous_response_id",
-		"prompt_cache_key",
 		"prompt_cache_retention",
 		"safety_identifier",
 		"top_logprobs",
@@ -2147,6 +2149,17 @@ func normalizeCodexResponsesRequest(body []byte) []byte {
 	return result
 }
 
+func codexResponsesHasReasoning(bodyMap map[string]interface{}) bool {
+	raw, ok := bodyMap["reasoning"]
+	if !ok || raw == nil {
+		return false
+	}
+	if rawMap, ok := raw.(map[string]interface{}); ok {
+		return len(rawMap) > 0
+	}
+	return true
+}
+
 func normalizeCodexResponsesInputRoles(bodyMap map[string]interface{}) {
 	items, ok := bodyMap["input"].([]interface{})
 	if !ok {
@@ -2161,6 +2174,10 @@ func normalizeCodexResponsesInputRoles(bodyMap map[string]interface{}) {
 			item["role"] = "developer"
 		}
 	}
+}
+
+func isUndefinedPlaceholder(value string) bool {
+	return strings.TrimSpace(value) == "[undefined]"
 }
 
 func normalizeCodexResponsesTools(bodyMap map[string]interface{}) {
@@ -2537,7 +2554,7 @@ func (r *Relayer) finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(cl
 	r.writeLogWithRoutedModelFormatsAndError(tokenID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, 0, 0, start, statusCode, errorMessage, firstClientIP(clientIPFromClaims(claims), fallbackClientIP))
 	if r.billing != nil {
 		go func() {
-			if err := r.billing.DBTransactionRefund(toUUID(tokenID).String(), planID, estTokens); err != nil {
+			if err := r.billing.DBTransactionRefundPreConsume(toUUID(tokenID).String(), planID, estTokens, model); err != nil {
 				logger.Component("relay.billing").Warn("refund failed",
 					logger.F("token_id", toUUID(tokenID).String()),
 					logger.F("error", err.Error()),

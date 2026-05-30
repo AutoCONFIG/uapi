@@ -33,6 +33,9 @@ type InternalRequest struct {
 	//   - Gemini: systemInstruction
 	// Always serialized in Responses output (including empty string).
 	Instructions *string
+	// InstructionsRaw preserves native system/instructions blocks when the
+	// source protocol carries more than plain text.
+	InstructionsRaw json.RawMessage
 
 	// Generation parameters (pointer = unset vs zero value)
 	MaxTokens   *int
@@ -71,11 +74,30 @@ type InternalRequest struct {
 // Role is always "user", "assistant", or "tool" — never "system" or "developer".
 type InternalMessage struct {
 	Role             string
+	Parts            []InternalContentItem
 	Content          []schema.ContentPart
 	ToolCalls        []schema.ToolCall
 	ToolResult       *schema.ToolResult
 	ReasoningContent []schema.ContentPart
 	Name             string // for named messages
+	ItemID           string
+	Status           string
+	Phase            string
+	RawItem          json.RawMessage // original Responses input item for same-format replay
+	Extra            map[string]json.RawMessage
+}
+
+// InternalContentItem preserves the original ordered content stream for
+// protocols whose message bodies are block sequences (Gemini parts,
+// Anthropic content blocks, Responses input/output items). The legacy Content,
+// ToolCalls, ToolResult, and ReasoningContent fields remain as indexed views for
+// converters that do not need exact source ordering.
+type InternalContentItem struct {
+	Kind       string
+	Content    schema.ContentPart
+	ToolCall   schema.ToolCall
+	ToolResult schema.ToolResult
+	Raw        json.RawMessage
 }
 
 // InternalResponse is the protocol-neutral response intermediate.

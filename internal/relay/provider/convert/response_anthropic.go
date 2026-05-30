@@ -19,10 +19,10 @@ func AnthropicResponseToInternal(body []byte) (*InternalResponse, error) {
 		Model:   resp.Model,
 		Choices: make([]InternalChoice, 0, len(resp.Content)),
 		Usage: schema.Usage{
-			PromptTokens:              resp.Usage.InputTokens,
-			CompletionTokens:          resp.Usage.OutputTokens,
-			CacheCreationInputTokens:  resp.Usage.CacheCreationInputTokens,
-			CacheReadInputTokens:       resp.Usage.CacheReadInputTokens,
+			PromptTokens:             resp.Usage.InputTokens,
+			CompletionTokens:         resp.Usage.OutputTokens,
+			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 		},
 		Raw: body, // Preserve raw for same-format passthrough
 	}
@@ -56,10 +56,23 @@ func AnthropicResponseToInternal(body []byte) (*InternalResponse, error) {
 			})
 
 		case "thinking":
+			extra := map[string]json.RawMessage{}
+			if block.Signature != "" {
+				extra = setRawString(extra, reasoningExtraSignature, block.Signature)
+			}
 			choice.ReasoningContent = append(choice.ReasoningContent, schema.ContentPart{
-				Type: "thinking",
-				Text: block.Thinking,
+				Type:  "thinking",
+				Text:  block.Thinking,
+				Extra: extra,
 			})
+		case "redacted_thinking":
+			if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
+				choice.ReasoningContent = append(choice.ReasoningContent, reasoningPartWithExtra("", map[string]json.RawMessage{
+					reasoningExtraData:             raw,
+					reasoningExtraEncryptedContent: raw,
+					reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
+				}))
+			}
 		}
 	}
 
@@ -120,11 +133,21 @@ func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 	for _, choice := range ir.Choices {
 		// Add reasoning/thinking blocks first
 		for _, rc := range choice.ReasoningContent {
-			if rc.Type == "thinking" && rc.Text != "" {
+			sig := reasoningSignature([]schema.ContentPart{rc})
+			encrypted := reasoningPartEncryptedData(rc)
+			if rc.Text == "" && encrypted != "" && sig == "" {
 				content = append(content, map[string]interface{}{
-					"type":     "thinking",
-					"thinking": rc.Text,
+					"type": "redacted_thinking",
+					"data": encrypted,
 				})
+				continue
+			}
+			if rc.Text != "" || sig != "" {
+				block := map[string]interface{}{"type": "thinking", "thinking": rc.Text}
+				if sig != "" {
+					block["signature"] = sig
+				}
+				content = append(content, block)
 			}
 		}
 
@@ -147,7 +170,7 @@ func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 				"type":  "tool_use",
 				"id":    tc.ID,
 				"name":  tc.Name,
-				"input": tc.Function.Arguments,
+				"input": jsonArgumentValue(tc.Function.Arguments),
 			})
 		}
 

@@ -106,8 +106,8 @@ func refreshTokenRequest(acc *db.Account, ch db.Channel, refreshToken string) (*
 			tokenURL = gemini.DefaultTokenURL
 		}
 	}
-	clientID := strings.TrimSpace(acc.ClientID)
-	clientSecret := decryptedClientSecret(acc)
+	clientID := oauthClientIDForFormat(acc.ClientID, ch.APIFormat)
+	clientSecret := oauthClientSecretForFormat(acc, ch.APIFormat)
 
 	if ch.APIFormat == "antigravity" {
 		tokens, err := antigravity.RefreshToken(tokenURL, refreshToken, clientID, clientSecret)
@@ -207,6 +207,39 @@ func decryptedClientSecret(acc *db.Account) string {
 		return ""
 	}
 	return secret
+}
+
+func oauthClientIDForFormat(clientID, apiFormat string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID != "" {
+		return clientID
+	}
+	switch apiFormat {
+	case "codex":
+		return openai.DefaultClientID
+	case "claude_code":
+		return anthropic.DefaultClientID
+	case "gemini_code":
+		return gemini.DefaultClientID
+	case "antigravity":
+		return antigravity.DefaultClientID
+	default:
+		return ""
+	}
+}
+
+func oauthClientSecretForFormat(acc *db.Account, apiFormat string) string {
+	if secret := decryptedClientSecret(acc); secret != "" {
+		return secret
+	}
+	switch apiFormat {
+	case "gemini_code":
+		return gemini.DefaultClientSecret
+	case "antigravity":
+		return antigravity.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func mergeMetadata(acc *db.Account, metadata map[string]interface{}) {

@@ -5,8 +5,10 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/google/uuid"
 )
 
@@ -61,6 +63,33 @@ func TestOAuthProviderAndTokenURLPreferChannelAPIFormat(t *testing.T) {
 	}
 	if got := oauthTokenURLForChannel(&db.Account{}, ch); got != antigravity.DefaultTokenURL {
 		t.Fatalf("token url = %q, want %q", got, antigravity.DefaultTokenURL)
+	}
+}
+
+func TestOAuthClientDefaultsCoverAllOAuthFormats(t *testing.T) {
+	tests := []struct {
+		providerKey string
+		wantID      string
+		wantSecret  string
+	}{
+		{providerKey: "openai", wantID: openai.DefaultClientID},
+		{providerKey: "anthropic", wantID: anthropic.DefaultClientID},
+		{providerKey: "gemini", wantID: gemini.DefaultClientID, wantSecret: gemini.DefaultClientSecret},
+		{providerKey: "antigravity", wantID: antigravity.DefaultClientID, wantSecret: antigravity.DefaultClientSecret},
+	}
+	for _, tt := range tests {
+		t.Run(tt.providerKey, func(t *testing.T) {
+			if got := oauthClientIDForProvider("", tt.providerKey); got != tt.wantID {
+				t.Fatalf("client id = %q, want %q", got, tt.wantID)
+			}
+			secret, err := oauthClientSecretForProvider(&db.Account{}, tt.providerKey)
+			if err != nil {
+				t.Fatalf("client secret: %v", err)
+			}
+			if secret != tt.wantSecret {
+				t.Fatalf("client secret = %q, want %q", secret, tt.wantSecret)
+			}
+		})
 	}
 }
 

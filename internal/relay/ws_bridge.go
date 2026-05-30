@@ -42,7 +42,7 @@ func (h *WSHandler) httpBridgeFallback(
 	convertedBody, err := provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
 	if err != nil {
 		WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
 
@@ -55,7 +55,7 @@ func (h *WSHandler) httpBridgeFallback(
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, 500, "url_error", "build upstream url failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
 
@@ -65,7 +65,7 @@ func (h *WSHandler) httpBridgeFallback(
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, 500, "cred_error", "credential refresh failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
 
@@ -76,7 +76,7 @@ func (h *WSHandler) httpBridgeFallback(
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, 500, "header_error", "setup headers failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
 
@@ -85,7 +85,7 @@ func (h *WSHandler) httpBridgeFallback(
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, 502, "upstream_error", "upstream request failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
 
@@ -96,7 +96,7 @@ func (h *WSHandler) httpBridgeFallback(
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, statusCode, "upstream_error", extractErrorMessage(bodyCopy))
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, statusCode)
 		return false
 	}
@@ -127,7 +127,7 @@ func (h *WSHandler) bridgeSSEToWS(
 			logger.Default().Panic("relay.ws", "panic in SSE bridge", r, logger.F("session", sess.id))
 		}
 		if !turnFinalized {
-			h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 500)
 		}
 	}()
@@ -138,7 +138,7 @@ func (h *WSHandler) bridgeSSEToWS(
 
 	bodyStream := upResp.BodyStream()
 	if bodyStream == nil {
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
 		turnFinalized = true
 		return
@@ -152,8 +152,8 @@ func (h *WSHandler) bridgeSSEToWS(
 	scanner.Buffer(make([]byte, 0, 8*1024), 10*1024*1024)
 
 	upstreamFormat := channelUpstreamFormat(ch)
-	inputConvert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions)
-	responsesConvert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIResponses)
+	var inputConvert func([]byte) []byte
+	responsesConvert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIResponses)
 	completed := false
 	interrupted := false
 	failed := false
@@ -272,19 +272,19 @@ func (h *WSHandler) bridgeSSEToWS(
 
 	if err := scanner.Err(); err != nil {
 		logger.Component("relay.ws").Warn("SSE scanner error", logger.F("session", sess.id), logger.Err(err))
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
 		turnFinalized = true
 		return
 	}
 	if failed {
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
 		turnFinalized = true
 		return
 	}
 	if interrupted || !completed {
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens)
+		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 499)
 		turnFinalized = true
 		return

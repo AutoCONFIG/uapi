@@ -48,21 +48,33 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 		}
 
 		for _, part := range content.Parts {
+			rawPart := rawJSON(part)
 			switch {
+			case part.Text != "" && part.Thought:
+				extra := map[string]json.RawMessage{}
+				if part.ThoughtSignature != "" {
+					extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
+				}
+				appendReasoningItem(&internalMsg, schema.ContentPart{
+					Type:  "thinking",
+					Text:  part.Text,
+					Extra: extra,
+				}, rawPart)
 			case part.Text != "":
-				internalMsg.Content = append(internalMsg.Content, schema.ContentPart{
+				appendContentItem(&internalMsg, schema.ContentPart{
 					Type: "text",
 					Text: part.Text,
-				})
+				}, rawPart)
 			case part.InlineData != nil:
 				dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
-				internalMsg.Content = append(internalMsg.Content, schema.ContentPart{
+				appendContentItem(&internalMsg, schema.ContentPart{
 					Type:     "image_url",
 					ImageURL: &dataURI,
-				})
+					MimeType: part.InlineData.MimeType,
+				}, rawPart)
 			case part.FunctionCall != nil:
 				args := string(part.FunctionCall.Args)
-				internalMsg.ToolCalls = append(internalMsg.ToolCalls, schema.ToolCall{
+				call := schema.ToolCall{
 					ID:   "", // Gemini doesn't provide ID for function calls
 					Type: "function",
 					Name: part.FunctionCall.Name,
@@ -73,19 +85,41 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 						Name:      part.FunctionCall.Name,
 						Arguments: args,
 					},
-				})
+				}
+				appendToolCallItem(&internalMsg, call, rawPart)
 			case part.FunctionResponse != nil:
 				respBytes, _ := json.Marshal(part.FunctionResponse.Response)
-				internalMsg.ToolResult = &schema.ToolResult{
+				appendToolResultItem(&internalMsg, schema.ToolResult{
 					ToolCallID: part.FunctionResponse.Name, // Use function name as ID since Gemini doesn't provide call ID
 					Content:    string(respBytes),
-				}
+				}, rawPart)
+			case part.ThoughtSignature != "":
+				appendReasoningItem(&internalMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
+					reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
+				}), rawPart)
 			case part.FileData != nil:
-				// Convert file data to content
-				internalMsg.Content = append(internalMsg.Content, schema.ContentPart{
-					Type: "image_url",
-					Text: fmt.Sprintf("file://%s", part.FileData.FileURI), // Convert to URL format
-				})
+				fileURL := "file://" + part.FileData.FileURI
+				appendContentItem(&internalMsg, schema.ContentPart{
+					Type:     "image_url",
+					ImageURL: &fileURL,
+					MimeType: part.FileData.MimeType,
+				}, rawPart)
+			case part.ExecutableCode != nil:
+				appendContentItem(&internalMsg, schema.ContentPart{
+					Type: "executable_code",
+					Text: part.ExecutableCode.Code,
+					Extra: map[string]json.RawMessage{
+						"language": json.RawMessage(fmt.Sprintf("%q", part.ExecutableCode.Language)),
+					},
+				}, rawPart)
+			case part.CodeExecutionResult != nil:
+				appendContentItem(&internalMsg, schema.ContentPart{
+					Type: "code_execution_result",
+					Text: part.CodeExecutionResult.Output,
+					Extra: map[string]json.RawMessage{
+						"outcome": json.RawMessage(fmt.Sprintf("%q", part.CodeExecutionResult.Outcome)),
+					},
+				}, rawPart)
 			}
 		}
 
@@ -115,6 +149,9 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 		if req.GenerationConfig.ThinkingConfig != nil {
 			ir.Thinking = req.GenerationConfig.ThinkingConfig
 		}
+		if req.GenerationConfig.ResponseMimeType != "" {
+			ir.ResponseFormat = responseFormatFromGemini(req.GenerationConfig.ResponseMimeType, req.GenerationConfig.ResponseSchema)
+		}
 	}
 
 	// Safety settings
@@ -124,9 +161,13 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 
 	// Tools
 	if req.Tools != nil {
-		var tools []schema.Tool
-		if json.Unmarshal(req.Tools, &tools) == nil {
+		if tools := geminiRequestToolsToInternal(req.Tools); len(tools) > 0 {
 			ir.Tools = tools
+		} else {
+			var tools []schema.Tool
+			if json.Unmarshal(req.Tools, &tools) == nil {
+				ir.Tools = tools
+			}
 		}
 	}
 
@@ -160,85 +201,17 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 
 	// Convert messages to contents
 	contents := make([]map[string]interface{}, 0)
+	toolCallNames := toolCallNameByID(ir.Messages)
 	for _, msg := range ir.Messages {
 		contentMap := make(map[string]interface{})
 		contentMap["role"] = internalRoleToGemini(msg.Role)
 
 		parts := make([]map[string]interface{}, 0)
 
-		// Convert content to parts
-		for _, c := range msg.Content {
-			switch c.Type {
-			case "text":
-				parts = append(parts, map[string]interface{}{"text": c.Text})
-			case "image_url":
-				if c.ImageURL != nil {
-					// Parse data URI to extract mime type and data
-					dataURI := *c.ImageURL
-					mimeType := "image/png" // default
-					data := dataURI
-
-					if len(dataURI) > 5 && dataURI[:5] == "data:" {
-						// Extract mime type
-						endIdx := len(dataURI)
-						for i := 5; i < len(dataURI); i++ {
-							if dataURI[i] == ';' || dataURI[i] == ',' {
-								endIdx = i
-								break
-							}
-						}
-						mimeType = dataURI[5:endIdx]
-
-						// Extract base64 data
-						if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
-							for i := endIdx + 1; i < len(dataURI); i++ {
-								if dataURI[i] == ',' {
-									data = dataURI[i+1:]
-									break
-								}
-							}
-						}
-					} else if len(dataURI) > 7 && dataURI[:7] == "file://" {
-						// Handle file:// URLs
-						parts = append(parts, map[string]interface{}{
-							"fileData": map[string]string{
-								"fileUri":  dataURI[7:],
-								"mimeType": mimeType,
-							},
-						})
-						continue
-					}
-
-					parts = append(parts, map[string]interface{}{
-						"inlineData": map[string]string{
-							"mimeType": mimeType,
-							"data":     data,
-						},
-					})
-				}
-			}
-		}
-
-		// Convert tool calls to functionCall parts
-		for _, tc := range msg.ToolCalls {
-			parts = append(parts, map[string]interface{}{
-				"functionCall": map[string]interface{}{
-					"name": tc.Name,
-					"args": tc.Function.Arguments,
-				},
-			})
-		}
-
-		// Convert tool result to functionResponse part
-		if msg.ToolResult != nil {
-			var response interface{}
-			json.Unmarshal([]byte(msg.ToolResult.Content), &response)
-			parts = append(parts, map[string]interface{}{
-				"functionResponse": map[string]interface{}{
-					"name":     msg.ToolResult.ToolCallID,
-					"response": response,
-				},
-			})
+		if len(msg.Parts) > 0 {
+			parts = geminiPartsFromItems(ir.SourceFormat, msg, toolCallNames)
+		} else {
+			parts = geminiPartsFromLegacyMessage(msg, toolCallNames)
 		}
 
 		contentMap["parts"] = parts
@@ -249,7 +222,7 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	// Generation config
 	genConfig := make(map[string]interface{})
 	if ir.MaxTokens != nil {
-		genConfig["maxOutputTokens"] = *ir.MaxTokens
+		genConfig["maxOutputTokens"] = capGeminiMaxOutputTokens(*ir.MaxTokens)
 	}
 	if ir.Temperature != nil {
 		genConfig["temperature"] = *ir.Temperature
@@ -266,8 +239,14 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	if ir.CandidateCount != nil {
 		genConfig["candidateCount"] = *ir.CandidateCount
 	}
-	if ir.Thinking != nil {
-		genConfig["thinkingConfig"] = ir.Thinking
+	if thinking := geminiThinkingFromInternal(ir); thinking != nil {
+		genConfig["thinkingConfig"] = thinking
+	}
+	if mimeType, schema := geminiResponseFormat(ir.ResponseFormat); mimeType != "" {
+		genConfig["responseMimeType"] = mimeType
+		if schema != nil {
+			genConfig["responseSchema"] = schema
+		}
 	}
 	if len(genConfig) > 0 {
 		req["generationConfig"] = genConfig
@@ -306,6 +285,266 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func geminiPartsFromItems(source Format, msg InternalMessage, toolCallNames map[string]string) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0, len(msg.Parts))
+	for _, item := range msg.Parts {
+		if (source == FormatGemini || source == FormatGeminiCLI) && len(item.Raw) > 0 {
+			var raw map[string]interface{}
+			if err := json.Unmarshal(item.Raw, &raw); err == nil {
+				parts = append(parts, raw)
+				continue
+			}
+		}
+		if part := geminiPartFromItem(item, toolCallNames); part != nil {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func geminiPartsFromLegacyMessage(msg InternalMessage, toolCallNames map[string]string) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0)
+	for _, rc := range msg.ReasoningContent {
+		if part := geminiReasoningPart(rc); part != nil {
+			parts = append(parts, part)
+		}
+	}
+	for _, c := range msg.Content {
+		if part := geminiContentPart(c); part != nil {
+			parts = append(parts, part)
+		}
+	}
+	for _, tc := range msg.ToolCalls {
+		parts = append(parts, geminiToolCallPart(tc))
+	}
+	if msg.ToolResult != nil {
+		parts = append(parts, geminiToolResultPart(*msg.ToolResult, toolCallNames))
+	}
+	return parts
+}
+
+func geminiPartFromItem(item InternalContentItem, toolCallNames map[string]string) map[string]interface{} {
+	switch item.Kind {
+	case contentItemKindReasoning:
+		return geminiReasoningPart(item.Content)
+	case contentItemKindContent:
+		return geminiContentPart(item.Content)
+	case contentItemKindToolCall:
+		return geminiToolCallPart(item.ToolCall)
+	case contentItemKindToolResult:
+		return geminiToolResultPart(item.ToolResult, toolCallNames)
+	default:
+		return nil
+	}
+}
+
+func geminiReasoningPart(rc schema.ContentPart) map[string]interface{} {
+	sig := reasoningOpaqueSignature([]schema.ContentPart{rc})
+	if rc.Text == "" && sig == "" {
+		return nil
+	}
+	part := map[string]interface{}{}
+	if rc.Text != "" {
+		part["text"] = rc.Text
+		part["thought"] = true
+	}
+	if sig != "" {
+		part["thoughtSignature"] = sig
+	}
+	return part
+}
+
+func geminiContentPart(c schema.ContentPart) map[string]interface{} {
+	switch c.Type {
+	case "text":
+		return map[string]interface{}{"text": c.Text}
+	case "image_url":
+		if c.ImageURL == nil {
+			return nil
+		}
+		dataURI := *c.ImageURL
+		mimeType := "image/png"
+		if c.MimeType != "" {
+			mimeType = c.MimeType
+		}
+		data := dataURI
+		if strings.HasPrefix(dataURI, "data:") {
+			endIdx := len(dataURI)
+			for i := len("data:"); i < len(dataURI); i++ {
+				if dataURI[i] == ';' || dataURI[i] == ',' {
+					endIdx = i
+					break
+				}
+			}
+			mimeType = dataURI[len("data:"):endIdx]
+			if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
+				for i := endIdx + 1; i < len(dataURI); i++ {
+					if dataURI[i] == ',' {
+						data = dataURI[i+1:]
+						break
+					}
+				}
+			}
+		} else if strings.HasPrefix(dataURI, "file://") {
+			return map[string]interface{}{
+				"fileData": map[string]string{
+					"fileUri":  strings.TrimPrefix(dataURI, "file://"),
+					"mimeType": mimeType,
+				},
+			}
+		}
+		return map[string]interface{}{
+			"inlineData": map[string]string{
+				"mimeType": mimeType,
+				"data":     data,
+			},
+		}
+	case "executable_code":
+		return map[string]interface{}{
+			"executableCode": map[string]interface{}{
+				"language": rawString(c.Extra["language"]),
+				"code":     c.Text,
+			},
+		}
+	case "code_execution_result":
+		return map[string]interface{}{
+			"codeExecutionResult": map[string]interface{}{
+				"outcome": rawString(c.Extra["outcome"]),
+				"output":  c.Text,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func geminiToolCallPart(tc schema.ToolCall) map[string]interface{} {
+	name := tc.Name
+	if name == "" {
+		name = tc.Function.Name
+	}
+	return map[string]interface{}{
+		"functionCall": map[string]interface{}{
+			"name": name,
+			"args": jsonArgumentValue(tc.Function.Arguments),
+		},
+	}
+}
+
+func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]string) map[string]interface{} {
+	var response interface{}
+	_ = json.Unmarshal([]byte(result.Content), &response)
+	return map[string]interface{}{
+		"functionResponse": map[string]interface{}{
+			"name":     toolResponseName(result.ToolCallID, toolCallNames),
+			"response": response,
+		},
+	}
+}
+
+func toolCallNameByID(messages []InternalMessage) map[string]string {
+	names := make(map[string]string)
+	for _, msg := range messages {
+		for _, call := range msg.ToolCalls {
+			if call.ID == "" || call.Name == "" {
+				continue
+			}
+			names[call.ID] = call.Name
+		}
+	}
+	return names
+}
+
+func toolResponseName(toolCallID string, names map[string]string) string {
+	if name := names[toolCallID]; name != "" {
+		return name
+	}
+	return toolCallID
+}
+
+const geminiMaxOutputTokensCap = 65536
+
+func capGeminiMaxOutputTokens(tokens int) int {
+	if tokens > geminiMaxOutputTokensCap {
+		return geminiMaxOutputTokensCap
+	}
+	return tokens
+}
+
+func normalizeGeminiThinkingConfig(raw json.RawMessage) interface{} {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw
+	}
+	if len(cfg) == 0 {
+		return nil
+	}
+	normalizeThinkingAlias(cfg, "thinking_budget", "thinkingBudget")
+	normalizeThinkingAlias(cfg, "thinking_level", "thinkingLevel")
+	normalizeThinkingAlias(cfg, "include_thoughts", "includeThoughts")
+	if _, hasBudget := cfg["thinkingBudget"]; hasBudget {
+		delete(cfg, "thinkingLevel")
+	}
+	return cfg
+}
+
+func normalizeThinkingAlias(cfg map[string]interface{}, snakeKey, camelKey string) {
+	if _, ok := cfg[camelKey]; ok {
+		delete(cfg, snakeKey)
+		return
+	}
+	if value, ok := cfg[snakeKey]; ok {
+		cfg[camelKey] = value
+		delete(cfg, snakeKey)
+	}
+}
+
+func geminiResponseFormat(raw json.RawMessage) (string, interface{}) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var format map[string]interface{}
+	if err := json.Unmarshal(raw, &format); err != nil {
+		return "", nil
+	}
+	formatType, _ := format["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(formatType)) {
+	case "json_object":
+		return "application/json", nil
+	case "json_schema":
+		if jsonSchema, ok := format["json_schema"].(map[string]interface{}); ok {
+			if schema, ok := jsonSchema["schema"]; ok {
+				return "application/json", schema
+			}
+		}
+		return "application/json", nil
+	default:
+		return "", nil
+	}
+}
+
+func responseFormatFromGemini(mimeType string, schema json.RawMessage) json.RawMessage {
+	if !strings.EqualFold(strings.TrimSpace(mimeType), "application/json") {
+		return nil
+	}
+	if len(schema) == 0 || string(schema) == "null" {
+		return json.RawMessage(`{"type":"json_object"}`)
+	}
+	out, err := json.Marshal(map[string]interface{}{
+		"type": "json_schema",
+		"json_schema": map[string]json.RawMessage{
+			"schema": schema,
+		},
+	})
+	if err != nil {
+		return json.RawMessage(`{"type":"json_object"}`)
+	}
+	return out
 }
 
 func isGeminiCLIEnvelopeExtra(key string) bool {
@@ -424,6 +663,49 @@ func normalizedFunctionTool(tool schema.Tool) (string, string, json.RawMessage) 
 		parameters = tool.InputSchema
 	}
 	return strings.TrimSpace(tool.Name), strings.TrimSpace(tool.Description), parameters
+}
+
+func geminiRequestToolsToInternal(raw json.RawMessage) []schema.Tool {
+	var rawTools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawTools); err != nil {
+		return nil
+	}
+	tools := make([]schema.Tool, 0)
+	for _, rawTool := range rawTools {
+		rawDecls := rawTool["functionDeclarations"]
+		if len(rawDecls) == 0 {
+			rawDecls = rawTool["function_declarations"]
+		}
+		if len(rawDecls) == 0 || string(rawDecls) == "null" {
+			continue
+		}
+		var declarations []map[string]json.RawMessage
+		if err := json.Unmarshal(rawDecls, &declarations); err != nil {
+			continue
+		}
+		for _, declaration := range declarations {
+			var name string
+			if err := json.Unmarshal(declaration["name"], &name); err != nil || strings.TrimSpace(name) == "" {
+				continue
+			}
+			var description string
+			_ = json.Unmarshal(declaration["description"], &description)
+			parameters := declaration["parametersJsonSchema"]
+			if len(parameters) == 0 {
+				parameters = declaration["parameters"]
+			}
+			if string(parameters) == "null" {
+				parameters = nil
+			}
+			tools = append(tools, schema.Tool{
+				Type:        "function",
+				Name:        strings.TrimSpace(name),
+				Description: strings.TrimSpace(description),
+				Parameters:  parameters,
+			})
+		}
+	}
+	return tools
 }
 
 func normalizeGeminiFunctionCallingMode(mode string) string {

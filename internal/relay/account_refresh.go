@@ -153,17 +153,18 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 	if providerKey == "antigravity" {
 		return refreshAntigravityOAuthToken(account, database, refreshToken, tokenURL)
 	}
+	clientID := oauthClientIDForProvider(account.ClientID, providerKey)
+	clientSecret, err := oauthClientSecretForProvider(account, providerKey)
+	if err != nil {
+		return "", err
+	}
 
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
-		"client_id":     {account.ClientID},
+		"client_id":     {clientID},
 	}
-	if account.ClientSecret != "" {
-		clientSecret, err := crypto.Decrypt(account.ClientSecret)
-		if err != nil {
-			return "", fmt.Errorf("decrypt client secret: %w", err)
-		}
+	if clientSecret != "" {
 		data.Set("client_secret", clientSecret)
 	}
 
@@ -172,7 +173,7 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		payload := map[string]interface{}{
 			"grant_type":    "refresh_token",
 			"refresh_token": refreshToken,
-			"client_id":     account.ClientID,
+			"client_id":     clientID,
 			"scope":         anthropic.ClaudeAIRefreshScope,
 		}
 		body, _ := json.Marshal(payload)
@@ -183,15 +184,7 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthHTTPClient.Do(req)
 	} else if providerKey == "openai" {
-		clientSecret := ""
-		if account.ClientSecret != "" {
-			var secretErr error
-			clientSecret, secretErr = crypto.Decrypt(account.ClientSecret)
-			if secretErr != nil {
-				return "", fmt.Errorf("decrypt client secret: %w", secretErr)
-			}
-		}
-		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, account.ClientID, clientSecret)
+		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
@@ -364,6 +357,43 @@ func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refres
 
 func oauthProviderKey(account *db.Account) string {
 	return oauthProviderKeyForChannel(account, nil)
+}
+
+func oauthClientIDForProvider(clientID, providerKey string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID != "" {
+		return clientID
+	}
+	switch providerKey {
+	case "openai":
+		return openai.DefaultClientID
+	case "anthropic":
+		return anthropic.DefaultClientID
+	case "gemini":
+		return gemini.DefaultClientID
+	case "antigravity":
+		return antigravity.DefaultClientID
+	default:
+		return ""
+	}
+}
+
+func oauthClientSecretForProvider(account *db.Account, providerKey string) (string, error) {
+	if account != nil && strings.TrimSpace(account.ClientSecret) != "" {
+		clientSecret, err := crypto.Decrypt(account.ClientSecret)
+		if err != nil {
+			return "", fmt.Errorf("decrypt client secret: %w", err)
+		}
+		return clientSecret, nil
+	}
+	switch providerKey {
+	case "gemini":
+		return gemini.DefaultClientSecret, nil
+	case "antigravity":
+		return antigravity.DefaultClientSecret, nil
+	default:
+		return "", nil
+	}
 }
 
 func oauthProviderKeyForChannel(account *db.Account, ch *db.Channel) string {

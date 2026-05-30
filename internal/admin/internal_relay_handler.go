@@ -239,9 +239,15 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 		if planID == uuid.Nil {
 			planID = existing.TokenPlanID
 		}
-		modelRatios := appsettings.Get(h.db, appsettings.ModelRatios, "{}")
-		if err := relay.RefundAndSettleTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, 0, 0, req.Model, modelRatios); err != nil {
-			return err
+		modelRatios := appsettings.Get(tx, appsettings.ModelRatios, "{}")
+		if req.StatusCode >= fasthttp.StatusBadRequest {
+			if err := relay.RefundPreConsumeTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.Model, modelRatios); err != nil {
+				return err
+			}
+		} else {
+			if err := relay.RefundAndSettleTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, 0, 0, req.Model, modelRatios); err != nil {
+				return err
+			}
 		}
 		return tx.Model(&existing).Updates(map[string]interface{}{
 			"token_plan_id":     planID,
