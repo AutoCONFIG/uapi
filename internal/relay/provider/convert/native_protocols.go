@@ -19,7 +19,7 @@ func parseCodexRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitCodexRequest(req *relayir.Request) ([]byte, error) {
-	internal := protocolRequestViewFromIR(req)
+	internal := requestDraftFromIR(req)
 	internal.SourceFormat = FormatCodexResponses
 	return emitOpenAIResponsesRequest(internal)
 }
@@ -36,7 +36,7 @@ func parseClaudeCodeRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitClaudeCodeRequest(req *relayir.Request) ([]byte, error) {
-	internal := protocolRequestViewFromIR(req)
+	internal := requestDraftFromIR(req)
 	internal.SourceFormat = FormatClaudeCode
 	return emitAnthropicRequest(internal)
 }
@@ -53,7 +53,7 @@ func parseGeminiCodeRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitGeminiCodeRequest(req *relayir.Request) ([]byte, error) {
-	internal := protocolRequestViewFromIR(req)
+	internal := requestDraftFromIR(req)
 	internal.SourceFormat = FormatGeminiCode
 	return emitGeminiCLIRequest(internal)
 }
@@ -70,7 +70,7 @@ func parseAntigravityRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitAntigravityRequest(req *relayir.Request) ([]byte, error) {
-	internal := protocolRequestViewFromIR(req)
+	internal := requestDraftFromIR(req)
 	internal.SourceFormat = FormatAntigravity
 	body, err := emitGeminiCLIRequest(internal)
 	if err != nil {

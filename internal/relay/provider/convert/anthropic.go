@@ -9,13 +9,13 @@ import (
 )
 
 // parseAnthropicRequest converts Anthropic Messages API request to an protocol request view.
-func parseAnthropicRequest(body []byte) (*protocolRequestView, error) {
+func parseAnthropicRequest(body []byte) (*requestDraft, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
 	}
 
-	ir := &protocolRequestView{
+	ir := &requestDraft{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatAnthropic,
@@ -57,7 +57,7 @@ func parseAnthropicRequest(body []byte) (*protocolRequestView, error) {
 
 	// Convert messages
 	for _, msg := range req.Messages {
-		requestMsg := protocolTurnView{
+		requestMsg := requestTurnDraft{
 			Role: msg.Role,
 		}
 
@@ -204,7 +204,7 @@ func parseAnthropicRequest(body []byte) (*protocolRequestView, error) {
 }
 
 // emitAnthropicRequest converts an protocol request view to Anthropic Messages API request.
-func emitAnthropicRequest(ir *protocolRequestView) ([]byte, error) {
+func emitAnthropicRequest(ir *requestDraft) ([]byte, error) {
 	req := make(map[string]interface{})
 	req["model"] = ir.Model
 	req["max_tokens"] = 4096 // default if not set
@@ -266,7 +266,7 @@ func emitAnthropicRequest(ir *protocolRequestView) ([]byte, error) {
 		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
-		if tools := anthropicTools(ir.Tools); len(tools) > 0 {
+		if tools := anthropicTools(ir.Tools, sameNativeRequestFamily(ir.SourceFormat, FormatAnthropic)); len(tools) > 0 {
 			req["tools"] = tools
 		}
 	}
@@ -323,13 +323,14 @@ func anthropicToolChoice(raw json.RawMessage, parallelToolCalls *bool) map[strin
 }
 
 func toolChoiceFunctionName(choice map[string]interface{}) string {
+	namespace := toolChoiceNamespace(choice)
 	if function, ok := choice["function"].(map[string]interface{}); ok {
 		if name, ok := function["name"].(string); ok {
-			return name
+			return qualifyResponsesNamespaceToolName(namespace, name)
 		}
 	}
 	if name, ok := choice["name"].(string); ok {
-		return name
+		return qualifyResponsesNamespaceToolName(namespace, name)
 	}
 	return ""
 }
@@ -371,18 +372,33 @@ func cloneInterfaceMap(in map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func anthropicTools(tools []schema.Tool) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(tools))
-	for _, tool := range tools {
-		normalized := anthropicTool(tool)
+func anthropicTools(tools []schema.Tool, preserveNative bool) []map[string]interface{} {
+	projected := tools
+	if !preserveNative {
+		projected = functionToolProjections(tools)
+	}
+	out := make([]map[string]interface{}, 0, len(projected))
+	if !preserveNative {
+		for _, tool := range tools {
+			if strings.TrimSpace(tool.Type) == "web_search" {
+				if normalized := anthropicTool(tool, false); normalized != nil {
+					out = append(out, normalized)
+				}
+			}
+		}
+	}
+	for _, tool := range projected {
+		normalized := anthropicTool(tool, preserveNative)
 		if normalized != nil {
-			out = append(out, normalized)
+			if preserveNative || strings.TrimSpace(tool.Type) != "web_search" {
+				out = append(out, normalized)
+			}
 		}
 	}
 	return out
 }
 
-func anthropicTool(tool schema.Tool) map[string]interface{} {
+func anthropicTool(tool schema.Tool, preserveNative bool) map[string]interface{} {
 	if strings.TrimSpace(tool.Type) == "web_search" {
 		return anthropicWebSearchTool(tool)
 	}
@@ -399,8 +415,10 @@ func anthropicTool(tool schema.Tool) map[string]interface{} {
 		} else {
 			out["input_schema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 		}
-		for key, value := range tool.Extra {
-			out[key] = value
+		if preserveNative {
+			for key, value := range tool.Extra {
+				out[key] = value
+			}
 		}
 		return out
 	}
@@ -496,7 +514,7 @@ func isAnthropicFamily(format Format) bool {
 	return format == FormatAnthropic || format == FormatClaudeCode
 }
 
-func anthropicBlocksFromMessage(source Format, msg protocolTurnView) []map[string]interface{} {
+func anthropicBlocksFromMessage(source Format, msg requestTurnDraft) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	blocks := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -514,7 +532,7 @@ func anthropicBlocksFromMessage(source Format, msg protocolTurnView) []map[strin
 	return blocks
 }
 
-func anthropicBlockFromItem(item protocolItemView) map[string]interface{} {
+func anthropicBlockFromItem(item requestItemDraft) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return anthropicReasoningBlock(item.Content)

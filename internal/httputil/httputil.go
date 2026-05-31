@@ -119,6 +119,26 @@ func ClientIPForLog(ctx *fasthttp.RequestCtx, trustedProxies []string) string {
 	return candidates[len(candidates)-1]
 }
 
+// ClientIPForGatewayLog returns the client IP that Gateway should stamp into
+// signed relay claims. Whitelist checks remain stricter via ClientIPCandidates;
+// this function is logging-oriented so Docker/nginx deployments still show the
+// original requester even when trusted_proxies has not been configured yet.
+func ClientIPForGatewayLog(ctx *fasthttp.RequestCtx, trustedProxies []string) string {
+	if ip := ClientIPForLog(ctx, trustedProxies); ip != "" && (ip != ctx.RemoteIP().String() || len(trustedProxies) > 0) {
+		return ip
+	}
+	if forwardedFor := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Forwarded-For"))); forwardedFor != "" {
+		firstHop := strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
+		if firstHop != "" {
+			return firstHop
+		}
+	}
+	if xRealIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); xRealIP != "" {
+		return xRealIP
+	}
+	return ctx.RemoteIP().String()
+}
+
 // IsTrustedProxy checks if the given IP is in the trusted proxies list.
 func IsTrustedProxy(ip string, trustedProxies []string) bool {
 	for _, trusted := range trustedProxies {

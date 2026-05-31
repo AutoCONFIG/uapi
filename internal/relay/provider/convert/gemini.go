@@ -9,13 +9,13 @@ import (
 )
 
 // parseGeminiRequest converts Gemini API request to an protocol request view.
-func parseGeminiRequest(body []byte) (*protocolRequestView, error) {
+func parseGeminiRequest(body []byte) (*requestDraft, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
 
-	ir := &protocolRequestView{
+	ir := &requestDraft{
 		Model:        rawString(req.Extra["model"]),
 		Stream:       false,
 		SourceFormat: FormatGemini,
@@ -52,7 +52,7 @@ func parseGeminiRequest(body []byte) (*protocolRequestView, error) {
 
 	// Convert contents to messages
 	for _, content := range req.Contents {
-		requestMsg := protocolTurnView{
+		requestMsg := requestTurnDraft{
 			Role: geminiRoleToRequestRole(content.Role),
 		}
 
@@ -230,7 +230,7 @@ func parseGeminiRequest(body []byte) (*protocolRequestView, error) {
 	return ir, nil
 }
 
-func appendGeminiPartExtraLosses(req *protocolRequestView, path string, part schema.GeminiPart, rawPart json.RawMessage) {
+func appendGeminiPartExtraLosses(req *requestDraft, path string, part schema.GeminiPart, rawPart json.RawMessage) {
 	if req == nil {
 		return
 	}
@@ -242,7 +242,7 @@ func appendGeminiPartExtraLosses(req *protocolRequestView, path string, part sch
 	}
 }
 
-func appendGeminiFunctionResponseLosses(req *protocolRequestView, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
+func appendGeminiFunctionResponseLosses(req *requestDraft, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
 	if req == nil || resp == nil {
 		return
 	}
@@ -279,7 +279,7 @@ func appendGeminiFunctionResponseLosses(req *protocolRequestView, resp *schema.G
 }
 
 // emitGeminiRequest converts an protocol request view to Gemini API request.
-func emitGeminiRequest(ir *protocolRequestView) ([]byte, error) {
+func emitGeminiRequest(ir *requestDraft) ([]byte, error) {
 	req := make(map[string]interface{})
 
 	// Convert Instructions to systemInstruction
@@ -382,7 +382,7 @@ func isGeminiEnvelopeFamily(format Format) bool {
 	return format == FormatGeminiCLI || format == FormatGeminiCode || format == FormatAntigravity
 }
 
-func geminiPartsFromItems(source Format, msg protocolTurnView, toolCallNames map[string]string) []map[string]interface{} {
+func geminiPartsFromItems(source Format, msg requestTurnDraft, toolCallNames map[string]string) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	parts := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -400,7 +400,7 @@ func geminiPartsFromItems(source Format, msg protocolTurnView, toolCallNames map
 	return parts
 }
 
-func geminiPartFromItem(item protocolItemView, toolCallNames map[string]string) map[string]interface{} {
+func geminiPartFromItem(item requestItemDraft, toolCallNames map[string]string) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return geminiReasoningPart(item.Content)
@@ -584,7 +584,7 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 	}
 }
 
-func toolCallNameByID(messages []protocolTurnView) map[string]string {
+func toolCallNameByID(messages []requestTurnDraft) map[string]string {
 	names := make(map[string]string)
 	for _, msg := range messages {
 		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
@@ -766,8 +766,9 @@ func geminiFunctionCallingConfig(raw json.RawMessage) (map[string]interface{}, b
 }
 
 func geminiTools(tools []schema.Tool) []map[string]interface{} {
-	functionDeclarations := make([]map[string]interface{}, 0, len(tools))
-	for _, tool := range tools {
+	projected := functionToolProjections(tools)
+	functionDeclarations := make([]map[string]interface{}, 0, len(projected))
+	for _, tool := range projected {
 		name, description, parameters := normalizedFunctionTool(tool)
 		if name == "" {
 			continue
@@ -920,13 +921,17 @@ func firstStringSlice(obj map[string]interface{}, keys ...string) []string {
 }
 
 func functionChoiceName(obj map[string]interface{}) string {
+	namespace := toolChoiceNamespace(obj)
+	if name := firstString(obj, "name", "Name"); name != "" {
+		return qualifyResponsesNamespaceToolName(namespace, name)
+	}
 	for _, key := range []string{"function", "Function"} {
 		switch raw := obj[key].(type) {
 		case string:
-			return strings.TrimSpace(raw)
+			return qualifyResponsesNamespaceToolName(namespace, raw)
 		case map[string]interface{}:
 			if name := firstString(raw, "name", "Name"); name != "" {
-				return name
+				return qualifyResponsesNamespaceToolName(namespace, name)
 			}
 		}
 	}

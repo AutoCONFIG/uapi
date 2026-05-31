@@ -7,17 +7,17 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseAnthropicResponse converts Anthropic response to protocolResponseView.
-func parseAnthropicResponse(body []byte) (*protocolResponseView, error) {
+// parseAnthropicResponse converts Anthropic response to responseDraft.
+func parseAnthropicResponse(body []byte) (*responseDraft, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
 	}
 
-	ir := &protocolResponseView{
+	ir := &responseDraft{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]protocolChoiceView, 0, len(resp.Content)),
+		Choices: make([]responseChoiceDraft, 0, len(resp.Content)),
 		Usage: schema.Usage{
 			PromptTokens:             resp.Usage.InputTokens,
 			CompletionTokens:         resp.Usage.OutputTokens,
@@ -28,7 +28,7 @@ func parseAnthropicResponse(body []byte) (*protocolResponseView, error) {
 	}
 
 	// Convert content blocks to a protocol response choice
-	choice := protocolChoiceView{
+	choice := responseChoiceDraft{
 		Index: 0,
 		Role:  resp.Role,
 	}
@@ -129,8 +129,8 @@ func mapAnthropicResponseFinishReason(fr string) string {
 	}
 }
 
-// emitAnthropicResponse converts protocolResponseView to Anthropic response.
-func emitAnthropicResponse(ir *protocolResponseView) ([]byte, error) {
+// emitAnthropicResponse converts responseDraft to Anthropic response.
+func emitAnthropicResponse(ir *responseDraft) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	resp["id"] = ir.ID

@@ -82,6 +82,9 @@ func recordTargetSpecificContentLosses(req *ir.Request, clientFormat, upstreamFo
 	if req == nil {
 		return
 	}
+	if len(req.Generation.LogitBias) > 0 && !supportsLogitBias(upstreamFormat) {
+		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$.logit_bias", "logit_bias", req.Generation.LogitBias, "OpenAI Chat logit_bias has no equivalent in target protocol and is not emitted"))
+	}
 	recordItemLosses := func(items []ir.Item) {
 		for i := range items {
 			if isResponsesFamily(upstreamFormat) && !isResponsesFamily(clientFormat) {
@@ -100,6 +103,10 @@ func recordTargetSpecificContentLosses(req *ir.Request, clientFormat, upstreamFo
 	for i := range req.Turns {
 		recordItemLosses(req.Turns[i].Items)
 	}
+}
+
+func supportsLogitBias(format Format) bool {
+	return format == FormatOpenAIChatCompletions
 }
 
 func supportsStructuredToolResultOutput(format Format) bool {

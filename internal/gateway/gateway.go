@@ -237,11 +237,12 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 }
 
 func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
-	if string(ctx.Method()) == fasthttp.MethodGet && isOpenAIModelsPath(string(ctx.Path())) {
+	path := string(ctx.Path())
+	if string(ctx.Method()) == fasthttp.MethodGet && isOpenAIModelsPath(path) {
 		g.handleModels(ctx)
 		return
 	}
-	if string(ctx.Method()) == fasthttp.MethodGet && isGeminiModelsPath(string(ctx.Path())) {
+	if string(ctx.Method()) == fasthttp.MethodGet && isGeminiModelsPath(path) {
 		g.handleGeminiModels(ctx)
 		return
 	}
@@ -253,11 +254,11 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	body := ctx.PostBody()
 	var req relayRequest
 	_ = json.Unmarshal(body, &req)
-	req.Model = httputil.ModelFromRequestPath(string(ctx.Path()), req.Model)
-	if req.Model == "" && pathCarriesOpenAIModel(string(ctx.Path())) {
+	req.Model = httputil.ModelFromRequestPath(path, req.Model)
+	if req.Model == "" && pathCarriesOpenAIModel(path) {
 		req.Model = httputil.ModelFromBodyOrForm(ctx)
 	}
-	if req.Model == "" && strings.HasPrefix(string(ctx.Path()), "/v1/images/") {
+	if req.Model == "" && strings.HasPrefix(path, "/v1/images/") {
 		req.Model = "gpt-image-1"
 	}
 	if req.Model == "" {
@@ -339,7 +340,8 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	upResp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(upReq)
 
-	if err := g.buildRequest(ctx, upReq, node.BaseURL); err != nil {
+	clientIP := httputil.ClientIPForGatewayLog(ctx, g.trustedProxies)
+	if err := g.buildRequest(ctx, upReq, node.BaseURL, clientIP); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
 			go g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model)
@@ -357,7 +359,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		EstimatedTokens: estimatedTokens,
 		Precharged:      precharged,
 		TokenPlanID:     prechargedTokenPlanID.String(),
-		ClientIP:        httputil.ClientIPForLog(ctx, g.trustedProxies),
+		ClientIP:        clientIP,
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
 		AccountID:       route.AccountID.String(),
@@ -818,7 +820,7 @@ func isDNSError(err error) bool {
 	return strings.Contains(err.Error(), "no such host")
 }
 
-func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL string) error {
+func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL, clientIP string) error {
 	path := string(ctx.RequestURI())
 	target := baseURL + path
 	if _, err := url.ParseRequestURI(target); err != nil {
@@ -830,7 +832,8 @@ func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, 
 	out.Header.Del("Proxy-Connection")
 	out.Header.Del("Keep-Alive")
 	out.Header.Del("Transfer-Encoding")
-	out.Header.Set("X-Forwarded-For", httputil.ClientIPForLog(ctx, g.trustedProxies))
+	out.Header.Set("X-Forwarded-For", clientIP)
+	out.Header.Set("X-Real-IP", clientIP)
 	out.Header.Set("X-Forwarded-Proto", string(ctx.URI().Scheme()))
 	return nil
 }

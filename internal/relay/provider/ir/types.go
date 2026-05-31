@@ -35,6 +35,7 @@ type GenerationConfig struct {
 	Seed              *int64                     `json:"seed,omitempty"`
 	LogProbs          *bool                      `json:"logprobs,omitempty"`
 	TopLogProbs       *int                       `json:"top_logprobs,omitempty"`
+	LogitBias         json.RawMessage            `json:"logit_bias,omitempty"`
 	FrequencyPenalty  *float64                   `json:"frequency_penalty,omitempty"`
 	PresencePenalty   *float64                   `json:"presence_penalty,omitempty"`
 	ResponseFormat    json.RawMessage            `json:"response_format,omitempty"`

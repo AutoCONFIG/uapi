@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func (r *protocolRequestView) ToIR() *ir.Request {
+func (r *requestDraft) ToIR() *ir.Request {
 	if r == nil {
 		return nil
 	}
 	return r.buildIR()
 }
 
-func (r *protocolRequestView) buildIR() *ir.Request {
+func (r *requestDraft) buildIR() *ir.Request {
 	req := &ir.Request{
 		SourceProtocol: irProtocol(r.SourceFormat),
 		Model:          r.Model,
@@ -35,6 +35,7 @@ func (r *protocolRequestView) buildIR() *ir.Request {
 			Seed:              r.Seed,
 			LogProbs:          r.LogProbs,
 			TopLogProbs:       r.TopLogProbs,
+			LogitBias:         ir.CloneRaw(r.LogitBias),
 			FrequencyPenalty:  r.FrequencyPenalty,
 			PresencePenalty:   r.PresencePenalty,
 			ResponseFormat:    ir.CloneRaw(r.ResponseFormat),
@@ -71,7 +72,7 @@ func (r *protocolRequestView) buildIR() *ir.Request {
 	return req
 }
 
-func irTurn(msg protocolTurnView, source Format) ir.Turn {
+func irTurn(msg requestTurnDraft, source Format) ir.Turn {
 	turn := ir.Turn{
 		Role:     irRole(msg.Role),
 		Name:     msg.Name,
@@ -94,7 +95,7 @@ func irTurn(msg protocolTurnView, source Format) ir.Turn {
 	return turn
 }
 
-func irItem(item protocolItemView, source Format, index int) ir.Item {
+func irItem(item requestItemDraft, source Format, index int) ir.Item {
 	switch item.Kind {
 	case contentItemKindContent, contentItemKindReasoning:
 		return irContentPartItem(item.Kind, item.Content, item.Raw, source, index)

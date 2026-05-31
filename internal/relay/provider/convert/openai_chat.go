@@ -8,13 +8,13 @@ import (
 )
 
 // parseOpenAIChatRequest converts OpenAI Chat Completions request to an protocol request view.
-func parseOpenAIChatRequest(body []byte) (*protocolRequestView, error) {
+func parseOpenAIChatRequest(body []byte) (*requestDraft, error) {
 	var req schema.OpenAIChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat request: %w", err)
 	}
 
-	ir := &protocolRequestView{
+	ir := &requestDraft{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatOpenAIChatCompletions,
@@ -28,7 +28,7 @@ func parseOpenAIChatRequest(body []byte) (*protocolRequestView, error) {
 
 	// Extract system/developer messages into Instructions
 	var instructions []string
-	var messages []protocolTurnView
+	var messages []requestTurnDraft
 
 	for _, msg := range req.Messages {
 		if msg.Role == "system" || msg.Role == "developer" {
@@ -45,12 +45,12 @@ func parseOpenAIChatRequest(body []byte) (*protocolRequestView, error) {
 			content = []schema.ContentPart{{Type: "text", Text: *msg.Content.Text}}
 		}
 
-		requestMsg := protocolTurnView{
+		requestMsg := requestTurnDraft{
 			Role: msg.Role,
 			Name: msg.Name,
 		}
 		for _, part := range reasoningPartsFromOpenAIChatExtra(msg.Extra) {
-			requestMsg.Parts = append(requestMsg.Parts, protocolItemView{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
+			requestMsg.Parts = append(requestMsg.Parts, requestItemDraft{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
 		}
 		if msg.Role != "tool" {
 			for _, part := range content {
@@ -178,7 +178,7 @@ func parseOpenAIChatRequest(body []byte) (*protocolRequestView, error) {
 }
 
 // emitOpenAIChatRequest converts an protocol request view to OpenAI Chat Completions request.
-func emitOpenAIChatRequest(ir *protocolRequestView) ([]byte, error) {
+func emitOpenAIChatRequest(ir *requestDraft) ([]byte, error) {
 	req := schema.OpenAIChatRequest{
 		Model:  ir.Model,
 		Stream: ir.Stream,
@@ -315,19 +315,27 @@ func emitOpenAIChatRequest(ir *protocolRequestView) ([]byte, error) {
 		req.User = ir.User
 	}
 	if ir.Tools != nil {
-		req.Tools = openAIChatTools(ir.Tools)
+		req.Tools = openAIChatTools(ir.Tools, sameNativeRequestFamily(ir.SourceFormat, FormatOpenAIChatCompletions))
 	}
 	if ir.ToolChoice != nil {
-		req.ToolChoice = ir.ToolChoice
+		if sameNativeRequestFamily(ir.SourceFormat, FormatOpenAIChatCompletions) {
+			req.ToolChoice = ir.ToolChoice
+		} else {
+			req.ToolChoice = projectFunctionToolChoice(ir.ToolChoice)
+		}
 	}
 
 	return json.Marshal(req)
 }
 
-func openAIChatTools(tools []schema.Tool) []schema.Tool {
-	out := make([]schema.Tool, 0, len(tools))
-	for _, tool := range tools {
-		normalized, ok := openAIChatTool(tool)
+func openAIChatTools(tools []schema.Tool, preserveNative bool) []schema.Tool {
+	projected := tools
+	if !preserveNative {
+		projected = functionToolProjections(tools)
+	}
+	out := make([]schema.Tool, 0, len(projected))
+	for _, tool := range projected {
+		normalized, ok := openAIChatTool(tool, preserveNative)
 		if ok {
 			out = append(out, normalized)
 		}
@@ -335,7 +343,7 @@ func openAIChatTools(tools []schema.Tool) []schema.Tool {
 	return out
 }
 
-func openAIChatTool(tool schema.Tool) (schema.Tool, bool) {
+func openAIChatTool(tool schema.Tool, preserveNative bool) (schema.Tool, bool) {
 	name, description, parameters := normalizedFunctionTool(tool)
 	if name != "" {
 		functionExtra := map[string]json.RawMessage(nil)
@@ -350,13 +358,18 @@ func openAIChatTool(tool schema.Tool) (schema.Tool, bool) {
 				Parameters:  parameters,
 				Extra:       functionExtra,
 			},
-			Extra: tool.Extra,
+			Extra: func() map[string]json.RawMessage {
+				if preserveNative {
+					return tool.Extra
+				}
+				return nil
+			}(),
 		}, true
 	}
-	if tool.Type == "" {
-		return schema.Tool{}, false
+	if preserveNative && tool.Type != "" {
+		return tool, true
 	}
-	return tool, true
+	return schema.Tool{}, false
 }
 
 func openAIChatRole(role string) string {

@@ -9,7 +9,7 @@ import (
 )
 
 // parseOpenAIResponsesRequest converts OpenAI Responses API request to an protocol request view.
-func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
+func parseOpenAIResponsesRequest(body []byte) (*requestDraft, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -17,7 +17,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 	var rawRoot map[string]json.RawMessage
 	_ = json.Unmarshal(body, &rawRoot)
 
-	ir := &protocolRequestView{
+	ir := &requestDraft{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: append(json.RawMessage(nil), body...),
@@ -49,12 +49,12 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 	}
 
 	// Parse Input - can be string or array
-	var messages []protocolTurnView
+	var messages []requestTurnDraft
 	var inputItems []schema.ResponsesInputItem
 
 	if req.Input.Text != nil {
 		// Single string input becomes a user message
-		msg := protocolTurnView{Role: "user"}
+		msg := requestTurnDraft{Role: "user"}
 		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
 		messages = append(messages, msg)
 	} else if len(req.Input.Items) > 0 {
@@ -74,7 +74,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 			} else if len(item.Content.Parts) > 0 {
 				content = item.Content.Parts
 			}
-			msg := protocolTurnView{
+			msg := requestTurnDraft{
 				Role:    item.Role,
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -88,7 +88,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 			messages = append(messages, msg)
 
 		case "reasoning":
-			msg := protocolTurnView{
+			msg := requestTurnDraft{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -102,7 +102,8 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 
 		case "function_call":
 			// function_call item becomes assistant message with tool calls
-			msg := protocolTurnView{
+			name := qualifyResponsesNamespaceToolName(rawString(item.Extra["namespace"]), item.Name)
+			msg := requestTurnDraft{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -112,12 +113,12 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 			appendToolCallItem(&msg, schema.ToolCall{
 				ID:   item.CallID,
 				Type: "function",
-				Name: item.Name,
+				Name: name,
 				Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{
-					Name:      item.Name,
+					Name:      name,
 					Arguments: item.Arguments,
 				},
 			}, rawItem)
@@ -125,7 +126,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 
 		case "function_call_output":
 			// function_call_output becomes tool result
-			msg := protocolTurnView{
+			msg := requestTurnDraft{
 				Role:    "tool",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -140,7 +141,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 			messages = append(messages, msg)
 		default:
 			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item is preserved as native raw/opaque IR"))
-			messages = append(messages, protocolTurnView{
+			messages = append(messages, requestTurnDraft{
 				ItemID:  item.ID,
 				Status:  item.Status,
 				Phase:   item.Phase,
@@ -193,7 +194,7 @@ func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 
 // emitOpenAIResponsesRequest converts an protocol request view to OpenAI Responses API request.
 // THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func emitOpenAIResponsesRequest(ir *protocolRequestView) ([]byte, error) {
+func emitOpenAIResponsesRequest(ir *requestDraft) ([]byte, error) {
 	// Use a map to build the JSON to ensure field ordering
 	resp := make(map[string]interface{})
 
@@ -324,7 +325,7 @@ func isResponsesFamily(format Format) bool {
 	return format == FormatOpenAIResponses || format == FormatCodexResponses
 }
 
-func responsesInputItemsFromOrderedParts(msg protocolTurnView) []map[string]interface{} {
+func responsesInputItemsFromOrderedParts(msg requestTurnDraft) []map[string]interface{} {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
 	flushContent := func() {

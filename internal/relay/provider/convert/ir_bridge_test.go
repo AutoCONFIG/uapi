@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"encoding/json"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 	"testing"
@@ -82,6 +83,130 @@ func TestResponsesOpaqueItemRecordsAuditLoss(t *testing.T) {
 	}
 	if len(got.Turns) != 1 || len(got.Turns[0].Items) != 1 || got.Turns[0].Items[0].Kind != ir.ItemOpaque {
 		t.Fatalf("opaque item not preserved in IR: %#v", got.Turns)
+	}
+}
+
+func TestResponsesNamespaceToolsProjectToAnthropicFunctionTools(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"use memory",
+		"tools":[
+			{"type":"namespace","name":"plugin:claude-mem:mcp-search","tools":[
+				{"type":"function","name":"smart_search","description":"Search memory","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}
+			]},
+			{"type":"mcp","server_label":"claude-mem","server_url":"https://mcp.example.test","allowed_tools":["smart_search"]},
+			{"type":"file_search","vector_store_ids":["vs_1"]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	tools, ok := got["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want exactly one flattened function tool; body=%s", got["tools"], converted)
+	}
+	tool := tools[0].(map[string]interface{})
+	if tool["name"] != "plugin:claude-mem:mcp-search__smart_search" {
+		t.Fatalf("flattened tool name = %#v; body=%s", tool["name"], converted)
+	}
+	if _, ok := tool["input_schema"].(map[string]interface{}); !ok {
+		t.Fatalf("input_schema must be an object: %#v; body=%s", tool["input_schema"], converted)
+	}
+	for _, forbidden := range []string{"type", "server_label", "server_url", "allowed_tools", "tools", "parameters"} {
+		if _, exists := tool[forbidden]; exists {
+			t.Fatalf("Claude tool leaked Responses-only field %q: %#v; body=%s", forbidden, tool, converted)
+		}
+	}
+}
+
+func TestResponsesNamespaceToolsProjectAcrossFunctionOnlyProtocols(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"use memory",
+		"tools":[
+			{"type":"namespace","name":"mcp__memory","tools":[
+				{"type":"function","name":"smart_search","description":"Search memory","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}
+			]},
+			{"type":"mcp","server_label":"memory","server_url":"https://mcp.example.test","allowed_tools":["smart_search"]}
+		],
+		"tool_choice":{"type":"function","name":"smart_search","namespace":"mcp__memory"}
+	}`)
+
+	chat, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> Chat: %v", err)
+	}
+	chatText := string(chat)
+	for _, want := range []string{`"name":"mcp__memory__smart_search"`, `"tool_choice":{"name":"mcp__memory__smart_search","type":"function"}`} {
+		if indexOf(chatText, want) < 0 {
+			t.Fatalf("OpenAI Chat projection missing %s:\n%s", want, chat)
+		}
+	}
+	for _, forbidden := range []string{`"type":"mcp"`, `"server_label"`, `"server_url"`, `"allowed_tools"`} {
+		if indexOf(chatText, forbidden) >= 0 {
+			t.Fatalf("OpenAI Chat projection leaked %s:\n%s", forbidden, chat)
+		}
+	}
+
+	gemini, err := ConvertRequest(FormatOpenAIResponses, FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Responses -> Gemini: %v", err)
+	}
+	geminiText := string(gemini)
+	for _, want := range []string{`"name":"mcp__memory__smart_search"`, `"allowedFunctionNames":["mcp__memory__smart_search"]`} {
+		if indexOf(geminiText, want) < 0 {
+			t.Fatalf("Gemini projection missing %s:\n%s", want, gemini)
+		}
+	}
+	for _, forbidden := range []string{`"type":"mcp"`, `"server_label"`, `"server_url"`, `"allowed_tools"`} {
+		if indexOf(geminiText, forbidden) >= 0 {
+			t.Fatalf("Gemini projection leaked %s:\n%s", forbidden, gemini)
+		}
+	}
+}
+
+func TestResponsesSameProtocolPreservesMCPAndNamespaceTools(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"use memory",
+		"tools":[
+			{"type":"namespace","name":"mcp__memory","tools":[{"type":"function","name":"smart_search","parameters":{"type":"object","properties":{}}}]},
+			{"type":"mcp","server_label":"memory","server_url":"https://mcp.example.test","allowed_tools":["smart_search"]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("Responses -> Responses: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{`"type":"namespace"`, `"tools":[`, `"type":"mcp"`, `"server_label":"memory"`, `"allowed_tools":["smart_search"]`} {
+		if indexOf(text, want) < 0 {
+			t.Fatalf("same-protocol Responses dropped %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestResponsesFunctionCallNamespaceProjectsToAnthropicToolUseName(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"model":"gpt-5",
+		"output":[
+			{"type":"function_call","call_id":"call_1","name":"smart_search","namespace":"plugin:claude-mem:mcp-search","arguments":"{\"query\":\"uapi\"}","status":"completed"}
+		]
+	}`)
+	converted, err := ConvertResponse(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertResponse: %v", err)
+	}
+	text := string(converted)
+	if indexOf(text, `"name":"plugin:claude-mem:mcp-search__smart_search"`) < 0 {
+		t.Fatalf("Responses namespace tool call not qualified for Anthropic:\n%s", converted)
 	}
 }
 
@@ -192,14 +317,14 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 }
 
 func TestProtocolResponseViewToIRPreservesUsageAndOrderedItems(t *testing.T) {
-	resp := &protocolResponseView{
+	resp := &responseDraft{
 		ID:    "chatcmpl_1",
 		Model: "gpt-test",
 		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
-		Choices: []protocolChoiceView{{
+		Choices: []responseChoiceDraft{{
 			Index: 0,
 			Role:  "assistant",
-			Items: []protocolItemView{
+			Items: []requestItemDraft{
 				{Kind: "content", Content: schema.ContentPart{Type: "text", Text: "answer"}},
 				{Kind: "tool_call", ToolCall: schema.ToolCall{ID: "call_1", Type: "function", Name: "lookup"}},
 			},

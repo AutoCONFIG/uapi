@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -13,6 +14,20 @@ type testUsageParser struct{}
 
 func (testUsageParser) ParseStreamUsage([]byte) (int, int, error) {
 	return 0, 0, nil
+}
+
+type errAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
 }
 
 type responsesUsageParser struct{}
@@ -153,6 +168,27 @@ func TestStreamAndForwardRawGeminiEOFCompletes(t *testing.T) {
 	result := <-done
 	if !result.finalized || result.failed {
 		t.Fatalf("clean raw Gemini EOF must finalize successfully: %+v", result)
+	}
+}
+
+func TestStreamAndForwardRawGeminiTerminalThenClosedNetworkCompletes(t *testing.T) {
+	body := "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(&errAfterReader{
+			data: []byte(body),
+			err:  errors.New("read tcp 127.0.0.1:1234->127.0.0.1:443: use of closed network connection"),
+		}, reader, newStreamTracker(testUsageParser{}), nil, nil, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.err != nil || !result.finalized || result.failed {
+		t.Fatalf("terminal Gemini close should complete successfully: %+v", result)
 	}
 }
 
@@ -423,6 +459,71 @@ func TestStreamConverterFuncKeepsGeminiNotStartedOpen(t *testing.T) {
 	}
 	if !strings.Contains(string(second), `"text":"second"`) {
 		t.Fatalf("converter closed on NOT_STARTED finishReason, second chunk: %s", second)
+	}
+}
+
+func TestStreamConverterFuncCoversOfficialClientFormatAliases(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream provider.Format
+		client   provider.Format
+		input    []byte
+		want     string
+	}{
+		{
+			name:     "codex responses stream to chat",
+			upstream: provider.FormatCodexResponses,
+			client:   provider.FormatOpenAIChatCompletions,
+			input:    []byte(`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n"),
+			want:     `"content":"hi"`,
+		},
+		{
+			name:     "chat stream to codex responses",
+			upstream: provider.FormatOpenAIChatCompletions,
+			client:   provider.FormatCodexResponses,
+			input:    []byte(`data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"),
+			want:     "event: response.output_text.delta",
+		},
+		{
+			name:     "claude code stream to chat",
+			upstream: provider.FormatClaudeCode,
+			client:   provider.FormatOpenAIChatCompletions,
+			input:    []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n"),
+			want:     `"content":"hi"`,
+		},
+		{
+			name:     "chat stream to claude code",
+			upstream: provider.FormatOpenAIChatCompletions,
+			client:   provider.FormatClaudeCode,
+			input:    []byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"),
+			want:     `"type":"content_block_delta"`,
+		},
+		{
+			name:     "gemini cli stream to chat",
+			upstream: provider.FormatGeminiCLI,
+			client:   provider.FormatOpenAIChatCompletions,
+			input:    []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"NOT_STARTED"}]}}` + "\n\n"),
+			want:     `"content":"hi"`,
+		},
+		{
+			name:     "chat stream to antigravity",
+			upstream: provider.FormatOpenAIChatCompletions,
+			client:   provider.FormatAntigravity,
+			input:    []byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"),
+			want:     `"text":"hi"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			convert := newStreamConverterFunc(tt.upstream, tt.client)
+			if convert == nil {
+				t.Fatalf("missing converter for %s -> %s", tt.upstream, tt.client)
+			}
+			out := convert(tt.input)
+			if !strings.Contains(string(out), tt.want) {
+				t.Fatalf("converted stream missing %s:\n%s", tt.want, out)
+			}
+		})
 	}
 }
 

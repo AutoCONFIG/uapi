@@ -10,7 +10,7 @@ import (
 
 // parseGeminiCLIRequest converts Gemini CLI request to an protocol request view.
 // Extracts the inner Gemini request from the CLI envelope.
-func parseGeminiCLIRequest(body []byte) (*protocolRequestView, error) {
+func parseGeminiCLIRequest(body []byte) (*requestDraft, error) {
 	var req schema.GeminiCLIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI request: %w", err)
@@ -60,7 +60,7 @@ func parseGeminiCLIRequest(body []byte) (*protocolRequestView, error) {
 
 // emitGeminiCLIRequest converts an protocol request view to Gemini CLI request.
 // Wraps the Gemini request in the CLI envelope.
-func emitGeminiCLIRequest(ir *protocolRequestView) ([]byte, error) {
+func emitGeminiCLIRequest(ir *requestDraft) ([]byte, error) {
 	// First convert to Gemini format
 	innerBody, err := emitGeminiRequest(ir)
 	if err != nil {

@@ -394,6 +394,10 @@ func streamAndForward(
 	}
 
 	if err := scanner.Err(); err != nil {
+		if (sawDone || sawTerminal || sawChatFinish) && isBenignStreamCloseError(err) {
+			pt, ct, parseFailed := tracker.Result()
+			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, parseFailed: parseFailed}
+		}
 		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
 		return streamResult{err: err}
 	}
@@ -415,6 +419,16 @@ func streamAndForward(
 
 	pt, ct, parseFailed := tracker.Result()
 	return streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, parseFailed: parseFailed}
+}
+
+func isBenignStreamCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "response body closed") ||
+		strings.Contains(msg, "body closed")
 }
 
 func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([]byte) []byte {
@@ -605,6 +619,10 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 	}
 
 	if err := scanner.Err(); err != nil {
+		if (sawDone || sawTerminal || sawChatFinish) && isBenignStreamCloseError(err) {
+			pt, ct, parseFailed := tracker.Result()
+			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, parseFailed: parseFailed}
+		}
 		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
 		return streamResult{err: err}
 	}

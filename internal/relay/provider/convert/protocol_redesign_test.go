@@ -173,6 +173,43 @@ func TestOpenAIChatSameFormatPreservesExplicitFalseAndNativeFields(t *testing.T)
 	}
 }
 
+func TestOpenAIChatLogitBiasSurvivesIRBridgeAndRecordsTargetLoss(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"logit_bias":{"123":-100}
+	}`)
+	reqIR, err := convert.ToIR(convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+	roundTrip, err := convert.FromIR(reqIR, convert.FormatOpenAIChatCompletions)
+	if err != nil {
+		t.Fatalf("FromIR chat: %v", err)
+	}
+	if !strings.Contains(string(roundTrip), `"logit_bias":{"123":-100}`) {
+		t.Fatalf("IR bridge dropped logit_bias:\n%s", roundTrip)
+	}
+
+	_, detailedIR, err := convert.ConvertRequestDetailed(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if detailedIR.Generation.LogitBias == nil || !strings.Contains(string(detailedIR.Generation.LogitBias), `"123":-100`) {
+		t.Fatalf("detailed IR did not preserve logit_bias: %#v", detailedIR.Generation.LogitBias)
+	}
+	foundLoss := false
+	for _, loss := range detailedIR.Losses {
+		if loss.Field == "logit_bias" && loss.Preserved {
+			foundLoss = true
+			break
+		}
+	}
+	if !foundLoss {
+		t.Fatalf("missing preserved logit_bias loss record: %#v", detailedIR.Losses)
+	}
+}
+
 func TestOpenAIChatToolExtensionsSurviveCrossProtocolConversion(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

@@ -43,11 +43,11 @@ func (e *NoRequestEmitterError) Error() string {
 	return "no request emitter for format " + string(e.Format)
 }
 
-func protocolRequestViewFromIR(req *relayir.Request) *protocolRequestView {
+func requestDraftFromIR(req *relayir.Request) *requestDraft {
 	if req == nil {
 		return nil
 	}
-	out := &protocolRequestView{
+	out := &requestDraft{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: relayir.CloneRaw(req.Native.RawBody),
@@ -79,6 +79,7 @@ func protocolRequestViewFromIR(req *relayir.Request) *protocolRequestView {
 	out.Seed = req.Generation.Seed
 	out.LogProbs = req.Generation.LogProbs
 	out.TopLogProbs = req.Generation.TopLogProbs
+	out.LogitBias = relayir.CloneRaw(req.Generation.LogitBias)
 	out.FrequencyPenalty = req.Generation.FrequencyPenalty
 	out.PresencePenalty = req.Generation.PresencePenalty
 	out.ResponseFormat = relayir.CloneRaw(req.Generation.ResponseFormat)
@@ -111,8 +112,8 @@ func instructionText(inst relayir.Instruction) string {
 	return ""
 }
 
-func requestMessageFromIRTurn(turn relayir.Turn) protocolTurnView {
-	msg := protocolTurnView{
+func requestMessageFromIRTurn(turn relayir.Turn) requestTurnDraft {
+	msg := requestTurnDraft{
 		Role:    string(turn.Role),
 		Name:    turn.Name,
 		ItemID:  turn.ID,
