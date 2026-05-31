@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
@@ -469,22 +470,189 @@ func (e *chatIREmitter) Reset() {
 }
 
 type responsesIREmitter struct {
-	inner StreamConverter
+	id                string
+	model             string
+	created           int64
+	started           bool
+	finished          bool
+	outputItemID      string
+	outputIndex       int
+	hasOutputItem     bool
+	hasContentPart    bool
+	outputText        strings.Builder
+	reasoningItemID   string
+	reasoningIndex    int
+	hasReasoningItem  bool
+	hasReasoningPart  bool
+	reasoningText     strings.Builder
+	reasoningOpaque   string
+	nextOutputIndex   int
+	toolCallIDToIndex map[string]int
 }
 
 func newResponsesIREmitter() streamIREmitter {
-	return &responsesIREmitter{inner: newChatToResponsesConverter()}
+	return &responsesIREmitter{outputIndex: -1, reasoningIndex: -1, toolCallIDToIndex: map[string]int{}}
 }
 
 func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
-	return e.inner.Convert(chatChunkFromIR(event))
+	e.setMeta(event)
+	switch event.Type {
+	case relayir.EventResponseCreated, relayir.EventMessageStart:
+		return e.ensureStarted()
+	case relayir.EventContentDelta:
+		e.outputText.WriteString(event.Delta.Text)
+		out := e.ensureStarted()
+		out = append(out, e.ensureOutputTextPart()...)
+		return append(out, sseEventJSON("response.output_text.delta", map[string]interface{}{
+			"type": "response.output_text.delta", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "delta": event.Delta.Text,
+		})...)
+	case relayir.EventReasoningDelta:
+		out := e.ensureStarted()
+		if event.Delta.Kind == relayir.ItemEncryptedReasoning || event.Delta.Signature != "" && event.Delta.Text == "" {
+			e.reasoningOpaque = event.Delta.Signature
+			return append(out, e.ensureReasoningItem()...)
+		}
+		e.reasoningText.WriteString(event.Delta.Text)
+		out = append(out, e.ensureReasoningPart()...)
+		return append(out, sseEventJSON("response.reasoning_summary_text.delta", map[string]interface{}{
+			"type": "response.reasoning_summary_text.delta", "item_id": e.reasoningItemID, "output_index": e.reasoningIndex, "summary_index": 0, "delta": event.Delta.Text,
+		})...)
+	case relayir.EventToolCallStart:
+		out := e.ensureStarted()
+		callID := rawMetaString(event.Native.Meta, "call_id")
+		name := rawMetaString(event.Native.Meta, "name")
+		if callID == "" {
+			callID = randomID("call_")
+		}
+		idx := len(e.toolCallIDToIndex)
+		e.toolCallIDToIndex[callID] = idx
+		return append(out, sseEventJSON("response.output_item.added", map[string]interface{}{
+			"type": "response.output_item.added", "output_index": idx, "item": map[string]interface{}{"type": "function_call", "id": callID, "name": name, "call_id": callID},
+		})...)
+	case relayir.EventToolArgDelta:
+		callID := rawMetaString(event.Native.Meta, "call_id")
+		return sseEventJSON("response.function_call_arguments.delta", map[string]interface{}{
+			"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": callID, "arguments": event.Delta.Arguments},
+		})
+	case relayir.EventResponseDone:
+		return e.completedEvent()
+	}
+	return nil
 }
 
-func (e *responsesIREmitter) Done() []byte { return e.inner.Done() }
+func (e *responsesIREmitter) setMeta(event relayir.StreamEvent) {
+	if e.id == "" && event.ResponseID != "" {
+		e.id = event.ResponseID
+		e.outputItemID = e.id + "_msg"
+		e.reasoningItemID = e.id + "_reasoning"
+	}
+	if e.model == "" && event.Model != "" {
+		e.model = event.Model
+	}
+	if e.created == 0 {
+		e.created = time.Now().Unix()
+	}
+}
+
+func (e *responsesIREmitter) ensureStarted() []byte {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	if e.id == "" {
+		e.id = randomID("resp_")
+	}
+	if e.outputItemID == "" {
+		e.outputItemID = e.id + "_msg"
+	}
+	if e.reasoningItemID == "" {
+		e.reasoningItemID = e.id + "_reasoning"
+	}
+	return sseEventJSON("response.created", map[string]interface{}{"type": "response.created", "response": map[string]interface{}{"id": e.id, "object": "response", "created_at": e.created, "status": "in_progress", "model": e.model, "output": []interface{}{}}})
+}
+
+func (e *responsesIREmitter) ensureReasoningPart() []byte {
+	out := e.ensureReasoningItem()
+	if e.hasReasoningPart {
+		return out
+	}
+	e.hasReasoningPart = true
+	return append(out, sseEventJSON("response.reasoning_summary_part.added", map[string]interface{}{"type": "response.reasoning_summary_part.added", "item_id": e.reasoningItemID, "output_index": e.reasoningIndex, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": ""}})...)
+}
+
+func (e *responsesIREmitter) ensureReasoningItem() []byte {
+	if e.reasoningIndex < 0 {
+		e.reasoningIndex = e.nextOutputIndex
+		e.nextOutputIndex++
+	}
+	if e.hasReasoningItem {
+		return nil
+	}
+	e.hasReasoningItem = true
+	item := map[string]interface{}{"id": e.reasoningItemID, "type": "reasoning", "status": "in_progress", "summary": []interface{}{}}
+	if e.reasoningOpaque != "" {
+		item["encrypted_content"] = e.reasoningOpaque
+	}
+	return sseEventJSON("response.output_item.added", map[string]interface{}{"type": "response.output_item.added", "output_index": e.reasoningIndex, "item": item})
+}
+
+func (e *responsesIREmitter) ensureOutputTextPart() []byte {
+	var out []byte
+	if e.outputIndex < 0 {
+		e.outputIndex = e.nextOutputIndex
+		e.nextOutputIndex++
+	}
+	if !e.hasOutputItem {
+		e.hasOutputItem = true
+		out = append(out, sseEventJSON("response.output_item.added", map[string]interface{}{"type": "response.output_item.added", "output_index": e.outputIndex, "item": map[string]interface{}{"id": e.outputItemID, "type": "message", "status": "in_progress", "role": "assistant", "content": []interface{}{}}})...)
+	}
+	if !e.hasContentPart {
+		e.hasContentPart = true
+		out = append(out, sseEventJSON("response.content_part.added", map[string]interface{}{"type": "response.content_part.added", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": "", "annotations": []interface{}{}}})...)
+	}
+	return out
+}
+
+func (e *responsesIREmitter) completedEvent() []byte {
+	if e.finished {
+		return nil
+	}
+	e.finished = true
+	var out []byte
+	var output []interface{}
+	reasoning := e.reasoningText.String()
+	if e.hasReasoningItem {
+		if e.hasReasoningPart {
+			out = append(out, sseEventJSON("response.reasoning_summary_text.done", map[string]interface{}{"type": "response.reasoning_summary_text.done", "item_id": e.reasoningItemID, "output_index": e.reasoningIndex, "summary_index": 0, "text": reasoning})...)
+			out = append(out, sseEventJSON("response.reasoning_summary_part.done", map[string]interface{}{"type": "response.reasoning_summary_part.done", "item_id": e.reasoningItemID, "output_index": e.reasoningIndex, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": reasoning}})...)
+		}
+		summary := []interface{}{}
+		if reasoning != "" {
+			summary = append(summary, map[string]interface{}{"type": "summary_text", "text": reasoning})
+		}
+		item := map[string]interface{}{"id": e.reasoningItemID, "type": "reasoning", "status": "completed", "summary": summary}
+		if e.reasoningOpaque != "" {
+			item["encrypted_content"] = e.reasoningOpaque
+		}
+		out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{"type": "response.output_item.done", "output_index": e.reasoningIndex, "item": item})...)
+		output = append(output, item)
+	}
+	text := e.outputText.String()
+	if e.hasOutputItem {
+		out = append(out, sseEventJSON("response.output_text.done", map[string]interface{}{"type": "response.output_text.done", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "text": text})...)
+		out = append(out, sseEventJSON("response.content_part.done", map[string]interface{}{"type": "response.content_part.done", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": text, "annotations": []interface{}{}}})...)
+		item := map[string]interface{}{"id": e.outputItemID, "type": "message", "status": "completed", "role": "assistant", "content": []interface{}{map[string]interface{}{"type": "output_text", "text": text, "annotations": []interface{}{}}}}
+		out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{"type": "response.output_item.done", "output_index": e.outputIndex, "item": item})...)
+		output = append(output, item)
+	}
+	out = append(out, sseEventJSON("response.completed", map[string]interface{}{"type": "response.completed", "response": map[string]interface{}{"id": e.id, "object": "response", "created_at": e.created, "status": "completed", "model": e.model, "output": output}})...)
+	return out
+}
+
+func (e *responsesIREmitter) Done() []byte { return e.completedEvent() }
 
 func (e *responsesIREmitter) Reset() {
-	e.inner.Reset()
-	e.inner = newChatToResponsesConverter()
+	*e = responsesIREmitter{outputIndex: -1, reasoningIndex: -1, toolCallIDToIndex: map[string]int{}}
 }
 
 func chatChunkFromIR(event relayir.StreamEvent) []byte {
@@ -495,9 +663,22 @@ func chatChunkFromIR(event relayir.StreamEvent) []byte {
 		return chatChunk(id, model, map[string]interface{}{"role": "assistant"}, nil, nil)
 	case relayir.EventContentDelta:
 		return chatChunk(id, model, map[string]interface{}{"content": event.Delta.Text}, nil, nil)
+	case relayir.EventContentPartEnd:
+		if event.Delta.Text == "" {
+			return nil
+		}
+		return chatChunk(id, model, map[string]interface{}{"content": event.Delta.Text}, nil, nil)
 	case relayir.EventReasoningDelta:
 		if event.Delta.Kind == relayir.ItemEncryptedReasoning || event.Delta.Signature != "" && event.Delta.Text == "" {
 			return chatChunk(id, model, reasoningEncryptedDelta(event.ItemIndex, event.Delta.Signature), nil, nil)
+		}
+		return chatChunk(id, model, reasoningTextDelta(event.Delta.Text, event.ItemIndex, event.Delta.Signature), nil, nil)
+	case relayir.EventReasoningEnd:
+		if event.Delta.Kind == relayir.ItemEncryptedReasoning || event.Delta.Signature != "" && event.Delta.Text == "" {
+			return chatChunk(id, model, reasoningEncryptedDelta(event.ItemIndex, event.Delta.Signature), nil, nil)
+		}
+		if event.Delta.Text == "" {
+			return nil
 		}
 		return chatChunk(id, model, reasoningTextDelta(event.Delta.Text, event.ItemIndex, event.Delta.Signature), nil, nil)
 	case relayir.EventToolCallStart:
@@ -610,6 +791,64 @@ func rawMetaString(meta map[string]json.RawMessage, key string) string {
 	var out string
 	_ = json.Unmarshal(meta[key], &out)
 	return out
+}
+
+func responsesTextDelta(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var delta struct {
+		Text      string `json:"text"`
+		Content   string `json:"content"`
+		Delta     string `json:"delta"`
+		Arguments string `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return ""
+	}
+	switch {
+	case delta.Text != "":
+		return delta.Text
+	case delta.Content != "":
+		return delta.Content
+	case delta.Delta != "":
+		return delta.Delta
+	default:
+		return delta.Arguments
+	}
+}
+
+type responsesOutputItem struct {
+	Type             string `json:"type"`
+	EncryptedContent string `json:"encrypted_content"`
+	Content          []struct {
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		OutputText string `json:"output_text"`
+	} `json:"content"`
+	Summary []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"summary"`
+}
+
+func numericUsageValue(usage map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		switch v := usage[key].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		case json.Number:
+			n, _ := v.Int64()
+			return int(n)
+		}
+	}
+	return 0
 }
 
 func init() {

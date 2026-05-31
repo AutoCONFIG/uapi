@@ -16,14 +16,6 @@ type StreamConverter interface {
 	Reset()
 }
 
-// FormatPair identifies a conversion direction.
-type FormatPair struct {
-	Upstream convert.Format
-	Client   convert.Format
-}
-
-var registry = map[FormatPair]func() StreamConverter{}
-
 type streamIRParser interface {
 	Parse(line []byte) []relayir.StreamEvent
 	Done() []relayir.StreamEvent
@@ -38,11 +30,6 @@ type streamIREmitter interface {
 
 var streamIRParsers = map[convert.Format]func() streamIRParser{}
 var streamIREmitters = map[convert.Format]func() streamIREmitter{}
-
-// Register registers a StreamConverter factory for a FormatPair.
-func Register(pair FormatPair, factory func() StreamConverter) {
-	registry[pair] = factory
-}
 
 func RegisterIRParser(format convert.Format, factory func() streamIRParser) {
 	streamIRParsers[format] = factory
@@ -60,25 +47,7 @@ func NewConverter(upstream, client convert.Format) StreamConverter {
 			return &irStreamConverter{parser: parserFactory(), emitter: emitterFactory()}
 		}
 	}
-	factory, ok := registry[FormatPair{Upstream: upstream, Client: client}]
-	if ok {
-		return factory()
-	}
-	if upstream == convert.FormatOpenAIChatCompletions || client == convert.FormatOpenAIChatCompletions {
-		return nil
-	}
-	toChatFactory, ok := registry[FormatPair{Upstream: upstream, Client: convert.FormatOpenAIChatCompletions}]
-	if !ok {
-		return nil
-	}
-	fromChatFactory, ok := registry[FormatPair{Upstream: convert.FormatOpenAIChatCompletions, Client: client}]
-	if !ok {
-		return nil
-	}
-	return &chainedConverter{
-		first:  toChatFactory(),
-		second: fromChatFactory(),
-	}
+	return nil
 }
 
 type irStreamConverter struct {
@@ -106,36 +75,4 @@ func (c *irStreamConverter) Done() []byte {
 func (c *irStreamConverter) Reset() {
 	c.parser.Reset()
 	c.emitter.Reset()
-}
-
-type chainedConverter struct {
-	first  StreamConverter
-	second StreamConverter
-}
-
-func (c *chainedConverter) Convert(line []byte) []byte {
-	firstOut := c.first.Convert(line)
-	return c.convertSecond(firstOut)
-}
-
-func (c *chainedConverter) Done() []byte {
-	var out []byte
-	if firstOut := c.first.Done(); len(firstOut) > 0 {
-		out = append(out, c.convertSecond(firstOut)...)
-	}
-	out = append(out, c.second.Done()...)
-	return out
-}
-
-func (c *chainedConverter) Reset() {
-	c.first.Reset()
-	c.second.Reset()
-}
-
-func (c *chainedConverter) convertSecond(events []byte) []byte {
-	var out []byte
-	for _, event := range splitStreamEvents(events) {
-		out = append(out, c.second.Convert(event)...)
-	}
-	return out
 }

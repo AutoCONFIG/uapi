@@ -6,21 +6,22 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 )
 
-func TestOpenAIChatResponsesStreamsUseIRBridge(t *testing.T) {
-	tests := []struct {
-		name     string
-		upstream convert.Format
-		client   convert.Format
-	}{
-		{name: "chat to responses", upstream: convert.FormatOpenAIChatCompletions, client: convert.FormatOpenAIResponses},
-		{name: "responses to chat", upstream: convert.FormatOpenAIResponses, client: convert.FormatOpenAIChatCompletions},
+func TestProtocolStreamsUseIRBridge(t *testing.T) {
+	formats := []convert.Format{
+		convert.FormatOpenAIChatCompletions,
+		convert.FormatOpenAIResponses,
+		convert.FormatAnthropic,
+		convert.FormatGemini,
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			converter := NewConverter(tt.upstream, tt.client)
-			if _, ok := converter.(*irStreamConverter); !ok {
-				t.Fatalf("NewConverter(%s, %s) = %T, want *irStreamConverter", tt.upstream, tt.client, converter)
+	for _, upstream := range formats {
+		for _, client := range formats {
+			if upstream == client {
+				continue
 			}
-		})
+			converter := NewConverter(upstream, client)
+			if _, ok := converter.(*irStreamConverter); !ok {
+				t.Fatalf("NewConverter(%s, %s) = %T, want *irStreamConverter", upstream, client, converter)
+			}
+		}
 	}
 }
