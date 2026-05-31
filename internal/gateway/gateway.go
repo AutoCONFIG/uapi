@@ -323,7 +323,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	if err := g.buildRequest(ctx, upReq, node.BaseURL); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
-			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
+			go g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model)
 		}
 		ctx.Error(`{"error":"gateway build request failed"}`, fasthttp.StatusBadGateway)
 		return
@@ -345,7 +345,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}, time.Now()); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
-			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
+			go g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model)
 		}
 		ctx.Error(`{"error":"gateway signing failed"}`, fasthttp.StatusInternalServerError)
 		return
@@ -358,7 +358,9 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		releaseNode(true)
 		releaseNode = nil
 		if precharged {
-			go g.billing.DBTransactionRefund(tokenID, prechargedTokenPlanID, estimatedTokens)
+			if err := g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model); err != nil {
+				logger.Warnf("gateway.billing", "refund before local fallback failed", logger.F("token_id", tokenID), logger.Err(err))
+			}
 		}
 		// Fallback to local relayer when external relay fails
 		if g.fallback != nil {

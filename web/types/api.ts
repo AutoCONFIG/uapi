@@ -119,6 +119,7 @@ export type UsageLogItem = {
   is_stream: boolean;
   prompt_tokens: number;
   completion_tokens: number;
+  cache_read_tokens?: number;
   total_tokens: number;
   latency_ms: number;
   status_code: number;

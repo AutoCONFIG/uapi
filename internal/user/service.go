@@ -415,7 +415,7 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 
 	var logs []db.Log
 	if err := s.db.Table("logs").
-		Select("logs.id, logs.created_at, logs.token_id, logs.client_ip, logs.channel_id, logs.account_id, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
+		Select("logs.id, logs.created_at, logs.token_id, logs.client_ip, logs.channel_id, logs.account_id, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.cache_read_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message").
 		Joins("JOIN tokens ON tokens.id = logs.token_id AND tokens.user_id = ?", userID).
 		Offset(offset).Limit(limit).
 		Order("logs.created_at DESC").
@@ -436,6 +436,7 @@ func (s *Service) GetUsageLogs(userID string, page, limit int) (*UsageLogsRespon
 			IsStream:         log.IsStream,
 			PromptTokens:     log.PromptTokens,
 			CompletionTokens: log.CompletionTokens,
+			CacheReadTokens:  log.CacheReadTokens,
 			TotalTokens:      log.TotalTokens,
 			LatencyMs:        log.LatencyMs,
 			StatusCode:       log.StatusCode,

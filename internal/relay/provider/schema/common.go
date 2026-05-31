@@ -276,6 +276,7 @@ type Usage struct {
 	TotalTokens              int                    `json:"total_tokens"`
 	CacheCreationInputTokens int                    `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int                    `json:"cache_read_input_tokens,omitempty"`
+	PromptCacheHitTokens     int                    `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptTokensDetails      map[string]interface{} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails  map[string]interface{} `json:"completion_tokens_details,omitempty"`
 }

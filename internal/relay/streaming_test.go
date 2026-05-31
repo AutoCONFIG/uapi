@@ -287,6 +287,15 @@ func TestStreamAndForwardConvertedTracksUsageFromNamedResponsesEvent(t *testing.
 	}
 }
 
+func TestStreamTrackerCapturesCacheReadTokens(t *testing.T) {
+	tracker := newStreamTracker(responsesUsageParser{})
+	tracker.TrackChunk([]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":13,"input_tokens_details":{"cached_tokens":7}}}}`))
+
+	if got := tracker.CacheReadTokens(); got != 7 {
+		t.Fatalf("cache read tokens = %d, want 7", got)
+	}
+}
+
 func TestStreamAndForwardResponsesIncompleteIsSuccessfulTerminal(t *testing.T) {
 	body := "event: response.incomplete\n" +
 		"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"

@@ -29,7 +29,11 @@ func parseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
 		ir.Usage.CompletionTokens = resp.Usage.CompletionTokens
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 		cachedTokens := usageDetailInt(resp.Usage.PromptTokensDetails, "cached_tokens")
+		if cachedTokens == 0 {
+			cachedTokens = resp.Usage.PromptCacheHitTokens
+		}
 		ir.Usage.CacheReadInputTokens = cachedTokens
+		ir.Usage.PromptCacheHitTokens = resp.Usage.PromptCacheHitTokens
 		if resp.Usage.CompletionTokensDetails != nil {
 			ir.Usage.CompletionTokensDetails = resp.Usage.CompletionTokensDetails
 		}
@@ -169,6 +173,9 @@ func emitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
 			}
 			resp.Usage.PromptTokensDetails["cached_tokens"] = ir.Usage.CacheReadInputTokens
 		}
+		if ir.Usage.PromptCacheHitTokens > 0 {
+			resp.Usage.PromptCacheHitTokens = ir.Usage.PromptCacheHitTokens
+		}
 	}
 
 	// Convert choices
@@ -271,6 +278,15 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 		ir.Usage.PromptTokens = resp.Usage.InputTokens
 		ir.Usage.CompletionTokens = resp.Usage.OutputTokens
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
+		cachedTokens := usageDetailInt(resp.Usage.InputTokensDetails, "cached_tokens")
+		if cachedTokens == 0 {
+			cachedTokens = resp.Usage.PromptCacheHitTokens
+		}
+		ir.Usage.CacheReadInputTokens = cachedTokens
+		ir.Usage.PromptCacheHitTokens = resp.Usage.PromptCacheHitTokens
+		if resp.Usage.InputTokensDetails != nil {
+			ir.Usage.PromptTokensDetails = resp.Usage.InputTokensDetails
+		}
 	}
 
 	var pendingReasoning []adapterItem
@@ -365,9 +381,13 @@ func emitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
 	// Convert usage
 	if ir.Usage.TotalTokens > 0 {
 		resp.Usage = &schema.ResponsesUsage{
-			InputTokens:  ir.Usage.PromptTokens,
-			OutputTokens: ir.Usage.CompletionTokens,
-			TotalTokens:  ir.Usage.TotalTokens,
+			InputTokens:          ir.Usage.PromptTokens,
+			OutputTokens:         ir.Usage.CompletionTokens,
+			TotalTokens:          ir.Usage.TotalTokens,
+			PromptCacheHitTokens: ir.Usage.PromptCacheHitTokens,
+		}
+		if ir.Usage.CacheReadInputTokens > 0 {
+			resp.Usage.InputTokensDetails = map[string]interface{}{"cached_tokens": ir.Usage.CacheReadInputTokens}
 		}
 	}
 

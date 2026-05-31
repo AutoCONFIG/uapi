@@ -131,6 +131,88 @@ func TestCodexSameProtocolPreservesOpaqueResponsesInputItem(t *testing.T) {
 	}
 }
 
+func TestGeminiUnknownPartPreservedAndAudited(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"text":"hi"},
+			{"videoMetadata":{"startOffset":"1s","endOffset":"2s"}}
+		]}]
+	}`)
+
+	audit, err := convert.ToIR(convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+	if len(audit.Turns) != 1 || len(audit.Turns[0].Items) != 2 {
+		t.Fatalf("items not preserved: %#v", audit.Turns)
+	}
+	opaque := audit.Turns[0].Items[1]
+	if opaque.Kind != ir.ItemOpaque || !strings.Contains(string(opaque.Native.Raw), "videoMetadata") {
+		t.Fatalf("unknown Gemini part not opaque/native: %#v", opaque)
+	}
+	if !hasLossField(audit.Losses, "gemini_part") {
+		t.Fatalf("unknown Gemini part loss missing: %#v", audit.Losses)
+	}
+	if !hasLossField(audit.Losses, "videoMetadata") {
+		t.Fatalf("unknown Gemini part field loss missing: %#v", audit.Losses)
+	}
+
+	converted, _, err := convert.ConvertRequestDetailed(convert.FormatGemini, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if !strings.Contains(string(converted), `"videoMetadata"`) {
+		t.Fatalf("same-protocol Gemini conversion dropped native part:\n%s", converted)
+	}
+}
+
+func TestGeminiSystemInstructionNativePartsAreAudited(t *testing.T) {
+	body := []byte(`{
+		"systemInstruction":{"parts":[
+			{"text":"sys","cache_control":{"type":"ephemeral"}},
+			{"inlineData":{"mimeType":"text/plain","data":"c2VjcmV0"}}
+		]},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]}]
+	}`)
+
+	converted, audit, err := provider.ConvertRequestDetailed(provider.FormatGemini, provider.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if strings.Contains(string(converted), "inlineData") {
+		t.Fatalf("Gemini native systemInstruction part leaked into OpenAI body: %s", converted)
+	}
+	for _, want := range []string{"cache_control", "systemInstruction.part"} {
+		if audit == nil || !hasLossField(audit.Losses, want) {
+			t.Fatalf("systemInstruction loss %q missing: %#v", want, audit)
+		}
+	}
+	if len(audit.Instructions) == 0 || !strings.Contains(string(audit.Instructions[0].Native.Raw), "inlineData") {
+		t.Fatalf("systemInstruction native raw not preserved: %#v", audit.Instructions)
+	}
+}
+
+func TestCrossProtocolRecordsGeminiGenerationConfigExtraLoss(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+		"generationConfig":{
+			"temperature":0.2,
+			"responseModalities":["TEXT","IMAGE"]
+		}
+	}`)
+
+	converted, audit, err := provider.ConvertRequestDetailed(provider.FormatGemini, provider.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if strings.Contains(string(converted), "responseModalities") {
+		t.Fatalf("Gemini generation extra leaked into OpenAI body: %s", converted)
+	}
+	if audit == nil || !hasLossField(audit.Losses, "responseModalities") {
+		t.Fatalf("generation extra loss missing: %#v", audit)
+	}
+}
+
 func hasLossField(losses []ir.Loss, field string) bool {
 	for _, loss := range losses {
 		if loss.Field == field && loss.ValueHash != "" && loss.Preserved {

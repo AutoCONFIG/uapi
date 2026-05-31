@@ -109,7 +109,27 @@ func PrepareRequestForTarget(req *ir.Request, clientFormat, upstreamFormat Forma
 	}
 	req.TargetProtocol = irProtocol(upstreamFormat)
 	completeLossProtocols(req, clientFormat, upstreamFormat)
+	recordTargetSpecificContentLosses(req, clientFormat, upstreamFormat)
 	dropExtraForCrossProtocol(req, clientFormat, upstreamFormat)
+}
+
+func recordTargetSpecificContentLosses(req *ir.Request, clientFormat, upstreamFormat Format) {
+	if req == nil || !isResponsesFamily(upstreamFormat) || isResponsesFamily(clientFormat) {
+		return
+	}
+	recordItemMetadataLosses := func(items []ir.Item) {
+		for i := range items {
+			if raw := items[i].Metadata["cache_control"]; len(raw) > 0 {
+				items[i].Losses = append(items[i].Losses, irloss(clientFormat, upstreamFormat, "$.content[].cache_control", "cache_control", raw, "Anthropic cache_control has no OpenAI Responses content-part equivalent and is not emitted"))
+			}
+		}
+	}
+	for i := range req.Instructions {
+		recordItemMetadataLosses(req.Instructions[i].Items)
+	}
+	for i := range req.Turns {
+		recordItemMetadataLosses(req.Turns[i].Items)
+	}
 }
 
 func completeLossProtocols(req *ir.Request, clientFormat, upstreamFormat Format) {
@@ -162,9 +182,13 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 		}
 		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols"))
 	}
+	for key, raw := range req.Generation.Extra {
+		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$.generation."+key, key, raw, "provider-specific generation config field is not emitted across protocols"))
+	}
 	req.Native.Fields = nil
 	req.Native.Unknown = nil
 	req.Metadata = nil
+	req.Generation.Extra = nil
 }
 
 func sameNativeRequestFamily(a, b Format) bool {

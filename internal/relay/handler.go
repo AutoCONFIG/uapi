@@ -632,9 +632,10 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
 			if errors.Is(result.err, io.ErrClosedPipe) {
 				pt, ct, _ := tracker.Result()
+				cacheReadTokens := tracker.CacheReadTokens()
 				estimateMissingUsage(&pt, &ct, body, nil, tracker.EstimatedOutputTokens())
 				if pt > 0 || ct > 0 {
-					go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, start, 499, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+					go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheReadTokens, start, 499, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 				} else {
 					go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, 499, estTokens, "client disconnected", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 				}
@@ -660,6 +661,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			}
 		}
 		pt, ct, parseFailed := tracker.Result()
+		cacheReadTokens := tracker.CacheReadTokens()
 		estimateMissingUsage(&pt, &ct, body, nil, tracker.EstimatedOutputTokens())
 		if parseFailed {
 			logger.Component("relay.billing").Warn("ParseStreamUsage had errors during streaming, token counts may be inaccurate",
@@ -679,7 +681,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
-		go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+		go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheReadTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	}()
 }
 
@@ -1120,14 +1122,20 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 
 	// Parse usage from upstream-format response after conversion succeeds.
-	pt, ct := 0, 0
+	pt, ct, cacheReadTokens := 0, 0, 0
 	if claims != nil && claims.RequestID != "" {
-		if parsedPT, parsedCT, err := adaptor.ParseUsage(upstreamRespBody); err == nil {
+		if usage, err := adaptor.ParseUsageFull(upstreamRespBody); err == nil {
+			pt, ct = usage.PromptTokens, usage.CompletionTokens
+			cacheReadTokens = usage.CacheReadInputTokens
+			if cacheReadTokens == 0 {
+				cacheReadTokens = usage.PromptCacheHitTokens
+			}
+		} else if parsedPT, parsedCT, err := adaptor.ParseUsage(upstreamRespBody); err == nil {
 			pt, ct = parsedPT, parsedCT
 		}
 		estimateMissingUsage(&pt, &ct, body, upstreamRespBody, 0)
 	} else {
-		pt, ct = r.settleAndRefund(token.ID.String(), tokenPlanID, body, upstreamRespBody, adaptor, estTokens, model)
+		pt, ct, cacheReadTokens = r.settleAndRefund(token.ID.String(), tokenPlanID, body, upstreamRespBody, adaptor, estTokens, model)
 	}
 
 	ctx.SetStatusCode(statusCode)
@@ -1153,9 +1161,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		// Gateway-authenticated requests did not acquire the Relay-local
 		// concurrency limiter; Gateway owns that slot and releases it when this
 		// response completes.
-		go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+		go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, cacheReadTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	} else {
-		go r.writeLogWithRoutedModelAndFormats(token.ID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, start, statusCode, httputil.ClientIPForLog(ctx, r.trustedProxies))
+		go r.writeLogWithRoutedModelFormatsErrorAndCache(token.ID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, cacheReadTokens, start, statusCode, "", httputil.ClientIPForLog(ctx, r.trustedProxies))
 	}
 }
 
@@ -2479,6 +2487,10 @@ func (r *Relayer) writeLogWithRoutedModelAndFormats(tokenID, channelID, accountI
 }
 
 func (r *Relayer) writeLogWithRoutedModelFormatsAndError(tokenID, channelID, accountID interface{}, model, routedModel string, isStream bool, clientFormat, upstreamFormat provider.Format, pt, ct int, start time.Time, statusCode int, errorMessage string, clientIPs ...string) {
+	r.writeLogWithRoutedModelFormatsErrorAndCache(tokenID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, pt, ct, 0, start, statusCode, errorMessage, clientIPs...)
+}
+
+func (r *Relayer) writeLogWithRoutedModelFormatsErrorAndCache(tokenID, channelID, accountID interface{}, model, routedModel string, isStream bool, clientFormat, upstreamFormat provider.Format, pt, ct, cacheReadTokens int, start time.Time, statusCode int, errorMessage string, clientIPs ...string) {
 	if r.db == nil {
 		return
 	}
@@ -2498,6 +2510,7 @@ func (r *Relayer) writeLogWithRoutedModelFormatsAndError(tokenID, channelID, acc
 		IsStream:         isStream,
 		PromptTokens:     int64(pt),
 		CompletionTokens: int64(ct),
+		CacheReadTokens:  int64(cacheReadTokens),
 		TotalTokens:      int64(pt + ct),
 		LatencyMs:        time.Since(start).Milliseconds(),
 		StatusCode:       statusCode,
@@ -2525,14 +2538,18 @@ func (r *Relayer) finishUsageWithRoutedModel(claims *internalauth.Claims, tokenI
 }
 
 func (r *Relayer) finishUsageWithRoutedModelAndFormats(claims *internalauth.Claims, tokenID, tokenPlanID, channelID, accountID interface{}, model, routedModel string, isStream bool, clientFormat, upstreamFormat provider.Format, pt, ct int, start time.Time, statusCode int, estTokens int, fallbackClientIPs ...string) {
+	r.finishUsageWithRoutedModelFormatsAndCache(claims, tokenID, tokenPlanID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, pt, ct, 0, start, statusCode, estTokens, fallbackClientIPs...)
+}
+
+func (r *Relayer) finishUsageWithRoutedModelFormatsAndCache(claims *internalauth.Claims, tokenID, tokenPlanID, channelID, accountID interface{}, model, routedModel string, isStream bool, clientFormat, upstreamFormat provider.Format, pt, ct, cacheReadTokens int, start time.Time, statusCode int, estTokens int, fallbackClientIPs ...string) {
 	planID := requestTokenPlanID(claims, tokenPlanID)
-	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, routedModel, clientFormat, upstreamFormat, isStream, pt, ct, start, statusCode, estTokens) == nil {
+	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, routedModel, clientFormat, upstreamFormat, isStream, pt, ct, cacheReadTokens, start, statusCode, estTokens) == nil {
 		return
 	}
-	r.writeLogWithRoutedModelAndFormats(tokenID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, pt, ct, start, statusCode, firstClientIP(clientIPFromClaims(claims), fallbackClientIPs...))
+	r.writeLogWithRoutedModelFormatsErrorAndCache(tokenID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, pt, ct, cacheReadTokens, start, statusCode, "", firstClientIP(clientIPFromClaims(claims), fallbackClientIPs...))
 	if r.billing != nil {
 		go func() {
-			if err := r.billing.DBTransactionRefundAndSettle(toUUID(tokenID).String(), planID, estTokens, pt, ct, 0, 0, model); err != nil {
+			if err := r.billing.DBTransactionRefundAndSettle(toUUID(tokenID).String(), planID, estTokens, pt, ct, 0, cacheReadTokens, model); err != nil {
 				logger.Component("relay.billing").Warn("refund-and-settle failed",
 					logger.F("token_id", toUUID(tokenID).String()),
 					logger.F("error", err.Error()),
@@ -2560,7 +2577,7 @@ func (r *Relayer) finishFailureUsageWithRoutedModelAndErrorAndClientIP(claims *i
 
 func (r *Relayer) finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model, routedModel string, isStream bool, clientFormat, upstreamFormat provider.Format, start time.Time, statusCode int, estTokens int, errorMessage string, fallbackClientIP string, tokenPlanIDs ...uuid.UUID) {
 	planID := requestTokenPlanID(claims, firstUUID(tokenPlanIDs))
-	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, routedModel, clientFormat, upstreamFormat, isStream, 0, 0, start, statusCode, estTokens) == nil {
+	if claims != nil && claims.RequestID != "" && r.reportUsageEvent(claims, tokenID, channelID, accountID, model, routedModel, clientFormat, upstreamFormat, isStream, 0, 0, 0, start, statusCode, estTokens) == nil {
 		return
 	}
 	r.writeLogWithRoutedModelFormatsAndError(tokenID, channelID, accountID, model, routedModel, isStream, clientFormat, upstreamFormat, 0, 0, start, statusCode, errorMessage, firstClientIP(clientIPFromClaims(claims), fallbackClientIP))
@@ -2595,7 +2612,7 @@ func firstClientIP(primary string, fallbacks ...string) string {
 	return ""
 }
 
-func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model, routedModel string, clientFormat, upstreamFormat provider.Format, isStream bool, pt, ct int, start time.Time, statusCode int, estTokens int) error {
+func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channelID, accountID interface{}, model, routedModel string, clientFormat, upstreamFormat provider.Format, isStream bool, pt, ct, cacheReadTokens int, start time.Time, statusCode int, estTokens int) error {
 	if r.controlURL == "" {
 		return fmt.Errorf("control url not configured")
 	}
@@ -2612,6 +2629,7 @@ func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channel
 		"is_stream":         isStream,
 		"prompt_tokens":     pt,
 		"completion_tokens": ct,
+		"cache_read_tokens": cacheReadTokens,
 		"estimated_tokens":  estTokens,
 		"status_code":       statusCode,
 		"latency_ms":        time.Since(start).Milliseconds(),
@@ -2694,15 +2712,18 @@ func toUUID(v interface{}) uuid.UUID {
 	return uuid.UUID{}
 }
 
-func (r *Relayer) settleAndRefund(tokenID string, tokenPlanID uuid.UUID, reqBody, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int) {
+func (r *Relayer) settleAndRefund(tokenID string, tokenPlanID uuid.UUID, reqBody, respBody []byte, adaptor provider.Adaptor, estTokens int, model string) (int, int, int) {
 	if r.billing == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	pt, ct, cc, cr := 0, 0, 0, 0
 	if adaptor != nil && len(respBody) > 0 {
 		if usage, err := adaptor.ParseUsageFull(respBody); err == nil {
 			pt, ct = usage.PromptTokens, usage.CompletionTokens
 			cc, cr = usage.CacheCreationInputTokens, usage.CacheReadInputTokens
+			if cr == 0 {
+				cr = usage.PromptCacheHitTokens
+			}
 		} else {
 			logger.Component("relay.billing").Warn("ParseUsage failed, recording zero tokens",
 				logger.F("token_id", tokenID),
@@ -2720,7 +2741,7 @@ func (r *Relayer) settleAndRefund(tokenID string, tokenPlanID uuid.UUID, reqBody
 			)
 		}
 	}()
-	return pt, ct
+	return pt, ct, cr
 }
 
 func requestTokenPlanID(claims *internalauth.Claims, fallback interface{}) uuid.UUID {

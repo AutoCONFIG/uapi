@@ -29,10 +29,19 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 
 	// Convert systemInstruction to Instructions
 	if req.SystemInstruction != nil && len(req.SystemInstruction.Parts) > 0 {
+		ir.InstructionsRaw = rawJSON(req.SystemInstruction)
 		var texts []string
 		for _, part := range req.SystemInstruction.Parts {
 			if part.Text != "" {
 				texts = append(texts, part.Text)
+				if len(part.Extra) > 0 {
+					appendGeminiPartExtraLosses(ir, "$.systemInstruction.parts[]", part, rawJSON(part))
+				}
+				continue
+			}
+			rawPart := rawJSON(part)
+			if len(rawPart) > 0 {
+				ir.Losses = append(ir.Losses, irloss(FormatGemini, "", "$.systemInstruction.parts[]", "systemInstruction.part", rawPart, "Gemini systemInstruction part has no protocol-neutral instruction representation and is preserved as native raw"))
 			}
 		}
 		if len(texts) > 0 {
@@ -49,6 +58,9 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 
 		for _, part := range content.Parts {
 			rawPart := rawJSON(part)
+			if len(part.Extra) > 0 {
+				appendGeminiPartExtraLosses(ir, "$.contents[].parts[]", part, rawPart)
+			}
 			switch {
 			case part.Text != "" && part.Thought:
 				extra := map[string]json.RawMessage{}
@@ -139,6 +151,14 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 						"outcome": json.RawMessage(fmt.Sprintf("%q", part.CodeExecutionResult.Outcome)),
 					},
 				}, rawPart)
+			default:
+				if len(rawPart) > 0 {
+					appendContentItem(&requestMsg, schema.ContentPart{
+						Type:  "gemini_part",
+						Extra: part.Extra,
+					}, rawPart)
+					ir.Losses = append(ir.Losses, irloss(FormatGemini, "", "$.contents[].parts[]", "gemini_part", rawPart, "Gemini part has no protocol-neutral representation and is preserved as native opaque IR"))
+				}
 			}
 		}
 
@@ -208,6 +228,18 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 	}
 
 	return ir, nil
+}
+
+func appendGeminiPartExtraLosses(req *adapterRequest, path string, part schema.GeminiPart, rawPart json.RawMessage) {
+	if req == nil {
+		return
+	}
+	for key, raw := range part.Extra {
+		req.Losses = append(req.Losses, irloss(FormatGemini, "", path+"."+key, key, raw, "Gemini part vendor field is preserved in native raw part but not emitted across protocols"))
+	}
+	if len(part.Extra) > 0 && len(rawPart) > 0 {
+		req.Losses = append(req.Losses, irloss(FormatGemini, "", path, "gemini_part", rawPart, "Gemini part native shape is preserved for audit"))
+	}
 }
 
 func appendGeminiFunctionResponseLosses(req *adapterRequest, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {

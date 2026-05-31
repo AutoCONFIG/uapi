@@ -32,6 +32,7 @@ type InternalUsage struct {
 	CompletionTokens         int
 	CacheCreationInputTokens int // Anthropic cache_creation_input_tokens
 	CacheReadInputTokens     int // Anthropic cache_read_input_tokens / OpenAI cached_tokens
+	PromptCacheHitTokens     int // Provider-specific cache hit alias, normalized into cache read
 	PromptTokensDetails      map[string]interface{}
 	CompletionTokensDetails  map[string]interface{}
 }

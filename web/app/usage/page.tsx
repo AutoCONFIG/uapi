@@ -28,6 +28,10 @@ function tokenTotal(log: UsageLogItem) {
   return log.total_tokens || log.prompt_tokens + log.completion_tokens;
 }
 
+function cacheHitTokens(log: UsageLogItem) {
+  return Number(log.cache_read_tokens ?? 0);
+}
+
 export default function UsagePage() {
   const [summary, setSummary] = useState<UsageSummary>(emptySummary);
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
@@ -145,6 +149,9 @@ export default function UsagePage() {
                       <>
                         <strong>{compactNumber(tokenTotal(log))}</strong>
                         <div className="muted" style={{ fontSize: 12 }}>入 {compactNumber(log.prompt_tokens)} / 出 {compactNumber(log.completion_tokens)}</div>
+                        {cacheHitTokens(log) > 0 ? (
+                          <div className="muted" style={{ fontSize: 12 }}>缓存命中 {compactNumber(cacheHitTokens(log))}</div>
+                        ) : null}
                       </>
                     ) : (
                       <>

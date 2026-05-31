@@ -20,6 +20,7 @@ type UsageEvent struct {
 	IsStream         bool      `json:"is_stream"`
 	PromptTokens     int       `json:"prompt_tokens"`
 	CompletionTokens int       `json:"completion_tokens"`
+	CacheReadTokens  int       `gorm:"default:0" json:"cache_read_tokens"`
 	EstimatedTokens  int       `json:"estimated_tokens"`
 	StatusCode       int       `json:"status_code"`
 	LatencyMs        int64     `json:"latency_ms"`

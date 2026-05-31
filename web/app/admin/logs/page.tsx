@@ -15,6 +15,10 @@ function tokenTotal(row: UsageLogItem) {
   return row.total_tokens || row.prompt_tokens + row.completion_tokens;
 }
 
+function cacheHitTokens(row: UsageLogItem) {
+  return Number(row.cache_read_tokens ?? 0);
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -104,6 +108,9 @@ export default function LogsPage() {
                       <>
                         <strong>{formatTokens(tokenTotal(row))}</strong>
                         <div className="muted" style={{ fontSize: 12 }}>入 {formatTokens(row.prompt_tokens)} / 出 {formatTokens(row.completion_tokens)}</div>
+                        {cacheHitTokens(row) > 0 ? (
+                          <div className="muted" style={{ fontSize: 12 }}>缓存命中 {formatTokens(cacheHitTokens(row))}</div>
+                        ) : null}
                       </>
                     ) : (
                       <>

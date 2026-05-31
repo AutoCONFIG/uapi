@@ -33,6 +33,7 @@ type streamTracker struct {
 	mu                  sync.Mutex
 	promptTokens        int
 	completionTokens    int
+	cacheReadTokens     int
 	hasPromptTokens     bool
 	hasCompletionTokens bool
 	firstPromptTokens   int // first non-zero prompt tokens observed
@@ -78,6 +79,9 @@ func (t *streamTracker) TrackChunk(dataLine []byte) {
 			t.completionTokens = ct
 			t.hasCompletionTokens = ct > 0
 		}
+		if cacheReadTokens := extractStreamCacheReadTokens(dataLine); cacheReadTokens > 0 {
+			t.cacheReadTokens = cacheReadTokens
+		}
 		t.mu.Unlock()
 	}
 }
@@ -99,6 +103,62 @@ func (t *streamTracker) Result() (int, int, bool) {
 		pt = t.firstPromptTokens
 	}
 	return pt, t.completionTokens, t.parseErrors > 0
+}
+
+func (t *streamTracker) CacheReadTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cacheReadTokens
+}
+
+func extractStreamCacheReadTokens(dataLine []byte) int {
+	var root map[string]interface{}
+	if err := json.Unmarshal(dataLine, &root); err != nil {
+		return 0
+	}
+	if usage, _ := root["usage"].(map[string]interface{}); usage != nil {
+		if cached := usageCacheReadTokens(usage); cached > 0 {
+			return cached
+		}
+	}
+	if response, _ := root["response"].(map[string]interface{}); response != nil {
+		if usage, _ := response["usage"].(map[string]interface{}); usage != nil {
+			if cached := usageCacheReadTokens(usage); cached > 0 {
+				return cached
+			}
+		}
+	}
+	return 0
+}
+
+func usageCacheReadTokens(usage map[string]interface{}) int {
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details, _ := usage[key].(map[string]interface{}); details != nil {
+			if value := jsonNumberToInt(details["cached_tokens"]); value > 0 {
+				return value
+			}
+		}
+	}
+	for _, key := range []string{"cached_tokens", "prompt_cache_hit_tokens"} {
+		if value := jsonNumberToInt(usage[key]); value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func jsonNumberToInt(value interface{}) int {
+	switch n := value.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
 }
 
 func estimateStreamOutputTokens(dataLine []byte) int {

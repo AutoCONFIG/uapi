@@ -20,6 +20,7 @@ type Log struct {
 	IsStream         bool      `json:"is_stream"`
 	PromptTokens     int64     `json:"prompt_tokens"`
 	CompletionTokens int64     `json:"completion_tokens"`
+	CacheReadTokens  int64     `gorm:"default:0" json:"cache_read_tokens"`
 	TotalTokens      int64     `json:"total_tokens"`
 	LatencyMs        int64     `json:"latency_ms"`
 	StatusCode       int       `json:"status_code"`

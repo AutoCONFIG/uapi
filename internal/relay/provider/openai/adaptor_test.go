@@ -50,3 +50,40 @@ func TestGetRequestURLKeepsCodexBaseForTextButNotOpenAIPlatformMedia(t *testing.
 		t.Fatalf("codex images URL = %q", got)
 	}
 }
+
+func TestParseUsageFullNormalizesCacheHitAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want int
+	}{
+		{
+			name: "chat prompt details",
+			body: []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}`),
+			want: 4,
+		},
+		{
+			name: "responses input details",
+			body: []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":5}}}`),
+			want: 5,
+		},
+		{
+			name: "prompt cache hit alias",
+			body: []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":6}}`),
+			want: 6,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adaptor := &OpenAIAdaptor{}
+			usage, err := adaptor.ParseUsageFull(tc.body)
+			if err != nil {
+				t.Fatalf("ParseUsageFull: %v", err)
+			}
+			if usage.CacheReadInputTokens != tc.want {
+				t.Fatalf("CacheReadInputTokens = %d, want %d", usage.CacheReadInputTokens, tc.want)
+			}
+		})
+	}
+}

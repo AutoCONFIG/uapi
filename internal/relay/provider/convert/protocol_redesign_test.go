@@ -1180,8 +1180,80 @@ func TestAnthropicDocumentToOpenAIResponsesOmitsUnsupportedFileType(t *testing.T
 	if !strings.Contains(text, `"type":"input_file"`) || !strings.Contains(text, `"file_data":"data:application/pdf;base64,AA=="`) {
 		t.Fatalf("Anthropic document did not become Responses input_file: %s", converted)
 	}
-	if strings.Contains(text, `"file_type"`) || strings.Contains(text, `"mime_type"`) {
-		t.Fatalf("Responses input_file must not include unsupported mime fields: %s", converted)
+	if strings.Contains(text, `"file_type"`) || strings.Contains(text, `"mime_type"`) || strings.Contains(text, `"title"`) {
+		t.Fatalf("Responses input_file must not include unsupported native fields: %s", converted)
+	}
+	if !strings.Contains(text, `"filename":"paper.pdf"`) {
+		t.Fatalf("Responses input_file should preserve Anthropic document title as filename: %s", converted)
+	}
+}
+
+func TestAnthropicCacheControlNotEmittedToOpenAIResponsesContent(t *testing.T) {
+	body := []byte(`{"model":"claude","max_tokens":100,"messages":[{"role":"user","content":[
+		{"type":"text","text":"cache me","cache_control":{"type":"ephemeral"}},
+		{"type":"text","text":"then answer"}
+	]}]}`)
+	converted, audit, err := convert.ConvertRequestDetailed(convert.FormatAnthropic, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Responses: %v", err)
+	}
+	if strings.Contains(string(converted), `"cache_control"`) {
+		t.Fatalf("Responses content must not include Anthropic cache_control: %s", converted)
+	}
+	if audit == nil || len(audit.Turns) == 0 || len(audit.Turns[0].Items) == 0 {
+		t.Fatalf("audit missing turns/items: %#v", audit)
+	}
+	if !hasLossField(audit.Turns[0].Items[0].Losses, "cache_control") {
+		t.Fatalf("cache_control loss missing from item audit: %#v", audit.Turns[0].Items[0].Losses)
+	}
+}
+
+func TestOpenAIResponsesUsageCachedTokensConvertsToChatUsage(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"model":"gpt-5",
+		"output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],
+		"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cached_tokens":7}}
+	}`)
+	converted, err := convert.ConvertResponse(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> Chat response: %v", err)
+	}
+	text := string(converted)
+	if !strings.Contains(text, `"prompt_tokens_details":{"cached_tokens":7}`) {
+		t.Fatalf("cached input tokens not preserved as chat cached_tokens: %s", converted)
+	}
+}
+
+func TestGeminiPDFInlineDataConvertsToOpenAIResponsesInputFile(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"text":"summarize"},
+			{"inlineData":{"mimeType":"application/pdf","data":"AA=="}}
+		]}],
+		"generationConfig":{"maxOutputTokens":"[undefined]"},
+		"systemInstruction":"[undefined]",
+		"tools":"[undefined]"
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("Gemini -> Responses: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{
+		`"type":"input_file"`,
+		`"file_data":"data:application/pdf;base64,AA=="`,
+		`"filename":"input.pdf"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Gemini PDF inlineData missing %s in Responses body: %s", want, converted)
+		}
+	}
+	for _, rejected := range []string{`"[undefined]"`, `"file_type"`, `"mime_type"`, `"title"`} {
+		if strings.Contains(text, rejected) {
+			t.Fatalf("Gemini PDF Responses body contains unsupported %s: %s", rejected, converted)
+		}
 	}
 }
 

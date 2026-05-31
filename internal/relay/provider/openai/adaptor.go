@@ -98,9 +98,10 @@ func (a *OpenAIAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 // --- Response/stream handling ---
 
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens         int `json:"prompt_tokens"`
+	CompletionTokens     int `json:"completion_tokens"`
+	TotalTokens          int `json:"total_tokens"`
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
 }
 
 type openAIResponse struct {
@@ -110,13 +111,18 @@ type openAIResponse struct {
 func (a *OpenAIAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	var resp struct {
 		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			InputTokens         int `json:"input_tokens"`
-			OutputTokens        int `json:"output_tokens"`
-			PromptTokensDetails struct {
+			PromptTokens         int `json:"prompt_tokens"`
+			CompletionTokens     int `json:"completion_tokens"`
+			InputTokens          int `json:"input_tokens"`
+			OutputTokens         int `json:"output_tokens"`
+			CachedTokens         int `json:"cached_tokens"`
+			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+			PromptTokensDetails  struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			InputTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
@@ -126,7 +132,12 @@ func (a *OpenAIAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	if pt == 0 && ct == 0 {
 		pt, ct = resp.Usage.InputTokens, resp.Usage.OutputTokens
 	}
-	a.lastCacheReadInputTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	a.lastCacheReadInputTokens = firstPositiveInt(
+		resp.Usage.PromptTokensDetails.CachedTokens,
+		resp.Usage.InputTokensDetails.CachedTokens,
+		resp.Usage.CachedTokens,
+		resp.Usage.PromptCacheHitTokens,
+	)
 	return pt, ct, nil
 }
 
@@ -141,6 +152,15 @@ func (a *OpenAIAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage,
 		CompletionTokens:     ct,
 		CacheReadInputTokens: a.lastCacheReadInputTokens,
 	}, nil
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func (a *OpenAIAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error) {

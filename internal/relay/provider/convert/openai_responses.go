@@ -386,11 +386,6 @@ func responsesMessageContent(role string, content []schema.ContentPart) interfac
 }
 
 func responsesContentPartMap(role string, part schema.ContentPart) map[string]interface{} {
-	out := make(map[string]interface{}, len(part.Extra)+6)
-	for key, value := range part.Extra {
-		out[key] = value
-	}
-
 	partType := part.Type
 	switch partType {
 	case "text":
@@ -403,6 +398,15 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 		partType = "input_image"
 	case "file":
 		partType = "input_file"
+	}
+	out := make(map[string]interface{}, len(part.Extra)+6)
+	if partType != "input_file" {
+		for key, value := range part.Extra {
+			if key == "cache_control" {
+				continue
+			}
+			out[key] = value
+		}
 	}
 	if partType != "" {
 		out["type"] = partType
@@ -427,6 +431,8 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 	}
 	if part.Filename != "" {
 		out["filename"] = part.Filename
+	} else if partType == "input_file" && part.FileData != "" {
+		out["filename"] = responsesDefaultFilename(part)
 	}
 	if part.FileType != "" && partType != "input_file" {
 		out["file_type"] = part.FileType
@@ -441,6 +447,24 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 		out["refusal"] = part.Refusal
 	}
 	return out
+}
+
+func responsesDefaultFilename(part schema.ContentPart) string {
+	mimeType := firstNonEmptyString(part.FileType, part.MimeType)
+	switch mimeType {
+	case "application/pdf":
+		return "input.pdf"
+	case "text/plain":
+		return "input.txt"
+	case "text/csv":
+		return "input.csv"
+	case "application/json":
+		return "input.json"
+	case "text/markdown":
+		return "input.md"
+	default:
+		return "input.bin"
+	}
 }
 
 func init() {
