@@ -14,9 +14,12 @@ func TestInternalToOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t
 		Model: "nano-banana-2",
 		Choices: []InternalChoice{{
 			Role: "model",
-			Content: []schema.ContentPart{{
-				Type:     "image_url",
-				ImageURL: &imageURL,
+			Items: []InternalContentItem{{
+				Kind: contentItemKindContent,
+				Content: schema.ContentPart{
+					Type:     "image_url",
+					ImageURL: &imageURL,
+				},
 			}},
 			FinishReason: "end_turn",
 		}},
@@ -54,9 +57,9 @@ func TestInternalToOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *t
 		Model: "nano-banana-2",
 		Choices: []InternalChoice{{
 			Role: "model",
-			Content: []schema.ContentPart{
-				{Type: "text", Text: "Here is the image."},
-				{Type: "image_url", ImageURL: &imageURL},
+			Items: []InternalContentItem{
+				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "text", Text: "Here is the image."}},
+				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "image_url", ImageURL: &imageURL}},
 			},
 			FinishReason: "end_turn",
 		}},

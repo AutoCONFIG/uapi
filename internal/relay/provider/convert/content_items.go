@@ -80,3 +80,23 @@ func toolResultFromItems(items []InternalContentItem) *schema.ToolResult {
 	}
 	return nil
 }
+
+func appendChoiceContentItem(choice *InternalChoice, part schema.ContentPart, raw json.RawMessage) {
+	choice.Items = append(choice.Items, InternalContentItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+}
+
+func appendChoiceReasoningItem(choice *InternalChoice, part schema.ContentPart, raw json.RawMessage) {
+	choice.Items = append(choice.Items, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+}
+
+func appendChoiceToolCallItem(choice *InternalChoice, call schema.ToolCall, raw json.RawMessage) {
+	choice.Items = append(choice.Items, InternalContentItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
+}
+
+func appendChoiceRefusalItem(choice *InternalChoice, refusal string) {
+	choice.Items = append(choice.Items, InternalContentItem{Kind: "refusal", Content: schema.ContentPart{Type: "refusal", Refusal: refusal}})
+}
+
+func canonicalChoiceItems(choice InternalChoice) []InternalContentItem {
+	return choice.Items
+}

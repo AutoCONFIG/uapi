@@ -928,6 +928,46 @@ func TestAnthropicThinkingSignatureSurvivesResponseConversions(t *testing.T) {
 	}
 }
 
+func TestResponseConversionPreservesInterleavedItemOrder(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-sonnet-4-6",
+		"content":[
+			{"type":"text","text":"before"},
+			{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"uapi"}},
+			{"type":"text","text":"after"}
+		],
+		"stop_reason":"tool_use",
+		"usage":{"input_tokens":3,"output_tokens":4}
+	}`)
+
+	gemini, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Gemini: %v", err)
+	}
+	text := string(gemini)
+	before := indexOrFatal(t, text, `"text":"before"`)
+	call := indexOrFatal(t, text, `"functionCall"`)
+	after := indexOrFatal(t, text, `"text":"after"`)
+	if !(before < call && call < after) {
+		t.Fatalf("interleaved response items were reordered:\n%s", gemini)
+	}
+
+	responses, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Responses: %v", err)
+	}
+	text = string(responses)
+	before = indexOrFatal(t, text, `"text":"before"`)
+	call = indexOrFatal(t, text, `"type":"function_call"`)
+	after = indexOrFatal(t, text, `"text":"after"`)
+	if !(before < call && call < after) {
+		t.Fatalf("Responses output item order changed:\n%s", responses)
+	}
+}
+
 func TestResponsesReasoningEncryptedContentSurvivesResponseConversions(t *testing.T) {
 	body := []byte(`{
 		"id":"resp_1",

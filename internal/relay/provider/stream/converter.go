@@ -1,6 +1,9 @@
 package stream
 
-import "github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+import (
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
+)
 
 // StreamConverter converts SSE lines from one protocol format to another.
 type StreamConverter interface {
@@ -21,14 +24,42 @@ type FormatPair struct {
 
 var registry = map[FormatPair]func() StreamConverter{}
 
+type streamIRParser interface {
+	Parse(line []byte) []relayir.StreamEvent
+	Done() []relayir.StreamEvent
+	Reset()
+}
+
+type streamIREmitter interface {
+	Emit(event relayir.StreamEvent) []byte
+	Done() []byte
+	Reset()
+}
+
+var streamIRParsers = map[convert.Format]func() streamIRParser{}
+var streamIREmitters = map[convert.Format]func() streamIREmitter{}
+
 // Register registers a StreamConverter factory for a FormatPair.
 func Register(pair FormatPair, factory func() StreamConverter) {
 	registry[pair] = factory
 }
 
+func RegisterIRParser(format convert.Format, factory func() streamIRParser) {
+	streamIRParsers[format] = factory
+}
+
+func RegisterIREmitter(format convert.Format, factory func() streamIREmitter) {
+	streamIREmitters[format] = factory
+}
+
 // NewConverter creates a StreamConverter for the given direction.
 // Returns nil if no converter is registered (same-format passthrough).
 func NewConverter(upstream, client convert.Format) StreamConverter {
+	if parserFactory, ok := streamIRParsers[upstream]; ok {
+		if emitterFactory, ok := streamIREmitters[client]; ok && upstream != client {
+			return &irStreamConverter{parser: parserFactory(), emitter: emitterFactory()}
+		}
+	}
 	factory, ok := registry[FormatPair{Upstream: upstream, Client: client}]
 	if ok {
 		return factory()
@@ -48,6 +79,33 @@ func NewConverter(upstream, client convert.Format) StreamConverter {
 		first:  toChatFactory(),
 		second: fromChatFactory(),
 	}
+}
+
+type irStreamConverter struct {
+	parser  streamIRParser
+	emitter streamIREmitter
+}
+
+func (c *irStreamConverter) Convert(line []byte) []byte {
+	var out []byte
+	for _, event := range c.parser.Parse(line) {
+		out = append(out, c.emitter.Emit(event)...)
+	}
+	return out
+}
+
+func (c *irStreamConverter) Done() []byte {
+	var out []byte
+	for _, event := range c.parser.Done() {
+		out = append(out, c.emitter.Emit(event)...)
+	}
+	out = append(out, c.emitter.Done()...)
+	return out
+}
+
+func (c *irStreamConverter) Reset() {
+	c.parser.Reset()
+	c.emitter.Reset()
 }
 
 type chainedConverter struct {

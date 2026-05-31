@@ -36,13 +36,13 @@ func AnthropicResponseToInternal(body []byte) (*InternalResponse, error) {
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "text":
-			choice.Content = append(choice.Content, schema.ContentPart{
+			appendChoiceContentItem(&choice, schema.ContentPart{
 				Type: "text",
 				Text: block.Text,
-			})
+			}, rawJSON(block))
 
 		case "tool_use":
-			choice.ToolCalls = append(choice.ToolCalls, schema.ToolCall{
+			appendChoiceToolCallItem(&choice, schema.ToolCall{
 				ID:   block.ID,
 				Type: "function",
 				Name: block.Name,
@@ -53,25 +53,25 @@ func AnthropicResponseToInternal(body []byte) (*InternalResponse, error) {
 					Name:      block.Name,
 					Arguments: string(block.Input),
 				},
-			})
+			}, rawJSON(block))
 
 		case "thinking":
 			extra := map[string]json.RawMessage{}
 			if block.Signature != "" {
 				extra = setRawString(extra, reasoningExtraSignature, block.Signature)
 			}
-			choice.ReasoningContent = append(choice.ReasoningContent, schema.ContentPart{
+			appendChoiceReasoningItem(&choice, schema.ContentPart{
 				Type:  "thinking",
 				Text:  block.Thinking,
 				Extra: extra,
-			})
+			}, rawJSON(block))
 		case "redacted_thinking":
 			if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
-				choice.ReasoningContent = append(choice.ReasoningContent, reasoningPartWithExtra("", map[string]json.RawMessage{
+				appendChoiceReasoningItem(&choice, reasoningPartWithExtra("", map[string]json.RawMessage{
 					reasoningExtraData:             raw,
 					reasoningExtraEncryptedContent: raw,
 					reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
-				}))
+				}), rawJSON(block))
 			}
 		}
 	}
@@ -131,47 +131,55 @@ func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 	// Convert content to Anthropic content blocks
 	var content []map[string]interface{}
 	for _, choice := range ir.Choices {
-		// Add reasoning/thinking blocks first
-		for _, rc := range choice.ReasoningContent {
-			sig := reasoningSignature([]schema.ContentPart{rc})
-			encrypted := reasoningPartEncryptedData(rc)
-			if rc.Text == "" && encrypted != "" && sig == "" {
-				content = append(content, map[string]interface{}{
-					"type": "redacted_thinking",
-					"data": encrypted,
-				})
-				continue
-			}
-			if rc.Text != "" || sig != "" {
-				block := map[string]interface{}{"type": "thinking", "thinking": rc.Text}
-				if sig != "" {
-					block["signature"] = sig
+		for _, item := range canonicalChoiceItems(choice) {
+			switch item.Kind {
+			case contentItemKindReasoning:
+				rc := item.Content
+				sig := reasoningSignature([]schema.ContentPart{rc})
+				encrypted := reasoningPartEncryptedData(rc)
+				if rc.Text == "" && encrypted != "" && sig == "" {
+					content = append(content, map[string]interface{}{
+						"type": "redacted_thinking",
+						"data": encrypted,
+					})
+					continue
+				}
+				if rc.Text != "" || sig != "" {
+					block := map[string]interface{}{"type": "thinking", "thinking": rc.Text}
+					if sig != "" {
+						block["signature"] = sig
+					}
+					content = append(content, block)
+				}
+			case contentItemKindContent:
+				c := item.Content
+				block := map[string]interface{}{"type": c.Type}
+				if c.Text != "" {
+					block["text"] = c.Text
+				}
+				if c.Refusal != "" {
+					block["type"] = "refusal"
+					block["refusal"] = c.Refusal
 				}
 				content = append(content, block)
+			case contentItemKindToolCall:
+				tc := item.ToolCall
+				name := tc.Name
+				if name == "" {
+					name = tc.Function.Name
+				}
+				content = append(content, map[string]interface{}{
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  name,
+					"input": jsonArgumentValue(tc.Function.Arguments),
+				})
+			case "refusal":
+				content = append(content, map[string]interface{}{
+					"type":    "refusal",
+					"refusal": item.Content.Refusal,
+				})
 			}
-		}
-
-		// Add text content
-		for _, c := range choice.Content {
-			block := map[string]interface{}{"type": c.Type}
-			if c.Text != "" {
-				block["text"] = c.Text
-			}
-			if c.Refusal != "" {
-				block["type"] = "refusal"
-				block["refusal"] = c.Refusal
-			}
-			content = append(content, block)
-		}
-
-		// Add tool calls
-		for _, tc := range choice.ToolCalls {
-			content = append(content, map[string]interface{}{
-				"type":  "tool_use",
-				"id":    tc.ID,
-				"name":  tc.Name,
-				"input": jsonArgumentValue(tc.Function.Arguments),
-			})
 		}
 
 		// Set finish reason

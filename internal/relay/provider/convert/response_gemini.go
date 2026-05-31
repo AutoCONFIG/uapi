@@ -64,24 +64,24 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 					if part.ThoughtSignature != "" {
 						extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
 					}
-					choice.ReasoningContent = append(choice.ReasoningContent, schema.ContentPart{
+					appendChoiceReasoningItem(&choice, schema.ContentPart{
 						Type:  "thinking",
 						Text:  part.Text,
 						Extra: extra,
-					})
+					}, rawJSON(part))
 				case part.Text != "":
-					choice.Content = append(choice.Content, schema.ContentPart{
+					appendChoiceContentItem(&choice, schema.ContentPart{
 						Type: "text",
 						Text: part.Text,
-					})
+					}, rawJSON(part))
 				case part.InlineData != nil:
 					dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
-					choice.Content = append(choice.Content, schema.ContentPart{
+					appendChoiceContentItem(&choice, schema.ContentPart{
 						Type:     "image_url",
 						ImageURL: &dataURI,
-					})
+					}, rawJSON(part))
 				case part.FunctionCall != nil:
-					choice.ToolCalls = append(choice.ToolCalls, schema.ToolCall{
+					appendChoiceToolCallItem(&choice, schema.ToolCall{
 						ID:   "", // Gemini doesn't provide ID for function calls
 						Type: "function",
 						Name: part.FunctionCall.Name,
@@ -92,13 +92,13 @@ func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
 							Name:      part.FunctionCall.Name,
 							Arguments: string(part.FunctionCall.Args),
 						},
-					})
+					}, rawJSON(part))
 				case part.FunctionResponse != nil:
 					// FunctionResponse is handled in the next turn
 				case part.ThoughtSignature != "":
-					choice.ReasoningContent = append(choice.ReasoningContent, reasoningPartWithExtra("", map[string]json.RawMessage{
+					appendChoiceReasoningItem(&choice, reasoningPartWithExtra("", map[string]json.RawMessage{
 						reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
-					}))
+					}), rawJSON(part))
 				}
 			}
 		}
@@ -157,75 +157,83 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 			"finishReason": mapInternalToGeminiFinishReason(choice.FinishReason),
 		}
 
-		// Convert content to parts
-		if len(choice.ReasoningContent) > 0 || len(choice.Content) > 0 || len(choice.ToolCalls) > 0 {
+		items := canonicalChoiceItems(choice)
+		if len(items) > 0 {
 			parts := make([]map[string]interface{}, 0)
-
-			for _, rc := range choice.ReasoningContent {
-				sig := reasoningOpaqueSignature([]schema.ContentPart{rc})
-				if rc.Text == "" && sig == "" {
-					continue
-				}
-				part := map[string]interface{}{}
-				if rc.Text != "" {
-					part["text"] = rc.Text
-					part["thought"] = true
-				}
-				if sig != "" {
-					part["thoughtSignature"] = sig
-				}
-				parts = append(parts, part)
-			}
-
-			for _, c := range choice.Content {
-				part := map[string]interface{}{"type": c.Type}
-				if c.Text != "" {
-					part["text"] = c.Text
-				}
-				if c.ImageURL != nil {
-					// Parse data URI
-					dataURI := *c.ImageURL
-					mimeType := "image/png"
-					data := dataURI
-					if len(dataURI) > 5 && dataURI[:5] == "data:" {
-						endIdx := len(dataURI)
-						for i := 5; i < len(dataURI); i++ {
-							if dataURI[i] == ';' || dataURI[i] == ',' {
-								endIdx = i
-								break
-							}
-						}
-						mimeType = dataURI[5:endIdx]
-						if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
-							for i := endIdx + 1; i < len(dataURI); i++ {
-								if dataURI[i] == ',' {
-									data = dataURI[i+1:]
+			for _, item := range items {
+				switch item.Kind {
+				case contentItemKindReasoning:
+					rc := item.Content
+					sig := reasoningOpaqueSignature([]schema.ContentPart{rc})
+					if rc.Text == "" && sig == "" {
+						continue
+					}
+					part := map[string]interface{}{}
+					if rc.Text != "" {
+						part["text"] = rc.Text
+						part["thought"] = true
+					}
+					if sig != "" {
+						part["thoughtSignature"] = sig
+					}
+					parts = append(parts, part)
+				case contentItemKindContent:
+					c := item.Content
+					part := map[string]interface{}{"type": c.Type}
+					if c.Text != "" {
+						part["text"] = c.Text
+					}
+					if c.ImageURL != nil {
+						dataURI := *c.ImageURL
+						mimeType := "image/png"
+						data := dataURI
+						if len(dataURI) > 5 && dataURI[:5] == "data:" {
+							endIdx := len(dataURI)
+							for i := 5; i < len(dataURI); i++ {
+								if dataURI[i] == ';' || dataURI[i] == ',' {
+									endIdx = i
 									break
 								}
 							}
+							mimeType = dataURI[5:endIdx]
+							if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
+								for i := endIdx + 1; i < len(dataURI); i++ {
+									if dataURI[i] == ',' {
+										data = dataURI[i+1:]
+										break
+									}
+								}
+							}
+						}
+						part["inlineData"] = map[string]string{
+							"mimeType": mimeType,
+							"data":     data,
 						}
 					}
-					part["inlineData"] = map[string]string{
-						"mimeType": mimeType,
-						"data":     data,
+					parts = append(parts, part)
+				case contentItemKindToolCall:
+					tc := item.ToolCall
+					name := tc.Name
+					if name == "" {
+						name = tc.Function.Name
+					}
+					parts = append(parts, map[string]interface{}{
+						"functionCall": map[string]interface{}{
+							"name": name,
+							"args": jsonArgumentValue(tc.Function.Arguments),
+						},
+					})
+				case "refusal":
+					if item.Content.Refusal != "" {
+						parts = append(parts, map[string]interface{}{"text": item.Content.Refusal})
 					}
 				}
-				parts = append(parts, part)
 			}
-
-			// Add tool calls
-			for _, tc := range choice.ToolCalls {
-				parts = append(parts, map[string]interface{}{
-					"functionCall": map[string]interface{}{
-						"name": tc.Name,
-						"args": jsonArgumentValue(tc.Function.Arguments),
-					},
-				})
-			}
-
-			cand["content"] = map[string]interface{}{
-				"role":  choice.Role,
-				"parts": parts,
+			if len(parts) > 0 {
+				cand["content"] = map[string]interface{}{
+					"role":  choice.Role,
+					"parts": parts,
+				}
 			}
 		}
 

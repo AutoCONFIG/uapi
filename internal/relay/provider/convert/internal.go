@@ -120,17 +120,16 @@ type InternalResponse struct {
 	Choices []InternalChoice
 	Usage   schema.Usage
 	Raw     json.RawMessage // preserved for same-format passthrough
+	IR      *ir.Response    `json:"-"`
+	Losses  []ir.Loss       `json:"-"`
 }
 
 // InternalChoice represents a single choice in a response.
 type InternalChoice struct {
-	Index            int
-	Role             string
-	Content          []schema.ContentPart
-	ToolCalls        []schema.ToolCall
-	FinishReason     string
-	ReasoningContent []schema.ContentPart
-	Refusal          string
+	Index        int
+	Role         string
+	Items        []InternalContentItem
+	FinishReason string
 }
 
 func decodeJSONUseNumber(data []byte, v interface{}) error {

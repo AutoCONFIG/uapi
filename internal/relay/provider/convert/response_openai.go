@@ -45,20 +45,21 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 
 		// Convert content
 		if !choice.Message.Content.IsEmpty() {
-			internalChoice.Content = choice.Message.Content.Parts
-		}
-		if internalChoice.Content == nil && choice.Message.Content.Text != nil {
-			internalChoice.Content = []schema.ContentPart{
-				{Type: "text", Text: *choice.Message.Content.Text},
+			for _, part := range choice.Message.Content.Parts {
+				appendChoiceContentItem(&internalChoice, part, rawJSON(part))
 			}
 		}
-		internalChoice.ReasoningContent = append(internalChoice.ReasoningContent, reasoningPartsFromOpenAIChatExtra(choice.Message.Extra)...)
+		if len(contentPartsFromItems(internalChoice.Items)) == 0 && choice.Message.Content.Text != nil {
+			appendChoiceContentItem(&internalChoice, schema.ContentPart{Type: "text", Text: *choice.Message.Content.Text}, rawJSON(choice.Message.Content.Text))
+		}
+		for _, part := range reasoningPartsFromOpenAIChatExtra(choice.Message.Extra) {
+			appendChoiceReasoningItem(&internalChoice, part, rawJSON(part))
+		}
 
 		// Convert tool calls
 		if len(choice.Message.ToolCalls) > 0 {
-			internalChoice.ToolCalls = make([]schema.ToolCall, len(choice.Message.ToolCalls))
-			for i, tc := range choice.Message.ToolCalls {
-				internalChoice.ToolCalls[i] = schema.ToolCall{
+			for _, tc := range choice.Message.ToolCalls {
+				call := schema.ToolCall{
 					ID:   tc.ID,
 					Type: tc.Type,
 					Name: tc.Name,
@@ -70,12 +71,13 @@ func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
 						Arguments: tc.Function.Arguments,
 					},
 				}
+				appendChoiceToolCallItem(&internalChoice, call, rawJSON(tc))
 			}
 		}
 
 		// Handle refusal
 		if choice.Message.Refusal != "" {
-			internalChoice.Refusal = choice.Message.Refusal
+			appendChoiceRefusalItem(&internalChoice, choice.Message.Refusal)
 		}
 
 		ir.Choices = append(ir.Choices, internalChoice)
@@ -179,34 +181,39 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 			},
 		}
 
+		items := canonicalChoiceItems(choice)
+		content := contentPartsFromItems(items)
+		reasoningContent := reasoningPartsFromItems(items)
+		toolCalls := toolCallsFromItems(items)
+
 		// Convert content
-		if len(choice.Content) > 0 {
-			if len(choice.Content) == 1 && choice.Content[0].Type == "text" {
-				chatChoice.Message.Content = schema.NewTextContent(choice.Content[0].Text)
+		if len(content) > 0 {
+			if len(content) == 1 && content[0].Type == "text" {
+				chatChoice.Message.Content = schema.NewTextContent(content[0].Text)
 			} else {
-				chatChoice.Message.Content = schema.NewPartsContent(choice.Content...)
+				chatChoice.Message.Content = schema.NewPartsContent(content...)
 			}
 		}
-		if len(choice.ReasoningContent) > 0 {
+		if len(reasoningContent) > 0 {
 			if chatChoice.Message.Extra == nil {
 				chatChoice.Message.Extra = make(map[string]json.RawMessage)
 			}
-			reasoning := contentPartsText(choice.ReasoningContent)
+			reasoning := contentPartsText(reasoningContent)
 			if reasoning != "" {
 				raw, _ := json.Marshal(reasoning)
 				chatChoice.Message.Extra["reasoning_content"] = raw
 				chatChoice.Message.Extra["reasoning"] = raw
 			}
-			if details := reasoningDetailsFromParts(choice.ReasoningContent); len(details) > 0 {
+			if details := reasoningDetailsFromParts(reasoningContent); len(details) > 0 {
 				raw, _ := json.Marshal(details)
 				chatChoice.Message.Extra["reasoning_details"] = raw
 			}
 		}
 
 		// Convert tool calls
-		if len(choice.ToolCalls) > 0 {
-			chatChoice.Message.ToolCalls = make([]schema.ToolCall, len(choice.ToolCalls))
-			for i, tc := range choice.ToolCalls {
+		if len(toolCalls) > 0 {
+			chatChoice.Message.ToolCalls = make([]schema.ToolCall, len(toolCalls))
+			for i, tc := range toolCalls {
 				chatChoice.Message.ToolCalls[i] = schema.ToolCall{
 					ID:   tc.ID,
 					Type: tc.Type,
@@ -222,9 +229,11 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 			}
 		}
 
-		// Handle refusal
-		if choice.Refusal != "" {
-			chatChoice.Message.Refusal = choice.Refusal
+		for _, item := range items {
+			if item.Kind == "refusal" && item.Content.Refusal != "" {
+				chatChoice.Message.Refusal = item.Content.Refusal
+				break
+			}
 		}
 
 		resp.Choices = append(resp.Choices, chatChoice)
@@ -265,17 +274,16 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 	}
 
-	var pendingReasoning []schema.ContentPart
+	var pendingReasoning []InternalContentItem
 	flushPendingReasoning := func() {
 		if len(pendingReasoning) == 0 {
 			return
 		}
-		ir.Choices = append(ir.Choices, InternalChoice{
-			Index:            len(ir.Choices),
-			Role:             "assistant",
-			ReasoningContent: pendingReasoning,
-			FinishReason:     "end_turn",
-		})
+		choice := InternalChoice{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
+		for _, item := range pendingReasoning {
+			appendChoiceReasoningItem(&choice, item.Content, item.Raw)
+		}
+		ir.Choices = append(ir.Choices, choice)
 		pendingReasoning = nil
 	}
 
@@ -285,41 +293,47 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 		switch item.Type {
 		case "message":
 			choice := InternalChoice{
-				Index:            len(ir.Choices),
-				Role:             item.Role,
-				Content:          item.Content,
-				ReasoningContent: pendingReasoning,
-				FinishReason:     mapResponsesToInternalFinishReason(item.Status),
+				Index:        len(ir.Choices),
+				Role:         item.Role,
+				FinishReason: mapResponsesToInternalFinishReason(item.Status),
+			}
+			for _, pending := range pendingReasoning {
+				appendChoiceReasoningItem(&choice, pending.Content, pending.Raw)
+			}
+			for _, part := range item.Content {
+				appendChoiceContentItem(&choice, part, rawJSON(part))
 			}
 			pendingReasoning = nil
 			ir.Choices = append(ir.Choices, choice)
 
 		case "function_call":
 			choice := InternalChoice{
-				Index:            len(ir.Choices),
-				Role:             item.Role,
-				ReasoningContent: pendingReasoning,
-				FinishReason:     "tool_use",
-				ToolCalls: []schema.ToolCall{
-					{
-						ID:   item.CallID,
-						Type: "function",
-						Name: item.Name,
-						Function: struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						}{
-							Name:      item.Name,
-							Arguments: item.Arguments,
-						},
-					},
-				},
+				Index:        len(ir.Choices),
+				Role:         item.Role,
+				FinishReason: "tool_use",
 			}
+			for _, pending := range pendingReasoning {
+				appendChoiceReasoningItem(&choice, pending.Content, pending.Raw)
+			}
+			appendChoiceToolCallItem(&choice, schema.ToolCall{
+				ID:   item.CallID,
+				Type: "function",
+				Name: item.Name,
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      item.Name,
+					Arguments: item.Arguments,
+				},
+			}, rawJSON(item))
 			pendingReasoning = nil
 			ir.Choices = append(ir.Choices, choice)
 
 		case "reasoning":
-			pendingReasoning = append(pendingReasoning, reasoningPartsFromResponsesExtra(item.Extra)...)
+			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
+				pendingReasoning = append(pendingReasoning, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
+			}
 		}
 	}
 	flushPendingReasoning()
@@ -360,44 +374,7 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 
 	// Convert choices to output items
 	for _, choice := range ir.Choices {
-		if len(choice.ReasoningContent) > 0 {
-			resp.Output = append(resp.Output, responsesReasoningOutputItem(choice))
-		}
-		if len(choice.ToolCalls) == 0 {
-			if contentItems := responsesContentOutputItems(choice); len(contentItems) > 0 {
-				resp.Output = append(resp.Output, contentItems...)
-				continue
-			}
-		}
-		item := schema.ResponsesOutputItem{
-			Type: "message",
-			Role: choice.Role,
-		}
-
-		// Convert content
-		if len(choice.Content) > 0 {
-			item.Content = choice.Content
-		}
-
-		// Convert tool calls
-		if len(choice.ToolCalls) > 0 {
-			item.Type = "function_call"
-			item.CallID = choice.ToolCalls[0].ID
-			item.Name = choice.ToolCalls[0].Name
-			item.Arguments = choice.ToolCalls[0].Function.Arguments
-		}
-
-		// Map finish reason to status
-		switch choice.FinishReason {
-		case "end_turn", "stop":
-			item.Status = "completed"
-		case "max_tokens", "length":
-			item.Status = "incomplete"
-		default:
-			item.Status = choice.FinishReason
-		}
-
-		resp.Output = append(resp.Output, item)
+		resp.Output = append(resp.Output, responsesOutputItemsFromChoice(choice)...)
 	}
 
 	// If Raw is present, preserve extra fields
@@ -419,16 +396,17 @@ func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 }
 
 func responsesReasoningOutputItem(choice InternalChoice) schema.ResponsesOutputItem {
+	reasoningContent := reasoningPartsFromItems(canonicalChoiceItems(choice))
 	extra := make(map[string]json.RawMessage)
-	if content := responsesReasoningContent(choice.ReasoningContent); len(content) > 0 {
+	if content := responsesReasoningContent(reasoningContent); len(content) > 0 {
 		raw, _ := json.Marshal(content)
 		extra["content"] = raw
 	}
-	if summary := responsesReasoningSummary(choice.ReasoningContent); len(summary) > 0 {
+	if summary := responsesReasoningSummary(reasoningContent); len(summary) > 0 {
 		raw, _ := json.Marshal(summary)
 		extra["summary"] = raw
 	}
-	if encrypted := reasoningEncryptedContent(choice.ReasoningContent); encrypted != "" {
+	if encrypted := reasoningEncryptedContent(reasoningContent); encrypted != "" {
 		raw, _ := json.Marshal(encrypted)
 		extra[reasoningExtraEncryptedContent] = raw
 	}
@@ -463,46 +441,73 @@ func responsesReasoningContent(parts []schema.ContentPart) []map[string]interfac
 	return content
 }
 
-func responsesContentOutputItems(choice InternalChoice) []schema.ResponsesOutputItem {
-	out := make([]schema.ResponsesOutputItem, 0)
-	pending := make([]schema.ContentPart, 0)
-	flushMessage := func() {
-		if len(pending) == 0 {
+func responsesOutputItemsFromChoice(choice InternalChoice) []schema.ResponsesOutputItem {
+	var out []schema.ResponsesOutputItem
+	var pendingContent []schema.ContentPart
+	status := responsesStatusFromFinishReason(choice.FinishReason)
+	flushContent := func() {
+		if len(pendingContent) == 0 {
 			return
 		}
 		out = append(out, schema.ResponsesOutputItem{
 			Type:    "message",
 			Role:    choice.Role,
-			Content: pending,
-			Status:  responsesStatusFromFinishReason(choice.FinishReason),
+			Content: pendingContent,
+			Status:  status,
 		})
-		pending = nil
+		pendingContent = nil
 	}
-	for idx, part := range choice.Content {
-		if part.ImageURL == nil || *part.ImageURL == "" {
-			pending = append(pending, part)
-			continue
+	for idx, item := range canonicalChoiceItems(choice) {
+		switch item.Kind {
+		case contentItemKindReasoning:
+			flushContent()
+			reasoningChoice := choice
+			reasoningChoice.Items = []InternalContentItem{item}
+			out = append(out, responsesReasoningOutputItem(reasoningChoice))
+		case contentItemKindContent:
+			part := item.Content
+			if part.ImageURL != nil && *part.ImageURL != "" {
+				if mimeType, b64, ok := splitDataURI(*part.ImageURL); ok {
+					flushContent()
+					format := imageOutputFormatFromMime(mimeType)
+					resultRaw, _ := json.Marshal(b64)
+					formatRaw, _ := json.Marshal(format)
+					out = append(out, schema.ResponsesOutputItem{
+						Type:   "image_generation_call",
+						ID:     fmt.Sprintf("ig_%d", idx),
+						Status: "completed",
+						Extra: map[string]json.RawMessage{
+							"result":        resultRaw,
+							"output_format": formatRaw,
+						},
+					})
+					continue
+				}
+			}
+			pendingContent = append(pendingContent, part)
+		case contentItemKindToolCall:
+			flushContent()
+			name := item.ToolCall.Name
+			if name == "" {
+				name = item.ToolCall.Function.Name
+			}
+			out = append(out, schema.ResponsesOutputItem{
+				Type:      "function_call",
+				Role:      choice.Role,
+				Status:    status,
+				CallID:    item.ToolCall.ID,
+				Name:      name,
+				Arguments: item.ToolCall.Function.Arguments,
+			})
+		case "refusal":
+			part := item.Content
+			if part.Type == "" {
+				part.Type = "refusal"
+			}
+			pendingContent = append(pendingContent, part)
 		}
-		mimeType, b64, ok := splitDataURI(*part.ImageURL)
-		if !ok {
-			pending = append(pending, part)
-			continue
-		}
-		flushMessage()
-		format := imageOutputFormatFromMime(mimeType)
-		resultRaw, _ := json.Marshal(b64)
-		formatRaw, _ := json.Marshal(format)
-		out = append(out, schema.ResponsesOutputItem{
-			Type:   "image_generation_call",
-			ID:     fmt.Sprintf("ig_%d", idx),
-			Status: "completed",
-			Extra: map[string]json.RawMessage{
-				"result":        resultRaw,
-				"output_format": formatRaw,
-			},
-		})
 	}
-	flushMessage()
+	flushContent()
 	return out
 }
 

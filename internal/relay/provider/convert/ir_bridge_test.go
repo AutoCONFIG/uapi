@@ -173,10 +173,12 @@ func TestInternalResponseToIRPreservesUsageAndOrderedItems(t *testing.T) {
 		Model: "gpt-test",
 		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
 		Choices: []convert.InternalChoice{{
-			Index:        0,
-			Role:         "assistant",
-			Content:      []schema.ContentPart{{Type: "text", Text: "answer"}},
-			ToolCalls:    []schema.ToolCall{{ID: "call_1", Type: "function", Name: "lookup"}},
+			Index: 0,
+			Role:  "assistant",
+			Items: []convert.InternalContentItem{
+				{Kind: "content", Content: schema.ContentPart{Type: "text", Text: "answer"}},
+				{Kind: "tool_call", ToolCall: schema.ToolCall{ID: "call_1", Type: "function", Name: "lookup"}},
+			},
 			FinishReason: "tool_calls",
 		}},
 	}

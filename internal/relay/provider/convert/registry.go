@@ -153,5 +153,7 @@ func ConvertResponse(upstreamFormat, clientFormat Format, body []byte) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return fromResp(ir)
+	respIR := ir.ToIR(upstreamFormat)
+	respIR.TargetProtocol = irProtocol(clientFormat)
+	return fromResp(InternalResponseFromIR(respIR))
 }
