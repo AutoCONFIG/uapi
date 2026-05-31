@@ -95,9 +95,11 @@ func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}) 
 		if quotaBucketExists(qd, label) {
 			return
 		}
+		usedPercent := clampPercent(100 - *remainingPct)
 		qd.Buckets = append(qd.Buckets, QuotaBucket{
 			Label:            label,
 			RemainingPercent: clampPercent(*remainingPct),
+			UsedPercent:      &usedPercent,
 			ResetTime:        codexResetTime(window),
 		})
 	}
@@ -118,9 +120,11 @@ func collectCodexWindows(qd *QuotaData, prefix string, m map[string]interface{})
 		}
 		key := "Codex " + label
 		if !quotaBucketExists(qd, key) {
+			usedPercent := clampPercent(100 - *remainingPct)
 			qd.Buckets = append(qd.Buckets, QuotaBucket{
 				Label:            key,
 				RemainingPercent: clampPercent(*remainingPct),
+				UsedPercent:      &usedPercent,
 				ResetTime:        codexResetTime(m),
 			})
 		}

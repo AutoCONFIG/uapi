@@ -838,10 +838,10 @@ export function AdminChannelConsole() {
                             <div className="quota-compact-item" key={item.key} title={item.detail || item.label}>
                               <div className="quota-compact-header">
                                 <span className="quota-label">{item.label}</span>
-                                <span className={`quota-percent ${quotaTone(item.remainingPercent)}`}>{item.remainingPercent}%</span>
+                                <span className={`quota-percent ${quotaTone(item.remainingPercent)}`}>{item.displayPercent}%</span>
                               </div>
                               <div className="quota-compact-bar-track">
-                                <div className={`quota-compact-bar ${quotaTone(item.remainingPercent)}`} style={{ width: `${item.remainingPercent}%` }} />
+                                <div className={`quota-compact-bar ${quotaTone(item.remainingPercent)}`} style={{ width: `${item.displayPercent}%` }} />
                               </div>
                               {item.resetText ? <span className={`quota-compact-reset ${item.resetTone || ""}`}>{item.resetText}</span> : null}
                             </div>
@@ -1142,6 +1142,8 @@ type QuotaDisplayItem = {
   key: string;
   label: string;
   remainingPercent: number;
+  displayPercent: number;
+  displayMode: "remaining" | "used";
   resetText?: string;
   resetTone?: string;
   detail?: string;
@@ -1158,13 +1160,20 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
       const pct = numberValue(b.remaining_percent);
       if (pct === null) continue;
       const remainingPercent = Math.round(clampPercent(pct));
+      const label = stringValue(b.label);
+      const fallbackUsedPercent = quotaUsesUpstreamUsedDisplay(label) ? 100 - remainingPercent : null;
+      const usedPercent = numberValue(b.used_percent) ?? fallbackUsedPercent;
+      const displayMode = usedPercent !== null ? "used" : "remaining";
+      const displayPercent = displayMode === "used" ? Math.round(clampPercent(usedPercent ?? 0)) : remainingPercent;
       items.push({
         key: `quota-${i}`,
-        label: stringValue(b.label) || `额度 ${i + 1}`,
+        label: label || `额度 ${i + 1}`,
         remainingPercent,
+        displayPercent,
+        displayMode,
         resetText: formatResetTimeShort(stringValue(b.reset_time)),
         resetTone: resetTimeTone(stringValue(b.reset_time)),
-        detail: [`剩余 ${remainingPercent}%`, stringValue(b.reset_time) ? `重置 ${stringValue(b.reset_time)}` : ""].filter(Boolean).join(" · "),
+        detail: [displayMode === "used" ? `已用 ${displayPercent}%` : `剩余 ${remainingPercent}%`, displayMode === "used" ? `剩余 ${remainingPercent}%` : "", stringValue(b.reset_time) ? `重置 ${stringValue(b.reset_time)}` : ""].filter(Boolean).join(" · "),
       });
     }
     const credits = asRecord(quota.credits);
@@ -1175,6 +1184,8 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
           key: "quota-credits",
           label: stringValue(credits.label) || "Credits",
           remainingPercent: credits.unlimited === true ? 100 : 0,
+          displayPercent: credits.unlimited === true ? 100 : 0,
+          displayMode: "remaining",
           detail: `Credits ${balance}`,
         });
       }
@@ -1185,9 +1196,16 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
   return items;
 }
 
+function quotaUsesUpstreamUsedDisplay(label: string): boolean {
+  const normalized = label.toLowerCase();
+  return normalized.includes("codex") || normalized.includes("claude");
+}
+
 function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {
   return items.sort((left, right) => {
-    const byRemaining = left.remainingPercent - right.remainingPercent;
+    const leftSeverity = left.displayMode === "used" ? 100 - left.displayPercent : left.remainingPercent;
+    const rightSeverity = right.displayMode === "used" ? 100 - right.displayPercent : right.remainingPercent;
+    const byRemaining = leftSeverity - rightSeverity;
     if (byRemaining !== 0) return byRemaining;
     return left.label.localeCompare(right.label, "zh-Hans-u-co-pinyin", { numeric: true });
   });

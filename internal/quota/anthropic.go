@@ -106,6 +106,7 @@ func convertAnthropicUsage(usage map[string]interface{}, metadata map[string]int
 		qd.Buckets = append(qd.Buckets, QuotaBucket{
 			Label:            label,
 			RemainingPercent: remaining,
+			UsedPercent:      &usedPercent,
 			ResetTime:        resetTime,
 		})
 	}

@@ -14,6 +14,7 @@ type QuotaData struct {
 type QuotaBucket struct {
 	Label            string `json:"label"`
 	RemainingPercent int    `json:"remaining_percent"`
+	UsedPercent      *int   `json:"used_percent,omitempty"`
 	ResetTime        string `json:"reset_time,omitempty"`
 }
 
