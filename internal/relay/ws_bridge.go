@@ -39,7 +39,13 @@ func (h *WSHandler) httpBridgeFallback(
 
 	adaptor.Init(ch, acc)
 	adaptor.SetRequestParams(model, true) // always stream in bridge mode
-	convertedBody, err := provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
+	var convertedBody []byte
+	var err error
+	if clientFormat == upstreamFormat {
+		convertedBody, err = provider.NormalizeRequestSameProtocol(upstreamFormat, body)
+	} else {
+		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
+	}
 	if err != nil {
 		WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
 		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)

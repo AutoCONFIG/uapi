@@ -27,6 +27,12 @@ working state so the next agent can continue without extra user briefing.
   truth. Stage 1 and Stage 2 are planned product direction; Stage 3 is a
   candidate pool only and must not be implemented until explicitly selected.
 - `docs/current/oauth-channels.md` is the current source of truth for OAuth-backed Codex, Gemini Code, Claude Code, Antigravity, and standard provider API alignment.
+- `docs/current/protocol-conversion-review-prompt.md` is the starting prompt for
+  independent follow-up reviews of the protocol conversion layer. Use it when
+  asking another AI to re-audit the work from scratch.
+- `docs/current/protocol-conversion-acceptance-prompt.md` is the stricter
+  acceptance-review prompt for auditing the completed protocol conversion
+  refactor and directly fixing gaps.
 - Runtime logging is documented in `docs/current/platform-design.md`; backend
   logs are structured JSON from `internal/logger`, controlled by
   `logging.level` in config. Current local development config uses `debug`;
@@ -71,13 +77,18 @@ working state so the next agent can continue without extra user briefing.
 - OAuth channel behavior must be checked against the local upstream official
   client sources listed in `docs/current/oauth-channels.md` before changing auth,
   refresh, metadata, or request-shaping logic.
-- Protocol conversion rule: same-protocol HTTP bodies and SSE streams are
-  preserved raw where useful. Cross-protocol requests use `ir.Request`,
-  responses use `ir.Response`, and streams use event-level IR parser/emitter
-  converters. Equivalent fields are mapped, fields without target-protocol
-  equivalents are logged with warning and skipped unless they would invalidate
-  core prompt/tool flow, and only malformed input or missing required fields
-  cause explicit conversion errors.
+- Protocol conversion rule: downstream/client format is determined by request
+  path, while upstream format is determined by channel `Type` + `APIFormat`.
+  Model names only affect routing/model mapping after format detection.
+  Same-protocol requests should follow Bifrost's production-validated raw-body
+  preservation pattern as closely as UAPI allows: parse/classify/validate,
+  sanitize known client noise, then forward the cleaned native body without
+  cross-protocol IR emission or emitter rebuild.
+  Cross-protocol requests use `ir.Request`, responses use `ir.Response`, and
+  streams use event-level IR parser/emitter converters. Equivalent fields are
+  mapped, fields without target-protocol equivalents are logged with warning and
+  skipped unless they would invalidate core prompt/tool flow, and only malformed
+  input or missing required fields cause explicit conversion errors.
 - Downstream model-list endpoints are local database reads. They use configured
   channel models plus channel model aliases and the user's active plan policy.
   They must not call upstream providers on client requests. Admins use
