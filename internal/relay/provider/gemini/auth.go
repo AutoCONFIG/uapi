@@ -29,7 +29,6 @@ const (
 	GeminiCLIVersion    = "0.44.0-nightly.20260512.g022e8baef"
 
 	UserTierFree     = "free-tier"
-	UserTierLegacy   = "legacy-tier"
 	UserTierStandard = "standard-tier"
 )
 
@@ -405,7 +404,7 @@ func defaultOnboardTier(loadRes map[string]interface{}) map[string]interface{} {
 			}
 		}
 	}
-	return map[string]interface{}{"id": UserTierLegacy}
+	return map[string]interface{}{"id": UserTierFree}
 }
 
 func boolValue(value interface{}) bool {

@@ -120,8 +120,7 @@ web/
 │       ├── plans/page.tsx
 │       ├── logs/page.tsx
 │       ├── audit-logs/page.tsx
-│       ├── settings/page.tsx
-│       └── accounts/page.tsx      # 旧链接说明页，账号实际归入渠道
+│       └── settings/page.tsx
 ├── components/
 │   ├── login-form.tsx             # 登录表单（user + admin 双模式）
 │   ├── shell.tsx                  # 导航外壳
@@ -192,7 +191,7 @@ POST   /api/admin/setup              # 首次初始化，返回 AT/RT
 GET    /api/admin/dashboard           # 仪表盘统计
 CRUD   /api/admin/access-policies     # 策略资源，由套餐管理页面组合使用；不是独立产品页面
 CRUD   /api/admin/relay-nodes
-CRUD   /api/admin/node-channels         # 节点-渠道绑定；保留路径名，字段为 channel_id
+CRUD   /api/admin/node-channels         # 节点-渠道绑定，字段为 channel_id
 CRUD   /api/admin/channels            # 渠道管理
 POST   /api/admin/channels/models/sync # 管理员手动从上游同步模型到本地渠道配置
 POST   /api/admin/channels/oauth/auth-url  # 创建 OAuth 授权 URL（admin JWT）
@@ -280,7 +279,7 @@ Relay API：      Gateway HMAC 签名校验 → 执行指定 channel/account →
 
 Relay 先识别 request type，再决定是否能转换或透传。这个模型参考
 Bifrost 的 `RequestType`、`AllowedRequests` 和 provider interface：文本类请求
-进入统一 `InternalRequest` 协议转换；图片、音频、Embeddings、Realtime、Video 等非文本能力单独
+进入统一 IR 协议转换；图片、音频、Embeddings、Realtime、Video 等非文本能力单独
 声明支持矩阵，不能走文本转换器凑合。当前支持矩阵：
 
 | 下游请求 | OpenAI 上游 | Antigravity 上游 | 其他上游 |
@@ -299,43 +298,49 @@ CLIProxyAPI 的 `geminiToAntigravity()`：图片模型使用
 `requestType:"image_gen"`、`image_gen/<millis>/<uuid>/12` requestId，并将
 OpenAI Images 参数映射到 Gemini `generationConfig.imageConfig`；图片编辑和变体请求会把 multipart 图片输入转换为 Gemini `inlineData` parts。
 
-#### 转换策略：跨协议中间格式，同协议 raw preservation
+#### 转换策略：IR-first，按需 raw preservation
 
-跨协议采用统一中间格式（`InternalRequest`/`InternalResponse`）：
-
-```
-客户端格式 → ToInternal() → InternalRequest → FromInternal() → 上游格式
-```
-
-同协议请求/响应不强制进入这个较窄的中间结构，而是 raw preservation：
-下游协议和上游协议相同时保留原始 JSON/SSE，只补必要的路由、鉴权和计费
-上下文。这样不会因为中间格式暂时没有表达某个原生标准字段而丢精度。新增
-provider 仍按 Bifrost-style adaptor pipeline 接入；跨协议转换时才使用
-`ToInternal()`/`FromInternal()`。跨协议转换采用粗转换策略：能映射的
-等价字段必须映射；目标协议无法表达但不影响核心 prompt/tool 流程的字段
-记录 warning 后跳过，并保留在同协议 raw preservation/ExtraParams 路径中；
-只有畸形结构、必需字段缺失或会让目标请求语义无效的内容才返回显式转换错误。
-
-流式 SSE 不整流缓冲，采用事件级状态机转换。和 Bifrost 的 schema/adaptor
-思路一致，Relay 先把不同上游流规范化为内部 OpenAI Chat Completions-style chunk，再按
-下游协议输出 OpenAI Responses API、Gemini API、Anthropic Messages API、OpenAI Chat Completions API 对应的 SSE 事件：
+跨协议文本请求采用 `ir.Request` 作为唯一主链路：
 
 ```
-上游 SSE event → provider stream normalizer → client stream formatter → 客户端 SSE event
+客户端格式 → request parser → ir.Request → request emitter → 上游格式
 ```
 
-`force_stream` 会把上游 SSE 规范化为 OpenAI Chat Completions-style chunk 后汇总成非流
-JSON。若上游流中出现 error chunk，Relay 返回对应客户端协议的错误响应，
+请求 parser/emitter 的 provider-specific envelope 只服务于具体协议读写，
+不作为公开 adaptor 接口或跨协议中心。项目尚未生产发布，废弃的
+旧请求转换面已删除；新增 provider 必须接入
+`ToIR`/`FromIR` 和 request/response parser-emitter registry。
+
+同协议请求仍可按需要 raw preservation：下游协议和上游协议相同时保留原始
+JSON/SSE，只补必要的路由、鉴权和计费上下文，避免丢失原生标准字段。跨协议
+转换要求能映射的等价字段必须映射；目标协议无法表达但不影响核心
+prompt/tool 流程的字段记录 warning 后跳过；只有畸形结构、必需字段缺失或会
+让目标请求语义无效的内容才返回显式转换错误。
+
+响应转换采用 `ir.Response` 作为主链路：
+
+```
+上游响应 → response parser → ir.Response → response emitter → 客户端响应
+```
+
+流式 SSE 不整流缓冲，采用事件级 IR parser/emitter 转换：
+
+```
+上游 SSE event → stream IR parser → stream IR emitter → 客户端 SSE event
+```
+
+`force_stream` 会把上游 SSE 经 IR 汇总成非流 JSON。若上游流中出现 error
+chunk，Relay 返回对应客户端协议的错误响应，
 不生成空 completion。
 
 #### 协议规范化
 
 Relay 的跨协议请求不依赖上游原始 envelope 透传，而是经过 UAPI 的
-ToInternal/FromInternal 或流式 normalizer/formatter。同名标准协议是一个
-例外：如果下游和上游都是同一个标准协议，Relay 保留原始标准 JSON 或 SSE，
-避免丢失 Gemini API、Anthropic Messages API、OpenAI 原生扩展字段。所有格式都必须实现
-`ParseUsage` 和 `ParseStreamUsage`，Relay 需要从响应中提取 usage；目标架构中
-usage event 回报 Gateway 后由 Gateway 幂等结算。
+IR parser/emitter。同名标准协议是一个例外：如果下游和上游都是同一个标准
+协议，Relay 保留原始标准 JSON 或 SSE，避免丢失 Gemini API、Anthropic
+Messages API、OpenAI 原生扩展字段。所有格式都必须实现 `ParseUsage` 和
+`ParseStreamUsage`，Relay 需要从响应中提取 usage；目标架构中 usage event
+回报 Gateway 后由 Gateway 幂等结算。
 
 Token 统一统计：无论客户端用哪种格式，usage 都归一化为
 `prompt_tokens + completion_tokens`，供日志、展示和 `token_based` 套餐结算使用。

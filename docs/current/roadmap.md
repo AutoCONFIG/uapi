@@ -3,7 +3,7 @@
 This document defines what UAPI should absorb from reference projects during the
 current early-development period. UAPI has not shipped to production, so obsolete
 first-draft behavior should be removed or rewritten instead of preserved behind
-compatibility layers.
+stale layers.
 
 `docs/api-reference/` is different from product planning documents: it is the
 protocol-standard corpus used to keep OpenAI Chat Completions, OpenAI Responses,
@@ -53,10 +53,10 @@ Stage 1 is the current implementation focus.
 | Admin/user auth | low-resource AT/RT for admin and user; short AT, long RT | common web practice | implement now |
 | Admin boundary | admin manages business; admin should not generate/use downstream API keys | UAPI product need | implement now |
 
-Stage 1 should actively remove stale first-draft product surfaces: standalone
+Stage 1 should actively remove superseded first-draft product surfaces: standalone
 admin token-management UI, account-as-primary navigation, token-bound access
 policies, account-bound node bindings, real-time upstream model discovery on
-client `/models`, and any UI copy that describes those old concepts.
+client `/models`, and any UI copy that describes those superseded concepts.
 
 ## Stage 2: Operational Hardening And Lightweight Business Features
 
@@ -112,8 +112,8 @@ Stage 3 remains documentation-only until explicitly selected.
 
 ## No Legacy Burden
 
-Because UAPI has not had a production release, compatibility with abandoned
-first-draft logic is not a goal. When the source of truth changes, update the DB
-model, backend route behavior, frontend workflow, and docs together. If a stale
-API remains temporarily for internal composition, mark it internal/control-plane
-only instead of documenting it as user-facing product surface.
+Because UAPI has not had a production release, abandoned first-draft logic is
+not protected product surface. When the source of truth changes, update the DB
+model, backend route behavior, frontend workflow, and docs together. If an
+internal control-plane API exists only for composition, keep it out of
+user-facing product docs.

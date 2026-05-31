@@ -192,8 +192,8 @@ subscribed plan's `plans.policy_id`. API keys keep only their own security field
 `tokens.models`, `tokens.permissions`, expiry, and IP whitelist; they do not
 store or override policy IDs.
 
-The `token_plans` table name is historical. In current business logic it means
-user package subscription, not a package bound to one API key.
+In current business logic, `token_plans` stores user package subscriptions, not
+packages bound to individual API keys.
 
 ## Format Conversion
 

@@ -102,7 +102,7 @@ func TestUserRoutesExposePublicPlanCatalogButNoSelfSubscribe(t *testing.T) {
 	}
 }
 
-func TestInitialSchemaHasNoLegacyCompatibilityFields(t *testing.T) {
+func TestInitialSchemaHasNoObsoleteRedundantFields(t *testing.T) {
 	for _, target := range []struct {
 		name string
 		path []string
@@ -115,7 +115,7 @@ func TestInitialSchemaHasNoLegacyCompatibilityFields(t *testing.T) {
 		for _, pattern := range []string{
 			"DROP COLUMN",
 			"DROP TABLE",
-			"legacy",
+			"obsolete",
 			"balance",
 			"Unlimited",
 			"unlimited",
@@ -125,7 +125,7 @@ func TestInitialSchemaHasNoLegacyCompatibilityFields(t *testing.T) {
 			"window_reset_at",
 		} {
 			if strings.Contains(content, pattern) {
-				t.Fatalf("%s still contains compatibility or redundant field %q", target.name, pattern)
+				t.Fatalf("%s still contains obsolete or redundant field %q", target.name, pattern)
 			}
 		}
 	}

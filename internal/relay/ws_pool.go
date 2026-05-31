@@ -100,14 +100,6 @@ func closeUpstreamWSConn(conn *ws.Conn) error {
 	return conn.Close()
 }
 
-// Return is a no-op since we discard connections after each turn.
-// Kept for API compatibility but connections should use Discard instead.
-func (p *UpstreamPool) Return(conn *UpstreamConn) {
-	// Always discard — WS connections can't be safely reused across turns
-	// because buffered data from previous turns may remain.
-	p.Discard(conn)
-}
-
 // Close is kept for API symmetry; connections are managed per turn.
 func (p *UpstreamPool) Close() {}
 

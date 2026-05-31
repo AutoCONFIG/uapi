@@ -23,7 +23,7 @@ working state so the next agent can continue without extra user briefing.
 - `docs/README.md` is the documentation index.
 - `docs/current/` is the source of truth for active implementation work.
 - `docs/current/gateway-relay.md` is the current source of truth for Gateway/Relay control-plane architecture.
-- `docs/current/roadmap.md` is the staged scope and no-legacy-burden source of
+- `docs/current/roadmap.md` is the staged scope and no-stale-burden source of
   truth. Stage 1 and Stage 2 are planned product direction; Stage 3 is a
   candidate pool only and must not be implemented until explicitly selected.
 - `docs/current/oauth-channels.md` is the current source of truth for OAuth-backed Codex, Gemini Code, Claude Code, Antigravity, and standard provider API alignment.
@@ -34,9 +34,7 @@ working state so the next agent can continue without extra user briefing.
   redaction fallback for common credential fields and token-shaped strings, but
   handlers should still avoid logging full request bodies or credentials.
 - OAuth channel model presets and provider quota/usage metadata display are
-  documented in `docs/current/oauth-channels.md`; the old
-  `docs/reference/cli-auth-reference.md` is only a pointer to avoid stale auth
-  guidance.
+  documented in `docs/current/oauth-channels.md`.
 - `docs/api-reference/` is retained as protocol-standard reference material for
   OpenAI Chat Completions, OpenAI Responses, Gemini, and Anthropic Messages. It
   prevents non-standard interface drift and is not business-roadmap clutter.
@@ -61,9 +59,9 @@ working state so the next agent can continue without extra user briefing.
 - OAuth accounts store encrypted refresh tokens plus JSON `accounts.metadata`
   for provider account/project/plan fields.
 
-- Relay node bindings are channel-level. The historical `/api/admin/node-channels`
-  path is kept, but the binding payload is `relay_node_id + channel_id`; runtime
-  config expands each bound channel to all enabled accounts in that channel.
+- Relay node bindings are channel-level. `/api/admin/node-channels` binds
+  `relay_node_id + channel_id`; runtime config expands each bound channel to all
+  enabled accounts in that channel.
 - OAuth lifecycle follows upstream client behavior on use. UAPI adds expiry-driven
   idle maintenance only for Claude Code and Gemini Code, because their normal
   local client paths do not have a standalone long-idle keep-alive loop. Each
@@ -74,11 +72,12 @@ working state so the next agent can continue without extra user briefing.
   client sources listed in `docs/current/oauth-channels.md` before changing auth,
   refresh, metadata, or request-shaping logic.
 - Protocol conversion rule: same-protocol HTTP bodies and SSE streams are
-  preserved raw where possible (raw preservation). Cross-protocol requests/responses
-  use internal structures with graceful degradation: equivalent fields are mapped,
-  fields without target-protocol equivalents are logged with warning and skipped
-  (unless they would invalidate core prompt/tool flow), and only malformed input or
-  missing required fields cause explicit conversion errors.
+  preserved raw where useful. Cross-protocol requests use `ir.Request`,
+  responses use `ir.Response`, and streams use event-level IR parser/emitter
+  converters. Equivalent fields are mapped, fields without target-protocol
+  equivalents are logged with warning and skipped unless they would invalidate
+  core prompt/tool flow, and only malformed input or missing required fields
+  cause explicit conversion errors.
 - Downstream model-list endpoints are local database reads. They use configured
   channel models plus channel model aliases and the user's active plan policy.
   They must not call upstream providers on client requests. Admins use
@@ -111,8 +110,7 @@ Main routes:
 - Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
   `/admin/users`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`,
   `/admin/settings`
-- `/admin/accounts` redirects to `/admin/channels`. Accounts are
-  conceptually folded into channels and should not regain primary navigation.
+- Accounts are folded into channels and do not have a standalone admin page.
 
 Login behavior:
 
@@ -121,7 +119,6 @@ Login behavior:
 - It tries `/api/user/login` first.
 - If user login fails, it tries `/api/admin/login` using the email prefix as the
   admin username.
-- No static preview fallback accounts are embedded.
 
 Navigation rules:
 
@@ -304,8 +301,8 @@ gateway behavior.
   `models`, and `permissions`. API keys do not bind policies or packages
   directly; Gateway resolves access limits from the key owner's active user
   subscription (`token_plans.user_id` -> `plans.policy_id`) before scheduling
-  relay execution. The table name is historical; it should be read as the user
-  package subscription table, not as API-key package ownership.
+  relay execution. `token_plans` is the user package subscription table, not
+  API-key package ownership.
 - `internal/user/service.go`: `CreateKeyRequest` accepts advanced key fields and
   returns them from key listing/creation responses.
 - `internal/user/dto.go` and `internal/user/service.go`: Usage endpoints return
@@ -342,7 +339,7 @@ gateway behavior.
 - `web/app/keys/page.tsx`: User key creation includes IP whitelist, expiry, model
   restriction, and scoped endpoint permissions.
 - `web/app/usage/page.tsx`: Usage charts and logs consume typed
-  `UsageSummary`/`UsageLogs` API responses with static preview fallback.
+  `UsageSummary`/`UsageLogs` API responses.
 - `web/lib/api.ts`: Admin channel OAuth helpers are available as
   `adminApi.startChannelOAuth`, `adminApi.channelOAuthStatus`, and
   `adminApi.bindChannelOAuth`.
@@ -409,8 +406,8 @@ Current relay notes:
 - SSE conversion must preserve `event:` names and significant `data:` payload
   whitespace. Only the single optional space after `data:` may be removed.
 - Protocol conversion treats non-text operations as first-class request types,
-  following Bifrost's `RequestType`/`AllowedRequests` pattern. Text formats
-  still use `InternalRequest`; OpenAI Images/Audio/Embeddings bypass text
+  following Bifrost's `RequestType`/`AllowedRequests` pattern. Text formats use
+  IR-first parser/emitter conversion; OpenAI Images/Audio/Embeddings bypass text
   conversion and require explicit provider support.
 - Current non-text matrix: OpenAI Images/Audio/Embeddings plus model-bearing
   Moderations/Video and Realtime HTTP session/control requests pass through to
@@ -427,8 +424,7 @@ Also verify static routes after `npm --prefix web run serve:static`:
 - `/`, `/login/`, `/register/`, `/forgot-password/`
 - `/overview/`, `/keys/`, `/usage/`, `/plans/`, `/settings/`
 - `/admin/`, `/admin/dashboard/`, `/admin/channels/`, `/admin/users/`,
-  `/admin/plans/`, `/admin/logs/`, `/admin/audit-logs/`,
-  `/admin/settings/`, `/admin/accounts/`
+  `/admin/plans/`, `/admin/logs/`, `/admin/audit-logs/`, `/admin/settings/`
 
 Known dependency note:
 

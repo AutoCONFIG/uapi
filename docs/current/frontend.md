@@ -56,10 +56,8 @@ The unified login form tries user login first, then admin login.
 
 The UI treats channels as the single top-level object for upstream access. Accounts,
 API keys, and OAuth credentials are represented as credentials within a channel rather
-than as a separate primary navigation item. The `/admin/accounts` route now
-redirects to `/admin/channels`. The admin
-UI should not expose standalone admin-side API key management in the
-first-stage product surface.
+than as a separate primary navigation item. The admin UI should not expose
+standalone admin-side API key management in the first-stage product surface.
 
 The `/admin/channels` page treats each channel as a top-level item. The left rail
 lists channels directly, while the right side shows the selected channel's account
@@ -96,8 +94,7 @@ provide an admin-side API key management surface. Optional key fields are
 relay entry points: `chat`, `responses`, `messages`, `gemini`, and `images`.
 
 The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
-`/api/user/usage` and `/api/user/usage/logs`, while preserving static preview
-fallback rows when the API server is unavailable.
+`/api/user/usage` and `/api/user/usage/logs`.
 
 Plan display is user-owned rather than API-key-owned. Deleting or rotating a
 key must not remove the user's package. The user plans page should show the

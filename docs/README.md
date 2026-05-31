@@ -13,8 +13,6 @@ the specific current document that matches the task.
   protocol behavior and avoid non-standard relay interfaces; it is not business
   roadmap scope.
 - `deployment/`: deployment and operations notes.
-- `reference/`: stable background references. These can explain upstream tools
-  or external behavior, but they are not product requirements by themselves.
 
 ## Current Source Of Truth
 
@@ -40,7 +38,7 @@ the specific current document that matches the task.
 - Keep `current/` aligned with implemented behavior before ending a major work
   session.
 - Before first production release, remove or rewrite obsolete behavior instead
-  of preserving compatibility layers that create historical burden.
+  of preserving stale layers that create maintenance burden.
 - When code and older prose disagree, treat code plus `current/handoff.md` as the
   immediate source of truth and update or delete the stale prose in the same
   change.
