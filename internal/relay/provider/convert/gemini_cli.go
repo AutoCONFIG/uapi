@@ -5,114 +5,67 @@ import (
 	"fmt"
 	"time"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiCLIRequest converts Gemini CLI request to an protocol request view.
-// Extracts the inner Gemini request from the CLI envelope.
-func parseGeminiCLIRequest(body []byte) (*requestDraft, error) {
+func parseGeminiCLIRequestDirectIR(body []byte) (*relayir.Request, error) {
 	var req schema.GeminiCLIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI request: %w", err)
 	}
-
-	// Marshal the inner request and convert using Gemini converter
 	innerBody, err := json.Marshal(req.Request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal inner Gemini request: %w", err)
 	}
-
-	ir, err := parseGeminiRequest(innerBody)
+	out, err := parseGeminiRequestDirectIR(innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert inner Gemini request: %w", err)
 	}
-
-	// Override model from CLI envelope
-	ir.Model = req.Model
-	ir.SourceFormat = FormatGeminiCLI
-
-	// Store CLI-specific fields in Extra for passthrough
-	if req.Project != "" {
-		ir.Extra["project"] = json.RawMessage(fmt.Sprintf(`%q`, req.Project))
+	out.SourceProtocol = relayir.ProtocolGeminiCLI
+	out.Native.Protocol = relayir.ProtocolGeminiCLI
+	out.Native.RawBody = relayir.CloneRaw(body)
+	out.Model = req.Model
+	if out.Metadata == nil {
+		out.Metadata = map[string]json.RawMessage{}
 	}
-	if req.UserPromptID != "" {
-		ir.Extra["user_prompt_id"] = json.RawMessage(fmt.Sprintf(`%q`, req.UserPromptID))
+	setEnvelopeRaw := func(key, value string) {
+		if value != "" {
+			out.Metadata[key] = rawJSON(value)
+		}
 	}
+	setEnvelopeRaw("project", req.Project)
+	setEnvelopeRaw("user_prompt_id", req.UserPromptID)
+	setEnvelopeRaw("userAgent", req.UserAgent)
+	setEnvelopeRaw("requestType", req.RequestType)
+	setEnvelopeRaw("requestId", req.RequestID)
+	setEnvelopeRaw("sessionId", req.SessionID)
 	if len(req.EnabledCreditTypes) > 0 {
-		raw, _ := json.Marshal(req.EnabledCreditTypes)
-		ir.Extra["enabled_credit_types"] = raw
+		out.Metadata["enabled_credit_types"] = rawJSON(req.EnabledCreditTypes)
 	}
-	if req.UserAgent != "" {
-		ir.Extra["userAgent"] = json.RawMessage(fmt.Sprintf(`%q`, req.UserAgent))
-	}
-	if req.RequestType != "" {
-		ir.Extra["requestType"] = json.RawMessage(fmt.Sprintf(`%q`, req.RequestType))
-	}
-	if req.RequestID != "" {
-		ir.Extra["requestId"] = json.RawMessage(fmt.Sprintf(`%q`, req.RequestID))
-	}
-	if req.SessionID != "" {
-		ir.Extra["sessionId"] = json.RawMessage(fmt.Sprintf(`%q`, req.SessionID))
-	}
-
-	return ir, nil
+	out.Native.Fields = relayir.CloneRawMap(out.Metadata)
+	return out, nil
 }
 
-// emitGeminiCLIRequest converts an protocol request view to Gemini CLI request.
-// Wraps the Gemini request in the CLI envelope.
-func emitGeminiCLIRequest(ir *requestDraft) ([]byte, error) {
-	// First convert to Gemini format
-	innerBody, err := emitGeminiRequest(ir)
+func emitGeminiCLIRequestDirectIR(req *relayir.Request) ([]byte, error) {
+	innerBody, err := emitGeminiRequestDirectIR(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert to Gemini format: %w", err)
 	}
-
-	// Parse the Gemini request
 	var geminiReq schema.GeminiRequest
 	if err := json.Unmarshal(innerBody, &geminiReq); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
-
-	// Build the CLI envelope
-	cliReq := schema.GeminiCLIRequest{
-		Model:     ir.Model,
-		Request:   geminiReq,
-		RequestID: generateRequestID(),
-		SessionID: "",
+	cliReq := schema.GeminiCLIRequest{Model: req.Model, Request: geminiReq, RequestID: generateRequestID()}
+	read := func(key string) string { return rawString(req.Metadata[key]) }
+	cliReq.Project = read("project")
+	cliReq.UserPromptID = read("user_prompt_id")
+	cliReq.UserAgent = read("userAgent")
+	cliReq.RequestType = read("requestType")
+	cliReq.SessionID = read("sessionId")
+	if raw := req.Metadata["enabled_credit_types"]; len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cliReq.EnabledCreditTypes)
 	}
-
-	// Add optional fields from Extra
-	if v, ok := ir.Extra["project"]; ok {
-		var project string
-		json.Unmarshal(v, &project)
-		cliReq.Project = project
-	}
-	if v, ok := ir.Extra["user_prompt_id"]; ok {
-		var userPromptID string
-		json.Unmarshal(v, &userPromptID)
-		cliReq.UserPromptID = userPromptID
-	}
-	if v, ok := ir.Extra["enabled_credit_types"]; ok {
-		var enabledCreditTypes []string
-		json.Unmarshal(v, &enabledCreditTypes)
-		cliReq.EnabledCreditTypes = enabledCreditTypes
-	}
-	if v, ok := ir.Extra["userAgent"]; ok {
-		var userAgent string
-		json.Unmarshal(v, &userAgent)
-		cliReq.UserAgent = userAgent
-	}
-	if v, ok := ir.Extra["requestType"]; ok {
-		var requestType string
-		json.Unmarshal(v, &requestType)
-		cliReq.RequestType = requestType
-	}
-	if v, ok := ir.Extra["sessionId"]; ok {
-		var sessionID string
-		json.Unmarshal(v, &sessionID)
-		cliReq.SessionID = sessionID
-	}
-
 	return json.Marshal(cliReq)
 }
 

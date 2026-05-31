@@ -5,276 +5,274 @@ import (
 	"fmt"
 	"strings"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseAnthropicRequest converts Anthropic Messages API request to an protocol request view.
-func parseAnthropicRequest(body []byte) (*requestDraft, error) {
+func parseAnthropicRequestDirectIR(body []byte) (*relayir.Request, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
 	}
-
-	ir := &requestDraft{
-		Model:        req.Model,
-		Stream:       req.Stream,
-		SourceFormat: FormatAnthropic,
-		Extra:        make(map[string]json.RawMessage),
-		MaxTokens:    req.MaxTokens,
-	}
-
-	// Copy Extra fields
-	for k, v := range req.Extra {
-		ir.Extra[k] = v
+	out := &relayir.Request{
+		SourceProtocol: relayir.ProtocolAnthropic,
+		Model:          req.Model,
+		Stream:         req.Stream,
+		Metadata:       relayir.CloneRawMap(req.Extra),
+		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, RawBody: relayir.CloneRaw(body), Fields: relayir.CloneRawMap(req.Extra), Unknown: relayir.CloneRawMap(req.Extra)},
 	}
 	if len(req.Metadata) > 0 {
-		ir.Extra["metadata"] = append(json.RawMessage(nil), req.Metadata...)
-	}
-
-	// Extract system message to Instructions
-	if req.System != nil {
-		ir.InstructionsRaw = append(json.RawMessage(nil), req.System...)
-		var sysStr string
-		if err := json.Unmarshal(req.System, &sysStr); err == nil {
-			ir.Instructions = &sysStr
-		} else {
-			// Try as array of text blocks
-			var blocks []map[string]string
-			if err := json.Unmarshal(req.System, &blocks); err == nil {
-				var texts []string
-				for _, b := range blocks {
-					if t, ok := b["text"]; ok {
-						texts = append(texts, t)
-					}
-				}
-				if len(texts) > 0 {
-					instr := joinNonEmpty(texts, "\n\n")
-					ir.Instructions = &instr
-				}
-			}
+		if out.Metadata == nil {
+			out.Metadata = map[string]json.RawMessage{}
 		}
+		out.Metadata["metadata"] = relayir.CloneRaw(req.Metadata)
+		out.Native.Fields = relayir.CloneRawMap(out.Metadata)
+		out.Native.Unknown = relayir.CloneRawMap(out.Metadata)
 	}
-
-	// Convert messages
+	if len(req.System) > 0 {
+		out.Instructions = append(out.Instructions, anthropicSystemInstruction(req.System))
+	}
 	for _, msg := range req.Messages {
-		requestMsg := requestTurnDraft{
-			Role: msg.Role,
-		}
-
-		// Convert content blocks
-		for _, block := range msg.Content {
-			rawBlock := rawJSON(block)
-			switch block.Type {
-			case "text":
-				part := schema.ContentPart{
-					Type:  "text",
-					Text:  block.Text,
-					Extra: block.Extra,
-				}
-				appendContentItem(&requestMsg, part, rawBlock)
-			case "image":
-				if block.Source != nil {
-					part := schema.ContentPart{
-						Type:     "image_url",
-						MimeType: block.Source.MediaType,
-						Extra:    block.Extra,
-					}
-					switch block.Source.Type {
-					case "url":
-						part.ImageURL = stringPtr(block.Source.URL)
-					default:
-						dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
-						part.ImageURL = &dataURI
-					}
-					if part.ImageURL != nil && *part.ImageURL != "" {
-						appendContentItem(&requestMsg, part, rawBlock)
-					}
-				}
-			case "document":
-				if block.Source != nil {
-					part := schema.ContentPart{
-						Type:     "file",
-						FileType: block.Source.MediaType,
-						MimeType: block.Source.MediaType,
-						Extra:    block.Extra,
-					}
-					if title := rawString(block.Extra["title"]); title != "" {
-						part.Filename = title
-					}
-					switch block.Source.Type {
-					case "base64":
-						if block.Source.MediaType != "" {
-							part.FileData = fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
-						} else {
-							part.FileData = block.Source.Data
-						}
-					case "text":
-						part.FileData = block.Source.Data
-						if part.FileType == "" {
-							part.FileType = "text/plain"
-						}
-					case "url":
-						part.FileURL = block.Source.URL
-					case "file":
-						part.FileID = block.Source.FileID
-					}
-					appendContentItem(&requestMsg, part, rawBlock)
-				}
-			case "tool_use":
-				args := rawJSONArgumentString(block.Input)
-				call := schema.ToolCall{
-					ID:   block.ID,
-					Type: "function",
-					Name: block.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      block.Name,
-						Arguments: args,
-					},
-				}
-				appendToolCallItem(&requestMsg, call, rawBlock)
-			case "tool_result":
-				appendToolResultItem(&requestMsg, schema.ToolResult{
-					ToolCallID: block.ToolUseID,
-					Content:    anthropicToolResultContentString(block.Content),
-					IsError:    block.IsError,
-				}, rawBlock)
-			case "thinking":
-				extra := map[string]json.RawMessage{}
-				if block.Signature != "" {
-					extra = setRawString(extra, reasoningExtraSignature, block.Signature)
-				}
-				for k, v := range block.Extra {
-					extra[k] = v
-				}
-				appendReasoningItem(&requestMsg, schema.ContentPart{
-					Type:  "thinking",
-					Text:  block.Thinking,
-					Extra: extra,
-				}, rawBlock)
-			case "redacted_thinking":
-				if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
-					appendReasoningItem(&requestMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
-						reasoningExtraData:             raw,
-						reasoningExtraEncryptedContent: raw,
-						reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
-					}), rawBlock)
-				}
-			default:
-				appendContentItem(&requestMsg, schema.ContentPart{
-					Type:  block.Type,
-					Text:  block.Text,
-					Extra: block.Extra,
-				}, rawBlock)
-			}
-		}
-
-		ir.Messages = append(ir.Messages, requestMsg)
+		out.Turns = append(out.Turns, anthropicMessageToIRTurn(msg))
 	}
-
-	// Generation parameters
-	if req.Temperature != nil {
-		ir.Temperature = req.Temperature
-	}
-	if req.TopP != nil {
-		ir.TopP = req.TopP
-	}
-	if req.TopK != nil {
-		ir.TopK = req.TopK
-	}
-	if len(req.StopSequences) > 0 {
-		ir.StopWords = req.StopSequences
-	}
-	if req.Thinking != nil {
-		ir.Thinking = req.Thinking
-	}
+	out.Generation.MaxTokens = req.MaxTokens
+	out.Generation.Temperature = req.Temperature
+	out.Generation.TopP = req.TopP
+	out.Generation.TopK = req.TopK
+	out.Generation.Stop = append([]string(nil), req.StopSequences...)
+	out.Generation.Thinking = relayir.CloneRaw(req.Thinking)
 	if req.Tools != nil {
 		var tools []schema.Tool
 		if json.Unmarshal(req.Tools, &tools) == nil {
-			ir.Tools = tools
+			for _, tool := range tools {
+				out.Tools = append(out.Tools, irTool(tool, FormatAnthropic))
+			}
 		}
 	}
 	if req.ToolChoice != nil {
-		ir.ToolChoice = req.ToolChoice
+		out.ToolChoice = &relayir.ToolChoice{Raw: relayir.CloneRaw(req.ToolChoice)}
 	}
-
-	return ir, nil
+	return out, nil
 }
 
-// emitAnthropicRequest converts an protocol request view to Anthropic Messages API request.
-func emitAnthropicRequest(ir *requestDraft) ([]byte, error) {
-	req := make(map[string]interface{})
-	req["model"] = ir.Model
-	req["max_tokens"] = 4096 // default if not set
-	if ir.MaxTokens != nil {
-		req["max_tokens"] = *ir.MaxTokens
+func anthropicSystemInstruction(raw json.RawMessage) relayir.Instruction {
+	inst := relayir.Instruction{Role: relayir.RoleSystem, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, Kind: "system", Raw: relayir.CloneRaw(raw)}}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		inst.Text = text
+		inst.Items = []relayir.Item{{Kind: relayir.ItemText, Text: &relayir.Text{Text: text}}}
+		return inst
 	}
-	req["stream"] = ir.Stream
-
-	// Add Extra fields
-	for k, v := range ir.Extra {
-		req[k] = v
+	var blocks []schema.AnthropicContentBlock
+	if json.Unmarshal(raw, &blocks) == nil {
+		var texts []string
+		for idx, block := range blocks {
+			item := anthropicBlockToIRItem(block, idx)
+			inst.Items = append(inst.Items, item)
+			if item.Text != nil && item.Text.Text != "" {
+				texts = append(texts, item.Text.Text)
+			}
+		}
+		inst.Text = joinNonEmpty(texts, "\n\n")
 	}
+	return inst
+}
 
-	// Add system message from Instructions
-	if isAnthropicFamily(ir.SourceFormat) && len(ir.InstructionsRaw) > 0 {
-		req["system"] = ir.InstructionsRaw
-	} else if ir.Instructions != nil {
-		req["system"] = *ir.Instructions
+func anthropicMessageToIRTurn(msg schema.AnthropicMessage) relayir.Turn {
+	turn := relayir.Turn{Role: relayir.Role(anthropicRole(msg.Role)), Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, Kind: "message", Raw: rawJSON(msg)}}
+	for idx, block := range msg.Content {
+		turn.Items = append(turn.Items, anthropicBlockToIRItem(block, idx))
 	}
+	return turn
+}
 
-	// Convert messages
-	messages := make([]map[string]interface{}, 0)
-	for _, msg := range ir.Messages {
-		msgMap := make(map[string]interface{})
-		role := anthropicRole(msg.Role)
+func anthropicBlockToIRItem(block schema.AnthropicContentBlock, idx int) relayir.Item {
+	rawBlock := rawJSON(block)
+	switch block.Type {
+	case "text":
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "text", Text: block.Text, Extra: block.Extra}, rawBlock, FormatAnthropic, idx)
+	case "image":
+		if block.Source == nil {
+			return relayir.Item{Kind: relayir.ItemOpaque, OriginalIndex: idx, Opaque: &relayir.Opaque{Type: block.Type, Raw: rawBlock}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, Kind: block.Type, Raw: rawBlock, Index: idx}}
+		}
+		part := schema.ContentPart{Type: "image_url", MimeType: block.Source.MediaType, Extra: block.Extra}
+		switch block.Source.Type {
+		case "url":
+			part.ImageURL = stringPtr(block.Source.URL)
+		default:
+			dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+			part.ImageURL = &dataURI
+		}
+		return irContentPartItem(contentItemKindContent, part, rawBlock, FormatAnthropic, idx)
+	case "document":
+		part := anthropicDocumentPart(block)
+		return irContentPartItem(contentItemKindContent, part, rawBlock, FormatAnthropic, idx)
+	case "tool_use":
+		return irToolUseItem(schema.ToolCall{ID: block.ID, Type: "function", Name: block.Name, Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: block.Name, Arguments: rawJSONArgumentString(block.Input)}}, rawBlock, FormatAnthropic, idx)
+	case "tool_result":
+		return irToolResultItem(schema.ToolResult{ToolCallID: block.ToolUseID, Content: anthropicToolResultContentString(block.Content), ContentRaw: relayir.CloneRaw(block.Content), IsError: block.IsError}, rawBlock, FormatAnthropic, idx)
+	case "thinking":
+		extra := map[string]json.RawMessage{}
+		if block.Signature != "" {
+			extra = setRawString(extra, reasoningExtraSignature, block.Signature)
+		}
+		for k, v := range block.Extra {
+			extra[k] = v
+		}
+		return irContentPartItem(contentItemKindReasoning, schema.ContentPart{Type: "thinking", Text: block.Thinking, Extra: extra}, rawBlock, FormatAnthropic, idx)
+	case "redacted_thinking":
+		if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
+			return irContentPartItem(contentItemKindReasoning, reasoningPartWithExtra("", map[string]json.RawMessage{reasoningExtraData: raw, reasoningExtraEncryptedContent: raw, reasoningExtraType: json.RawMessage(`"reasoning.encrypted"`)}), rawBlock, FormatAnthropic, idx)
+		}
+	}
+	return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: block.Type, Text: block.Text, Extra: block.Extra}, rawBlock, FormatAnthropic, idx)
+}
+
+func anthropicDocumentPart(block schema.AnthropicContentBlock) schema.ContentPart {
+	part := schema.ContentPart{Type: "file", Extra: block.Extra}
+	if block.Source == nil {
+		return part
+	}
+	part.FileType = block.Source.MediaType
+	part.MimeType = block.Source.MediaType
+	if title := rawString(block.Extra["title"]); title != "" {
+		part.Filename = title
+	}
+	switch block.Source.Type {
+	case "base64":
+		if block.Source.MediaType != "" {
+			part.FileData = fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+		} else {
+			part.FileData = block.Source.Data
+		}
+	case "text":
+		part.FileData = block.Source.Data
+		if part.FileType == "" {
+			part.FileType = "text/plain"
+		}
+	case "url":
+		part.FileURL = block.Source.URL
+	case "file":
+		part.FileID = block.Source.FileID
+	}
+	return part
+}
+
+func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
+	out := make(map[string]interface{})
+	out["model"] = req.Model
+	out["max_tokens"] = 4096
+	if req.Generation.MaxTokens != nil {
+		out["max_tokens"] = *req.Generation.MaxTokens
+	}
+	out["stream"] = req.Stream
+	for k, v := range req.Metadata {
+		out[k] = v
+	}
+	if len(req.Instructions) > 0 {
+		out["system"] = anthropicSystemFromIR(req.SourceProtocol, req.Instructions)
+	}
+	messages := make([]map[string]interface{}, 0, len(req.Turns))
+	for _, turn := range req.Turns {
+		role := anthropicRole(string(turn.Role))
 		if role == "tool" || role == "function" {
 			role = "user"
 		}
-		msgMap["role"] = role
-
-		blocks := anthropicBlocksFromMessage(ir.SourceFormat, msg)
-		if len(blocks) > 0 {
-			msgMap["content"] = blocks
+		msg := map[string]interface{}{"role": role}
+		if blocks := anthropicBlocksFromIRTurn(req.SourceProtocol, turn); len(blocks) > 0 {
+			msg["content"] = blocks
 		}
-
-		messages = append(messages, msgMap)
+		messages = append(messages, msg)
 	}
-	req["messages"] = messages
-
-	// Generation parameters
-	if ir.Temperature != nil {
-		req["temperature"] = *ir.Temperature
+	out["messages"] = messages
+	if req.Generation.Temperature != nil {
+		out["temperature"] = *req.Generation.Temperature
 	}
-	if ir.TopP != nil {
-		req["top_p"] = *ir.TopP
+	if req.Generation.TopP != nil {
+		out["top_p"] = *req.Generation.TopP
 	}
-	if ir.TopK != nil {
-		req["top_k"] = *ir.TopK
+	if req.Generation.TopK != nil {
+		out["top_k"] = *req.Generation.TopK
 	}
-	if len(ir.StopWords) > 0 {
-		req["stop_sequences"] = ir.StopWords
+	if len(req.Generation.Stop) > 0 {
+		out["stop_sequences"] = req.Generation.Stop
 	}
-	toolChoice := anthropicToolChoice(ir.ToolChoice, ir.ParallelToolCalls)
+	toolChoice := anthropicToolChoice(nilIfEmptyToolChoice(req.ToolChoice), req.Generation.ParallelToolCalls)
 	forcedToolChoice := anthropicToolChoiceForcesToolUse(toolChoice)
 	if forcedToolChoice {
-		removeAnthropicForcedThinkingExtras(req)
+		removeAnthropicForcedThinkingExtras(out)
 	}
-	if thinking := anthropicThinkingFromProtocolRequest(ir); thinking != nil && !forcedToolChoice {
-		req["thinking"] = thinking
+	if thinking := anthropicThinkingFromIRRequest(req); thinking != nil && !forcedToolChoice {
+		out["thinking"] = thinking
 	}
-	if ir.Tools != nil {
-		if tools := anthropicTools(ir.Tools, sameNativeRequestFamily(ir.SourceFormat, FormatAnthropic)); len(tools) > 0 {
-			req["tools"] = tools
+	if len(req.Tools) > 0 {
+		tools := make([]schema.Tool, 0, len(req.Tools))
+		for _, tool := range req.Tools {
+			tools = append(tools, schemaToolFromIR(tool))
+		}
+		if projected := anthropicTools(tools, req.SourceProtocol == relayir.ProtocolAnthropic || req.SourceProtocol == relayir.ProtocolClaudeCode); len(projected) > 0 {
+			out["tools"] = projected
 		}
 	}
 	if toolChoice != nil {
-		req["tool_choice"] = toolChoice
+		out["tool_choice"] = toolChoice
 	}
+	for k, v := range req.Native.Fields {
+		out[k] = relayir.CloneRaw(v)
+	}
+	if forcedToolChoice {
+		removeAnthropicForcedThinkingExtras(out)
+	}
+	return json.Marshal(out)
+}
 
-	return json.Marshal(req)
+func nilIfEmptyToolChoice(choice *relayir.ToolChoice) json.RawMessage {
+	if choice == nil {
+		return nil
+	}
+	return relayir.CloneRaw(choice.Raw)
+}
+
+func anthropicThinkingFromIRRequest(req *relayir.Request) interface{} {
+	if req == nil {
+		return nil
+	}
+	if thinking := anthropicThinkingFromRawThinking(req.Generation.Thinking); thinking != nil {
+		return thinking
+	}
+	if thinking := anthropicThinkingFromReasoning(req.Generation.Reasoning); thinking != nil {
+		return thinking
+	}
+	return anthropicThinkingFromGeminiThinking(req.Generation.Thinking)
+}
+
+func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instruction) interface{} {
+	if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(instructions) == 1 && len(instructions[0].Native.Raw) > 0 {
+		var raw interface{}
+		if json.Unmarshal(instructions[0].Native.Raw, &raw) == nil {
+			return raw
+		}
+	}
+	var blocks []map[string]interface{}
+	for _, inst := range instructions {
+		for _, item := range inst.Items {
+			if block := anthropicBlockFromIRItem(item); block != nil {
+				blocks = append(blocks, block)
+			}
+		}
+		if len(inst.Items) == 0 && inst.Text != "" {
+			blocks = append(blocks, map[string]interface{}{"type": "text", "text": inst.Text})
+		}
+	}
+	if len(blocks) == 1 {
+		if text, ok := blocks[0]["text"].(string); ok && blocks[0]["type"] == "text" {
+			return text
+		}
+	}
+	return blocks
 }
 
 func anthropicToolChoice(raw json.RawMessage, parallelToolCalls *bool) map[string]interface{} {
@@ -514,37 +512,37 @@ func isAnthropicFamily(format Format) bool {
 	return format == FormatAnthropic || format == FormatClaudeCode
 }
 
-func anthropicBlocksFromMessage(source Format, msg requestTurnDraft) []map[string]interface{} {
-	items := canonicalMessageParts(msg)
-	blocks := make([]map[string]interface{}, 0, len(items))
-	for _, item := range items {
-		if isAnthropicFamily(source) && len(item.Raw) > 0 {
+func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) []map[string]interface{} {
+	blocks := make([]map[string]interface{}, 0, len(turn.Items))
+	for _, item := range turn.Items {
+		if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(item.Native.Raw) > 0 {
 			var raw map[string]interface{}
-			if err := json.Unmarshal(item.Raw, &raw); err == nil {
+			if json.Unmarshal(item.Native.Raw, &raw) == nil {
 				blocks = append(blocks, raw)
 				continue
 			}
 		}
-		if block := anthropicBlockFromItem(item); block != nil {
+		if block := anthropicBlockFromIRItem(item); block != nil {
 			blocks = append(blocks, block)
 		}
 	}
 	return blocks
 }
 
-func anthropicBlockFromItem(item requestItemDraft) map[string]interface{} {
+func anthropicBlockFromIRItem(item relayir.Item) map[string]interface{} {
 	switch item.Kind {
-	case contentItemKindReasoning:
-		return anthropicReasoningBlock(item.Content)
-	case contentItemKindContent:
-		return anthropicContentBlock(item.Content)
-	case contentItemKindToolCall:
-		return anthropicToolUseBlock(item.ToolCall)
-	case contentItemKindToolResult:
-		return anthropicToolResultBlock(item.ToolResult)
+	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
+		return anthropicReasoningBlock(schemaReasoningFromIR(item))
+	case relayir.ItemToolUse, relayir.ItemFunctionCall:
+		return anthropicToolUseBlock(schemaToolCallFromIR(item))
+	case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
+		return anthropicToolResultBlock(schemaToolResultFromIR(item))
 	default:
-		return nil
+		if part, ok := schemaContentFromIR(item); ok {
+			return anthropicContentBlock(part)
+		}
 	}
+	return nil
 }
 
 func anthropicReasoningBlock(rc schema.ContentPart) map[string]interface{} {

@@ -7,16 +7,11 @@ import { adminApi } from "@/lib/api";
 import type { AdminSettings } from "@/types/api";
 
 const backgroundOptions: Array<{ value: AdminSettings["background"]; label: string; description: string }> = [
-  { value: "aurora", label: "极光", description: "冷暖渐变与细网格，适合日常控制台。" },
-  { value: "silk", label: "丝绸", description: "柔和织物光泽，页面更轻盈。" },
   { value: "mesh", label: "光网", description: "多层渐变网格，科技感更强。" },
-  { value: "topography", label: "等高线", description: "低对比纹理，信息密集页更稳。" },
-  { value: "noir", label: "暗夜", description: "深色壁纸质感，突出玻璃面板。" },
-  { value: "custom", label: "自定义", description: "使用上传的本地图片作为系统壁纸。" },
 ];
 
 function applyBackground(settings: AdminSettings) {
-  document.body.dataset.background = settings.background || "aurora";
+  document.body.dataset.background = "mesh";
   if (settings.wallpaper_url) {
     document.body.style.setProperty("--wallpaper-image", `url("${settings.wallpaper_url}")`);
   } else {
@@ -35,12 +30,11 @@ export default function AdminSettingsPage() {
   const [adminUsername, setAdminUsername] = useState("admin");
   const [adminPassword, setAdminPassword] = useState("");
   const [maxKeysPerUser, setMaxKeysPerUser] = useState(1);
-  const [background, setBackground] = useState<AdminSettings["background"]>("aurora");
+  const [background, setBackground] = useState<AdminSettings["background"]>("mesh");
   const [publicBaseURL, setPublicBaseURL] = useState("");
   const [wallpaperURL, setWallpaperURL] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportingUsers, setExportingUsers] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -55,7 +49,7 @@ export default function AdminSettingsPage() {
       setModelRatios(settings.model_ratios || "{}");
       setAdminUsername(settings.admin_username || "admin");
       setMaxKeysPerUser(settings.max_keys_per_user ?? 1);
-      setBackground(settings.background);
+      setBackground("mesh");
       setPublicBaseURL(settings.public_base_url || "");
       setWallpaperURL(settings.wallpaper_url || "");
       applyBackground(settings);
@@ -75,7 +69,7 @@ export default function AdminSettingsPage() {
         admin_username: adminUsername.trim(),
         ...(adminPassword.trim() ? { admin_password: adminPassword.trim() } : {}),
         max_keys_per_user: maxKeysPerUser,
-        background,
+        background: "mesh",
         public_base_url: publicBaseURL.trim(),
       });
       setLogRetention(updated.log_retention_days);
@@ -84,7 +78,7 @@ export default function AdminSettingsPage() {
       setAdminUsername(updated.admin_username || "admin");
       setAdminPassword("");
       setMaxKeysPerUser(updated.max_keys_per_user ?? 1);
-      setBackground(updated.background);
+      setBackground("mesh");
       setPublicBaseURL(updated.public_base_url || "");
       setWallpaperURL(updated.wallpaper_url || "");
       applyBackground(updated);
@@ -93,24 +87,6 @@ export default function AdminSettingsPage() {
       setMessage(err instanceof Error ? err.message : "保存失败");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function uploadWallpaper(file?: File) {
-    const token = window.localStorage.getItem("uapi.admin.token");
-    if (!token || !file) return;
-    setUploading(true);
-    setMessage("");
-    try {
-      const updated = await adminApi.uploadWallpaper(token, file);
-      setBackground(updated.background);
-      setWallpaperURL(updated.wallpaper_url || "");
-      applyBackground(updated);
-      setMessage("壁纸已上传并启用");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "上传失败");
-    } finally {
-      setUploading(false);
     }
   }
 
@@ -256,27 +232,16 @@ export default function AdminSettingsPage() {
           <section className="card card-pad settings-section">
             <div>
               <h2>系统壁纸</h2>
-              <p className="muted">预设壁纸会立即预览，保存后对所有用户生效。</p>
+              <p className="muted">当前仅保留光网主题，保存后对所有用户生效。</p>
             </div>
             <div className="wallpaper-grid">
               {backgroundOptions.map((option) => (
-                <button className={`wallpaper-option wallpaper-${option.value}${background === option.value ? " active" : ""}`} key={option.value} onClick={() => setBackground(option.value)} type="button">
+                <button className={`wallpaper-option wallpaper-${option.value}${background === option.value ? " active" : ""}`} key={option.value} onClick={() => setBackground("mesh")} type="button">
                   <span className="wallpaper-preview" />
                   <strong>{option.label}</strong>
                   <small>{option.description}</small>
                 </button>
               ))}
-            </div>
-            <div className="wallpaper-upload">
-              <div>
-                <strong>本地图片壁纸</strong>
-                <p className="muted">支持 JPG、PNG、WebP、GIF，最大 8MB。上传后会自动启用“自定义”。</p>
-                {wallpaperURL ? <a href={wallpaperURL} target="_blank" rel="noreferrer">查看当前壁纸</a> : null}
-              </div>
-              <label className="btn" aria-disabled={uploading}>
-                {uploading ? "上传中" : "选择图片"}
-                <input accept="image/jpeg,image/png,image/webp,image/gif" hidden type="file" onChange={(e) => uploadWallpaper(e.target.files?.[0])} />
-              </label>
             </div>
           </section>
         </div>

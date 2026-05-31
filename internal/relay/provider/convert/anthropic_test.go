@@ -7,16 +7,16 @@ import (
 
 func TestParseAnthropicRequestAcceptsStringContent(t *testing.T) {
 	body := []byte(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`)
-	got, err := parseAnthropicRequest(body)
+	got, err := parseAnthropicRequestDirectIR(body)
 	if err != nil {
-		t.Fatalf("parseAnthropicRequest() error = %v", err)
+		t.Fatalf("parseAnthropicRequestDirectIR() error = %v", err)
 	}
-	if len(got.Messages) != 1 || len(got.Messages[0].Parts) != 1 {
-		t.Fatalf("messages = %#v", got.Messages)
+	if len(got.Turns) != 1 || len(got.Turns[0].Items) != 1 {
+		t.Fatalf("turns = %#v", got.Turns)
 	}
-	part := got.Messages[0].Parts[0]
-	if part.Kind != contentItemKindContent || part.Content.Type != "text" || part.Content.Text != "hi" {
-		t.Fatalf("content part = %#v", part)
+	item := got.Turns[0].Items[0]
+	if item.Text == nil || item.Text.Text != "hi" {
+		t.Fatalf("content item = %#v", item)
 	}
 }
 
@@ -26,19 +26,19 @@ func TestParseAnthropicToolResultAcceptsContentBlocks(t *testing.T) {
 		"max_tokens":8,
 		"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]}]}]
 	}`)
-	got, err := parseAnthropicRequest(body)
+	got, err := parseAnthropicRequestDirectIR(body)
 	if err != nil {
-		t.Fatalf("parseAnthropicRequest() error = %v", err)
+		t.Fatalf("parseAnthropicRequestDirectIR() error = %v", err)
 	}
-	if len(got.Messages) != 1 || len(got.Messages[0].Parts) != 1 {
-		t.Fatalf("messages = %#v", got.Messages)
+	if len(got.Turns) != 1 || len(got.Turns[0].Items) != 1 {
+		t.Fatalf("turns = %#v", got.Turns)
 	}
-	part := got.Messages[0].Parts[0]
-	if part.Kind != contentItemKindToolResult {
-		t.Fatalf("part kind = %q, want tool_result; part=%#v", part.Kind, part)
+	item := got.Turns[0].Items[0]
+	if item.ToolResult == nil {
+		t.Fatalf("item kind = %q, want tool_result; item=%#v", item.Kind, item)
 	}
-	if part.ToolResult.ToolCallID != "toolu_1" || part.ToolResult.Content != "onetwo" {
-		t.Fatalf("tool result = %#v", part.ToolResult)
+	if item.ToolResult.CallID != "toolu_1" || item.ToolResult.OutputText != "onetwo" {
+		t.Fatalf("tool result = %#v", item.ToolResult)
 	}
 }
 
@@ -48,16 +48,16 @@ func TestParseAnthropicImageURLSource(t *testing.T) {
 		"max_tokens":8,
 		"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]
 	}`)
-	got, err := parseAnthropicRequest(body)
+	got, err := parseAnthropicRequestDirectIR(body)
 	if err != nil {
-		t.Fatalf("parseAnthropicRequest() error = %v", err)
+		t.Fatalf("parseAnthropicRequestDirectIR() error = %v", err)
 	}
-	if len(got.Messages) != 1 || len(got.Messages[0].Parts) != 1 {
-		t.Fatalf("messages = %#v", got.Messages)
+	if len(got.Turns) != 1 || len(got.Turns[0].Items) != 1 {
+		t.Fatalf("turns = %#v", got.Turns)
 	}
-	part := got.Messages[0].Parts[0]
-	if part.Content.ImageURL == nil || *part.Content.ImageURL != "https://example.com/image.png" {
-		t.Fatalf("image URL source not preserved: %#v", part.Content)
+	item := got.Turns[0].Items[0]
+	if item.Image == nil || item.Image.URL != "https://example.com/image.png" {
+		t.Fatalf("image URL source not preserved: %#v", item)
 	}
 }
 
@@ -159,6 +159,52 @@ func TestAnthropicSkillToolToOpenAIResponsesUsesParameters(t *testing.T) {
 	required, ok := params["required"].([]interface{})
 	if !ok || len(required) != 1 || required[0] != "skill" {
 		t.Fatalf("required skill not preserved: %#v; body=%s", params, converted)
+	}
+}
+
+func TestClaudeCodeAgentToolRequiredSchemaSurvivesResponsesConversion(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[{"role":"user","content":"delegate"}],
+		"tools":[{
+			"name":"Agent",
+			"description":"Launch a subagent",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"description":{"type":"string"},
+					"prompt":{"type":"string"},
+					"subagent_type":{"type":"string"}
+				},
+				"required":["description","prompt"]
+			}
+		}]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Responses: %v", err)
+	}
+	var got struct {
+		Tools []map[string]interface{} `json:"tools"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %#v; body=%s", got.Tools, converted)
+	}
+	params, ok := got.Tools[0]["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Agent parameters missing: %#v; body=%s", got.Tools[0], converted)
+	}
+	required, ok := params["required"].([]interface{})
+	if !ok || len(required) != 2 || required[0] != "description" || required[1] != "prompt" {
+		t.Fatalf("Agent required parameters not preserved: %#v; body=%s", params["required"], converted)
+	}
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok || props["description"] == nil || props["prompt"] == nil {
+		t.Fatalf("Agent description/prompt properties not preserved: %#v; body=%s", props, converted)
 	}
 }
 

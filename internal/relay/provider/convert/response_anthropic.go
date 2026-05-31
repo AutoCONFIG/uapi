@@ -4,100 +4,136 @@ import (
 	"encoding/json"
 	"fmt"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseAnthropicResponse converts Anthropic response to responseDraft.
-func parseAnthropicResponse(body []byte) (*responseDraft, error) {
+func parseAnthropicResponseDirectIR(body []byte) (*relayir.Response, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
 	}
-
-	ir := &responseDraft{
-		ID:      resp.ID,
-		Model:   resp.Model,
-		Choices: make([]responseChoiceDraft, 0, len(resp.Content)),
-		Usage: schema.Usage{
-			PromptTokens:             resp.Usage.InputTokens,
-			CompletionTokens:         resp.Usage.OutputTokens,
-			CacheCreationInputTokens: anthropicCacheCreationInputTokens(resp.Usage),
-			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
-		},
-		Raw: body, // Preserve raw for native replay and field recovery
+	var rawRoot map[string]json.RawMessage
+	_ = json.Unmarshal(body, &rawRoot)
+	meta := map[string]json.RawMessage{}
+	copyRawFields(meta, rawRoot, "type", "stop_sequence")
+	out := &relayir.Response{
+		SourceProtocol: relayir.ProtocolAnthropic,
+		ID:             resp.ID,
+		Model:          resp.Model,
+		Metadata:       relayir.CloneRawMap(meta),
+		Usage:          anthropicUsageToIR(resp.Usage),
+		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, RawBody: relayir.CloneRaw(body), Fields: relayir.CloneRawMap(meta), Unknown: relayir.CloneRawMap(meta)},
 	}
-
-	// Convert content blocks to a protocol response choice
-	choice := responseChoiceDraft{
+	choice := relayir.Choice{
 		Index: 0,
-		Role:  resp.Role,
+		Role:  relayir.Role(anthropicRole(resp.Role)),
+		Finish: &relayir.Finish{
+			Reason:       finishReasonToIR(mapAnthropicFinishReason(resp.StopReason)),
+			NativeReason: resp.StopReason,
+			StopSequence: resp.StopSequence,
+		},
+		Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, Kind: "message", Raw: relayir.CloneRaw(body)},
 	}
-
-	for _, block := range resp.Content {
-		switch block.Type {
-		case "text":
-			appendChoiceContentItem(&choice, schema.ContentPart{
-				Type:  "text",
-				Text:  block.Text,
-				Extra: block.Extra,
-			}, rawJSON(block))
-
-		case "tool_use":
-			appendChoiceToolCallItem(&choice, schema.ToolCall{
-				ID:   block.ID,
-				Type: "function",
-				Name: block.Name,
-				Function: struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				}{
-					Name:      block.Name,
-					Arguments: string(block.Input),
-				},
-			}, rawJSON(block))
-
-		case "thinking":
-			extra := map[string]json.RawMessage{}
-			if block.Signature != "" {
-				extra = setRawString(extra, reasoningExtraSignature, block.Signature)
-			}
-			for k, v := range block.Extra {
-				extra[k] = v
-			}
-			appendChoiceReasoningItem(&choice, schema.ContentPart{
-				Type:  "thinking",
-				Text:  block.Thinking,
-				Extra: extra,
-			}, rawJSON(block))
-		case "redacted_thinking":
-			if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
-				appendChoiceReasoningItem(&choice, reasoningPartWithExtra("", map[string]json.RawMessage{
-					reasoningExtraData:             raw,
-					reasoningExtraEncryptedContent: raw,
-					reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
-				}), rawJSON(block))
-			}
-		default:
-			appendChoiceContentItem(&choice, schema.ContentPart{
-				Type:  block.Type,
-				Text:  block.Text,
-				Extra: anthropicUnknownBlockExtra(block),
-			}, rawJSON(block))
-		}
+	for idx, block := range resp.Content {
+		choice.Items = append(choice.Items, anthropicBlockToIRItem(block, idx))
 	}
-
-	// Map finish reason
-	choice.FinishReason = mapAnthropicFinishReason(resp.StopReason)
-
-	// Calculate total tokens
-	ir.Usage.TotalTokens = ir.Usage.PromptTokens + ir.Usage.CompletionTokens
-
-	ir.Choices = append(ir.Choices, choice)
-
-	return ir, nil
+	out.Choices = append(out.Choices, choice)
+	return out, nil
 }
 
-// mapAnthropicFinishReason converts Anthropic stop_reason to internal format.
+func anthropicUsageToIR(usage schema.AnthropicUsage) *relayir.Usage {
+	cacheCreation := anthropicCacheCreationInputTokens(usage)
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && cacheCreation == 0 && usage.CacheReadInputTokens == 0 {
+		return nil
+	}
+	return &relayir.Usage{
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		TotalTokens:         usage.InputTokens + usage.OutputTokens,
+		PromptTokens:        usage.InputTokens,
+		CompletionTokens:    usage.OutputTokens,
+		CacheCreationTokens: cacheCreation,
+		CacheWriteTokens:    cacheCreation,
+		CacheReadTokens:     usage.CacheReadInputTokens,
+		Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolAnthropic, Fields: func() map[string]json.RawMessage {
+			raw := rawJSON(usage)
+			var fields map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &fields)
+			return fields
+		}()},
+	}
+}
+
+func emitAnthropicResponseDirectIR(resp *relayir.Response) ([]byte, error) {
+	out := make(map[string]interface{})
+	out["id"] = resp.ID
+	out["type"] = "message"
+	out["role"] = "assistant"
+	out["model"] = resp.Model
+	for k, v := range resp.Metadata {
+		out[k] = v
+	}
+	var content []map[string]interface{}
+	if len(resp.Choices) > 0 {
+		choice := resp.Choices[0]
+		for _, item := range choice.Items {
+			if (resp.SourceProtocol == relayir.ProtocolAnthropic || resp.SourceProtocol == relayir.ProtocolClaudeCode) && len(item.Native.Raw) > 0 {
+				var raw map[string]interface{}
+				if json.Unmarshal(item.Native.Raw, &raw) == nil {
+					content = append(content, raw)
+					continue
+				}
+			}
+			if block := anthropicBlockFromIRItem(item); block != nil {
+				content = append(content, block)
+			}
+		}
+		out["stop_reason"] = anthropicFinishFromIR(choice.Finish)
+		if choice.Finish != nil && choice.Finish.StopSequence != "" {
+			out["stop_sequence"] = choice.Finish.StopSequence
+		}
+	}
+	out["content"] = content
+	out["usage"] = anthropicUsageFromIR(resp.Usage)
+	for k, v := range resp.Native.Fields {
+		out[k] = relayir.CloneRaw(v)
+	}
+	return json.Marshal(out)
+}
+
+func anthropicUsageFromIR(usage *relayir.Usage) map[string]interface{} {
+	if usage == nil {
+		return map[string]interface{}{"input_tokens": 0, "output_tokens": 0}
+	}
+	out := map[string]interface{}{
+		"input_tokens":  usage.InputTokens,
+		"output_tokens": usage.OutputTokens,
+	}
+	if usage.CacheCreationTokens > 0 {
+		out["cache_creation_input_tokens"] = usage.CacheCreationTokens
+	}
+	if usage.CacheReadTokens > 0 {
+		out["cache_read_input_tokens"] = usage.CacheReadTokens
+	}
+	for k, v := range usage.Native.Fields {
+		if _, exists := out[k]; !exists {
+			out[k] = relayir.CloneRaw(v)
+		}
+	}
+	return out
+}
+
+func anthropicFinishFromIR(finish *relayir.Finish) string {
+	if finish == nil {
+		return "end_turn"
+	}
+	if finish.NativeReason != "" {
+		return finish.NativeReason
+	}
+	return mapAnthropicResponseFinishReason(internalFinishReasonFromIR(finish.Reason))
+}
+
 func mapAnthropicFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
@@ -113,7 +149,6 @@ func mapAnthropicFinishReason(fr string) string {
 	}
 }
 
-// mapAnthropicResponseFinishReason converts internal finish_reason to Anthropic format.
 func mapAnthropicResponseFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
@@ -127,120 +162,6 @@ func mapAnthropicResponseFinishReason(fr string) string {
 	default:
 		return fr
 	}
-}
-
-// emitAnthropicResponse converts responseDraft to Anthropic response.
-func emitAnthropicResponse(ir *responseDraft) ([]byte, error) {
-	resp := make(map[string]interface{})
-
-	resp["id"] = ir.ID
-	resp["type"] = "message"
-	resp["role"] = "assistant"
-	resp["model"] = ir.Model
-
-	// Convert content to Anthropic content blocks
-	var content []map[string]interface{}
-	for _, choice := range ir.Choices {
-		for _, item := range canonicalChoiceItems(choice) {
-			switch item.Kind {
-			case contentItemKindReasoning:
-				rc := item.Content
-				sig := reasoningSignature([]schema.ContentPart{rc})
-				encrypted := reasoningPartEncryptedData(rc)
-				if rc.Text == "" && encrypted != "" && sig == "" {
-					content = append(content, map[string]interface{}{
-						"type": "redacted_thinking",
-						"data": encrypted,
-					})
-					continue
-				}
-				if rc.Text != "" || sig != "" {
-					block := map[string]interface{}{"type": "thinking", "thinking": rc.Text}
-					if sig != "" {
-						block["signature"] = sig
-					}
-					for k, v := range rc.Extra {
-						if k == reasoningExtraSignature || k == reasoningExtraThoughtSignature || k == reasoningExtraEncryptedContent || k == reasoningExtraData || k == reasoningExtraType {
-							continue
-						}
-						block[k] = v
-					}
-					content = append(content, block)
-				}
-			case contentItemKindContent:
-				c := item.Content
-				block := map[string]interface{}{}
-				for k, v := range c.Extra {
-					block[k] = v
-				}
-				block["type"] = c.Type
-				if c.Text != "" {
-					block["text"] = c.Text
-				}
-				if c.Refusal != "" {
-					block["type"] = "refusal"
-					block["refusal"] = c.Refusal
-				}
-				content = append(content, block)
-			case contentItemKindToolCall:
-				tc := item.ToolCall
-				name := tc.Name
-				if name == "" {
-					name = tc.Function.Name
-				}
-				content = append(content, map[string]interface{}{
-					"type":  "tool_use",
-					"id":    tc.ID,
-					"name":  name,
-					"input": jsonArgumentValue(tc.Function.Arguments),
-				})
-			case "refusal":
-				content = append(content, map[string]interface{}{
-					"type":    "refusal",
-					"refusal": item.Content.Refusal,
-				})
-			}
-		}
-
-		// Set finish reason
-		resp["stop_reason"] = mapAnthropicResponseFinishReason(choice.FinishReason)
-
-		// Only process first choice for now
-		break
-	}
-	resp["content"] = content
-
-	// Convert usage
-	resp["usage"] = map[string]interface{}{
-		"input_tokens":  ir.Usage.PromptTokens,
-		"output_tokens": ir.Usage.CompletionTokens,
-	}
-
-	// Add cache tokens if present
-	if ir.Usage.CacheCreationInputTokens > 0 {
-		resp["usage"].(map[string]interface{})["cache_creation_input_tokens"] = ir.Usage.CacheCreationInputTokens
-	}
-	if ir.Usage.CacheReadInputTokens > 0 {
-		resp["usage"].(map[string]interface{})["cache_read_input_tokens"] = ir.Usage.CacheReadInputTokens
-	}
-	mergeAnthropicRawUsageExtras(resp["usage"].(map[string]interface{}), ir.Raw)
-
-	// If Raw is present, preserve extra fields
-	if len(ir.Raw) > 0 {
-		var rawMap map[string]json.RawMessage
-		if json.Unmarshal(ir.Raw, &rawMap) == nil {
-			for k, v := range rawMap {
-				switch k {
-				case "id", "type", "role", "model", "content", "stop_reason", "usage":
-					// Skip standard fields
-				default:
-					resp[k] = v
-				}
-			}
-		}
-	}
-
-	return json.Marshal(resp)
 }
 
 func anthropicCacheCreationInputTokens(usage schema.AnthropicUsage) int {

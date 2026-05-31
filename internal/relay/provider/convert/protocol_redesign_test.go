@@ -173,7 +173,7 @@ func TestOpenAIChatSameFormatPreservesExplicitFalseAndNativeFields(t *testing.T)
 	}
 }
 
-func TestOpenAIChatLogitBiasSurvivesIRBridgeAndRecordsTargetLoss(t *testing.T) {
+func TestOpenAIChatLogitBiasSurvivesIRConversionAndRecordsTargetLoss(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",
 		"messages":[{"role":"user","content":"hello"}],
@@ -188,7 +188,7 @@ func TestOpenAIChatLogitBiasSurvivesIRBridgeAndRecordsTargetLoss(t *testing.T) {
 		t.Fatalf("FromIR chat: %v", err)
 	}
 	if !strings.Contains(string(roundTrip), `"logit_bias":{"123":-100}`) {
-		t.Fatalf("IR bridge dropped logit_bias:\n%s", roundTrip)
+		t.Fatalf("IR conversion dropped logit_bias:\n%s", roundTrip)
 	}
 
 	_, detailedIR, err := convert.ConvertRequestDetailed(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic, body)
@@ -261,7 +261,7 @@ func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
 		`"parallel_tool_calls":false`,
 	} {
 		if !strings.Contains(string(converted), want) {
-			t.Fatalf("provider bridge dropped %s:\n%s", want, converted)
+			t.Fatalf("provider conversion dropped %s:\n%s", want, converted)
 		}
 	}
 }

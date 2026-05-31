@@ -43,66 +43,6 @@ func (e *NoRequestEmitterError) Error() string {
 	return "no request emitter for format " + string(e.Format)
 }
 
-func requestDraftFromIR(req *relayir.Request) *requestDraft {
-	if req == nil {
-		return nil
-	}
-	out := &requestDraft{
-		Model:          req.Model,
-		Stream:         req.Stream,
-		RawRequestBody: relayir.CloneRaw(req.Native.RawBody),
-		Extra:          relayir.CloneRawMap(req.Metadata),
-		SourceFormat:   protocolFormat(req.SourceProtocol),
-		Losses:         append([]relayir.Loss(nil), req.Losses...),
-	}
-	if len(req.Native.Fields) > 0 {
-		out.Extra = relayir.CloneRawMap(req.Native.Fields)
-	}
-	if len(req.Instructions) > 0 {
-		text := req.Instructions[0].Text
-		if text == "" {
-			text = instructionText(req.Instructions[0])
-		}
-		if text != "" {
-			out.Instructions = &text
-		}
-		out.InstructionsRaw = relayir.CloneRaw(req.Instructions[0].Native.Raw)
-	}
-	out.MaxTokens = req.Generation.MaxTokens
-	out.MaxTokensField = req.Generation.MaxTokensField
-	out.Temperature = req.Generation.Temperature
-	out.TopP = req.Generation.TopP
-	out.TopK = req.Generation.TopK
-	out.StopWords = append([]string(nil), req.Generation.Stop...)
-	out.N = req.Generation.N
-	out.CandidateCount = req.Generation.CandidateCount
-	out.Seed = req.Generation.Seed
-	out.LogProbs = req.Generation.LogProbs
-	out.TopLogProbs = req.Generation.TopLogProbs
-	out.LogitBias = relayir.CloneRaw(req.Generation.LogitBias)
-	out.FrequencyPenalty = req.Generation.FrequencyPenalty
-	out.PresencePenalty = req.Generation.PresencePenalty
-	out.ResponseFormat = relayir.CloneRaw(req.Generation.ResponseFormat)
-	out.Reasoning = relayir.CloneRaw(req.Generation.Reasoning)
-	out.Thinking = relayir.CloneRaw(req.Generation.Thinking)
-	out.ServiceTier = req.Generation.ServiceTier
-	out.Store = req.Generation.Store
-	out.User = req.Generation.User
-	out.ParallelToolCalls = req.Generation.ParallelToolCalls
-	out.GeminiGenerationConfigExtra = relayir.CloneRawMap(req.Generation.Extra)
-	out.SafetySettings = relayir.CloneRaw(req.Safety.Settings)
-	for _, tool := range req.Tools {
-		out.Tools = append(out.Tools, schemaToolFromIR(tool))
-	}
-	if req.ToolChoice != nil {
-		out.ToolChoice = relayir.CloneRaw(req.ToolChoice.Raw)
-	}
-	for _, turn := range req.Turns {
-		out.Messages = append(out.Messages, requestMessageFromIRTurn(turn))
-	}
-	return out
-}
-
 func instructionText(inst relayir.Instruction) string {
 	for _, item := range inst.Items {
 		if item.Text != nil && item.Text.Text != "" {
@@ -110,33 +50,6 @@ func instructionText(inst relayir.Instruction) string {
 		}
 	}
 	return ""
-}
-
-func requestMessageFromIRTurn(turn relayir.Turn) requestTurnDraft {
-	msg := requestTurnDraft{
-		Role:    string(turn.Role),
-		Name:    turn.Name,
-		ItemID:  turn.ID,
-		Status:  turn.Status,
-		Phase:   turn.Phase,
-		RawItem: relayir.CloneRaw(turn.Native.Raw),
-		Extra:   relayir.CloneRawMap(turn.Metadata),
-	}
-	for _, item := range turn.Items {
-		switch item.Kind {
-		case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
-			appendReasoningItem(&msg, schemaReasoningFromIR(item), relayir.CloneRaw(item.Native.Raw))
-		case relayir.ItemToolUse, relayir.ItemFunctionCall:
-			appendToolCallItem(&msg, schemaToolCallFromIR(item), relayir.CloneRaw(item.Native.Raw))
-		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
-			appendToolResultItem(&msg, schemaToolResultFromIR(item), relayir.CloneRaw(item.Native.Raw))
-		default:
-			if part, ok := schemaContentFromIR(item); ok {
-				appendContentItem(&msg, part, relayir.CloneRaw(item.Native.Raw))
-			}
-		}
-	}
-	return msg
 }
 
 func schemaContentFromIR(item relayir.Item) (schema.ContentPart, bool) {

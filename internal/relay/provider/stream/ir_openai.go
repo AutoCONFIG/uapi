@@ -170,12 +170,21 @@ func (p *chatIRParser) Done() []relayir.StreamEvent {
 func (p *chatIRParser) Reset() { *p = chatIRParser{} }
 
 type responsesIRParser struct {
-	id       string
-	model    string
-	finished bool
+	id            string
+	model         string
+	finished      bool
+	toolArgText   map[string]string
+	toolCallMeta  map[string]map[string]json.RawMessage
+	toolCallStart map[string]bool
 }
 
-func newResponsesIRParser() streamIRParser { return &responsesIRParser{} }
+func newResponsesIRParser() streamIRParser {
+	return &responsesIRParser{
+		toolArgText:   map[string]string{},
+		toolCallMeta:  map[string]map[string]json.RawMessage{},
+		toolCallStart: map[string]bool{},
+	}
+}
 
 func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 	data, ok := sseData(line)
@@ -190,6 +199,7 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 		OutputIndex int             `json:"output_index,omitempty"`
 		Response    json.RawMessage `json:"response,omitempty"`
 		Text        string          `json:"text,omitempty"`
+		Arguments   string          `json:"arguments,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return nil
@@ -240,12 +250,33 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 		}
 		_ = json.Unmarshal(event.Delta, &delta)
 		if delta.Arguments == "" {
+			delta.Arguments = event.Arguments
+		}
+		if delta.Arguments == "" {
 			delta.Arguments = responsesTextDelta(event.Delta)
 		}
 		if delta.CallID == "" {
 			delta.CallID = event.ItemID
 		}
-		return []relayir.StreamEvent{{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: delta.Arguments}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: rawMeta("call_id", delta.CallID)}}}
+		key := p.toolKey(event.OutputIndex, delta.CallID)
+		p.toolArgText[key] += delta.Arguments
+		return []relayir.StreamEvent{{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: delta.Arguments}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: p.toolMeta(key, delta.CallID, "")}}}
+	case "response.function_call_arguments.done":
+		var done struct {
+			CallID    string `json:"call_id"`
+			Arguments string `json:"arguments"`
+		}
+		_ = json.Unmarshal(event.Delta, &done)
+		if done.Arguments == "" {
+			done.Arguments = event.Arguments
+		}
+		if done.Arguments == "" {
+			done.Arguments = responsesTextDelta(event.Delta)
+		}
+		if done.CallID == "" {
+			done.CallID = event.ItemID
+		}
+		return p.outputFunctionCallDone(event.OutputIndex, done.CallID, "", done.Arguments)
 	case "error", "response.failed":
 		p.finished = true
 		return []relayir.StreamEvent{{Type: relayir.EventError, ResponseID: p.id, Model: p.model, Error: responsesStreamError([]byte(data))}}
@@ -272,7 +303,11 @@ func (p *responsesIRParser) outputItemAdded(raw json.RawMessage, index int) []re
 	}
 	switch item.Type {
 	case "function_call":
-		return []relayir.StreamEvent{{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: rawMeta("call_id", item.CallID, "name", item.Name)}}}
+		key := p.toolKey(index, firstNonEmpty(item.CallID, item.ID))
+		meta := rawMeta("call_id", firstNonEmpty(item.CallID, item.ID), "name", item.Name)
+		p.toolCallMeta[key] = meta
+		p.toolCallStart[key] = true
+		return []relayir.StreamEvent{{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}}}
 	case "reasoning":
 		if item.EncryptedContent != "" {
 			return []relayir.StreamEvent{{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemEncryptedReasoning, Signature: item.EncryptedContent}}}
@@ -284,12 +319,80 @@ func (p *responsesIRParser) outputItemAdded(raw json.RawMessage, index int) []re
 func (p *responsesIRParser) outputItemDone(raw json.RawMessage, index int) []relayir.StreamEvent {
 	var item struct {
 		Type             string `json:"type"`
+		ID               string `json:"id"`
+		CallID           string `json:"call_id"`
+		Name             string `json:"name"`
+		Arguments        string `json:"arguments"`
 		EncryptedContent string `json:"encrypted_content"`
 	}
-	if err := json.Unmarshal(raw, &item); err != nil || item.Type != "reasoning" || item.EncryptedContent == "" {
+	if err := json.Unmarshal(raw, &item); err != nil {
 		return nil
 	}
-	return []relayir.StreamEvent{{Type: relayir.EventReasoningEnd, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemEncryptedReasoning, Signature: item.EncryptedContent}}}
+	switch item.Type {
+	case "function_call":
+		return p.outputFunctionCallDone(index, firstNonEmpty(item.CallID, item.ID), item.Name, item.Arguments)
+	case "reasoning":
+		if item.EncryptedContent == "" {
+			return nil
+		}
+		return []relayir.StreamEvent{{Type: relayir.EventReasoningEnd, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemEncryptedReasoning, Signature: item.EncryptedContent}}}
+	default:
+		return nil
+	}
+}
+
+func (p *responsesIRParser) outputFunctionCallDone(index int, callID, name, arguments string) []relayir.StreamEvent {
+	key := p.toolKey(index, callID)
+	meta := p.toolMeta(key, callID, name)
+	var out []relayir.StreamEvent
+	if !p.toolCallStart[key] {
+		p.toolCallStart[key] = true
+		out = append(out, relayir.StreamEvent{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}})
+	}
+	missing := missingSuffix(p.toolArgText[key], arguments)
+	if missing != "" {
+		p.toolArgText[key] += missing
+		out = append(out, relayir.StreamEvent{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: missing}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}})
+	}
+	return out
+}
+
+func (p *responsesIRParser) toolKey(index int, callID string) string {
+	if callID != "" {
+		return callID
+	}
+	return strconv.Itoa(index)
+}
+
+func (p *responsesIRParser) toolMeta(key, callID, name string) map[string]json.RawMessage {
+	if meta := p.toolCallMeta[key]; len(meta) > 0 {
+		if callID != "" && rawMetaString(meta, "call_id") == "" {
+			meta["call_id"] = rawStringValue(callID)
+		}
+		if name != "" && rawMetaString(meta, "name") == "" {
+			meta["name"] = rawStringValue(name)
+		}
+		return meta
+	}
+	meta := rawMeta("call_id", callID, "name", name)
+	p.toolCallMeta[key] = meta
+	return meta
+}
+
+func missingSuffix(current, full string) string {
+	if full == "" {
+		return ""
+	}
+	if current == "" {
+		return full
+	}
+	if strings.HasPrefix(full, current) {
+		return strings.TrimPrefix(full, current)
+	}
+	if strings.Contains(current, full) {
+		return ""
+	}
+	return full
 }
 
 func (p *responsesIRParser) completed(raw json.RawMessage, reason relayir.FinishReason, nativeReason string) []relayir.StreamEvent {
@@ -340,7 +443,7 @@ func (p *responsesIRParser) Done() []relayir.StreamEvent {
 	return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: relayir.FinishStop, NativeReason: "stop"}}}
 }
 
-func (p *responsesIRParser) Reset() { *p = responsesIRParser{} }
+func (p *responsesIRParser) Reset() { *p = *newResponsesIRParser().(*responsesIRParser) }
 
 type chatIREmitter struct {
 	id                   string
@@ -740,9 +843,16 @@ func chatUsageToIR(usage map[string]interface{}) *relayir.Usage {
 		return nil
 	}
 	return &relayir.Usage{
-		InputTokens:  numericUsageValue(usage, "prompt_tokens"),
-		OutputTokens: numericUsageValue(usage, "completion_tokens"),
-		TotalTokens:  numericUsageValue(usage, "total_tokens"),
+		InputTokens:         numericUsageValue(usage, "prompt_tokens"),
+		OutputTokens:        numericUsageValue(usage, "completion_tokens"),
+		TotalTokens:         numericUsageValue(usage, "total_tokens"),
+		CacheReadTokens:     streamUsageCacheReadTokens(usage),
+		CacheCreationTokens: streamUsageCacheCreationTokens(usage),
+		CacheWriteTokens:    streamUsageCacheCreationTokens(usage),
+		InputTokenDetails:   rawUsageDetails(usage, "prompt_tokens_details"),
+		OutputTokenDetails:  rawUsageDetails(usage, "completion_tokens_details"),
+		PromptTokens:        numericUsageValue(usage, "prompt_tokens"),
+		CompletionTokens:    numericUsageValue(usage, "completion_tokens"),
 	}
 }
 
@@ -756,7 +866,18 @@ func responsesUsageToIR(usage map[string]interface{}) *relayir.Usage {
 	if total == 0 && (prompt != 0 || completion != 0) {
 		total = prompt + completion
 	}
-	return &relayir.Usage{InputTokens: prompt, OutputTokens: completion, TotalTokens: total}
+	return &relayir.Usage{
+		InputTokens:         prompt,
+		OutputTokens:        completion,
+		TotalTokens:         total,
+		PromptTokens:        prompt,
+		CompletionTokens:    completion,
+		CacheReadTokens:     streamUsageCacheReadTokens(usage),
+		CacheCreationTokens: streamUsageCacheCreationTokens(usage),
+		CacheWriteTokens:    streamUsageCacheCreationTokens(usage),
+		InputTokenDetails:   rawUsageDetails(usage, "input_tokens_details", "prompt_tokens_details"),
+		OutputTokenDetails:  rawUsageDetails(usage, "output_tokens_details", "completion_tokens_details"),
+	}
 }
 
 func irUsageToChat(usage *relayir.Usage) map[string]interface{} {
@@ -770,7 +891,68 @@ func irUsageToChat(usage *relayir.Usage) map[string]interface{} {
 	if usage.InputTokens == 0 && usage.OutputTokens == 0 && total == 0 {
 		return nil
 	}
-	return map[string]interface{}{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": total}
+	out := map[string]interface{}{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": total}
+	if usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheWriteTokens > 0 {
+		details := map[string]interface{}{}
+		if usage.CacheReadTokens > 0 {
+			details["cached_tokens"] = usage.CacheReadTokens
+			details["cached_read_tokens"] = usage.CacheReadTokens
+		}
+		if usage.CacheCreationTokens > 0 {
+			details["cache_creation_input_tokens"] = usage.CacheCreationTokens
+			details["cached_write_tokens"] = usage.CacheCreationTokens
+		} else if usage.CacheWriteTokens > 0 {
+			details["cached_write_tokens"] = usage.CacheWriteTokens
+		}
+		out["prompt_tokens_details"] = details
+	}
+	return out
+}
+
+func streamUsageCacheReadTokens(usage map[string]interface{}) int {
+	read := numericUsageValue(usage, "cache_read_input_tokens", "prompt_cache_hit_tokens", "cached_tokens")
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details, ok := usage[key].(map[string]interface{}); ok && read == 0 {
+			read = numericUsageValue(details, "cached_read_tokens", "cached_tokens", "cache_read_input_tokens")
+		}
+	}
+	if read == 0 {
+		read = numericUsageValue(usage, "cachedContentTokenCount")
+	}
+	return read
+}
+
+func streamUsageCacheCreationTokens(usage map[string]interface{}) int {
+	creation := numericUsageValue(usage, "cache_creation_input_tokens", "cache_write_input_tokens")
+	if creation == 0 {
+		if nested, ok := usage["cache_creation"].(map[string]interface{}); ok {
+			creation = numericUsageValue(nested, "ephemeral_5m_input_tokens") + numericUsageValue(nested, "ephemeral_1h_input_tokens")
+		}
+	}
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details, ok := usage[key].(map[string]interface{}); ok && creation == 0 {
+			creation = numericUsageValue(details, "cached_write_tokens", "cache_creation_input_tokens")
+		}
+	}
+	return creation
+}
+
+func rawUsageDetails(usage map[string]interface{}, keys ...string) map[string]json.RawMessage {
+	for _, key := range keys {
+		details, ok := usage[key].(map[string]interface{})
+		if !ok || len(details) == 0 {
+			continue
+		}
+		out := make(map[string]json.RawMessage, len(details))
+		for k, v := range details {
+			raw, err := json.Marshal(v)
+			if err == nil {
+				out[k] = raw
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func rawMeta(kv ...interface{}) map[string]json.RawMessage {
@@ -924,4 +1106,6 @@ func init() {
 	RegisterIREmitter(convert.FormatOpenAIChatCompletions, newChatIREmitter)
 	RegisterIRParser(convert.FormatOpenAIResponses, newResponsesIRParser)
 	RegisterIREmitter(convert.FormatOpenAIResponses, newResponsesIREmitter)
+	RegisterIRParser(convert.FormatCodexResponses, newResponsesIRParser)
+	RegisterIREmitter(convert.FormatCodexResponses, newResponsesIREmitter)
 }

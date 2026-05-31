@@ -4,24 +4,22 @@ import (
 	"encoding/json"
 	"testing"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
 func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *testing.T) {
 	imageURL := "data:image/png;base64,aGVsbG8="
-	body, err := emitOpenAIResponsesResponse(&responseDraft{
+	body, err := emitOpenAIResponsesResponseDirectIR(&relayir.Response{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
-		Choices: []responseChoiceDraft{{
-			Role: "model",
-			Items: []requestItemDraft{{
-				Kind: contentItemKindContent,
-				Content: schema.ContentPart{
-					Type:     "image_url",
-					ImageURL: &imageURL,
-				},
+		Choices: []relayir.Choice{{
+			Role: relayir.RoleModel,
+			Items: []relayir.Item{{
+				Kind:  relayir.ItemImage,
+				Image: &relayir.Image{DataURI: imageURL},
 			}},
-			FinishReason: "end_turn",
+			Finish: &relayir.Finish{Reason: relayir.FinishStop},
 		}},
 	})
 	if err != nil {
@@ -52,16 +50,16 @@ func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *test
 
 func TestEmitOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *testing.T) {
 	imageURL := "data:image/webp;base64,aW1n"
-	body, err := emitOpenAIResponsesResponse(&responseDraft{
+	body, err := emitOpenAIResponsesResponseDirectIR(&relayir.Response{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
-		Choices: []responseChoiceDraft{{
-			Role: "model",
-			Items: []requestItemDraft{
-				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "text", Text: "Here is the image."}},
-				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "image_url", ImageURL: &imageURL}},
+		Choices: []relayir.Choice{{
+			Role: relayir.RoleModel,
+			Items: []relayir.Item{
+				{Kind: relayir.ItemText, Text: &relayir.Text{Text: "Here is the image."}},
+				{Kind: relayir.ItemImage, Image: &relayir.Image{DataURI: imageURL}},
 			},
-			FinishReason: "end_turn",
+			Finish: &relayir.Finish{Reason: relayir.FinishStop},
 		}},
 	})
 	if err != nil {

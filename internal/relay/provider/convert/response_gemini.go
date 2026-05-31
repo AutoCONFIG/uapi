@@ -4,112 +4,137 @@ import (
 	"encoding/json"
 	"fmt"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiResponse converts Gemini API response to responseDraft.
-func parseGeminiResponse(body []byte) (*responseDraft, error) {
+func parseGeminiResponseDirectIR(body []byte) (*relayir.Response, error) {
 	var wrapped struct {
 		Response json.RawMessage `json:"response"`
 	}
-	if err := json.Unmarshal(body, &wrapped); err == nil && len(wrapped.Response) > 0 {
+	if json.Unmarshal(body, &wrapped) == nil && len(wrapped.Response) > 0 {
 		body = wrapped.Response
 	}
-
 	var resp schema.GeminiResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini response: %w", err)
 	}
-
-	ir := &responseDraft{
-		ID:      "", // Gemini doesn't have an ID field
-		Model:   resp.ModelVersion,
-		Choices: make([]responseChoiceDraft, 0, len(resp.Candidates)),
-		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for native replay and field recovery
+	out := &relayir.Response{
+		SourceProtocol: relayir.ProtocolGemini,
+		Model:          resp.ModelVersion,
+		Usage:          geminiResponseUsageToIR(resp.UsageMetadata),
+		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, RawBody: relayir.CloneRaw(body)},
 	}
-
-	// Convert usage
-	if resp.UsageMetadata != nil {
-		ir.Usage.PromptTokens = resp.UsageMetadata.PromptTokenCount
-		ir.Usage.CompletionTokens = resp.UsageMetadata.CandidatesTokenCount
-		ir.Usage.TotalTokens = resp.UsageMetadata.TotalTokenCount
-		if ir.Usage.TotalTokens == 0 {
-			ir.Usage.TotalTokens = ir.Usage.PromptTokens + ir.Usage.CompletionTokens
-		}
-		ir.Usage.CacheReadInputTokens = resp.UsageMetadata.CachedContentTokenCount
-		if resp.UsageMetadata.ThoughtsTokenCount > 0 {
-			if ir.Usage.CompletionTokensDetails == nil {
-				ir.Usage.CompletionTokensDetails = map[string]interface{}{}
-			}
-			ir.Usage.CompletionTokensDetails["reasoning_tokens"] = resp.UsageMetadata.ThoughtsTokenCount
-		}
-	}
-
-	// Convert candidates to choices
 	for _, cand := range resp.Candidates {
-		choice := responseChoiceDraft{
-			Index:        cand.Index,
-			FinishReason: mapGeminiFinishReason(cand.FinishReason),
+		choice := relayir.Choice{
+			Index: cand.Index,
+			Finish: &relayir.Finish{
+				Reason:       finishReasonToIR(mapGeminiFinishReason(cand.FinishReason)),
+				NativeReason: cand.FinishReason,
+			},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "candidate", Raw: rawJSON(cand)},
 		}
-
 		if cand.Content != nil {
-			choice.Role = cand.Content.Role
-
-			// Convert parts to content
-			for _, part := range cand.Content.Parts {
-				switch {
-				case part.Text != "" && part.Thought:
-					extra := map[string]json.RawMessage{}
-					if part.ThoughtSignature != "" {
-						extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
-					}
-					appendChoiceReasoningItem(&choice, schema.ContentPart{
-						Type:  "thinking",
-						Text:  part.Text,
-						Extra: extra,
-					}, rawJSON(part))
-				case part.Text != "":
-					appendChoiceContentItem(&choice, schema.ContentPart{
-						Type: "text",
-						Text: part.Text,
-					}, rawJSON(part))
-				case part.InlineData != nil:
-					dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
-					appendChoiceContentItem(&choice, schema.ContentPart{
-						Type:     "image_url",
-						ImageURL: &dataURI,
-					}, rawJSON(part))
-				case part.FunctionCall != nil:
-					appendChoiceToolCallItem(&choice, schema.ToolCall{
-						ID:   "", // Gemini doesn't provide ID for function calls
-						Type: "function",
-						Name: part.FunctionCall.Name,
-						Function: struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						}{
-							Name:      part.FunctionCall.Name,
-							Arguments: string(part.FunctionCall.Args),
-						},
-					}, rawJSON(part))
-				case part.FunctionResponse != nil:
-					// FunctionResponse is handled in the next turn
-				case part.ThoughtSignature != "":
-					appendChoiceReasoningItem(&choice, reasoningPartWithExtra("", map[string]json.RawMessage{
-						reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
-					}), rawJSON(part))
-				}
+			choice.Role = relayir.Role(geminiRoleToRequestRole(cand.Content.Role))
+			for idx, part := range cand.Content.Parts {
+				choice.Items = append(choice.Items, geminiPartToIRItem(part, idx, nil, "$.candidates[].content.parts[]"))
 			}
 		}
-
-		ir.Choices = append(ir.Choices, choice)
+		out.Choices = append(out.Choices, choice)
 	}
-
-	return ir, nil
+	return out, nil
 }
 
-// mapGeminiFinishReason converts Gemini finishReason to internal format.
+func geminiResponseUsageToIR(usage *schema.GeminiUsageMetadata) *relayir.Usage {
+	if usage == nil {
+		return nil
+	}
+	total := usage.TotalTokenCount
+	if total == 0 {
+		total = usage.PromptTokenCount + usage.CandidatesTokenCount
+	}
+	out := &relayir.Usage{
+		InputTokens:      usage.PromptTokenCount,
+		OutputTokens:     usage.CandidatesTokenCount,
+		TotalTokens:      total,
+		PromptTokens:     usage.PromptTokenCount,
+		CompletionTokens: usage.CandidatesTokenCount,
+		CacheReadTokens:  usage.CachedContentTokenCount,
+	}
+	if usage.ThoughtsTokenCount > 0 {
+		out.OutputTokenDetails = map[string]json.RawMessage{"reasoning_tokens": rawJSON(usage.ThoughtsTokenCount)}
+	}
+	return out
+}
+
+func emitGeminiResponseDirectIR(resp *relayir.Response) ([]byte, error) {
+	out := map[string]interface{}{}
+	var candidates []map[string]interface{}
+	for _, choice := range resp.Choices {
+		cand := map[string]interface{}{
+			"index":        choice.Index,
+			"finishReason": geminiFinishFromIR(choice.Finish),
+		}
+		if len(choice.Items) > 0 {
+			parts := make([]map[string]interface{}, 0, len(choice.Items))
+			for _, item := range choice.Items {
+				if part := geminiPartFromIRItem(item, nil); part != nil {
+					parts = append(parts, part)
+				}
+			}
+			if len(parts) > 0 {
+				cand["content"] = map[string]interface{}{"role": internalRoleToGemini(string(choice.Role)), "parts": parts}
+			}
+		}
+		candidates = append(candidates, cand)
+	}
+	out["candidates"] = candidates
+	if resp.Usage != nil {
+		out["usageMetadata"] = geminiUsageFromIR(resp.Usage)
+	}
+	if resp.Model != "" {
+		out["modelVersion"] = resp.Model
+	}
+	for k, v := range resp.Native.Fields {
+		out[k] = relayir.CloneRaw(v)
+	}
+	return json.Marshal(out)
+}
+
+func geminiUsageFromIR(usage *relayir.Usage) map[string]interface{} {
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.InputTokens + usage.OutputTokens
+	}
+	out := map[string]interface{}{"promptTokenCount": usage.InputTokens, "candidatesTokenCount": usage.OutputTokens, "totalTokenCount": total}
+	if usage.CacheReadTokens > 0 {
+		out["cachedContentTokenCount"] = usage.CacheReadTokens
+	}
+	if reasoningTokens := rawInt(usage.OutputTokenDetails["reasoning_tokens"]); reasoningTokens > 0 {
+		out["thoughtsTokenCount"] = reasoningTokens
+	}
+	return out
+}
+
+func rawInt(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int
+	_ = json.Unmarshal(raw, &n)
+	return n
+}
+
+func geminiFinishFromIR(finish *relayir.Finish) string {
+	if finish == nil {
+		return "STOP"
+	}
+	if finish.NativeReason != "" {
+		return finish.NativeReason
+	}
+	return mapGeminiResponseFinishReason(internalFinishReasonFromIR(finish.Reason))
+}
+
 func mapGeminiFinishReason(fr string) string {
 	switch fr {
 	case "STOP":
@@ -127,7 +152,6 @@ func mapGeminiFinishReason(fr string) string {
 	}
 }
 
-// mapGeminiResponseFinishReason converts internal finish_reason to Gemini format.
 func mapGeminiResponseFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
@@ -145,177 +169,35 @@ func mapGeminiResponseFinishReason(fr string) string {
 	}
 }
 
-// emitGeminiResponse converts responseDraft to Gemini API response.
-func emitGeminiResponse(ir *responseDraft) ([]byte, error) {
-	resp := make(map[string]interface{})
-
-	// Convert choices to candidates
-	candidates := make([]map[string]interface{}, 0, len(ir.Choices))
-	for _, choice := range ir.Choices {
-		cand := map[string]interface{}{
-			"index":        choice.Index,
-			"finishReason": mapGeminiResponseFinishReason(choice.FinishReason),
-		}
-
-		items := canonicalChoiceItems(choice)
-		if len(items) > 0 {
-			parts := make([]map[string]interface{}, 0)
-			for _, item := range items {
-				switch item.Kind {
-				case contentItemKindReasoning:
-					rc := item.Content
-					sig := reasoningOpaqueSignature([]schema.ContentPart{rc})
-					if rc.Text == "" && sig == "" {
-						continue
-					}
-					part := map[string]interface{}{}
-					if rc.Text != "" {
-						part["text"] = rc.Text
-						part["thought"] = true
-					}
-					if sig != "" {
-						part["thoughtSignature"] = sig
-					}
-					parts = append(parts, part)
-				case contentItemKindContent:
-					c := item.Content
-					part := map[string]interface{}{"type": c.Type}
-					if c.Text != "" {
-						part["text"] = c.Text
-					}
-					if c.ImageURL != nil {
-						dataURI := *c.ImageURL
-						mimeType := "image/png"
-						data := dataURI
-						if len(dataURI) > 5 && dataURI[:5] == "data:" {
-							endIdx := len(dataURI)
-							for i := 5; i < len(dataURI); i++ {
-								if dataURI[i] == ';' || dataURI[i] == ',' {
-									endIdx = i
-									break
-								}
-							}
-							mimeType = dataURI[5:endIdx]
-							if endIdx < len(dataURI) && dataURI[endIdx] == ';' {
-								for i := endIdx + 1; i < len(dataURI); i++ {
-									if dataURI[i] == ',' {
-										data = dataURI[i+1:]
-										break
-									}
-								}
-							}
-						}
-						part["inlineData"] = map[string]string{
-							"mimeType": mimeType,
-							"data":     data,
-						}
-					}
-					parts = append(parts, part)
-				case contentItemKindToolCall:
-					tc := item.ToolCall
-					name := tc.Name
-					if name == "" {
-						name = tc.Function.Name
-					}
-					parts = append(parts, map[string]interface{}{
-						"functionCall": map[string]interface{}{
-							"name": name,
-							"args": jsonArgumentValue(tc.Function.Arguments),
-						},
-					})
-				case "refusal":
-					if item.Content.Refusal != "" {
-						parts = append(parts, map[string]interface{}{"text": item.Content.Refusal})
-					}
-				}
-			}
-			if len(parts) > 0 {
-				cand["content"] = map[string]interface{}{
-					"role":  choice.Role,
-					"parts": parts,
-				}
-			}
-		}
-
-		candidates = append(candidates, cand)
-	}
-	resp["candidates"] = candidates
-
-	// Convert usage
-	if ir.Usage.TotalTokens > 0 || ir.Usage.PromptTokens > 0 {
-		usage := map[string]interface{}{
-			"promptTokenCount":     ir.Usage.PromptTokens,
-			"candidatesTokenCount": ir.Usage.CompletionTokens,
-			"totalTokenCount":      ir.Usage.TotalTokens,
-		}
-		if reasoningTokens := usageDetailInt(ir.Usage.CompletionTokensDetails, "reasoning_tokens"); reasoningTokens > 0 {
-			usage["thoughtsTokenCount"] = reasoningTokens
-		}
-		if ir.Usage.CacheReadInputTokens > 0 {
-			usage["cachedContentTokenCount"] = ir.Usage.CacheReadInputTokens
-		}
-		resp["usageMetadata"] = usage
-	}
-
-	// If Raw is present, preserve extra fields
-	if len(ir.Raw) > 0 {
-		var rawMap map[string]json.RawMessage
-		if json.Unmarshal(ir.Raw, &rawMap) == nil {
-			for k, v := range rawMap {
-				switch k {
-				case "candidates", "usageMetadata", "modelVersion":
-					// Skip standard fields
-				default:
-					resp[k] = v
-				}
-			}
-		}
-	}
-
-	return json.Marshal(resp)
-}
-
-// parseGeminiCLIResponse extracts responseDraft from Gemini CLI envelope.
-func parseGeminiCLIResponse(body []byte) (*responseDraft, error) {
+func parseGeminiCLIResponseDirectIR(body []byte) (*relayir.Response, error) {
 	var env schema.GeminiCLIResponse
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI response: %w", err)
 	}
-
-	// Convert inner Gemini response to responseDraft
 	innerBody, err := json.Marshal(env.Response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal inner Gemini response: %w", err)
 	}
-
-	ir, err := parseGeminiResponse(innerBody)
+	out, err := parseGeminiResponseDirectIR(innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert inner Gemini response: %w", err)
 	}
-
-	return ir, nil
+	out.SourceProtocol = relayir.ProtocolGeminiCLI
+	out.Native.Protocol = relayir.ProtocolGeminiCLI
+	out.Native.RawBody = relayir.CloneRaw(body)
+	return out, nil
 }
 
-// emitGeminiCLIResponse wraps responseDraft in Gemini CLI envelope.
-func emitGeminiCLIResponse(ir *responseDraft) ([]byte, error) {
-	// First convert to Gemini format
-	innerBody, err := emitGeminiResponse(ir)
+func emitGeminiCLIResponseDirectIR(resp *relayir.Response) ([]byte, error) {
+	innerBody, err := emitGeminiResponseDirectIR(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert to Gemini format: %w", err)
 	}
-
-	// Parse the Gemini response
 	var geminiResp schema.GeminiResponse
 	if err := json.Unmarshal(innerBody, &geminiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini response: %w", err)
 	}
-
-	// Build the CLI envelope
-	cliResp := schema.GeminiCLIResponse{
-		Response: geminiResp,
-	}
-
-	return json.Marshal(cliResp)
+	return json.Marshal(schema.GeminiCLIResponse{Response: geminiResp})
 }
 
 func init() {

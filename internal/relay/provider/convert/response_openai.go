@@ -5,89 +5,100 @@ import (
 	"fmt"
 	"strings"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseOpenAIChatResponse converts OpenAI Chat Completions response to responseDraft.
-func parseOpenAIChatResponse(body []byte) (*responseDraft, error) {
+func parseOpenAIChatResponseDirectIR(body []byte) (*relayir.Response, error) {
 	var resp schema.OpenAIChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat response: %w", err)
 	}
-
-	ir := &responseDraft{
-		ID:      resp.ID,
-		Model:   resp.Model,
-		Choices: make([]responseChoiceDraft, 0, len(resp.Choices)),
-		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for native replay and field recovery
+	out := &relayir.Response{
+		SourceProtocol: relayir.ProtocolOpenAIChat,
+		ID:             resp.ID,
+		Model:          resp.Model,
+		Metadata:       relayir.CloneRawMap(resp.Extra),
+		Native: relayir.NativeEnvelope{
+			Protocol: relayir.ProtocolOpenAIChat,
+			RawBody:  relayir.CloneRaw(body),
+			Fields:   relayir.CloneRawMap(resp.Extra),
+			Unknown:  relayir.CloneRawMap(resp.Extra),
+		},
 	}
-
-	// Convert usage
 	if resp.Usage != nil {
-		ir.Usage.PromptTokens = resp.Usage.PromptTokens
-		ir.Usage.CompletionTokens = resp.Usage.CompletionTokens
-		ir.Usage.TotalTokens = resp.Usage.TotalTokens
-		cachedTokens := usageDetailInt(resp.Usage.PromptTokensDetails, "cached_tokens")
-		if cachedTokens == 0 {
-			cachedTokens = resp.Usage.PromptCacheHitTokens
-		}
-		ir.Usage.CacheReadInputTokens = cachedTokens
-		ir.Usage.PromptCacheHitTokens = resp.Usage.PromptCacheHitTokens
-		if resp.Usage.CompletionTokensDetails != nil {
-			ir.Usage.CompletionTokensDetails = resp.Usage.CompletionTokensDetails
-		}
+		out.Usage = openAIChatUsageToIR(resp.Usage)
 	}
-
-	// Convert choices
 	for _, choice := range resp.Choices {
-		internalChoice := responseChoiceDraft{
-			Index:        choice.Index,
-			Role:         choice.Message.Role,
-			FinishReason: mapOpenAIChatFinishReason(choice.FinishReason),
-		}
-
-		// Convert content
-		if !choice.Message.Content.IsEmpty() {
-			for _, part := range choice.Message.Content.Parts {
-				appendChoiceContentItem(&internalChoice, part, rawJSON(part))
-			}
-		}
-		if len(contentPartsFromItems(internalChoice.Items)) == 0 && choice.Message.Content.Text != nil {
-			appendChoiceContentItem(&internalChoice, schema.ContentPart{Type: "text", Text: *choice.Message.Content.Text}, rawJSON(choice.Message.Content.Text))
+		irChoice := relayir.Choice{
+			Index: choice.Index,
+			Role:  relayir.Role(openAIChatRole(choice.Message.Role)),
+			Finish: &relayir.Finish{
+				Reason:       finishReasonToIR(mapOpenAIChatFinishReason(choice.FinishReason)),
+				NativeReason: choice.FinishReason,
+			},
+			Native: relayir.NativeEnvelope{
+				Protocol: relayir.ProtocolOpenAIChat,
+				Kind:     "choice",
+				Raw:      rawJSON(choice),
+				Fields:   relayir.CloneRawMap(choice.Extra),
+			},
 		}
 		for _, part := range reasoningPartsFromOpenAIChatExtra(choice.Message.Extra) {
-			appendChoiceReasoningItem(&internalChoice, part, rawJSON(part))
+			irChoice.Items = append(irChoice.Items, irContentPartItem(contentItemKindReasoning, part, rawJSON(part), FormatOpenAIChatCompletions, len(irChoice.Items)))
 		}
-
-		// Convert tool calls
-		if len(choice.Message.ToolCalls) > 0 {
-			for _, tc := range choice.Message.ToolCalls {
-				call := schema.ToolCall{
-					ID:   tc.ID,
-					Type: tc.Type,
-					Name: tc.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      tc.Function.Name,
-						Arguments: tc.Function.Arguments,
-					},
-				}
-				appendChoiceToolCallItem(&internalChoice, call, rawJSON(tc))
+		for _, part := range chatContentParts(choice.Message.Content) {
+			irChoice.Items = append(irChoice.Items, irContentPartItem(contentItemKindContent, part, rawJSON(part), FormatOpenAIChatCompletions, len(irChoice.Items)))
+		}
+		for _, tc := range choice.Message.ToolCalls {
+			call := schema.ToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Name: tc.Function.Name,
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
 			}
+			irChoice.Items = append(irChoice.Items, irToolUseItem(call, rawJSON(tc), FormatOpenAIChatCompletions, len(irChoice.Items)))
 		}
-
-		// Handle refusal
 		if choice.Message.Refusal != "" {
-			appendChoiceRefusalItem(&internalChoice, choice.Message.Refusal)
+			irChoice.Items = append(irChoice.Items, relayir.Item{
+				Kind:          relayir.ItemRefusal,
+				OriginalIndex: len(irChoice.Items),
+				Refusal:       &relayir.Refusal{Text: choice.Message.Refusal},
+				Native:        relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIChat, Kind: "refusal", Raw: rawJSON(choice.Message.Refusal)},
+			})
 		}
-
-		ir.Choices = append(ir.Choices, internalChoice)
+		out.Choices = append(out.Choices, irChoice)
 	}
+	return out, nil
+}
 
-	return ir, nil
+func openAIChatUsageToIR(usage *schema.Usage) *relayir.Usage {
+	if usage == nil {
+		return nil
+	}
+	cachedTokens := usageDetailInt(usage.PromptTokensDetails, "cached_tokens")
+	if cachedTokens == 0 {
+		cachedTokens = usage.PromptCacheHitTokens
+	}
+	creationTokens := usageDetailInt(usage.PromptTokensDetails, "cache_creation_input_tokens")
+	if creationTokens == 0 {
+		creationTokens = usageDetailInt(usage.PromptTokensDetails, "cached_write_tokens")
+	}
+	return &relayir.Usage{
+		InputTokens:         usage.PromptTokens,
+		OutputTokens:        usage.CompletionTokens,
+		TotalTokens:         usage.TotalTokens,
+		PromptTokens:        usage.PromptTokens,
+		CompletionTokens:    usage.CompletionTokens,
+		CacheReadTokens:     cachedTokens,
+		CacheCreationTokens: creationTokens,
+		CacheWriteTokens:    creationTokens,
+		InputTokenDetails:   rawDetails(usage.PromptTokensDetails),
+		OutputTokenDetails:  rawDetails(usage.CompletionTokensDetails),
+	}
 }
 
 func usageDetailInt(details map[string]interface{}, key string) int {
@@ -143,110 +154,116 @@ func mapOpenAIChatResponseFinishReason(fr string) string {
 	}
 }
 
-// emitOpenAIChatResponse converts responseDraft to OpenAI Chat Completions response.
-func emitOpenAIChatResponse(ir *responseDraft) ([]byte, error) {
+func emitOpenAIChatResponseDirectIR(ir *relayir.Response) ([]byte, error) {
 	resp := schema.OpenAIChatResponse{
 		ID:      ir.ID,
 		Object:  "chat.completion",
-		Created: 0, // Will be set by caller if needed
+		Created: 0,
 		Model:   ir.Model,
 		Choices: make([]schema.ChatChoice, 0, len(ir.Choices)),
+		Extra:   relayir.CloneRawMap(ir.Metadata),
 	}
-
-	// Convert usage
-	if ir.Usage.TotalTokens > 0 {
-		resp.Usage = &schema.Usage{
-			PromptTokens:        ir.Usage.PromptTokens,
-			CompletionTokens:    ir.Usage.CompletionTokens,
-			TotalTokens:         ir.Usage.TotalTokens,
-			PromptTokensDetails: map[string]interface{}{},
-		}
-		if ir.Usage.CompletionTokensDetails != nil {
-			resp.Usage.CompletionTokensDetails = ir.Usage.CompletionTokensDetails
-		}
-		if ir.Usage.CacheCreationInputTokens > 0 {
-			resp.Usage.PromptTokensDetails["cached_write_tokens"] = ir.Usage.CacheCreationInputTokens
-		}
-		if ir.Usage.CacheReadInputTokens > 0 {
-			if resp.Usage.PromptTokensDetails == nil {
-				resp.Usage.PromptTokensDetails = map[string]interface{}{}
-			}
-			resp.Usage.PromptTokensDetails["cached_tokens"] = ir.Usage.CacheReadInputTokens
-			resp.Usage.PromptTokensDetails["cached_read_tokens"] = ir.Usage.CacheReadInputTokens
-		}
-		if ir.Usage.PromptCacheHitTokens > 0 {
-			resp.Usage.PromptCacheHitTokens = ir.Usage.PromptCacheHitTokens
-		}
+	if ir.Usage != nil {
+		resp.Usage = openAIChatUsageFromIR(ir.Usage)
 	}
-
-	// Convert choices
 	for _, choice := range ir.Choices {
 		chatChoice := schema.ChatChoice{
 			Index:        choice.Index,
-			FinishReason: mapOpenAIChatResponseFinishReason(choice.FinishReason),
+			FinishReason: openAIChatFinishFromIR(choice.Finish),
 			Message: schema.ChatMessage{
-				Role: choice.Role,
+				Role:  openAIChatRole(string(choice.Role)),
+				Extra: relayir.CloneRawMap(choice.Native.Fields),
 			},
+			Extra: relayir.CloneRawMap(choice.Native.Fields),
 		}
-
-		items := canonicalChoiceItems(choice)
-		content := contentPartsFromItems(items)
-		reasoningContent := reasoningPartsFromItems(items)
-		toolCalls := toolCallsFromItems(items)
-
-		// Convert content
+		var content []schema.ContentPart
+		var reasoning []schema.ContentPart
+		for _, item := range choice.Items {
+			switch item.Kind {
+			case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
+				reasoning = append(reasoning, schemaReasoningFromIR(item))
+			case relayir.ItemToolUse, relayir.ItemFunctionCall:
+				chatChoice.Message.ToolCalls = append(chatChoice.Message.ToolCalls, schemaToolCallFromIR(item))
+			case relayir.ItemRefusal:
+				if item.Refusal != nil {
+					chatChoice.Message.Refusal = item.Refusal.Text
+				}
+			default:
+				if part, ok := schemaContentFromIR(item); ok {
+					content = append(content, part)
+				}
+			}
+		}
+		content = openAIChatContentParts(content)
 		if len(content) > 0 {
-			if len(content) == 1 && content[0].Type == "text" {
+			if len(content) == 1 && content[0].Type == "text" && content[0].Text != "" && len(content[0].Extra) == 0 {
 				chatChoice.Message.Content = schema.NewTextContent(content[0].Text)
 			} else {
 				chatChoice.Message.Content = schema.NewPartsContent(content...)
 			}
 		}
-		if len(reasoningContent) > 0 {
+		if len(reasoning) > 0 {
 			if chatChoice.Message.Extra == nil {
 				chatChoice.Message.Extra = make(map[string]json.RawMessage)
 			}
-			reasoning := contentPartsText(reasoningContent)
-			if reasoning != "" {
-				raw, _ := json.Marshal(reasoning)
-				chatChoice.Message.Extra["reasoning_content"] = raw
+			if text := contentPartsText(reasoning); text != "" {
+				chatChoice.Message.Extra["reasoning_content"] = rawJSON(text)
 			}
-			if details := reasoningDetailsFromParts(reasoningContent); len(details) > 0 {
-				raw, _ := json.Marshal(details)
-				chatChoice.Message.Extra["reasoning_details"] = raw
+			if details := reasoningDetailsFromParts(reasoning); len(details) > 0 {
+				chatChoice.Message.Extra["reasoning_details"] = rawJSON(details)
 			}
 		}
-
-		// Convert tool calls
-		if len(toolCalls) > 0 {
-			chatChoice.Message.ToolCalls = make([]schema.ToolCall, len(toolCalls))
-			for i, tc := range toolCalls {
-				chatChoice.Message.ToolCalls[i] = schema.ToolCall{
-					ID:   tc.ID,
-					Type: tc.Type,
-					Name: tc.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      tc.Name,
-						Arguments: tc.Function.Arguments,
-					},
-				}
-			}
-		}
-
-		for _, item := range items {
-			if item.Kind == "refusal" && item.Content.Refusal != "" {
-				chatChoice.Message.Refusal = item.Content.Refusal
-				break
-			}
-		}
-
 		resp.Choices = append(resp.Choices, chatChoice)
 	}
-
+	for k, v := range ir.Native.Fields {
+		resp.Extra[k] = relayir.CloneRaw(v)
+	}
 	return json.Marshal(resp)
+}
+
+func openAIChatUsageFromIR(usage *relayir.Usage) *schema.Usage {
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.InputTokens + usage.OutputTokens
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && total == 0 &&
+		usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 && usage.CacheWriteTokens == 0 {
+		return nil
+	}
+	out := &schema.Usage{
+		PromptTokens:            usage.InputTokens,
+		CompletionTokens:        usage.OutputTokens,
+		TotalTokens:             total,
+		PromptTokensDetails:     detailsFromRaw(usage.InputTokenDetails),
+		CompletionTokensDetails: detailsFromRaw(usage.OutputTokenDetails),
+	}
+	if out.PromptTokensDetails == nil {
+		out.PromptTokensDetails = map[string]interface{}{}
+	}
+	if usage.CacheReadTokens > 0 {
+		out.PromptTokensDetails["cached_tokens"] = usage.CacheReadTokens
+		out.PromptTokensDetails["cached_read_tokens"] = usage.CacheReadTokens
+	}
+	if usage.CacheCreationTokens > 0 {
+		out.PromptTokensDetails["cache_creation_input_tokens"] = usage.CacheCreationTokens
+		out.PromptTokensDetails["cached_write_tokens"] = usage.CacheCreationTokens
+	} else if usage.CacheWriteTokens > 0 {
+		out.PromptTokensDetails["cached_write_tokens"] = usage.CacheWriteTokens
+	}
+	if len(out.PromptTokensDetails) == 0 {
+		out.PromptTokensDetails = nil
+	}
+	return out
+}
+
+func openAIChatFinishFromIR(finish *relayir.Finish) string {
+	if finish == nil {
+		return "stop"
+	}
+	if finish.NativeReason != "" {
+		return finish.NativeReason
+	}
+	return mapOpenAIChatResponseFinishReason(internalFinishReasonFromIR(finish.Reason))
 }
 
 func contentPartsText(parts []schema.ContentPart) string {
@@ -259,103 +276,325 @@ func contentPartsText(parts []schema.ContentPart) string {
 	return strings.Join(out, "\n")
 }
 
-// parseOpenAIResponsesResponse converts OpenAI Responses API response to responseDraft.
-func parseOpenAIResponsesResponse(body []byte) (*responseDraft, error) {
+func parseOpenAIResponsesResponseDirectIR(body []byte) (*relayir.Response, error) {
 	var resp schema.OpenAIResponsesResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses response: %w", err)
 	}
-
-	ir := &responseDraft{
-		ID:      resp.ID,
-		Model:   resp.Model,
-		Choices: make([]responseChoiceDraft, 0),
-		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for native replay and field recovery
+	var rawRoot map[string]json.RawMessage
+	_ = json.Unmarshal(body, &rawRoot)
+	out := &relayir.Response{
+		SourceProtocol: relayir.ProtocolOpenAIResponses,
+		ID:             resp.ID,
+		Model:          resp.Model,
+		Native: relayir.NativeEnvelope{
+			Protocol: relayir.ProtocolOpenAIResponses,
+			RawBody:  relayir.CloneRaw(body),
+		},
+		Metadata: map[string]json.RawMessage{},
 	}
-
-	// Convert usage
+	copyResponseRawFields(out.Metadata, rawRoot, "object", "created_at", "status", "metadata", "error", "incomplete_details", "parallel_tool_calls", "temperature", "top_p", "tool_choice")
+	out.Native.Fields = relayir.CloneRawMap(out.Metadata)
+	out.Native.Unknown = relayir.CloneRawMap(out.Metadata)
 	if resp.Usage != nil {
-		ir.Usage.PromptTokens = resp.Usage.InputTokens
-		ir.Usage.CompletionTokens = resp.Usage.OutputTokens
-		ir.Usage.TotalTokens = resp.Usage.TotalTokens
-		cachedTokens := usageDetailInt(resp.Usage.InputTokensDetails, "cached_tokens")
-		if cachedTokens == 0 {
-			cachedTokens = resp.Usage.PromptCacheHitTokens
-		}
-		ir.Usage.CacheReadInputTokens = cachedTokens
-		ir.Usage.PromptCacheHitTokens = resp.Usage.PromptCacheHitTokens
-		if resp.Usage.InputTokensDetails != nil {
-			ir.Usage.PromptTokensDetails = resp.Usage.InputTokensDetails
-		}
+		out.Usage = responsesResponseUsageToIR(resp.Usage)
 	}
-
-	var pendingReasoning []requestItemDraft
+	var pendingReasoning []relayir.Item
 	flushPendingReasoning := func() {
 		if len(pendingReasoning) == 0 {
 			return
 		}
-		choice := responseChoiceDraft{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
-		for _, item := range pendingReasoning {
-			appendChoiceReasoningItem(&choice, item.Content, item.Raw)
-		}
-		ir.Choices = append(ir.Choices, choice)
+		out.Choices = append(out.Choices, relayir.Choice{
+			Index: len(out.Choices),
+			Role:  relayir.RoleAssistant,
+			Items: append([]relayir.Item(nil), pendingReasoning...),
+			Finish: &relayir.Finish{
+				Reason:       relayir.FinishStop,
+				NativeReason: "completed",
+			},
+		})
 		pendingReasoning = nil
 	}
-
-	// Convert output items. Responses can carry reasoning as a separate output
-	// item immediately before the assistant message or tool call it belongs to.
 	for _, item := range resp.Output {
+		rawItem := rawJSON(item)
 		switch item.Type {
 		case "message":
-			choice := responseChoiceDraft{
-				Index:        len(ir.Choices),
-				Role:         item.Role,
-				FinishReason: mapResponsesStatusToFinishReason(item.Status),
+			choice := relayir.Choice{
+				Index: len(out.Choices),
+				Role:  relayir.Role(responsesRole(item.Role)),
+				Items: append([]relayir.Item(nil), pendingReasoning...),
+				Native: relayir.NativeEnvelope{
+					Protocol: relayir.ProtocolOpenAIResponses,
+					Kind:     item.Type,
+					Raw:      rawItem,
+					Fields:   relayir.CloneRawMap(item.Extra),
+				},
+				Finish: &relayir.Finish{
+					Reason:       finishReasonToIR(mapResponsesStatusToFinishReason(item.Status)),
+					NativeReason: item.Status,
+				},
 			}
-			for _, pending := range pendingReasoning {
-				appendChoiceReasoningItem(&choice, pending.Content, pending.Raw)
-			}
-			for _, part := range item.Content {
-				appendChoiceContentItem(&choice, part, rawJSON(part))
+			for idx, part := range item.Content {
+				choice.Items = append(choice.Items, irContentPartItem(contentItemKindContent, part, rawJSON(part), FormatOpenAIResponses, idx))
 			}
 			pendingReasoning = nil
-			ir.Choices = append(ir.Choices, choice)
-
+			out.Choices = append(out.Choices, choice)
 		case "function_call":
 			name := qualifyResponsesNamespaceToolName(rawString(item.Extra["namespace"]), item.Name)
-			choice := responseChoiceDraft{
-				Index:        len(ir.Choices),
-				Role:         item.Role,
-				FinishReason: "tool_use",
+			choice := relayir.Choice{
+				Index: len(out.Choices),
+				Role:  relayir.Role(responsesRole(item.Role)),
+				Items: append([]relayir.Item(nil), pendingReasoning...),
+				Native: relayir.NativeEnvelope{
+					Protocol: relayir.ProtocolOpenAIResponses,
+					Kind:     item.Type,
+					Raw:      rawItem,
+					Fields:   relayir.CloneRawMap(item.Extra),
+				},
+				Finish: &relayir.Finish{Reason: relayir.FinishToolCall, NativeReason: "function_call"},
 			}
-			for _, pending := range pendingReasoning {
-				appendChoiceReasoningItem(&choice, pending.Content, pending.Raw)
-			}
-			appendChoiceToolCallItem(&choice, schema.ToolCall{
+			choice.Items = append(choice.Items, irToolUseItem(schema.ToolCall{
 				ID:   item.CallID,
 				Type: "function",
 				Name: name,
 				Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
-				}{
-					Name:      name,
-					Arguments: item.Arguments,
-				},
-			}, rawJSON(item))
+				}{Name: name, Arguments: item.Arguments},
+			}, rawItem, FormatOpenAIResponses, 0))
 			pendingReasoning = nil
-			ir.Choices = append(ir.Choices, choice)
-
+			out.Choices = append(out.Choices, choice)
 		case "reasoning":
-			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
-				pendingReasoning = append(pendingReasoning, requestItemDraft{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
+			for idx, part := range reasoningPartsFromResponsesExtra(item.Extra) {
+				pendingReasoning = append(pendingReasoning, irContentPartItem(contentItemKindReasoning, part, rawItem, FormatOpenAIResponses, idx))
 			}
+		default:
+			out.Losses = append(out.Losses, irloss(FormatOpenAIResponses, "", "$.output[]", item.Type, rawItem, "Responses output item is preserved as native raw/opaque IR"))
+			flushPendingReasoning()
+			out.Choices = append(out.Choices, relayir.Choice{
+				Index: len(out.Choices),
+				Role:  relayir.RoleAssistant,
+				Items: []relayir.Item{{
+					Kind:   relayir.ItemOpaque,
+					Opaque: &relayir.Opaque{Type: item.Type, Raw: rawItem},
+					Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: item.Type, Raw: rawItem},
+				}},
+				Finish: &relayir.Finish{Reason: relayir.FinishUnknown, NativeReason: item.Status},
+			})
 		}
 	}
 	flushPendingReasoning()
+	return out, nil
+}
 
-	return ir, nil
+func responsesResponseUsageToIR(usage *schema.ResponsesUsage) *relayir.Usage {
+	if usage == nil {
+		return nil
+	}
+	cachedTokens := usageDetailInt(usage.InputTokensDetails, "cached_tokens")
+	if cachedTokens == 0 {
+		cachedTokens = usage.PromptCacheHitTokens
+	}
+	return &relayir.Usage{
+		InputTokens:       usage.InputTokens,
+		OutputTokens:      usage.OutputTokens,
+		TotalTokens:       usage.TotalTokens,
+		PromptTokens:      usage.InputTokens,
+		CompletionTokens:  usage.OutputTokens,
+		CacheReadTokens:   cachedTokens,
+		InputTokenDetails: rawDetails(usage.InputTokensDetails),
+	}
+}
+
+func emitOpenAIResponsesResponseDirectIR(resp *relayir.Response) ([]byte, error) {
+	if resp == nil {
+		return json.Marshal(map[string]interface{}{})
+	}
+	out := map[string]interface{}{
+		"id":         resp.ID,
+		"object":     "response",
+		"created_at": int64(0),
+		"model":      resp.Model,
+		"output":     responsesOutputItemsFromIR(resp),
+	}
+	if resp.Usage != nil {
+		out["usage"] = responsesUsageFromIR(resp.Usage)
+	}
+	for k, v := range resp.Metadata {
+		out[k] = v
+	}
+	for k, v := range resp.Native.Fields {
+		out[k] = v
+	}
+	if _, ok := out["status"]; !ok {
+		out["status"] = responsesResponseStatusFromIR(resp)
+	}
+	return json.Marshal(out)
+}
+
+func responsesOutputItemsFromIR(resp *relayir.Response) []map[string]interface{} {
+	var out []map[string]interface{}
+	for _, choice := range resp.Choices {
+		out = append(out, responsesOutputItemsFromIRChoice(choice)...)
+	}
+	return out
+}
+
+func responsesOutputItemsFromIRChoice(choice relayir.Choice) []map[string]interface{} {
+	if isResponsesFamily(protocolFormat(choice.Native.Protocol)) && len(choice.Native.Raw) > 0 {
+		var raw map[string]interface{}
+		if err := decodeJSONUseNumber(choice.Native.Raw, &raw); err == nil {
+			return []map[string]interface{}{raw}
+		}
+	}
+	var out []map[string]interface{}
+	var pendingContent []schema.ContentPart
+	role := responsesRole(string(choice.Role))
+	status := responsesStatusFromIRFinish(choice.Finish)
+	flushContent := func() {
+		if len(pendingContent) == 0 {
+			return
+		}
+		item := map[string]interface{}{
+			"type":    "message",
+			"role":    role,
+			"content": responsesMessageContent(role, pendingContent),
+			"status":  status,
+		}
+		out = append(out, item)
+		pendingContent = nil
+	}
+	for _, item := range choice.Items {
+		if isResponsesFamily(protocolFormat(item.Native.Protocol)) && len(item.Native.Raw) > 0 && (item.Kind == relayir.ItemOpaque || item.Native.Kind == "image_generation_call") {
+			flushContent()
+			var raw map[string]interface{}
+			if err := decodeJSONUseNumber(item.Native.Raw, &raw); err == nil {
+				out = append(out, raw)
+				continue
+			}
+		}
+		switch item.Kind {
+		case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
+			flushContent()
+			out = append(out, responsesReasoningOutputItemFromIR(item, status))
+		case relayir.ItemText, relayir.ItemImage, relayir.ItemFile, relayir.ItemDocument, relayir.ItemAudio, relayir.ItemRefusal, relayir.ItemExecutableCode, relayir.ItemCodeExecutionResult, relayir.ItemOpaque:
+			if part, ok := schemaContentFromIR(item); ok {
+				if part.ImageURL != nil && *part.ImageURL != "" {
+					if mimeType, b64, ok := splitDataURI(*part.ImageURL); ok {
+						flushContent()
+						out = append(out, map[string]interface{}{
+							"type":          "image_generation_call",
+							"id":            firstNonEmptyString(item.ID, fmt.Sprintf("ig_%d", item.OriginalIndex)),
+							"status":        "completed",
+							"result":        b64,
+							"output_format": imageOutputFormatFromMime(mimeType),
+						})
+						continue
+					}
+				}
+				pendingContent = append(pendingContent, part)
+			}
+		case relayir.ItemToolUse, relayir.ItemFunctionCall:
+			flushContent()
+			call := schemaToolCallFromIR(item)
+			name := call.Name
+			if name == "" {
+				name = call.Function.Name
+			}
+			out = append(out, map[string]interface{}{
+				"type":      "function_call",
+				"role":      role,
+				"status":    status,
+				"call_id":   firstNonEmptyString(call.ID, item.CallID, item.ID),
+				"name":      name,
+				"arguments": call.Function.Arguments,
+			})
+		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
+			flushContent()
+			result := schemaToolResultFromIR(item)
+			out = append(out, map[string]interface{}{
+				"type":    "function_call_output",
+				"call_id": result.ToolCallID,
+				"output":  responsesToolResultOutput(result),
+			})
+		}
+	}
+	flushContent()
+	return out
+}
+
+func responsesReasoningOutputItemFromIR(item relayir.Item, status string) map[string]interface{} {
+	part := schemaReasoningFromIR(item)
+	out := map[string]interface{}{
+		"type":   "reasoning",
+		"id":     firstNonEmptyString(item.ID, generateResponsesReasoningID()),
+		"status": status,
+	}
+	if content := responsesReasoningContent([]schema.ContentPart{part}); len(content) > 0 {
+		out["content"] = content
+	}
+	if summary := responsesReasoningSummary([]schema.ContentPart{part}); len(summary) > 0 {
+		out["summary"] = summary
+	}
+	if encrypted := reasoningEncryptedContent([]schema.ContentPart{part}); encrypted != "" {
+		out[reasoningExtraEncryptedContent] = encrypted
+	}
+	for k, v := range item.Metadata {
+		if _, exists := out[k]; !exists {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func responsesUsageFromIR(usage *relayir.Usage) map[string]interface{} {
+	if usage == nil {
+		return nil
+	}
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.InputTokens + usage.OutputTokens
+	}
+	out := map[string]interface{}{
+		"input_tokens":  usage.InputTokens,
+		"output_tokens": usage.OutputTokens,
+		"total_tokens":  total,
+	}
+	details := detailsFromRaw(usage.InputTokenDetails)
+	if details == nil {
+		details = map[string]interface{}{}
+	}
+	if usage.CacheReadTokens > 0 {
+		details["cached_tokens"] = usage.CacheReadTokens
+	}
+	if len(details) > 0 {
+		out["input_tokens_details"] = details
+	}
+	return out
+}
+
+func responsesStatusFromIRFinish(finish *relayir.Finish) string {
+	if finish == nil {
+		return "completed"
+	}
+	if finish.NativeReason != "" && finish.NativeReason != "function_call" {
+		return responsesStatusFromFinishReason(finish.NativeReason)
+	}
+	return responsesStatusFromFinishReason(internalFinishReasonFromIR(finish.Reason))
+}
+
+func responsesResponseStatusFromIR(resp *relayir.Response) string {
+	for _, choice := range resp.Choices {
+		status := responsesStatusFromIRFinish(choice.Finish)
+		if status != "" {
+			return status
+		}
+	}
+	return "completed"
+}
+
+func copyResponseRawFields(dst map[string]json.RawMessage, src map[string]json.RawMessage, keys ...string) {
+	copyRawFields(dst, src, keys...)
 }
 
 // mapResponsesStatusToFinishReason converts Responses API status to internal finish reason.
@@ -367,75 +606,6 @@ func mapResponsesStatusToFinishReason(status string) string {
 		return "max_tokens"
 	default:
 		return status
-	}
-}
-
-// emitOpenAIResponsesResponse converts responseDraft to OpenAI Responses API response.
-func emitOpenAIResponsesResponse(ir *responseDraft) ([]byte, error) {
-	resp := schema.OpenAIResponsesResponse{
-		ID:        ir.ID,
-		Object:    "response",
-		CreatedAt: 0, // Will be set by caller if needed
-		Model:     ir.Model,
-		Output:    make([]schema.ResponsesOutputItem, 0, len(ir.Choices)),
-	}
-
-	// Convert usage
-	if ir.Usage.TotalTokens > 0 {
-		resp.Usage = &schema.ResponsesUsage{
-			InputTokens:          ir.Usage.PromptTokens,
-			OutputTokens:         ir.Usage.CompletionTokens,
-			TotalTokens:          ir.Usage.TotalTokens,
-			PromptCacheHitTokens: ir.Usage.PromptCacheHitTokens,
-		}
-		if ir.Usage.CacheReadInputTokens > 0 {
-			resp.Usage.InputTokensDetails = map[string]interface{}{"cached_tokens": ir.Usage.CacheReadInputTokens}
-		}
-	}
-
-	// Convert choices to output items
-	for _, choice := range ir.Choices {
-		resp.Output = append(resp.Output, responsesOutputItemsFromChoice(choice)...)
-	}
-
-	// If Raw is present, preserve extra fields
-	if len(ir.Raw) > 0 {
-		var rawMap map[string]json.RawMessage
-		if json.Unmarshal(ir.Raw, &rawMap) == nil {
-			for k := range rawMap {
-				switch k {
-				case "id", "object", "created_at", "model", "output", "usage", "status":
-					// Skip standard fields
-				default:
-					// Extra fields would be added here for passthrough
-				}
-			}
-		}
-	}
-
-	return json.Marshal(resp)
-}
-
-func responsesReasoningOutputItem(choice responseChoiceDraft) schema.ResponsesOutputItem {
-	reasoningContent := reasoningPartsFromItems(canonicalChoiceItems(choice))
-	extra := make(map[string]json.RawMessage)
-	if content := responsesReasoningContent(reasoningContent); len(content) > 0 {
-		raw, _ := json.Marshal(content)
-		extra["content"] = raw
-	}
-	if summary := responsesReasoningSummary(reasoningContent); len(summary) > 0 {
-		raw, _ := json.Marshal(summary)
-		extra["summary"] = raw
-	}
-	if encrypted := reasoningEncryptedContent(reasoningContent); encrypted != "" {
-		raw, _ := json.Marshal(encrypted)
-		extra[reasoningExtraEncryptedContent] = raw
-	}
-	return schema.ResponsesOutputItem{
-		Type:   "reasoning",
-		ID:     generateResponsesReasoningID(),
-		Status: responsesStatusFromFinishReason(choice.FinishReason),
-		Extra:  extra,
 	}
 }
 
@@ -460,76 +630,6 @@ func responsesReasoningContent(parts []schema.ContentPart) []map[string]interfac
 		content = append(content, block)
 	}
 	return content
-}
-
-func responsesOutputItemsFromChoice(choice responseChoiceDraft) []schema.ResponsesOutputItem {
-	var out []schema.ResponsesOutputItem
-	var pendingContent []schema.ContentPart
-	status := responsesStatusFromFinishReason(choice.FinishReason)
-	flushContent := func() {
-		if len(pendingContent) == 0 {
-			return
-		}
-		out = append(out, schema.ResponsesOutputItem{
-			Type:    "message",
-			Role:    choice.Role,
-			Content: pendingContent,
-			Status:  status,
-		})
-		pendingContent = nil
-	}
-	for idx, item := range canonicalChoiceItems(choice) {
-		switch item.Kind {
-		case contentItemKindReasoning:
-			flushContent()
-			reasoningChoice := choice
-			reasoningChoice.Items = []requestItemDraft{item}
-			out = append(out, responsesReasoningOutputItem(reasoningChoice))
-		case contentItemKindContent:
-			part := item.Content
-			if part.ImageURL != nil && *part.ImageURL != "" {
-				if mimeType, b64, ok := splitDataURI(*part.ImageURL); ok {
-					flushContent()
-					format := imageOutputFormatFromMime(mimeType)
-					resultRaw, _ := json.Marshal(b64)
-					formatRaw, _ := json.Marshal(format)
-					out = append(out, schema.ResponsesOutputItem{
-						Type:   "image_generation_call",
-						ID:     fmt.Sprintf("ig_%d", idx),
-						Status: "completed",
-						Extra: map[string]json.RawMessage{
-							"result":        resultRaw,
-							"output_format": formatRaw,
-						},
-					})
-					continue
-				}
-			}
-			pendingContent = append(pendingContent, part)
-		case contentItemKindToolCall:
-			flushContent()
-			name := item.ToolCall.Name
-			if name == "" {
-				name = item.ToolCall.Function.Name
-			}
-			out = append(out, schema.ResponsesOutputItem{
-				Type:      "function_call",
-				Role:      choice.Role,
-				Status:    status,
-				CallID:    item.ToolCall.ID,
-				Name:      name,
-				Arguments: item.ToolCall.Function.Arguments,
-			})
-		case "refusal":
-			part := item.Content
-			if part.Type == "" {
-				part.Type = "refusal"
-			}
-			pendingContent = append(pendingContent, part)
-		}
-	}
-	flushContent()
-	return out
 }
 
 func responsesStatusFromFinishReason(finishReason string) string {

@@ -7,7 +7,7 @@ import type { PublicSettings } from "@/types/api";
 const STORAGE_KEY = "uapi.ui.settings";
 
 function applyTheme(settings: PublicSettings) {
-  document.body.dataset.background = settings.background || "aurora";
+  document.body.dataset.background = "mesh";
   if (settings.wallpaper_url) {
     document.body.style.setProperty("--wallpaper-image", `url("${settings.wallpaper_url}")`);
   } else {

@@ -95,8 +95,14 @@ func (p *anthropicIRParser) Parse(line []byte) []relayir.StreamEvent {
 	case "message_delta":
 		var delta struct {
 			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				CacheCreation            *struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+				} `json:"cache_creation"`
 			} `json:"usage"`
 			Delta struct {
 				StopReason string `json:"stop_reason"`
@@ -104,7 +110,7 @@ func (p *anthropicIRParser) Parse(line []byte) []relayir.StreamEvent {
 		}
 		_ = json.Unmarshal([]byte(data), &delta)
 		p.finished = true
-		return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: anthropicFinishToIR(delta.Delta.StopReason), NativeReason: delta.Delta.StopReason}, Usage: &relayir.Usage{InputTokens: delta.Usage.InputTokens, OutputTokens: delta.Usage.OutputTokens, TotalTokens: delta.Usage.InputTokens + delta.Usage.OutputTokens}}}
+		return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: anthropicFinishToIR(delta.Delta.StopReason), NativeReason: delta.Delta.StopReason}, Usage: anthropicStreamUsageToIR(delta.Usage.InputTokens, delta.Usage.OutputTokens, delta.Usage.CacheCreationInputTokens, delta.Usage.CacheReadInputTokens, delta.Usage.CacheCreation)}}
 	case "message_stop":
 		return nil
 	}
@@ -194,8 +200,10 @@ func (p *geminiIRParser) parseBody(body []byte) []relayir.StreamEvent {
 			FinishReason string `json:"finishReason,omitempty"`
 		} `json:"candidates"`
 		UsageMetadata *struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
+			PromptTokenCount        int `json:"promptTokenCount"`
+			CandidatesTokenCount    int `json:"candidatesTokenCount"`
+			TotalTokenCount         int `json:"totalTokenCount"`
+			CachedContentTokenCount int `json:"cachedContentTokenCount"`
 		} `json:"usageMetadata,omitempty"`
 		ModelVersion string `json:"modelVersion,omitempty"`
 	}
@@ -216,7 +224,7 @@ func (p *geminiIRParser) parseBody(body []byte) []relayir.StreamEvent {
 	}
 	if len(response.Candidates) == 0 {
 		if response.UsageMetadata != nil {
-			out = append(out, relayir.StreamEvent{Type: relayir.EventUsage, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), Usage: geminiUsageToIR(response.UsageMetadata.PromptTokenCount, response.UsageMetadata.CandidatesTokenCount)})
+			out = append(out, relayir.StreamEvent{Type: relayir.EventUsage, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), Usage: geminiUsageToIR(response.UsageMetadata.PromptTokenCount, response.UsageMetadata.CandidatesTokenCount, response.UsageMetadata.TotalTokenCount, response.UsageMetadata.CachedContentTokenCount)})
 		}
 		return out
 	}
@@ -580,20 +588,40 @@ func geminiFinishFromIR(finish *relayir.Finish) string {
 }
 
 func geminiUsageFromMetadata(usage *struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
 }) *relayir.Usage {
 	if usage == nil {
 		return nil
 	}
-	return geminiUsageToIR(usage.PromptTokenCount, usage.CandidatesTokenCount)
+	return geminiUsageToIR(usage.PromptTokenCount, usage.CandidatesTokenCount, usage.TotalTokenCount, usage.CachedContentTokenCount)
 }
 
-func geminiUsageToIR(prompt, completion int) *relayir.Usage {
-	if prompt == 0 && completion == 0 {
+func geminiUsageToIR(prompt, completion, total, cached int) *relayir.Usage {
+	if total == 0 && (prompt != 0 || completion != 0) {
+		total = prompt + completion
+	}
+	if prompt == 0 && completion == 0 && total == 0 && cached == 0 {
 		return nil
 	}
-	return &relayir.Usage{InputTokens: prompt, OutputTokens: completion, TotalTokens: prompt + completion}
+	return &relayir.Usage{InputTokens: prompt, OutputTokens: completion, TotalTokens: total, PromptTokens: prompt, CompletionTokens: completion, CacheReadTokens: cached}
+}
+
+func anthropicStreamUsageToIR(input, output, cacheCreation, cacheRead int, nested interface{}) *relayir.Usage {
+	if cacheCreation == 0 {
+		if v, ok := nested.(*struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+		}); ok && v != nil {
+			cacheCreation = v.Ephemeral5mInputTokens + v.Ephemeral1hInputTokens
+		}
+	}
+	if input == 0 && output == 0 && cacheCreation == 0 && cacheRead == 0 {
+		return nil
+	}
+	return &relayir.Usage{InputTokens: input, OutputTokens: output, TotalTokens: input + output, PromptTokens: input, CompletionTokens: output, CacheCreationTokens: cacheCreation, CacheWriteTokens: cacheCreation, CacheReadTokens: cacheRead}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -659,4 +687,12 @@ func init() {
 	RegisterIREmitter(convert.FormatAnthropic, newAnthropicIREmitter)
 	RegisterIRParser(convert.FormatGemini, newGeminiIRParser)
 	RegisterIREmitter(convert.FormatGemini, newGeminiIREmitter)
+	RegisterIRParser(convert.FormatClaudeCode, newAnthropicIRParser)
+	RegisterIREmitter(convert.FormatClaudeCode, newAnthropicIREmitter)
+	RegisterIRParser(convert.FormatGeminiCode, newGeminiIRParser)
+	RegisterIREmitter(convert.FormatGeminiCode, newGeminiIREmitter)
+	RegisterIRParser(convert.FormatGeminiCLI, newGeminiIRParser)
+	RegisterIREmitter(convert.FormatGeminiCLI, newGeminiIREmitter)
+	RegisterIRParser(convert.FormatAntigravity, newGeminiIRParser)
+	RegisterIREmitter(convert.FormatAntigravity, newGeminiIREmitter)
 }

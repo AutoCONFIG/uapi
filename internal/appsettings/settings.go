@@ -26,7 +26,7 @@ func Bootstrap(database *gorm.DB) error {
 		LogRetentionDays:        "180",
 		RedeemCodeRetentionDays: "180",
 		ModelRatios:             "{}",
-		UIBackground:            "aurora",
+		UIBackground:            "mesh",
 		UserMaxKeysPerUser:      "1",
 	}
 	return database.Transaction(func(tx *gorm.DB) error {

@@ -5,215 +5,55 @@ import (
 	"fmt"
 	"strings"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiRequest converts Gemini API request to an protocol request view.
-func parseGeminiRequest(body []byte) (*requestDraft, error) {
+func parseGeminiRequestDirectIR(body []byte) (*relayir.Request, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
-
-	ir := &requestDraft{
-		Model:        rawString(req.Extra["model"]),
-		Stream:       false,
-		SourceFormat: FormatGemini,
-		Extra:        make(map[string]json.RawMessage),
+	out := &relayir.Request{
+		SourceProtocol: relayir.ProtocolGemini,
+		Model:          rawString(req.Extra["model"]),
+		Metadata:       relayir.CloneRawMap(req.Extra),
+		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, RawBody: relayir.CloneRaw(body), Fields: relayir.CloneRawMap(req.Extra), Unknown: relayir.CloneRawMap(req.Extra)},
 	}
-
-	// Copy Extra fields
-	for k, v := range req.Extra {
-		ir.Extra[k] = v
+	if req.SystemInstruction != nil {
+		out.Instructions = append(out.Instructions, geminiInstructionToIR(*req.SystemInstruction, out))
 	}
-
-	// Convert systemInstruction to Instructions
-	if req.SystemInstruction != nil && len(req.SystemInstruction.Parts) > 0 {
-		ir.InstructionsRaw = rawJSON(req.SystemInstruction)
-		var texts []string
-		for _, part := range req.SystemInstruction.Parts {
-			if part.Text != "" {
-				texts = append(texts, part.Text)
-				if len(part.Extra) > 0 {
-					appendGeminiPartExtraLosses(ir, "$.systemInstruction.parts[]", part, rawJSON(part))
-				}
-				continue
-			}
-			rawPart := rawJSON(part)
-			if len(rawPart) > 0 {
-				ir.Losses = append(ir.Losses, irloss(FormatGemini, "", "$.systemInstruction.parts[]", "systemInstruction.part", rawPart, "Gemini systemInstruction part has no protocol-neutral instruction representation and is preserved as native raw"))
-			}
-		}
-		if len(texts) > 0 {
-			instr := joinNonEmpty(texts, "\n\n")
-			ir.Instructions = &instr
-		}
-	}
-
-	// Convert contents to messages
 	for _, content := range req.Contents {
-		requestMsg := requestTurnDraft{
-			Role: geminiRoleToRequestRole(content.Role),
-		}
-
-		for _, part := range content.Parts {
-			rawPart := rawJSON(part)
-			if len(part.Extra) > 0 {
-				appendGeminiPartExtraLosses(ir, "$.contents[].parts[]", part, rawPart)
-			}
-			switch {
-			case part.Text != "" && part.Thought:
-				extra := map[string]json.RawMessage{}
-				if part.ThoughtSignature != "" {
-					extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
-				}
-				appendReasoningItem(&requestMsg, schema.ContentPart{
-					Type:  "thinking",
-					Text:  part.Text,
-					Extra: extra,
-				}, rawPart)
-			case part.Text != "":
-				appendContentItem(&requestMsg, schema.ContentPart{
-					Type: "text",
-					Text: part.Text,
-				}, rawPart)
-			case part.InlineData != nil:
-				dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
-				if strings.HasPrefix(part.InlineData.MimeType, "image/") {
-					appendContentItem(&requestMsg, schema.ContentPart{
-						Type:     "image_url",
-						ImageURL: &dataURI,
-						MimeType: part.InlineData.MimeType,
-					}, rawPart)
-				} else {
-					appendContentItem(&requestMsg, schema.ContentPart{
-						Type:     "file",
-						FileData: dataURI,
-						FileType: part.InlineData.MimeType,
-						MimeType: part.InlineData.MimeType,
-					}, rawPart)
-				}
-			case part.FunctionCall != nil:
-				args := string(part.FunctionCall.Args)
-				call := schema.ToolCall{
-					ID:   "", // Gemini doesn't provide ID for function calls
-					Type: "function",
-					Name: part.FunctionCall.Name,
-					Function: struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					}{
-						Name:      part.FunctionCall.Name,
-						Arguments: args,
-					},
-				}
-				appendToolCallItem(&requestMsg, call, rawPart)
-			case part.FunctionResponse != nil:
-				respBytes, _ := json.Marshal(part.FunctionResponse.Response)
-				appendToolResultItem(&requestMsg, schema.ToolResult{
-					ToolCallID: part.FunctionResponse.Name, // Use function name as ID since Gemini doesn't provide call ID
-					Content:    string(respBytes),
-				}, rawPart)
-				appendGeminiFunctionResponseLosses(ir, part.FunctionResponse, rawPart)
-			case part.ThoughtSignature != "":
-				appendReasoningItem(&requestMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
-					reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
-				}), rawPart)
-			case part.FileData != nil:
-				fileURL := "file://" + part.FileData.FileURI
-				if strings.HasPrefix(part.FileData.MimeType, "image/") {
-					appendContentItem(&requestMsg, schema.ContentPart{
-						Type:     "image_url",
-						ImageURL: &fileURL,
-						MimeType: part.FileData.MimeType,
-					}, rawPart)
-				} else {
-					appendContentItem(&requestMsg, schema.ContentPart{
-						Type:     "file",
-						FileURL:  fileURL,
-						FileType: part.FileData.MimeType,
-						MimeType: part.FileData.MimeType,
-					}, rawPart)
-				}
-			case part.ExecutableCode != nil:
-				appendContentItem(&requestMsg, schema.ContentPart{
-					Type: "executable_code",
-					Text: part.ExecutableCode.Code,
-					Extra: map[string]json.RawMessage{
-						"language": json.RawMessage(fmt.Sprintf("%q", part.ExecutableCode.Language)),
-					},
-				}, rawPart)
-			case part.CodeExecutionResult != nil:
-				appendContentItem(&requestMsg, schema.ContentPart{
-					Type: "code_execution_result",
-					Text: part.CodeExecutionResult.Output,
-					Extra: map[string]json.RawMessage{
-						"outcome": json.RawMessage(fmt.Sprintf("%q", part.CodeExecutionResult.Outcome)),
-					},
-				}, rawPart)
-			default:
-				if len(rawPart) > 0 {
-					appendContentItem(&requestMsg, schema.ContentPart{
-						Type:  "gemini_part",
-						Extra: part.Extra,
-					}, rawPart)
-					ir.Losses = append(ir.Losses, irloss(FormatGemini, "", "$.contents[].parts[]", "gemini_part", rawPart, "Gemini part has no protocol-neutral representation and is preserved as native opaque IR"))
-				}
-			}
-		}
-
-		ir.Messages = append(ir.Messages, requestMsg)
+		out.Turns = append(out.Turns, geminiContentToIRTurn(content, out))
 	}
-
-	// Generation parameters from GenerationConfig
 	if req.GenerationConfig != nil {
-		if len(req.GenerationConfig.Extra) > 0 {
-			ir.GeminiGenerationConfigExtra = copyRawMap(req.GenerationConfig.Extra)
-		}
-		if req.GenerationConfig.MaxOutputTokens != nil {
-			ir.MaxTokens = req.GenerationConfig.MaxOutputTokens
-		}
-		if req.GenerationConfig.Temperature != nil {
-			ir.Temperature = req.GenerationConfig.Temperature
-		}
-		if req.GenerationConfig.TopP != nil {
-			ir.TopP = req.GenerationConfig.TopP
-		}
-		if req.GenerationConfig.TopK != nil {
-			ir.TopK = req.GenerationConfig.TopK
-		}
-		if len(req.GenerationConfig.StopSequences) > 0 {
-			ir.StopWords = req.GenerationConfig.StopSequences
-		}
-		if req.GenerationConfig.CandidateCount != nil {
-			ir.CandidateCount = req.GenerationConfig.CandidateCount
-		}
-		if req.GenerationConfig.ThinkingConfig != nil {
-			ir.Thinking = req.GenerationConfig.ThinkingConfig
-		}
+		out.Generation.Extra = relayir.CloneRawMap(req.GenerationConfig.Extra)
+		out.Generation.MaxTokens = req.GenerationConfig.MaxOutputTokens
+		out.Generation.Temperature = req.GenerationConfig.Temperature
+		out.Generation.TopP = req.GenerationConfig.TopP
+		out.Generation.TopK = req.GenerationConfig.TopK
+		out.Generation.Stop = append([]string(nil), req.GenerationConfig.StopSequences...)
+		out.Generation.CandidateCount = req.GenerationConfig.CandidateCount
+		out.Generation.Thinking = relayir.CloneRaw(req.GenerationConfig.ThinkingConfig)
 		if req.GenerationConfig.ResponseMimeType != "" {
-			ir.ResponseFormat = responseFormatFromGemini(req.GenerationConfig.ResponseMimeType, req.GenerationConfig.ResponseSchema)
+			out.Generation.ResponseFormat = responseFormatFromGemini(req.GenerationConfig.ResponseMimeType, req.GenerationConfig.ResponseSchema)
 		}
 	}
-
-	// Safety settings
-	if req.SafetySettings != nil {
-		ir.SafetySettings = req.SafetySettings
-	}
-
-	// Tools
+	out.Safety.Settings = relayir.CloneRaw(req.SafetySettings)
 	if req.Tools != nil {
 		if tools := parseGeminiRequestTools(req.Tools); len(tools) > 0 {
-			ir.Tools = tools
+			for _, tool := range tools {
+				out.Tools = append(out.Tools, irTool(tool, FormatGemini))
+			}
 		} else {
 			var tools []schema.Tool
 			if json.Unmarshal(req.Tools, &tools) == nil {
-				ir.Tools = tools
+				for _, tool := range tools {
+					out.Tools = append(out.Tools, irTool(tool, FormatGemini))
+				}
 			}
 		}
 	}
-
-	// Tool config
 	if req.ToolConfig != nil && req.ToolConfig.FunctionCallingConfig != nil {
 		fcConfig := req.ToolConfig.FunctionCallingConfig
 		mode := normalizeGeminiFunctionCallingMode(fcConfig.Mode)
@@ -223,51 +63,109 @@ func parseGeminiRequest(body []byte) (*requestDraft, error) {
 				names, _ := json.Marshal(fcConfig.AllowedFunctionNames)
 				toolChoice = json.RawMessage(fmt.Sprintf(`{"mode":%q,"function_names":%s}`, mode, names))
 			}
-			ir.ToolChoice = toolChoice
+			out.ToolChoice = &relayir.ToolChoice{Raw: toolChoice}
 		}
 	}
-
-	return ir, nil
+	return out, nil
 }
 
-func appendGeminiPartExtraLosses(req *requestDraft, path string, part schema.GeminiPart, rawPart json.RawMessage) {
-	if req == nil {
-		return
+func geminiInstructionToIR(content schema.GeminiContent, req *relayir.Request) relayir.Instruction {
+	inst := relayir.Instruction{Role: relayir.RoleSystem, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "systemInstruction", Raw: rawJSON(content)}}
+	var texts []string
+	for idx, part := range content.Parts {
+		item := geminiPartToIRItem(part, idx, req, "$.systemInstruction.parts[]")
+		inst.Items = append(inst.Items, item)
+		if item.Text != nil && item.Text.Text != "" {
+			texts = append(texts, item.Text.Text)
+		} else if req != nil {
+			rawPart := rawJSON(part)
+			req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.systemInstruction.parts[]", "systemInstruction.part", rawPart, "Gemini systemInstruction part has no protocol-neutral instruction representation and is preserved as native raw"))
+		}
 	}
-	for key, raw := range part.Extra {
-		req.Losses = append(req.Losses, irloss(FormatGemini, "", path+"."+key, key, raw, "Gemini part vendor field is preserved in native raw part but not emitted across protocols"))
+	inst.Text = joinNonEmpty(texts, "\n\n")
+	return inst
+}
+
+func geminiContentToIRTurn(content schema.GeminiContent, req *relayir.Request) relayir.Turn {
+	turn := relayir.Turn{Role: relayir.Role(geminiRoleToRequestRole(content.Role)), Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "content", Raw: rawJSON(content)}}
+	for idx, part := range content.Parts {
+		turn.Items = append(turn.Items, geminiPartToIRItem(part, idx, req, "$.contents[].parts[]"))
 	}
-	if len(part.Extra) > 0 && len(rawPart) > 0 {
+	return turn
+}
+
+func geminiPartToIRItem(part schema.GeminiPart, idx int, req *relayir.Request, path string) relayir.Item {
+	rawPart := rawJSON(part)
+	if len(part.Extra) > 0 && req != nil {
+		for key, raw := range part.Extra {
+			req.Losses = append(req.Losses, irloss(FormatGemini, "", path+"."+key, key, raw, "Gemini part vendor field is preserved in native raw part but not emitted across protocols"))
+		}
 		req.Losses = append(req.Losses, irloss(FormatGemini, "", path, "gemini_part", rawPart, "Gemini part native shape is preserved for audit"))
 	}
+	switch {
+	case part.Text != "" && part.Thought:
+		extra := map[string]json.RawMessage{}
+		if part.ThoughtSignature != "" {
+			extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
+		}
+		return irContentPartItem(contentItemKindReasoning, schema.ContentPart{Type: "thinking", Text: part.Text, Extra: extra}, rawPart, FormatGemini, idx)
+	case part.Text != "":
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "text", Text: part.Text}, rawPart, FormatGemini, idx)
+	case part.InlineData != nil:
+		dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
+		if strings.HasPrefix(part.InlineData.MimeType, "image/") {
+			return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "image_url", ImageURL: &dataURI, MimeType: part.InlineData.MimeType}, rawPart, FormatGemini, idx)
+		}
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "file", FileData: dataURI, FileType: part.InlineData.MimeType, MimeType: part.InlineData.MimeType}, rawPart, FormatGemini, idx)
+	case part.FunctionCall != nil:
+		return irToolUseItem(schema.ToolCall{Type: "function", Name: part.FunctionCall.Name, Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: part.FunctionCall.Name, Arguments: string(part.FunctionCall.Args)}}, rawPart, FormatGemini, idx)
+	case part.FunctionResponse != nil:
+		respBytes, _ := json.Marshal(part.FunctionResponse.Response)
+		if req != nil {
+			appendGeminiFunctionResponseLossesIR(req, part.FunctionResponse, rawPart)
+		}
+		return irToolResultItem(schema.ToolResult{ToolCallID: part.FunctionResponse.Name, Content: string(respBytes), ContentRaw: relayir.CloneRaw(part.FunctionResponse.Response)}, rawPart, FormatGemini, idx)
+	case part.ThoughtSignature != "":
+		return irContentPartItem(contentItemKindReasoning, reasoningPartWithExtra("", map[string]json.RawMessage{reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature))}), rawPart, FormatGemini, idx)
+	case part.FileData != nil:
+		fileURL := "file://" + part.FileData.FileURI
+		if strings.HasPrefix(part.FileData.MimeType, "image/") {
+			return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "image_url", ImageURL: &fileURL, MimeType: part.FileData.MimeType}, rawPart, FormatGemini, idx)
+		}
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "file", FileURL: fileURL, FileType: part.FileData.MimeType, MimeType: part.FileData.MimeType}, rawPart, FormatGemini, idx)
+	case part.ExecutableCode != nil:
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "executable_code", Text: part.ExecutableCode.Code, Extra: setRawString(nil, "language", part.ExecutableCode.Language)}, rawPart, FormatGemini, idx)
+	case part.CodeExecutionResult != nil:
+		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "code_execution_result", Text: part.CodeExecutionResult.Output, Extra: setRawString(nil, "outcome", part.CodeExecutionResult.Outcome)}, rawPart, FormatGemini, idx)
+	default:
+		if req != nil && len(rawPart) > 0 {
+			req.Losses = append(req.Losses, irloss(FormatGemini, "", path, "gemini_part", rawPart, "Gemini part has no protocol-neutral representation and is preserved as native opaque IR"))
+		}
+		return relayir.Item{Kind: relayir.ItemOpaque, OriginalIndex: idx, Opaque: &relayir.Opaque{Type: "gemini_part", Raw: rawPart}, Metadata: relayir.CloneRawMap(part.Extra), Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "gemini_part", Raw: rawPart, Fields: relayir.CloneRawMap(part.Extra), Index: idx}}
+	}
 }
 
-func appendGeminiFunctionResponseLosses(req *requestDraft, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
+func appendGeminiFunctionResponseLossesIR(req *relayir.Request, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
 	if req == nil || resp == nil {
 		return
 	}
 	add := func(field string, raw json.RawMessage, reason string) {
-		if len(raw) == 0 {
-			return
+		if len(raw) > 0 {
+			req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[].functionResponse."+field, field, raw, reason))
 		}
-		req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[].functionResponse."+field, field, raw, reason))
-	}
-	marshalField := func(value interface{}) json.RawMessage {
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil
-		}
-		return raw
 	}
 	add("response", resp.Response, "Gemini functionResponse.response is serialized into protocol tool-result output text across protocols")
 	if resp.ID != "" {
-		add("id", marshalField(resp.ID), "Gemini functionResponse.id has no protocol-neutral tool-result field")
+		add("id", rawJSON(resp.ID), "Gemini functionResponse.id has no protocol-neutral tool-result field")
 	}
 	if resp.WillContinue != nil {
-		add("willContinue", marshalField(*resp.WillContinue), "Gemini functionResponse.willContinue has no equivalent in target protocols")
+		add("willContinue", rawJSON(*resp.WillContinue), "Gemini functionResponse.willContinue has no equivalent in target protocols")
 	}
 	if resp.Scheduling != "" {
-		add("scheduling", marshalField(resp.Scheduling), "Gemini functionResponse.scheduling has no equivalent in target protocols")
+		add("scheduling", rawJSON(resp.Scheduling), "Gemini functionResponse.scheduling has no equivalent in target protocols")
 	}
 	add("parts", resp.Parts, "Gemini functionResponse.parts has no equivalent in target protocols")
 	for key, raw := range resp.Extra {
@@ -278,141 +176,164 @@ func appendGeminiFunctionResponseLosses(req *requestDraft, resp *schema.GeminiFu
 	}
 }
 
-// emitGeminiRequest converts an protocol request view to Gemini API request.
-func emitGeminiRequest(ir *requestDraft) ([]byte, error) {
-	req := make(map[string]interface{})
-
-	// Convert Instructions to systemInstruction
-	if ir.Instructions != nil {
-		req["systemInstruction"] = map[string]interface{}{
-			"parts": []map[string]string{{"text": *ir.Instructions}},
+func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
+	out := make(map[string]interface{})
+	if len(reqIR.Instructions) > 0 {
+		var parts []map[string]interface{}
+		for _, inst := range reqIR.Instructions {
+			for _, item := range inst.Items {
+				if part := geminiPartFromIRItem(item, nil); part != nil {
+					parts = append(parts, part)
+				}
+			}
+			if len(inst.Items) == 0 && inst.Text != "" {
+				parts = append(parts, map[string]interface{}{"text": inst.Text})
+			}
+		}
+		if len(parts) > 0 {
+			out["systemInstruction"] = map[string]interface{}{"parts": parts}
 		}
 	}
-
-	// Convert messages to contents
-	contents := make([]map[string]interface{}, 0)
-	toolCallNames := toolCallNameByID(ir.Messages)
-	for _, msg := range ir.Messages {
-		contentMap := make(map[string]interface{})
-		contentMap["role"] = internalRoleToGemini(msg.Role)
-
-		parts := make([]map[string]interface{}, 0)
-
-		parts = geminiPartsFromItems(ir.SourceFormat, msg, toolCallNames)
-
-		contentMap["parts"] = parts
-		contents = append(contents, contentMap)
+	names := toolCallNameByIDIR(reqIR.Turns)
+	var contents []map[string]interface{}
+	for _, turn := range reqIR.Turns {
+		contents = append(contents, map[string]interface{}{
+			"role":  internalRoleToGemini(string(turn.Role)),
+			"parts": geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names),
+		})
 	}
-	req["contents"] = contents
-
-	// Generation config
-	genConfig := make(map[string]interface{})
-	if ir.MaxTokens != nil {
-		genConfig["maxOutputTokens"] = capGeminiMaxOutputTokens(*ir.MaxTokens)
+	out["contents"] = contents
+	genConfig := map[string]interface{}{}
+	if reqIR.Generation.MaxTokens != nil {
+		genConfig["maxOutputTokens"] = capGeminiMaxOutputTokens(*reqIR.Generation.MaxTokens)
 	}
-	if ir.Temperature != nil {
-		genConfig["temperature"] = *ir.Temperature
+	if reqIR.Generation.Temperature != nil {
+		genConfig["temperature"] = *reqIR.Generation.Temperature
 	}
-	if ir.TopP != nil {
-		genConfig["topP"] = *ir.TopP
+	if reqIR.Generation.TopP != nil {
+		genConfig["topP"] = *reqIR.Generation.TopP
 	}
-	if ir.TopK != nil {
-		genConfig["topK"] = *ir.TopK
+	if reqIR.Generation.TopK != nil {
+		genConfig["topK"] = *reqIR.Generation.TopK
 	}
-	if len(ir.StopWords) > 0 {
-		genConfig["stopSequences"] = ir.StopWords
+	if len(reqIR.Generation.Stop) > 0 {
+		genConfig["stopSequences"] = reqIR.Generation.Stop
 	}
-	if ir.CandidateCount != nil {
-		genConfig["candidateCount"] = *ir.CandidateCount
+	if reqIR.Generation.CandidateCount != nil {
+		genConfig["candidateCount"] = *reqIR.Generation.CandidateCount
 	}
-	if thinking := geminiThinkingFromProtocolRequest(ir); thinking != nil {
+	if thinking := geminiThinkingFromIRRequest(reqIR); thinking != nil {
 		genConfig["thinkingConfig"] = thinking
 	}
-	if mimeType, schema := geminiResponseFormat(ir.ResponseFormat); mimeType != "" {
+	if mimeType, schema := geminiResponseFormat(reqIR.Generation.ResponseFormat); mimeType != "" {
 		genConfig["responseMimeType"] = mimeType
 		if schema != nil {
 			genConfig["responseSchema"] = schema
 		}
 	}
-	for k, v := range ir.GeminiGenerationConfigExtra {
+	for k, v := range reqIR.Generation.Extra {
 		if _, exists := genConfig[k]; !exists {
 			genConfig[k] = v
 		}
 	}
 	if len(genConfig) > 0 {
-		req["generationConfig"] = genConfig
+		out["generationConfig"] = genConfig
 	}
-
-	// Safety settings
-	if ir.SafetySettings != nil {
-		req["safetySettings"] = ir.SafetySettings
+	if len(reqIR.Safety.Settings) > 0 {
+		out["safetySettings"] = relayir.CloneRaw(reqIR.Safety.Settings)
 	}
-
 	hasGeminiTools := false
-	if ir.Tools != nil {
-		if tools := geminiTools(ir.Tools); len(tools) > 0 {
-			req["tools"] = tools
+	if len(reqIR.Tools) > 0 {
+		tools := make([]schema.Tool, 0, len(reqIR.Tools))
+		for _, tool := range reqIR.Tools {
+			tools = append(tools, schemaToolFromIR(tool))
+		}
+		if projected := geminiTools(tools); len(projected) > 0 {
+			out["tools"] = projected
 			hasGeminiTools = true
 		}
 	}
-
-	// Tool config
-	if hasGeminiTools && ir.ToolChoice != nil {
-		if fcConfig, ok := geminiFunctionCallingConfig(ir.ToolChoice); ok {
-			toolConfig := map[string]interface{}{
-				"functionCallingConfig": fcConfig,
-			}
-			req["toolConfig"] = toolConfig
+	if hasGeminiTools && reqIR.ToolChoice != nil {
+		if fcConfig, ok := geminiFunctionCallingConfig(reqIR.ToolChoice.Raw); ok {
+			out["toolConfig"] = map[string]interface{}{"functionCallingConfig": fcConfig}
 		}
 	}
-
-	// Add Extra fields. Gemini CLI envelope fields belong outside the inner
-	// request and must not be echoed into request.*.
-	for k, v := range ir.Extra {
-		if isGeminiEnvelopeFamily(ir.SourceFormat) && isGeminiCLIEnvelopeExtra(k) {
+	for k, v := range reqIR.Metadata {
+		if isGeminiEnvelopeProtocol(reqIR.SourceProtocol) && isGeminiCLIEnvelopeExtra(k) {
 			continue
 		}
-		req[k] = v
+		out[k] = v
 	}
-
-	return json.Marshal(req)
+	for k, v := range reqIR.Native.Fields {
+		if isGeminiEnvelopeProtocol(reqIR.SourceProtocol) && isGeminiCLIEnvelopeExtra(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return json.Marshal(out)
 }
 
-func isGeminiEnvelopeFamily(format Format) bool {
-	return format == FormatGeminiCLI || format == FormatGeminiCode || format == FormatAntigravity
+func geminiThinkingFromIRRequest(req *relayir.Request) interface{} {
+	if req == nil {
+		return nil
+	}
+	if thinking := normalizeAnyGeminiThinkingConfig(req.Generation.Thinking); thinking != nil {
+		return thinking
+	}
+	return geminiThinkingFromReasoning(req.Generation.Reasoning)
 }
 
-func geminiPartsFromItems(source Format, msg requestTurnDraft, toolCallNames map[string]string) []map[string]interface{} {
-	items := canonicalMessageParts(msg)
-	parts := make([]map[string]interface{}, 0, len(items))
-	for _, item := range items {
-		if (source == FormatGemini || isGeminiEnvelopeFamily(source)) && len(item.Raw) > 0 {
+func isGeminiEnvelopeProtocol(protocol relayir.Protocol) bool {
+	return protocol == relayir.ProtocolGeminiCLI || protocol == relayir.ProtocolGeminiCode || protocol == relayir.ProtocolAntigravity
+}
+
+func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0, len(turn.Items))
+	for _, item := range turn.Items {
+		if (source == relayir.ProtocolGemini || isGeminiEnvelopeProtocol(source)) && len(item.Native.Raw) > 0 {
 			var raw map[string]interface{}
-			if err := json.Unmarshal(item.Raw, &raw); err == nil {
+			if json.Unmarshal(item.Native.Raw, &raw) == nil {
 				parts = append(parts, raw)
 				continue
 			}
 		}
-		if part := geminiPartFromItem(item, toolCallNames); part != nil {
+		if part := geminiPartFromIRItem(item, names); part != nil {
 			parts = append(parts, part)
 		}
 	}
 	return parts
 }
 
-func geminiPartFromItem(item requestItemDraft, toolCallNames map[string]string) map[string]interface{} {
+func geminiPartFromIRItem(item relayir.Item, names map[string]string) map[string]interface{} {
 	switch item.Kind {
-	case contentItemKindReasoning:
-		return geminiReasoningPart(item.Content)
-	case contentItemKindContent:
-		return geminiContentPart(item.Content)
-	case contentItemKindToolCall:
-		return geminiToolCallPart(item.ToolCall)
-	case contentItemKindToolResult:
-		return geminiToolResultPart(item.ToolResult, toolCallNames)
+	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
+		return geminiReasoningPart(schemaReasoningFromIR(item))
+	case relayir.ItemToolUse, relayir.ItemFunctionCall:
+		return geminiToolCallPart(schemaToolCallFromIR(item))
+	case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
+		return geminiToolResultPart(schemaToolResultFromIR(item), names)
 	default:
-		return nil
+		if part, ok := schemaContentFromIR(item); ok {
+			return geminiContentPart(part)
+		}
 	}
+	return nil
+}
+
+func toolCallNameByIDIR(turns []relayir.Turn) map[string]string {
+	names := map[string]string{}
+	for _, turn := range turns {
+		for _, item := range turn.Items {
+			if item.ToolUse == nil {
+				continue
+			}
+			id := firstNonEmptyString(item.ToolUse.CallID, item.ToolUse.ID, item.CallID, item.ID)
+			if id != "" && item.ToolUse.Name != "" {
+				names[id] = item.ToolUse.Name
+			}
+		}
+	}
+	return names
 }
 
 func geminiReasoningPart(rc schema.ContentPart) map[string]interface{} {
@@ -582,19 +503,6 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 			"response": response,
 		},
 	}
-}
-
-func toolCallNameByID(messages []requestTurnDraft) map[string]string {
-	names := make(map[string]string)
-	for _, msg := range messages {
-		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
-			if call.ID == "" || call.Name == "" {
-				continue
-			}
-			names[call.ID] = call.Name
-		}
-	}
-	return names
 }
 
 func toolResponseName(toolCallID string, names map[string]string) string {

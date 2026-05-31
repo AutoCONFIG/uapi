@@ -2,9 +2,9 @@ package convert
 
 import (
 	"encoding/json"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 	"testing"
+
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
 func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
@@ -21,11 +21,10 @@ func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
 		"parallel_tool_calls":false,
 		"store":false
 	}`)
-	req, err := parseOpenAIResponsesRequest(body)
+	got, err := parseOpenAIResponsesRequestDirectIR(body)
 	if err != nil {
-		t.Fatalf("parseOpenAIResponsesRequest: %v", err)
+		t.Fatalf("parseOpenAIResponsesRequestDirectIR: %v", err)
 	}
-	got := req.ToIR()
 	if got.Native.Protocol != ir.ProtocolOpenAIResponses {
 		t.Fatalf("protocol = %q, want %q", got.Native.Protocol, ir.ProtocolOpenAIResponses)
 	}
@@ -67,11 +66,10 @@ func TestResponsesOpaqueItemRecordsAuditLoss(t *testing.T) {
 		"model":"gpt-5",
 		"input":[{"id":"fs_1","type":"file_search_call","status":"completed","queries":["uapi"]}]
 	}`)
-	req, err := parseOpenAIResponsesRequest(body)
+	got, err := parseOpenAIResponsesRequestDirectIR(body)
 	if err != nil {
-		t.Fatalf("parseOpenAIResponsesRequest: %v", err)
+		t.Fatalf("parseOpenAIResponsesRequestDirectIR: %v", err)
 	}
-	got := req.ToIR()
 	if len(got.Losses) != 1 {
 		t.Fatalf("losses = %d, want 1: %#v", len(got.Losses), got.Losses)
 	}
@@ -317,21 +315,24 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 }
 
 func TestProtocolResponseViewToIRPreservesUsageAndOrderedItems(t *testing.T) {
-	resp := &responseDraft{
-		ID:    "chatcmpl_1",
-		Model: "gpt-test",
-		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
-		Choices: []responseChoiceDraft{{
-			Index: 0,
-			Role:  "assistant",
-			Items: []requestItemDraft{
-				{Kind: "content", Content: schema.ContentPart{Type: "text", Text: "answer"}},
-				{Kind: "tool_call", ToolCall: schema.ToolCall{ID: "call_1", Type: "function", Name: "lookup"}},
+	body := []byte(`{
+		"id":"chatcmpl_1",
+		"model":"gpt-test",
+		"choices":[{
+			"index":0,
+			"message":{
+				"role":"assistant",
+				"content":"answer",
+				"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]
 			},
-			FinishReason: "tool_calls",
-		}},
+			"finish_reason":"tool_calls"
+		}],
+		"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}
+	}`)
+	got, err := parseOpenAIChatResponseDirectIR(body)
+	if err != nil {
+		t.Fatalf("parseOpenAIChatResponseDirectIR: %v", err)
 	}
-	got := resp.ToIR(FormatOpenAIChatCompletions)
 	if got.SourceProtocol != ir.ProtocolOpenAIChat || got.Usage == nil || got.Usage.CacheReadTokens != 2 {
 		t.Fatalf("response IR metadata/usage not preserved: %#v", got)
 	}

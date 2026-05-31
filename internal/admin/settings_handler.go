@@ -137,9 +137,9 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *Handler) settingsResponse() AdminSettingsResponse {
-	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "aurora"))
+	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "mesh"))
 	if background == "" {
-		background = "aurora"
+		background = "mesh"
 	}
 	modelRatios := appsettings.Get(h.db, appsettings.ModelRatios, "{}")
 	if modelRatios == "" {
@@ -162,9 +162,9 @@ func (h *Handler) HandlePublicSettings(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "aurora"))
+	background := normalizeBackground(appsettings.Get(h.db, appsettings.UIBackground, "mesh"))
 	if background == "" {
-		background = "aurora"
+		background = "mesh"
 	}
 	h.jsonResponse(ctx, 200, PublicSettingsResponse{Background: background, PublicBaseURL: appsettings.Get(h.db, appsettings.UIPublicBaseURL, ""), WallpaperURL: h.wallpaperURL()})
 }
@@ -196,10 +196,8 @@ func (h *Handler) saveSettings(changes map[string]interface{}) error {
 
 func normalizeBackground(value string) string {
 	switch value {
-	case "", "aurora":
-		return "aurora"
-	case "silk", "mesh", "topography", "noir", "custom":
-		return value
+	case "", "aurora", "silk", "mesh", "topography", "noir", "custom":
+		return "mesh"
 	default:
 		return ""
 	}
@@ -255,13 +253,13 @@ func (h *Handler) HandleWallpaperUpload(ctx *fasthttp.RequestCtx) {
 	}
 	cleanupOldWallpapers(dir, target)
 	if err := appsettings.SetMany(h.db, map[string]string{
-		appsettings.UIBackground:    "custom",
+		appsettings.UIBackground:    "mesh",
 		appsettings.UIWallpaperPath: target,
 	}); err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "save settings failed")
 		return
 	}
-	createAuditLogWithValues(h.db, "update", "settings", "wallpaper", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(map[string]interface{}{"background": "custom"}))
+	createAuditLogWithValues(h.db, "update", "settings", "wallpaper", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(map[string]interface{}{"background": "mesh"}))
 	h.jsonResponse(ctx, 200, h.settingsResponse())
 }
 

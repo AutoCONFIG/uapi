@@ -122,6 +122,41 @@ func TestResponsesStreamConverterEmitsCompletedOutputText(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamCachedTokensConvertToChatUsage(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cached_tokens":7}}}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"prompt_tokens":10`, `"completion_tokens":2`, `"cached_tokens":7`, `"cached_read_tokens":7`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses stream cache usage missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestAnthropicStreamCacheUsageConvertsToChatUsage(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":20,"output_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":4},"cache_read_input_tokens":7}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"prompt_tokens":20`, `"completion_tokens":3`, `"cached_tokens":7`, `"cache_creation_input_tokens":6`, `"cached_write_tokens":6`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Anthropic stream cache usage missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestGeminiStreamCachedContentConvertsToChatUsage(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatGemini, convert.FormatOpenAIChatCompletions)
+	out := converter.Convert([]byte(`data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":5,"totalTokenCount":16,"cachedContentTokenCount":8}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"prompt_tokens":11`, `"completion_tokens":5`, `"total_tokens":16`, `"cached_tokens":8`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Gemini stream cache usage missing %s:\n%s", want, got)
+		}
+	}
+}
+
 func TestResponsesStreamConverterDoesNotDuplicateDoneText(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
 	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
@@ -170,6 +205,40 @@ func TestChatToAnthropicEmitsTextBlockBeforeDelta(t *testing.T) {
 	delta := strings.Index(string(out), `"type":"content_block_delta"`)
 	if start < 0 || delta < 0 || start > delta {
 		t.Fatalf("anthropic stream must start text block before delta:\n%s", out)
+	}
+}
+
+func TestResponsesFunctionCallDoneArgumentsConvertToAnthropicToolInput(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent","arguments":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"type":"tool_use"`, `"id":"call_1"`, `"name":"Agent"`, `"partial_json":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses function_call.done arguments not converted to Anthropic tool input, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestResponsesFunctionCallDoneDoesNotDuplicateArgumentDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent"}}` + "\n\n"))
+	delta := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"call_1","delta":"{\"description\":\"Audit API\""}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent","arguments":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"}}` + "\n\n"))
+	got := string(delta) + string(done)
+	if strings.Count(got, `description`) != 1 || !strings.Contains(got, `prompt`) || strings.Contains(string(done), `description`) {
+		t.Fatalf("Responses function_call.done should emit only missing argument suffix:\n%s", got)
+	}
+}
+
+func TestResponsesFunctionCallArgumentsDoneEmitsOnlyMissingSuffix(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent"}}` + "\n\n"))
+	delta := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"call_1","delta":"{\"description\":\"Audit API\""}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"call_1","arguments":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"}` + "\n\n"))
+	got := string(delta) + string(done)
+	if strings.Count(got, `description`) != 1 || !strings.Contains(string(done), `prompt`) || strings.Contains(string(done), `description`) {
+		t.Fatalf("Responses function_call_arguments.done should emit only missing suffix:\n%s", got)
 	}
 }
 

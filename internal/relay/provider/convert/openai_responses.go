@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseOpenAIResponsesRequest converts OpenAI Responses API request to an protocol request view.
-func parseOpenAIResponsesRequest(body []byte) (*requestDraft, error) {
+func parseOpenAIResponsesRequestDirectIR(body []byte) (*relayir.Request, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -17,19 +17,20 @@ func parseOpenAIResponsesRequest(body []byte) (*requestDraft, error) {
 	var rawRoot map[string]json.RawMessage
 	_ = json.Unmarshal(body, &rawRoot)
 
-	ir := &requestDraft{
+	out := &relayir.Request{
+		SourceProtocol: relayir.ProtocolOpenAIResponses,
 		Model:          req.Model,
 		Stream:         req.Stream,
-		RawRequestBody: append(json.RawMessage(nil), body...),
-		SourceFormat:   FormatOpenAIResponses,
-		Extra:          make(map[string]json.RawMessage),
+		Native: relayir.NativeEnvelope{
+			Protocol: relayir.ProtocolOpenAIResponses,
+			RawBody:  relayir.CloneRaw(body),
+		},
+		Metadata: map[string]json.RawMessage{},
 	}
-
-	// Copy Extra fields
 	for k, v := range req.Extra {
-		ir.Extra[k] = v
+		out.Metadata[k] = relayir.CloneRaw(v)
 	}
-	copyRawFields(ir.Extra, rawRoot,
+	copyRawFields(out.Metadata, rawRoot,
 		"truncation",
 		"stream_options",
 		"metadata",
@@ -42,225 +43,214 @@ func parseOpenAIResponsesRequest(body []byte) (*requestDraft, error) {
 		"prompt_cache_key",
 		"safety_identifier",
 	)
+	out.Native.Fields = relayir.CloneRawMap(out.Metadata)
+	out.Native.Unknown = relayir.CloneRawMap(out.Metadata)
 
-	// Handle Instructions - always set (the bug fix)
 	if req.Instructions != "" {
-		ir.Instructions = &req.Instructions
+		out.Instructions = append(out.Instructions, relayir.Instruction{
+			Role: relayir.RoleSystem,
+			Text: req.Instructions,
+			Items: []relayir.Item{{
+				Kind: relayir.ItemText,
+				Text: &relayir.Text{Text: req.Instructions},
+			}},
+		})
 	}
-
-	// Parse Input - can be string or array
-	var messages []requestTurnDraft
-	var inputItems []schema.ResponsesInputItem
 
 	if req.Input.Text != nil {
-		// Single string input becomes a user message
-		msg := requestTurnDraft{Role: "user"}
-		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
-		messages = append(messages, msg)
-	} else if len(req.Input.Items) > 0 {
-		inputItems = req.Input.Items
+		out.Turns = append(out.Turns, relayir.Turn{
+			Role: relayir.RoleUser,
+			Items: []relayir.Item{{
+				Kind: relayir.ItemText,
+				Text: &relayir.Text{Text: *req.Input.Text},
+			}},
+		})
 	} else {
-		// Empty input - no messages
-	}
-
-	// Convert input items to adapter turns
-	for _, item := range inputItems {
-		rawItem := append(json.RawMessage(nil), item.Raw...)
-		switch item.Type {
-		case "message":
-			var content []schema.ContentPart
-			if item.Content.Text != nil {
-				content = []schema.ContentPart{{Type: "text", Text: *item.Content.Text}}
-			} else if len(item.Content.Parts) > 0 {
-				content = item.Content.Parts
+		for _, item := range req.Input.Items {
+			if !knownResponsesInputItemType(item.Type) {
+				out.Losses = append(out.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, item.Raw, "Responses input item is preserved as native raw/opaque IR"))
 			}
-			msg := requestTurnDraft{
-				Role:    item.Role,
-				ItemID:  item.ID,
-				Status:  item.Status,
-				Phase:   item.Phase,
-				RawItem: rawItem,
-				Extra:   item.Extra,
-			}
-			for _, part := range content {
-				appendContentItem(&msg, part, rawJSON(part))
-			}
-			messages = append(messages, msg)
-
-		case "reasoning":
-			msg := requestTurnDraft{
-				Role:    "assistant",
-				ItemID:  item.ID,
-				Status:  item.Status,
-				RawItem: rawItem,
-				Extra:   item.Extra,
-			}
-			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
-				appendReasoningItem(&msg, part, rawItem)
-			}
-			messages = append(messages, msg)
-
-		case "function_call":
-			// function_call item becomes assistant message with tool calls
-			name := qualifyResponsesNamespaceToolName(rawString(item.Extra["namespace"]), item.Name)
-			msg := requestTurnDraft{
-				Role:    "assistant",
-				ItemID:  item.ID,
-				Status:  item.Status,
-				RawItem: rawItem,
-				Extra:   item.Extra,
-			}
-			appendToolCallItem(&msg, schema.ToolCall{
-				ID:   item.CallID,
-				Type: "function",
-				Name: name,
-				Function: struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				}{
-					Name:      name,
-					Arguments: item.Arguments,
-				},
-			}, rawItem)
-			messages = append(messages, msg)
-
-		case "function_call_output":
-			// function_call_output becomes tool result
-			msg := requestTurnDraft{
-				Role:    "tool",
-				ItemID:  item.ID,
-				Status:  item.Status,
-				RawItem: rawItem,
-				Extra:   item.Extra,
-			}
-			appendToolResultItem(&msg, schema.ToolResult{
-				ToolCallID: item.CallID,
-				Content:    item.Output,
-				ContentRaw: item.OutputRaw,
-			}, rawItem)
-			messages = append(messages, msg)
-		default:
-			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item is preserved as native raw/opaque IR"))
-			messages = append(messages, requestTurnDraft{
-				ItemID:  item.ID,
-				Status:  item.Status,
-				Phase:   item.Phase,
-				RawItem: rawItem,
-				Extra:   item.Extra,
-			})
+			out.Turns = append(out.Turns, responsesInputItemToIRTurn(item))
 		}
 	}
 
-	ir.Messages = messages
-
-	// Generation parameters
-	if req.MaxOutputTokens != nil {
-		ir.MaxTokens = req.MaxOutputTokens
-	}
-	if req.Temperature != nil {
-		ir.Temperature = req.Temperature
-	}
-	if req.TopP != nil {
-		ir.TopP = req.TopP
-	}
+	out.Generation.MaxTokens = req.MaxOutputTokens
+	out.Generation.Temperature = req.Temperature
+	out.Generation.TopP = req.TopP
 	if _, ok := rawRoot["parallel_tool_calls"]; ok {
-		ir.ParallelToolCalls = &req.ParallelToolCalls
+		out.Generation.ParallelToolCalls = &req.ParallelToolCalls
 	} else if req.ParallelToolCalls {
-		ir.ParallelToolCalls = &req.ParallelToolCalls
+		out.Generation.ParallelToolCalls = &req.ParallelToolCalls
 	}
-	if req.ServiceTier != "" {
-		ir.ServiceTier = req.ServiceTier
-	}
+	out.Generation.ServiceTier = req.ServiceTier
 	if _, ok := rawRoot["store"]; ok {
-		ir.Store = &req.Store
+		out.Generation.Store = &req.Store
 	} else if req.Store {
-		ir.Store = &req.Store
+		out.Generation.Store = &req.Store
 	}
-	if req.Reasoning != nil {
-		ir.Reasoning = req.Reasoning
-	}
+	out.Generation.Reasoning = relayir.CloneRaw(req.Reasoning)
 	if req.Tools != nil {
 		var tools []schema.Tool
 		if json.Unmarshal(req.Tools, &tools) == nil {
-			ir.Tools = tools
+			for _, tool := range tools {
+				out.Tools = append(out.Tools, irTool(tool, FormatOpenAIResponses))
+			}
 		}
 	}
 	if req.ToolChoice != nil {
-		ir.ToolChoice = req.ToolChoice
+		out.ToolChoice = &relayir.ToolChoice{Raw: relayir.CloneRaw(req.ToolChoice)}
 	}
-
-	return ir, nil
+	return out, nil
 }
 
-// emitOpenAIResponsesRequest converts an protocol request view to OpenAI Responses API request.
-// THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func emitOpenAIResponsesRequest(ir *requestDraft) ([]byte, error) {
-	// Use a map to build the JSON to ensure field ordering
-	resp := make(map[string]interface{})
-
-	resp["model"] = ir.Model
-	resp["stream"] = ir.Stream
-
-	// CRITICAL BUG FIX: Always emit instructions field, even if empty
-	// The previous bug was: if ir.Instructions != nil && *ir.Instructions != "" { ... }
-	// This caused "Instructions are required" error when no system message was present
-	if ir.Instructions != nil {
-		resp["instructions"] = *ir.Instructions
-	} else {
-		resp["instructions"] = "" // Always emit, even if empty
+func knownResponsesInputItemType(typ string) bool {
+	switch typ {
+	case "message", "reasoning", "function_call", "function_call_output":
+		return true
+	default:
+		return false
 	}
+}
 
-	// Convert messages to input array
+func responsesInputItemToIRTurn(item schema.ResponsesInputItem) relayir.Turn {
+	rawItem := relayir.CloneRaw(item.Raw)
+	turn := relayir.Turn{
+		Role:     relayir.Role(responsesRole(item.Role)),
+		ID:       item.ID,
+		Status:   item.Status,
+		Phase:    item.Phase,
+		Metadata: relayir.CloneRawMap(item.Extra),
+		Native: relayir.NativeEnvelope{
+			Protocol: relayir.ProtocolOpenAIResponses,
+			Kind:     item.Type,
+			Raw:      rawItem,
+			Fields:   relayir.CloneRawMap(item.Extra),
+		},
+	}
+	switch item.Type {
+	case "message":
+		var content []schema.ContentPart
+		if item.Content.Text != nil {
+			content = []schema.ContentPart{{Type: "text", Text: *item.Content.Text}}
+		} else if len(item.Content.Parts) > 0 {
+			content = item.Content.Parts
+		}
+		for idx, part := range content {
+			turn.Items = append(turn.Items, irContentPartItem(contentItemKindContent, part, rawJSON(part), FormatOpenAIResponses, idx))
+		}
+	case "reasoning":
+		turn.Role = relayir.RoleAssistant
+		for idx, part := range reasoningPartsFromResponsesExtra(item.Extra) {
+			turn.Items = append(turn.Items, irContentPartItem(contentItemKindReasoning, part, rawItem, FormatOpenAIResponses, idx))
+		}
+	case "function_call":
+		turn.Role = relayir.RoleAssistant
+		name := qualifyResponsesNamespaceToolName(rawString(item.Extra["namespace"]), item.Name)
+		call := schema.ToolCall{
+			ID:   item.CallID,
+			Type: "function",
+			Name: name,
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      name,
+				Arguments: item.Arguments,
+			},
+		}
+		turn.Items = append(turn.Items, irToolUseItem(call, rawItem, FormatOpenAIResponses, 0))
+	case "function_call_output":
+		turn.Role = relayir.RoleTool
+		turn.Items = append(turn.Items, irToolResultItem(schema.ToolResult{
+			ToolCallID: item.CallID,
+			Content:    item.Output,
+			ContentRaw: item.OutputRaw,
+		}, rawItem, FormatOpenAIResponses, 0))
+	default:
+		turn.Role = relayir.RoleOpaque
+		turn.Items = append(turn.Items, relayir.Item{
+			ID:     item.ID,
+			Kind:   relayir.ItemOpaque,
+			Opaque: &relayir.Opaque{Type: item.Type, Raw: rawItem},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: item.Type, Raw: rawItem},
+		})
+	}
+	if len(turn.Items) == 0 && len(rawItem) > 0 {
+		turn.Items = append(turn.Items, relayir.Item{
+			ID:     item.ID,
+			Kind:   relayir.ItemOpaque,
+			Opaque: &relayir.Opaque{Type: item.Type, Raw: rawItem},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: item.Type, Raw: rawItem},
+		})
+	}
+	return turn
+}
+
+func emitOpenAIResponsesRequestDirectIR(req *relayir.Request) ([]byte, error) {
+	resp := make(map[string]interface{})
+	resp["model"] = req.Model
+	resp["stream"] = req.Stream
+	if len(req.Instructions) > 0 {
+		text := req.Instructions[0].Text
+		if text == "" {
+			text = instructionText(req.Instructions[0])
+		}
+		resp["instructions"] = text
+	} else {
+		resp["instructions"] = ""
+	}
 	input := make([]map[string]interface{}, 0)
-	for _, msg := range ir.Messages {
-		if isResponsesFamily(ir.SourceFormat) && len(msg.RawItem) > 0 {
+	for _, turn := range req.Turns {
+		if isResponsesFamily(protocolFormat(req.SourceProtocol)) && len(turn.Native.Raw) > 0 {
 			var raw map[string]interface{}
-			if err := decodeJSONUseNumber(msg.RawItem, &raw); err == nil {
+			if err := decodeJSONUseNumber(turn.Native.Raw, &raw); err == nil {
 				input = append(input, raw)
 				continue
 			}
 		}
-
-		input = append(input, responsesInputItemsFromOrderedParts(msg)...)
+		input = append(input, responsesInputItemsFromIRTurn(turn)...)
 	}
 	resp["input"] = input
-
-	// Generation parameters
-	if ir.MaxTokens != nil {
-		resp["max_output_tokens"] = *ir.MaxTokens
+	if req.Generation.MaxTokens != nil {
+		resp["max_output_tokens"] = *req.Generation.MaxTokens
 	}
-	if ir.Temperature != nil {
-		resp["temperature"] = *ir.Temperature
+	if req.Generation.Temperature != nil {
+		resp["temperature"] = *req.Generation.Temperature
 	}
-	if ir.TopP != nil {
-		resp["top_p"] = *ir.TopP
+	if req.Generation.TopP != nil {
+		resp["top_p"] = *req.Generation.TopP
 	}
-	if ir.ParallelToolCalls != nil {
-		resp["parallel_tool_calls"] = *ir.ParallelToolCalls
+	if req.Generation.ParallelToolCalls != nil {
+		resp["parallel_tool_calls"] = *req.Generation.ParallelToolCalls
 	}
-	if ir.ServiceTier != "" {
-		resp["service_tier"] = ir.ServiceTier
+	if req.Generation.ServiceTier != "" {
+		resp["service_tier"] = req.Generation.ServiceTier
 	}
-	if ir.Store != nil {
-		resp["store"] = *ir.Store
+	if req.Generation.Store != nil {
+		resp["store"] = *req.Generation.Store
 	}
-	if ir.Reasoning != nil {
-		resp["reasoning"] = ir.Reasoning
+	if req.Generation.Reasoning != nil {
+		resp["reasoning"] = req.Generation.Reasoning
 	}
-	if ir.Tools != nil {
-		tools, _ := json.Marshal(openAIResponsesTools(ir.Tools))
-		resp["tools"] = json.RawMessage(tools)
+	if req.Tools != nil {
+		tools := make([]schema.Tool, 0, len(req.Tools))
+		for _, tool := range req.Tools {
+			tools = append(tools, schemaToolFromIR(tool))
+		}
+		raw, _ := json.Marshal(openAIResponsesTools(tools))
+		resp["tools"] = json.RawMessage(raw)
 	}
-	if ir.ToolChoice != nil {
-		tc, _ := json.Marshal(ir.ToolChoice)
-		resp["tool_choice"] = json.RawMessage(tc)
+	if req.ToolChoice != nil {
+		resp["tool_choice"] = relayir.CloneRaw(req.ToolChoice.Raw)
 	}
-
-	// Add Extra fields
-	for k, v := range ir.Extra {
+	for k, v := range req.Metadata {
 		resp[k] = v
 	}
-
+	if len(req.Native.Fields) > 0 {
+		for k, v := range req.Native.Fields {
+			resp[k] = v
+		}
+	}
 	return json.Marshal(resp)
 }
 
@@ -325,75 +315,80 @@ func isResponsesFamily(format Format) bool {
 	return format == FormatOpenAIResponses || format == FormatCodexResponses
 }
 
-func responsesInputItemsFromOrderedParts(msg requestTurnDraft) []map[string]interface{} {
+func responsesInputItemsFromIRTurn(turn relayir.Turn) []map[string]interface{} {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
+	role := responsesRole(string(turn.Role))
 	flushContent := func() {
 		if len(pendingContent) == 0 {
 			return
 		}
 		item := map[string]interface{}{
 			"type":    "message",
-			"role":    responsesRole(msg.Role),
-			"content": responsesMessageContent(responsesRole(msg.Role), pendingContent),
+			"role":    role,
+			"content": responsesMessageContent(role, pendingContent),
 		}
-		if msg.ItemID != "" {
-			item["id"] = msg.ItemID
+		if turn.ID != "" {
+			item["id"] = turn.ID
 		}
-		if msg.Status != "" {
-			item["status"] = msg.Status
+		if turn.Status != "" {
+			item["status"] = turn.Status
 		}
-		if msg.Phase != "" {
-			item["phase"] = msg.Phase
+		if turn.Phase != "" {
+			item["phase"] = turn.Phase
 		}
-		for k, v := range msg.Extra {
+		for k, v := range turn.Metadata {
 			item[k] = v
 		}
 		items = append(items, item)
 		pendingContent = nil
 	}
-
-	for _, part := range msg.Parts {
-		switch part.Kind {
-		case contentItemKindContent:
-			if msg.Role != "tool" {
-				pendingContent = append(pendingContent, part.Content)
+	for _, item := range turn.Items {
+		switch item.Kind {
+		case relayir.ItemText, relayir.ItemImage, relayir.ItemFile, relayir.ItemDocument, relayir.ItemAudio, relayir.ItemRefusal, relayir.ItemExecutableCode, relayir.ItemCodeExecutionResult, relayir.ItemOpaque:
+			if role != "tool" {
+				if part, ok := schemaContentFromIR(item); ok {
+					pendingContent = append(pendingContent, part)
+				}
 			}
-		case contentItemKindReasoning:
+		case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
 			flushContent()
+			part := schemaReasoningFromIR(item)
 			reasoning := map[string]interface{}{
 				"type":    "reasoning",
 				"id":      generateResponsesReasoningID(),
-				"summary": responsesReasoningSummary([]schema.ContentPart{part.Content}),
+				"summary": responsesReasoningSummary([]schema.ContentPart{part}),
 			}
-			if msg.ItemID != "" {
-				reasoning["id"] = msg.ItemID
+			if turn.ID != "" {
+				reasoning["id"] = turn.ID
 			}
-			if msg.Status != "" {
-				reasoning["status"] = msg.Status
+			if turn.Status != "" {
+				reasoning["status"] = turn.Status
 			}
-			if encrypted := reasoningEncryptedContent([]schema.ContentPart{part.Content}); encrypted != "" {
+			if encrypted := reasoningEncryptedContent([]schema.ContentPart{part}); encrypted != "" {
 				reasoning["encrypted_content"] = encrypted
 			}
 			items = append(items, reasoning)
-		case contentItemKindToolCall:
+		case relayir.ItemToolUse, relayir.ItemFunctionCall:
 			flushContent()
-			name := part.ToolCall.Name
+			call := schemaToolCallFromIR(item)
+			name := call.Name
 			if name == "" {
-				name = part.ToolCall.Function.Name
+				name = call.Function.Name
 			}
 			items = append(items, map[string]interface{}{
 				"type":      "function_call",
-				"call_id":   part.ToolCall.ID,
+				"call_id":   firstNonEmptyString(call.ID, item.CallID, item.ID),
 				"name":      name,
-				"arguments": part.ToolCall.Function.Arguments,
+				"arguments": call.Function.Arguments,
 			})
-		case contentItemKindToolResult:
+		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 			flushContent()
+			result := schemaToolResultFromIR(item)
 			items = append(items, map[string]interface{}{
 				"type":    "function_call_output",
-				"call_id": part.ToolResult.ToolCallID,
-				"output":  responsesToolResultOutput(part.ToolResult),
+				"call_id": result.ToolCallID,
+				"output":  responsesToolResultOutput(result),
 			})
 		}
 	}

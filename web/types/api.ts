@@ -35,7 +35,7 @@ export type AdminSettings = {
   admin_username: string;
   admin_password?: string;
   max_keys_per_user: number;
-  background: "aurora" | "silk" | "mesh" | "topography" | "noir" | "custom";
+  background: "mesh";
   public_base_url?: string;
   wallpaper_url?: string;
 };
