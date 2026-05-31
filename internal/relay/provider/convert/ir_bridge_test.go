@@ -138,6 +138,32 @@ func TestGeminiFunctionResponseNativeFieldsSurviveSameFormat(t *testing.T) {
 	}
 }
 
+func TestGeminiFunctionResponseExtendedFieldsRecordCrossProtocolLoss(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"functionResponse":{
+			"name":"lookup",
+			"id":"fr_1",
+			"response":{"content":[{"text":"tool result"}]},
+			"willContinue":true,
+			"scheduling":"SILENT",
+			"parts":[{"text":"nested"}],
+			"vendorField":{"x":1}
+		}}]}]
+	}`)
+	converted, audit, err := ConvertRequestDetailed(FormatGemini, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if indexOf(string(converted), `"function_call_output"`) < 0 {
+		t.Fatalf("converted body should contain tool result output: %s", converted)
+	}
+	for _, field := range []string{"response", "id", "willContinue", "scheduling", "parts", "vendorField"} {
+		if !hasLossField(audit.Losses, field) {
+			t.Fatalf("missing functionResponse loss for %s: %#v", field, audit.Losses)
+		}
+	}
+}
+
 func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 	req := &ir.Request{
 		SourceProtocol: ir.ProtocolOpenAIResponses,
@@ -211,4 +237,13 @@ func indexOf(text, needle string) int {
 		}
 	}
 	return -1
+}
+
+func hasLossField(losses []ir.Loss, field string) bool {
+	for _, loss := range losses {
+		if loss.Field == field && loss.ValueHash != "" && loss.Preserved {
+			return true
+		}
+	}
+	return false
 }

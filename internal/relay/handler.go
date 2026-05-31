@@ -2010,7 +2010,7 @@ func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTok
 
 func injectStreamTrue(body []byte) []byte {
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
 	}
 	bodyMap["stream"] = true
@@ -2023,7 +2023,7 @@ func injectStreamTrue(body []byte) []byte {
 
 func cleanJSONUndefinedPlaceholders(body []byte) []byte {
 	var root interface{}
-	if err := json.Unmarshal(body, &root); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &root); err != nil {
 		return body
 	}
 	cleaned, changed := cleanUndefinedValue(root, 0)
@@ -2080,7 +2080,7 @@ func setRequestModel(body []byte, model string) []byte {
 		return body
 	}
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
 	}
 	bodyMap["model"] = model
@@ -2104,7 +2104,7 @@ func routedModelFromBody(body []byte, fallback string) string {
 
 func normalizeCodexResponsesRequest(body []byte) []byte {
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
 	}
 	if _, ok := bodyMap["instructions"]; !ok {
@@ -2213,7 +2213,7 @@ func injectModelIfMissing(body []byte, model string) []byte {
 		return body
 	}
 	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
 	}
 	if existing, ok := bodyMap["model"].(string); ok && strings.TrimSpace(existing) != "" {

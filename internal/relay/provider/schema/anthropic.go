@@ -8,7 +8,7 @@ import (
 type AnthropicRequest struct {
 	Model         string             `json:"model"`
 	Messages      []AnthropicMessage `json:"messages"`
-	MaxTokens     int                `json:"max_tokens"`
+	MaxTokens     *int               `json:"max_tokens,omitempty"`
 	System        json.RawMessage    `json:"system,omitempty"` // string or []ContentBlock
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
@@ -76,17 +76,17 @@ func (m *AnthropicMessage) UnmarshalJSON(data []byte) error {
 
 // AnthropicContentBlock represents a content block in an Anthropic message.
 type AnthropicContentBlock struct {
-	Type       string                `json:"type"`
-	Text       string                `json:"text,omitempty"`
-	Input      json.RawMessage       `json:"input,omitempty"`
-	ID         string                `json:"id,omitempty"`
-	Name       string                `json:"name,omitempty"`
-	ToolUseID  string                `json:"tool_use_id,omitempty"`
-	ContentStr string                `json:"content,omitempty"`
-	IsError    bool                  `json:"is_error,omitempty"`
-	Source     *AnthropicImageSource `json:"source,omitempty"`
-	Thinking   string                `json:"thinking,omitempty"`
-	Signature  string                `json:"signature,omitempty"`
+	Type      string                `json:"type"`
+	Text      string                `json:"text,omitempty"`
+	Input     json.RawMessage       `json:"input,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	ToolUseID string                `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage       `json:"content,omitempty"`
+	IsError   bool                  `json:"is_error,omitempty"`
+	Source    *AnthropicImageSource `json:"source,omitempty"`
+	Thinking  string                `json:"thinking,omitempty"`
+	Signature string                `json:"signature,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -131,8 +131,15 @@ type AnthropicResponse struct {
 
 // AnthropicUsage represents token usage in the Anthropic API.
 type AnthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	InputTokens              int                        `json:"input_tokens"`
+	OutputTokens             int                        `json:"output_tokens"`
+	CacheCreationInputTokens int                        `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int                        `json:"cache_read_input_tokens,omitempty"`
+	CacheCreation            *AnthropicCacheCreation    `json:"cache_creation,omitempty"`
+	ServerToolUse            map[string]json.RawMessage `json:"server_tool_use,omitempty"`
+}
+
+type AnthropicCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }

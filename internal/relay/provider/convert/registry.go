@@ -150,7 +150,7 @@ func completeLossProtocols(req *ir.Request, clientFormat, upstreamFormat Format)
 }
 
 func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat Format) {
-	if req == nil || clientFormat == upstreamFormat {
+	if req == nil || sameNativeRequestFamily(clientFormat, upstreamFormat) {
 		return
 	}
 	for key, raw := range req.Native.Fields {
@@ -165,6 +165,13 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 	req.Native.Fields = nil
 	req.Native.Unknown = nil
 	req.Metadata = nil
+}
+
+func sameNativeRequestFamily(a, b Format) bool {
+	if a == b {
+		return true
+	}
+	return isAnthropicFamily(a) && isAnthropicFamily(b)
 }
 
 func irloss(source, target Format, path, field string, raw []byte, reason string) ir.Loss {

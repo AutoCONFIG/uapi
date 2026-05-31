@@ -1153,6 +1153,38 @@ func TestGeminiPDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
 	}
 }
 
+func TestGeminiInjectedModelSurvivesCodexConversion(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.5",
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatCodexResponses, body)
+	if err != nil {
+		t.Fatalf("Gemini -> Codex: %v", err)
+	}
+	if !strings.Contains(string(converted), `"model":"gpt-5.5"`) {
+		t.Fatalf("Gemini injected model was not preserved for Codex: %s", converted)
+	}
+}
+
+func TestAnthropicDocumentToOpenAIResponsesOmitsUnsupportedFileType(t *testing.T) {
+	body := []byte(`{"model":"claude","max_tokens":100,"messages":[{"role":"user","content":[
+		{"type":"text","text":"summarize"},
+		{"type":"document","title":"paper.pdf","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}
+	]}]}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Responses: %v", err)
+	}
+	text := string(converted)
+	if !strings.Contains(text, `"type":"input_file"`) || !strings.Contains(text, `"file_data":"data:application/pdf;base64,AA=="`) {
+		t.Fatalf("Anthropic document did not become Responses input_file: %s", converted)
+	}
+	if strings.Contains(text, `"file_type"`) || strings.Contains(text, `"mime_type"`) {
+		t.Fatalf("Responses input_file must not include unsupported mime fields: %s", converted)
+	}
+}
+
 func TestOpenAIChatFileConvertsToGeminiInlineData(t *testing.T) {
 	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[
 		{"type":"text","text":"summarize"},

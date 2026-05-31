@@ -428,13 +428,13 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 	if part.Filename != "" {
 		out["filename"] = part.Filename
 	}
-	if part.FileType != "" {
+	if part.FileType != "" && partType != "input_file" {
 		out["file_type"] = part.FileType
 	}
 	if part.Data != "" {
 		out["data"] = part.Data
 	}
-	if part.MimeType != "" {
+	if part.MimeType != "" && partType != "input_file" {
 		out["mime_type"] = part.MimeType
 	}
 	if part.Refusal != "" {

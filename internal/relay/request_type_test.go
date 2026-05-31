@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -156,5 +157,23 @@ func TestCleanJSONUndefinedPlaceholdersRemovesCherryStudioSentinels(t *testing.T
 	}
 	if body["store"] != false {
 		t.Fatalf("valid false value should be preserved: %#v", body["store"])
+	}
+}
+
+func TestRelayBodyRewriteHelpersPreserveLargeIntegers(t *testing.T) {
+	body := []byte(`{"model":"alias","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"id":{"const":9007199254740993}}}}}],"temperature":"[undefined]"}`)
+
+	for name, got := range map[string][]byte{
+		"clean":        cleanJSONUndefinedPlaceholders(body),
+		"set_model":    setRequestModel(body, "upstream"),
+		"inject_model": injectModelIfMissing([]byte(`{"messages":[{"role":"user","content":"hi"}],"value":9007199254740993}`), "upstream"),
+		"stream":       injectStreamTrue(body),
+	} {
+		if !json.Valid(got) {
+			t.Fatalf("%s result is not JSON: %s", name, got)
+		}
+		if !strings.Contains(string(got), `9007199254740993`) {
+			t.Fatalf("%s lost integer precision: %s", name, got)
+		}
 	}
 }

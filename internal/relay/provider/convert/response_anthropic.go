@@ -21,7 +21,7 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 		Usage: schema.Usage{
 			PromptTokens:             resp.Usage.InputTokens,
 			CompletionTokens:         resp.Usage.OutputTokens,
-			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+			CacheCreationInputTokens: anthropicCacheCreationInputTokens(resp.Usage),
 			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 		},
 		Raw: body, // Preserve raw for native replay and field recovery
@@ -37,8 +37,9 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 		switch block.Type {
 		case "text":
 			appendChoiceContentItem(&choice, schema.ContentPart{
-				Type: "text",
-				Text: block.Text,
+				Type:  "text",
+				Text:  block.Text,
+				Extra: block.Extra,
 			}, rawJSON(block))
 
 		case "tool_use":
@@ -60,6 +61,9 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 			if block.Signature != "" {
 				extra = setRawString(extra, reasoningExtraSignature, block.Signature)
 			}
+			for k, v := range block.Extra {
+				extra[k] = v
+			}
 			appendChoiceReasoningItem(&choice, schema.ContentPart{
 				Type:  "thinking",
 				Text:  block.Thinking,
@@ -73,6 +77,12 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 					reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
 				}), rawJSON(block))
 			}
+		default:
+			appendChoiceContentItem(&choice, schema.ContentPart{
+				Type:  block.Type,
+				Text:  block.Text,
+				Extra: anthropicUnknownBlockExtra(block),
+			}, rawJSON(block))
 		}
 	}
 
@@ -149,11 +159,21 @@ func emitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 					if sig != "" {
 						block["signature"] = sig
 					}
+					for k, v := range rc.Extra {
+						if k == reasoningExtraSignature || k == reasoningExtraThoughtSignature || k == reasoningExtraEncryptedContent || k == reasoningExtraData || k == reasoningExtraType {
+							continue
+						}
+						block[k] = v
+					}
 					content = append(content, block)
 				}
 			case contentItemKindContent:
 				c := item.Content
-				block := map[string]interface{}{"type": c.Type}
+				block := map[string]interface{}{}
+				for k, v := range c.Extra {
+					block[k] = v
+				}
+				block["type"] = c.Type
 				if c.Text != "" {
 					block["text"] = c.Text
 				}
@@ -203,6 +223,7 @@ func emitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 	if ir.Usage.CacheReadInputTokens > 0 {
 		resp["usage"].(map[string]interface{})["cache_read_input_tokens"] = ir.Usage.CacheReadInputTokens
 	}
+	mergeAnthropicRawUsageExtras(resp["usage"].(map[string]interface{}), ir.Raw)
 
 	// If Raw is present, preserve extra fields
 	if len(ir.Raw) > 0 {
@@ -220,6 +241,59 @@ func emitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func anthropicCacheCreationInputTokens(usage schema.AnthropicUsage) int {
+	if usage.CacheCreationInputTokens > 0 {
+		return usage.CacheCreationInputTokens
+	}
+	if usage.CacheCreation == nil {
+		return 0
+	}
+	return usage.CacheCreation.Ephemeral5mInputTokens + usage.CacheCreation.Ephemeral1hInputTokens
+}
+
+func mergeAnthropicRawUsageExtras(usage map[string]interface{}, rawBody json.RawMessage) {
+	if len(rawBody) == 0 {
+		return
+	}
+	var raw struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(rawBody, &raw); err != nil {
+		return
+	}
+	for key, value := range raw.Usage {
+		switch key {
+		case "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens":
+			continue
+		default:
+			usage[key] = value
+		}
+	}
+}
+
+func anthropicUnknownBlockExtra(block schema.AnthropicContentBlock) map[string]json.RawMessage {
+	extra := copyRawMap(block.Extra)
+	if block.ID != "" {
+		extra = setRawString(extra, "id", block.ID)
+	}
+	if block.Name != "" {
+		extra = setRawString(extra, "name", block.Name)
+	}
+	if len(block.Input) > 0 && string(block.Input) != "null" {
+		if extra == nil {
+			extra = make(map[string]json.RawMessage)
+		}
+		extra["input"] = append(json.RawMessage(nil), block.Input...)
+	}
+	if len(block.Content) > 0 && string(block.Content) != "null" {
+		if extra == nil {
+			extra = make(map[string]json.RawMessage)
+		}
+		extra["content"] = append(json.RawMessage(nil), block.Content...)
+	}
+	return extra
 }
 
 func init() {

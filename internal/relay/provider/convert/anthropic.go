@@ -20,12 +20,15 @@ func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 		Stream:       req.Stream,
 		SourceFormat: FormatAnthropic,
 		Extra:        make(map[string]json.RawMessage),
-		MaxTokens:    &req.MaxTokens, // Anthropic requires max_tokens
+		MaxTokens:    req.MaxTokens,
 	}
 
 	// Copy Extra fields
 	for k, v := range req.Extra {
 		ir.Extra[k] = v
+	}
+	if len(req.Metadata) > 0 {
+		ir.Extra["metadata"] = append(json.RawMessage(nil), req.Metadata...)
 	}
 
 	// Extract system message to Instructions
@@ -71,14 +74,21 @@ func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 				appendContentItem(&requestMsg, part, rawBlock)
 			case "image":
 				if block.Source != nil {
-					dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
 					part := schema.ContentPart{
 						Type:     "image_url",
-						ImageURL: &dataURI,
 						MimeType: block.Source.MediaType,
 						Extra:    block.Extra,
 					}
-					appendContentItem(&requestMsg, part, rawBlock)
+					switch block.Source.Type {
+					case "url":
+						part.ImageURL = stringPtr(block.Source.URL)
+					default:
+						dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+						part.ImageURL = &dataURI
+					}
+					if part.ImageURL != nil && *part.ImageURL != "" {
+						appendContentItem(&requestMsg, part, rawBlock)
+					}
 				}
 			case "document":
 				if block.Source != nil {
@@ -128,7 +138,7 @@ func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 			case "tool_result":
 				appendToolResultItem(&requestMsg, schema.ToolResult{
 					ToolCallID: block.ToolUseID,
-					Content:    block.ContentStr,
+					Content:    anthropicToolResultContentString(block.Content),
 					IsError:    block.IsError,
 				}, rawBlock)
 			case "thinking":
@@ -247,19 +257,228 @@ func emitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
 	if len(ir.StopWords) > 0 {
 		req["stop_sequences"] = ir.StopWords
 	}
-	if thinking := anthropicThinkingFromAdapterRequest(ir); thinking != nil {
+	toolChoice := anthropicToolChoice(ir.ToolChoice, ir.ParallelToolCalls)
+	forcedToolChoice := anthropicToolChoiceForcesToolUse(toolChoice)
+	if forcedToolChoice {
+		removeAnthropicForcedThinkingExtras(req)
+	}
+	if thinking := anthropicThinkingFromAdapterRequest(ir); thinking != nil && !forcedToolChoice {
 		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
-		tools, _ := json.Marshal(ir.Tools)
-		req["tools"] = json.RawMessage(tools)
+		if tools := anthropicTools(ir.Tools); len(tools) > 0 {
+			req["tools"] = tools
+		}
 	}
-	if ir.ToolChoice != nil {
-		tc, _ := json.Marshal(ir.ToolChoice)
-		req["tool_choice"] = json.RawMessage(tc)
+	if toolChoice != nil {
+		req["tool_choice"] = toolChoice
 	}
 
 	return json.Marshal(req)
+}
+
+func anthropicToolChoice(raw json.RawMessage, parallelToolCalls *bool) map[string]interface{} {
+	var out map[string]interface{}
+	if len(raw) > 0 && string(raw) != "null" {
+		var choice string
+		if err := json.Unmarshal(raw, &choice); err == nil {
+			switch choice {
+			case "auto":
+				out = map[string]interface{}{"type": "auto"}
+			case "required":
+				out = map[string]interface{}{"type": "any"}
+			case "none":
+				out = map[string]interface{}{"type": "none"}
+			}
+		} else {
+			var choiceMap map[string]interface{}
+			if err := json.Unmarshal(raw, &choiceMap); err == nil {
+				choiceType, _ := choiceMap["type"].(string)
+				switch choiceType {
+				case "function":
+					if name := toolChoiceFunctionName(choiceMap); name != "" {
+						out = map[string]interface{}{"type": "tool", "name": name}
+					}
+				case "auto", "any", "none":
+					out = map[string]interface{}{"type": choiceType}
+				case "tool":
+					out = cloneInterfaceMap(choiceMap)
+				default:
+					if choiceType != "" {
+						out = cloneInterfaceMap(choiceMap)
+					}
+				}
+			}
+		}
+	}
+	if parallelToolCalls != nil {
+		if out == nil {
+			out = map[string]interface{}{"type": "auto"}
+		}
+		if out["type"] != "none" {
+			out["disable_parallel_tool_use"] = !*parallelToolCalls
+		}
+	}
+	return out
+}
+
+func toolChoiceFunctionName(choice map[string]interface{}) string {
+	if function, ok := choice["function"].(map[string]interface{}); ok {
+		if name, ok := function["name"].(string); ok {
+			return name
+		}
+	}
+	if name, ok := choice["name"].(string); ok {
+		return name
+	}
+	return ""
+}
+
+func anthropicToolChoiceForcesToolUse(choice map[string]interface{}) bool {
+	if choice == nil {
+		return false
+	}
+	choiceType, _ := choice["type"].(string)
+	return choiceType == "any" || choiceType == "tool"
+}
+
+func removeAnthropicForcedThinkingExtras(req map[string]interface{}) {
+	outputConfig, ok := req["output_config"]
+	if !ok {
+		return
+	}
+	raw, ok := outputConfig.(json.RawMessage)
+	if !ok {
+		return
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return
+	}
+	delete(cfg, "effort")
+	if len(cfg) == 0 {
+		delete(req, "output_config")
+		return
+	}
+	req["output_config"] = cfg
+}
+
+func cloneInterfaceMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func anthropicTools(tools []schema.Tool) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		normalized := anthropicTool(tool)
+		if normalized != nil {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+func anthropicTool(tool schema.Tool) map[string]interface{} {
+	if strings.TrimSpace(tool.Type) == "web_search" {
+		return anthropicWebSearchTool(tool)
+	}
+	name, description, inputSchema := normalizedFunctionTool(tool)
+	if name != "" {
+		out := map[string]interface{}{
+			"name": name,
+		}
+		if description != "" {
+			out["description"] = description
+		}
+		if len(inputSchema) > 0 && string(inputSchema) != "null" {
+			out["input_schema"] = json.RawMessage(inputSchema)
+		} else {
+			out["input_schema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+		}
+		for key, value := range tool.Extra {
+			out[key] = value
+		}
+		return out
+	}
+	if strings.TrimSpace(tool.Type) == "" || strings.TrimSpace(tool.Type) == "opaque" {
+		return nil
+	}
+	out := map[string]interface{}{"type": strings.TrimSpace(tool.Type)}
+	if tool.Name != "" {
+		out["name"] = tool.Name
+	}
+	if tool.Description != "" {
+		out["description"] = tool.Description
+	}
+	if len(tool.InputSchema) > 0 && string(tool.InputSchema) != "null" {
+		out["input_schema"] = json.RawMessage(tool.InputSchema)
+	}
+	if len(tool.Parameters) > 0 && string(tool.Parameters) != "null" {
+		out["parameters"] = json.RawMessage(tool.Parameters)
+	}
+	for key, value := range tool.Extra {
+		out[key] = value
+	}
+	return out
+}
+
+func anthropicWebSearchTool(tool schema.Tool) map[string]interface{} {
+	if externalWebAccess := rawBool(tool.Extra["external_web_access"]); externalWebAccess != nil && !*externalWebAccess {
+		return nil
+	}
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		name = "web_search"
+	}
+	out := map[string]interface{}{
+		"type": "web_search_20250305",
+		"name": name,
+	}
+	if raw := tool.Extra["max_uses"]; len(raw) > 0 && string(raw) != "null" {
+		out["max_uses"] = json.RawMessage(raw)
+	}
+	if raw := tool.Extra["user_location"]; len(raw) > 0 && string(raw) != "null" {
+		out["user_location"] = json.RawMessage(raw)
+	}
+	if raw := allowedDomainsFromToolFilters(tool.Extra["filters"]); len(raw) > 0 {
+		out["allowed_domains"] = json.RawMessage(raw)
+	}
+	for key, value := range tool.Extra {
+		switch key {
+		case "external_web_access", "filters", "max_uses", "user_location":
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func rawBool(raw json.RawMessage) *bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return &value
+}
+
+func allowedDomainsFromToolFilters(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var filters struct {
+		AllowedDomains json.RawMessage `json:"allowed_domains"`
+	}
+	if err := json.Unmarshal(raw, &filters); err != nil {
+		return nil
+	}
+	return filters.AllowedDomains
 }
 
 func anthropicRole(role string) string {
@@ -459,6 +678,32 @@ func anthropicToolResultBlock(result schema.ToolResult) map[string]interface{} {
 		block["is_error"] = true
 	}
 	return block
+}
+
+func anthropicToolResultContentString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		texts := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if block.Type == "text" && block.Text != "" {
+				texts = append(texts, block.Text)
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "")
+		}
+	}
+	return string(raw)
 }
 
 func init() {

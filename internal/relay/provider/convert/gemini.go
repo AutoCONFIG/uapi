@@ -16,7 +16,7 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 	}
 
 	ir := &adapterRequest{
-		Model:        "", // Will be set by caller
+		Model:        rawString(req.Extra["model"]),
 		Stream:       false,
 		SourceFormat: FormatGemini,
 		Extra:        make(map[string]json.RawMessage),
@@ -102,6 +102,7 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 					ToolCallID: part.FunctionResponse.Name, // Use function name as ID since Gemini doesn't provide call ID
 					Content:    string(respBytes),
 				}, rawPart)
+				appendGeminiFunctionResponseLosses(ir, part.FunctionResponse, rawPart)
 			case part.ThoughtSignature != "":
 				appendReasoningItem(&requestMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
 					reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
@@ -207,6 +208,42 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 	}
 
 	return ir, nil
+}
+
+func appendGeminiFunctionResponseLosses(req *adapterRequest, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
+	if req == nil || resp == nil {
+		return
+	}
+	add := func(field string, raw json.RawMessage, reason string) {
+		if len(raw) == 0 {
+			return
+		}
+		req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[].functionResponse."+field, field, raw, reason))
+	}
+	marshalField := func(value interface{}) json.RawMessage {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+		return raw
+	}
+	add("response", resp.Response, "Gemini functionResponse.response is serialized into protocol tool-result output text across protocols")
+	if resp.ID != "" {
+		add("id", marshalField(resp.ID), "Gemini functionResponse.id has no protocol-neutral tool-result field")
+	}
+	if resp.WillContinue != nil {
+		add("willContinue", marshalField(*resp.WillContinue), "Gemini functionResponse.willContinue has no equivalent in target protocols")
+	}
+	if resp.Scheduling != "" {
+		add("scheduling", marshalField(resp.Scheduling), "Gemini functionResponse.scheduling has no equivalent in target protocols")
+	}
+	add("parts", resp.Parts, "Gemini functionResponse.parts has no equivalent in target protocols")
+	for key, raw := range resp.Extra {
+		add(key, raw, "Gemini functionResponse vendor field is preserved in native raw part but not emitted across protocols")
+	}
+	if len(resp.Extra) > 0 && len(rawPart) > 0 {
+		req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[]", "functionResponse", rawPart, "Gemini functionResponse native part is preserved for audit"))
+	}
 }
 
 // emitGeminiRequest converts an adapter request to Gemini API request.

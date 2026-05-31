@@ -226,7 +226,11 @@ func irTool(tool schema.Tool, source Format) ir.Tool {
 	}
 	kind := ir.ToolKind(tool.Type)
 	if kind == "" {
-		kind = ir.ToolOpaque
+		if name != "" || len(parameters) > 0 || len(tool.InputSchema) > 0 {
+			kind = ir.ToolFunction
+		} else {
+			kind = ir.ToolOpaque
+		}
 	}
 	return ir.Tool{
 		Kind:        kind,
