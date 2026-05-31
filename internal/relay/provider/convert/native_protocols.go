@@ -14,8 +14,7 @@ func parseCodexRequest(body []byte) (*relayir.Request, error) {
 	}
 	req.SourceFormat = FormatCodexResponses
 	out := req.ToIR()
-	out.SourceProtocol = relayir.ProtocolCodex
-	out.Native.Protocol = relayir.ProtocolCodex
+	normalizeNativeRequestProtocol(out, relayir.ProtocolCodex)
 	return out, nil
 }
 
@@ -32,8 +31,7 @@ func parseClaudeCodeRequest(body []byte) (*relayir.Request, error) {
 	}
 	req.SourceFormat = FormatClaudeCode
 	out := req.ToIR()
-	out.SourceProtocol = relayir.ProtocolClaudeCode
-	out.Native.Protocol = relayir.ProtocolClaudeCode
+	normalizeNativeRequestProtocol(out, relayir.ProtocolClaudeCode)
 	return out, nil
 }
 
@@ -50,8 +48,7 @@ func parseGeminiCodeRequest(body []byte) (*relayir.Request, error) {
 	}
 	req.SourceFormat = FormatGeminiCode
 	out := req.ToIR()
-	out.SourceProtocol = relayir.ProtocolGeminiCode
-	out.Native.Protocol = relayir.ProtocolGeminiCode
+	normalizeNativeRequestProtocol(out, relayir.ProtocolGeminiCode)
 	return out, nil
 }
 
@@ -68,8 +65,7 @@ func parseAntigravityRequest(body []byte) (*relayir.Request, error) {
 	}
 	req.SourceFormat = FormatAntigravity
 	out := req.ToIR()
-	out.SourceProtocol = relayir.ProtocolAntigravity
-	out.Native.Protocol = relayir.ProtocolAntigravity
+	normalizeNativeRequestProtocol(out, relayir.ProtocolAntigravity)
 	return out, nil
 }
 
@@ -91,6 +87,38 @@ func emitAntigravityRequest(req *relayir.Request) ([]byte, error) {
 		envelope["requestType"] = "generateContent"
 	}
 	return json.Marshal(envelope)
+}
+
+func normalizeNativeRequestProtocol(req *relayir.Request, protocol relayir.Protocol) {
+	if req == nil {
+		return
+	}
+	req.SourceProtocol = protocol
+	req.Native.Protocol = protocol
+	for i := range req.Losses {
+		req.Losses[i].SourceProtocol = protocol
+	}
+	for i := range req.Instructions {
+		req.Instructions[i].Native.Protocol = protocol
+		for j := range req.Instructions[i].Items {
+			req.Instructions[i].Items[j].Native.Protocol = protocol
+			for k := range req.Instructions[i].Items[j].Losses {
+				req.Instructions[i].Items[j].Losses[k].SourceProtocol = protocol
+			}
+		}
+	}
+	for i := range req.Turns {
+		req.Turns[i].Native.Protocol = protocol
+		for j := range req.Turns[i].Items {
+			req.Turns[i].Items[j].Native.Protocol = protocol
+			for k := range req.Turns[i].Items[j].Losses {
+				req.Turns[i].Items[j].Losses[k].SourceProtocol = protocol
+			}
+		}
+	}
+	for i := range req.Tools {
+		req.Tools[i].Native.Protocol = protocol
+	}
 }
 
 func init() {

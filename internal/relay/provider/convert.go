@@ -56,6 +56,14 @@ func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([
 	return newconvert.ConvertRequestDetailed(client, upstream, body)
 }
 
+func NormalizeRequestSameProtocol(format Format, body []byte) ([]byte, error) {
+	converted, err := toConvertFormat(format)
+	if err != nil {
+		return nil, err
+	}
+	return newconvert.NormalizeRequestSameProtocol(converted, body)
+}
+
 func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte, adaptor Adaptor) ([]byte, error) {
 	client, err := toConvertFormat(clientFormat)
 	if err != nil {

@@ -510,16 +510,22 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 	convertedBody := body
 	routedModel := upstreamModel
-	if !sameFormat {
-		var err error
+	if sameFormat {
+		convertedBody, err = provider.NormalizeRequestSameProtocol(upstreamFormat, body)
+		if err != nil {
+			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, routedModel, false, clientFormat, upstreamFormat, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
+			ctx.Error(`{"error":"normalize request failed: `+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
+			return
+		}
+	} else {
 		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
 		if err != nil {
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, routedModel, false, clientFormat, upstreamFormat, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 			ctx.Error(`{"error":"convert request failed: `+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)
 			return
 		}
-		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
+	routedModel = routedModelFromBody(convertedBody, routedModel)
 	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses {
 		convertedBody = normalizeCodexResponsesRequest(convertedBody)
 		routedModel = routedModelFromBody(convertedBody, routedModel)

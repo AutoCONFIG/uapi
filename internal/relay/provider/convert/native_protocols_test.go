@@ -86,6 +86,11 @@ func TestDetailedConversionExposesLossRecordsForAdaptorPath(t *testing.T) {
 	if len(audit.Losses) < 3 {
 		t.Fatalf("loss records missing: %#v", audit.Losses)
 	}
+	for _, loss := range audit.Losses {
+		if loss.SourceProtocol != ir.ProtocolCodex || loss.TargetProtocol != ir.ProtocolAntigravity {
+			t.Fatalf("loss protocol audit not closed: %#v", audit.Losses)
+		}
+	}
 	for _, want := range []string{"previous_response_id", "prompt_cache_key", "custom_source_only"} {
 		if !hasLossField(audit.Losses, want) {
 			t.Fatalf("loss field %q missing: %#v", want, audit.Losses)
@@ -115,6 +120,9 @@ func TestCodexSameProtocolPreservesOpaqueResponsesInputItem(t *testing.T) {
 	}
 	if len(audit.Losses) != 1 || audit.Losses[0].Field != "file_search_call" || !audit.Losses[0].Preserved {
 		t.Fatalf("opaque item loss not recorded/preserved: %#v", audit.Losses)
+	}
+	if audit.Losses[0].SourceProtocol != ir.ProtocolCodex || audit.Losses[0].TargetProtocol != ir.ProtocolCodex {
+		t.Fatalf("opaque item loss protocol audit not closed: %#v", audit.Losses[0])
 	}
 	for _, want := range []string{`"type":"file_search_call"`, `"include":["reasoning.encrypted_content"]`} {
 		if !strings.Contains(string(converted), want) {

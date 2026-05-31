@@ -321,6 +321,62 @@ func TestAnthropicSameFormatPreservesSystemAndOrderedBlocks(t *testing.T) {
 	}
 }
 
+func TestSameProtocolNormalizerRemovesUndefinedSentinels(t *testing.T) {
+	tests := []struct {
+		name   string
+		format convert.Format
+		body   []byte
+	}{
+		{
+			name:   "responses",
+			format: convert.FormatOpenAIResponses,
+			body: []byte(`{
+				"model":"gpt-5.5",
+				"input":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":"[undefined]"}]}],
+				"temperature":"[undefined]",
+				"tools":"[undefined]",
+				"stream":true
+			}`),
+		},
+		{
+			name:   "gemini",
+			format: convert.FormatGemini,
+			body: []byte(`{
+				"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+				"generationConfig":{"maxOutputTokens":"[undefined]","temperature":"[undefined]"},
+				"systemInstruction":"[undefined]",
+				"tools":"[undefined]"
+			}`),
+		},
+		{
+			name:   "anthropic",
+			format: convert.FormatAnthropic,
+			body: []byte(`{
+				"model":"claude-test",
+				"max_tokens":4096,
+				"system":"[undefined]",
+				"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":"[undefined]"}]}],
+				"tools":"[undefined]",
+				"temperature":"[undefined]"
+			}`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, err := convert.NormalizeRequestSameProtocol(tt.format, tt.body)
+			if err != nil {
+				t.Fatalf("NormalizeRequestSameProtocol: %v", err)
+			}
+			if !json.Valid(normalized) {
+				t.Fatalf("normalized body is not JSON: %s", normalized)
+			}
+			if strings.Contains(string(normalized), "[undefined]") {
+				t.Fatalf("undefined sentinel survived same-protocol normalization:\n%s", normalized)
+			}
+		})
+	}
+}
+
 func TestOpenAIChatToolResultToGeminiDoesNotDuplicateAsText(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

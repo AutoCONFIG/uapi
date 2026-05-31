@@ -63,6 +63,21 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	return result, err
 }
 
+// NormalizeRequestSameProtocol prepares a request for same-protocol forwarding.
+// It intentionally avoids cross-protocol IR emission: same-format traffic only
+// gets client-noise cleanup plus protocol parser validation.
+func NormalizeRequestSameProtocol(format Format, body []byte) ([]byte, error) {
+	body = cleanJSONUndefinedPlaceholders(body)
+	toIR, ok := requestIRParsers[format]
+	if !ok {
+		return nil, fmt.Errorf("no request parser for format %q", format)
+	}
+	if _, err := toIR(body); err != nil {
+		return nil, fmt.Errorf("parse request %s: %w", format, err)
+	}
+	return body, nil
+}
+
 // ConvertRequestDetailed converts a request and returns the IR used for
 // auditing loss records and native preservation decisions.
 func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([]byte, *ir.Request, error) {
@@ -93,7 +108,45 @@ func PrepareRequestForTarget(req *ir.Request, clientFormat, upstreamFormat Forma
 		return
 	}
 	req.TargetProtocol = irProtocol(upstreamFormat)
+	completeLossProtocols(req, clientFormat, upstreamFormat)
 	dropExtraForCrossProtocol(req, clientFormat, upstreamFormat)
+}
+
+func completeLossProtocols(req *ir.Request, clientFormat, upstreamFormat Format) {
+	source := irProtocol(clientFormat)
+	target := irProtocol(upstreamFormat)
+	for i := range req.Losses {
+		if req.Losses[i].SourceProtocol == "" {
+			req.Losses[i].SourceProtocol = source
+		}
+		if req.Losses[i].TargetProtocol == "" {
+			req.Losses[i].TargetProtocol = target
+		}
+	}
+	for i := range req.Instructions {
+		for j := range req.Instructions[i].Items {
+			for k := range req.Instructions[i].Items[j].Losses {
+				if req.Instructions[i].Items[j].Losses[k].SourceProtocol == "" {
+					req.Instructions[i].Items[j].Losses[k].SourceProtocol = source
+				}
+				if req.Instructions[i].Items[j].Losses[k].TargetProtocol == "" {
+					req.Instructions[i].Items[j].Losses[k].TargetProtocol = target
+				}
+			}
+		}
+	}
+	for i := range req.Turns {
+		for j := range req.Turns[i].Items {
+			for k := range req.Turns[i].Items[j].Losses {
+				if req.Turns[i].Items[j].Losses[k].SourceProtocol == "" {
+					req.Turns[i].Items[j].Losses[k].SourceProtocol = source
+				}
+				if req.Turns[i].Items[j].Losses[k].TargetProtocol == "" {
+					req.Turns[i].Items[j].Losses[k].TargetProtocol = target
+				}
+			}
+		}
+	}
 }
 
 func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat Format) {
