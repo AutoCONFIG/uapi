@@ -7,14 +7,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func TestInternalToOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *testing.T) {
+func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *testing.T) {
 	imageURL := "data:image/png;base64,aGVsbG8="
-	body, err := InternalToOpenAIResponsesResponse(&InternalResponse{
+	body, err := EmitOpenAIResponsesResponse(&InternalResponse{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
 		Choices: []InternalChoice{{
 			Role: "model",
-			Items: []InternalContentItem{{
+			Items: []ContentItem{{
 				Kind: contentItemKindContent,
 				Content: schema.ContentPart{
 					Type:     "image_url",
@@ -50,14 +50,14 @@ func TestInternalToOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t
 	}
 }
 
-func TestInternalToOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *testing.T) {
+func TestEmitOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *testing.T) {
 	imageURL := "data:image/webp;base64,aW1n"
-	body, err := InternalToOpenAIResponsesResponse(&InternalResponse{
+	body, err := EmitOpenAIResponsesResponse(&InternalResponse{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
 		Choices: []InternalChoice{{
 			Role: "model",
-			Items: []InternalContentItem{
+			Items: []ContentItem{
 				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "text", Text: "Here is the image."}},
 				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "image_url", ImageURL: &imageURL}},
 			},

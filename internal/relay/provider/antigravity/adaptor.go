@@ -113,15 +113,11 @@ func (a *AntigravityAdaptor) SetupRequestHeader(req *fasthttp.Request, credentia
 	return nil
 }
 
-func (a *AntigravityAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	ir, err := convert.ToInternalOnly(convert.FormatGeminiCLI, body)
-	if err != nil {
-		return nil, err
-	}
-	return ir, nil
+func (a *AntigravityAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+	return convert.ToIR(convert.FormatGeminiCLI, body)
 }
 
-func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
+func (a *AntigravityAdaptor) emitRequest(req *provider.RequestEnvelope) ([]byte, error) {
 	clientModel := req.Model
 	if clientModel == "" {
 		clientModel = a.model
@@ -134,7 +130,7 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	model := ResolveRequestModelWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings, channelModels(a.channel))
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.InternalToGemini(&reqCopy)
+	gemBody, err := convert.EmitGeminiRequest(&reqCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +165,10 @@ func (a *AntigravityAdaptor) FromInternal(req *provider.InternalRequest) ([]byte
 	return json.Marshal(body)
 }
 
+func (a *AntigravityAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+	return a.emitRequest(convert.RequestEnvelopeFromIR(req))
+}
+
 func channelModels(ch *db.Channel) []string {
 	if ch == nil {
 		return nil
@@ -176,7 +176,7 @@ func channelModels(ch *db.Channel) []string {
 	return strings.Split(ch.Models, ",")
 }
 
-func antigravityReasoningEffort(req *provider.InternalRequest) string {
+func antigravityReasoningEffort(req *provider.RequestEnvelope) string {
 	if req == nil {
 		return ""
 	}
@@ -287,7 +287,7 @@ func cleanStrings(values []string) []string {
 	return out
 }
 
-func antigravityRequestSize(req *provider.InternalRequest, settings ChannelSettings) string {
+func antigravityRequestSize(req *provider.RequestEnvelope, settings ChannelSettings) string {
 	tokens := estimateAntigravityTokens(req)
 	switch {
 	case tokens > settings.LongTokenThreshold:
@@ -299,7 +299,7 @@ func antigravityRequestSize(req *provider.InternalRequest, settings ChannelSetti
 	}
 }
 
-func estimateAntigravityTokens(req *provider.InternalRequest) int {
+func estimateAntigravityTokens(req *provider.RequestEnvelope) int {
 	if req == nil {
 		return 0
 	}
@@ -524,7 +524,7 @@ func (a *AntigravityAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error
 }
 
 func (a *AntigravityAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage, error) {
-	internal, err := convert.GeminiResponseToInternal(respBody)
+	internal, err := convert.ParseGeminiResponse(respBody)
 	if err != nil {
 		return provider.InternalUsage{}, err
 	}

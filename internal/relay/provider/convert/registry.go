@@ -8,71 +8,91 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
-// toInternalFunc converts raw protocol bytes into an InternalRequest.
-type toInternalFunc func(body []byte) (*InternalRequest, error)
+// requestEnvelopeParser converts raw protocol bytes into a request envelope.
+type requestEnvelopeParser func(body []byte) (*RequestEnvelope, error)
 
-// fromInternalFunc converts an InternalRequest into raw protocol bytes.
-type fromInternalFunc func(ir *InternalRequest) ([]byte, error)
+// requestEnvelopeEmitter converts a request envelope into raw protocol bytes.
+type requestEnvelopeEmitter func(ir *RequestEnvelope) ([]byte, error)
 
-var toInternalRegistry = map[Format]toInternalFunc{}
-var fromInternalRegistry = map[Format]fromInternalFunc{}
+type requestIRParser func(body []byte) (*ir.Request, error)
+type requestIREmitter func(req *ir.Request) ([]byte, error)
 
-// GetFromInternalFunc returns the FromInternal converter for a format.
-func GetFromInternalFunc(f Format) (fromInternalFunc, bool) {
-	fn, ok := fromInternalRegistry[f]
-	return fn, ok
+var requestEnvelopeParsers = map[Format]requestEnvelopeParser{}
+var requestEnvelopeEmitters = map[Format]requestEnvelopeEmitter{}
+var requestIRParsers = map[Format]requestIRParser{}
+var requestIREmitters = map[Format]requestIREmitter{}
+
+// RegisterRequestParser registers a converter from protocol bytes to a request envelope.
+func RegisterRequestParser(f Format, fn requestEnvelopeParser) {
+	requestEnvelopeParsers[f] = fn
+	requestIRParsers[f] = func(body []byte) (*ir.Request, error) {
+		req, err := parseRequestEnvelope(f, body, fn)
+		if err != nil {
+			return nil, err
+		}
+		return req.ToIR(), nil
+	}
 }
 
-// RegisterToInternal registers a converter from protocol bytes to InternalRequest.
-func RegisterToInternal(f Format, fn toInternalFunc) {
-	toInternalRegistry[f] = fn
-}
-
-// RegisterFromInternal registers a converter from InternalRequest to protocol bytes.
-func RegisterFromInternal(f Format, fn fromInternalFunc) {
-	fromInternalRegistry[f] = fn
+// RegisterRequestEmitter registers a converter from a request envelope to protocol bytes.
+func RegisterRequestEmitter(f Format, fn requestEnvelopeEmitter) {
+	requestEnvelopeEmitters[f] = fn
+	requestIREmitters[f] = func(req *ir.Request) ([]byte, error) {
+		internal := RequestEnvelopeFromIR(req)
+		if internal.SourceFormat == "" {
+			internal.SourceFormat = protocolFormat(req.SourceProtocol)
+		}
+		if internal.SourceFormat == "" {
+			internal.SourceFormat = f
+		}
+		return fn(internal)
+	}
 }
 
 // ConvertRequest converts a request from clientFormat to upstreamFormat.
-// It first converts the raw bytes to InternalRequest using clientFormat's
-// ToInternal converter, then converts InternalRequest to upstreamFormat bytes
-// using upstreamFormat's FromInternal converter.
 func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
 	body = cleanJSONUndefinedPlaceholders(body)
 	if clientFormat == upstreamFormat && clientFormat == FormatOpenAIChatCompletions {
 		return body, nil
 	}
-	toInternal, ok := toInternalRegistry[clientFormat]
+	toIR, ok := requestIRParsers[clientFormat]
 	if !ok {
-		return nil, fmt.Errorf("no ToInternal converter for format %q", clientFormat)
+		return nil, fmt.Errorf("no request parser for format %q", clientFormat)
 	}
-	fromInternal, ok := fromInternalRegistry[upstreamFormat]
+	fromIR, ok := requestIREmitters[upstreamFormat]
 	if !ok {
-		return nil, fmt.Errorf("no FromInternal converter for format %q", upstreamFormat)
+		return nil, fmt.Errorf("no request emitter for format %q", upstreamFormat)
 	}
 
-	ir, err := toInternal(body)
+	req, err := toIR(body)
 	if err != nil {
-		return nil, fmt.Errorf("ToInternal(%s): %w", clientFormat, err)
+		return nil, fmt.Errorf("parse request %s: %w", clientFormat, err)
 	}
-	attachRawRequest(ir, body)
-	dropExtraForCrossProtocol(ir, clientFormat, upstreamFormat)
-	ir.RefreshIR()
-	result, err := fromInternal(ir)
+	req.TargetProtocol = irProtocol(upstreamFormat)
+	dropExtraForCrossProtocol(req, clientFormat, upstreamFormat)
+	result, err := fromIR(req)
 	if err != nil {
-		return nil, fmt.Errorf("FromInternal(%s): %w", upstreamFormat, err)
+		return nil, fmt.Errorf("emit request %s: %w", upstreamFormat, err)
 	}
 	return result, nil
 }
 
-func dropExtraForCrossProtocol(ir *InternalRequest, clientFormat, upstreamFormat Format) {
-	if ir == nil || clientFormat == upstreamFormat {
+func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat Format) {
+	if req == nil || clientFormat == upstreamFormat {
 		return
 	}
-	for key, raw := range ir.Extra {
-		ir.Losses = append(ir.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols by the compatibility converter"))
+	for key, raw := range req.Native.Fields {
+		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols"))
 	}
-	ir.Extra = nil
+	for key, raw := range req.Metadata {
+		if _, exists := req.Native.Fields[key]; exists {
+			continue
+		}
+		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols"))
+	}
+	req.Native.Fields = nil
+	req.Native.Unknown = nil
+	req.Metadata = nil
 }
 
 func irloss(source, target Format, path, field string, raw []byte, reason string) ir.Loss {
@@ -98,24 +118,17 @@ func rawHash(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// ToInternalOnly converts a request body to InternalRequest without converting back.
-// Useful for extracting model/messages for routing decisions.
-func ToInternalOnly(format Format, body []byte) (*InternalRequest, error) {
-	body = cleanJSONUndefinedPlaceholders(body)
-	toInternal, ok := toInternalRegistry[format]
-	if !ok {
-		return nil, fmt.Errorf("no ToInternal converter for format %q", format)
-	}
-	ir, err := toInternal(body)
+func parseRequestEnvelope(format Format, body []byte, parse requestEnvelopeParser) (*RequestEnvelope, error) {
+	ir, err := parse(body)
 	if err != nil {
 		return nil, err
 	}
 	attachRawRequest(ir, body)
-	ir.RefreshIR()
+	ir.IR = ir.buildIR()
 	return ir, nil
 }
 
-func attachRawRequest(ir *InternalRequest, body []byte) {
+func attachRawRequest(ir *RequestEnvelope, body []byte) {
 	if ir == nil || len(ir.RawRequestBody) > 0 {
 		return
 	}
@@ -123,31 +136,31 @@ func attachRawRequest(ir *InternalRequest, body []byte) {
 }
 
 // response converter types
-type toResponseInternalFunc func(body []byte) (*InternalResponse, error)
-type fromResponseInternalFunc func(ir *InternalResponse) ([]byte, error)
+type responseParser func(body []byte) (*InternalResponse, error)
+type responseEmitter func(ir *InternalResponse) ([]byte, error)
 
-var toResponseRegistry = map[Format]toResponseInternalFunc{}
-var fromResponseRegistry = map[Format]fromResponseInternalFunc{}
+var responseParsers = map[Format]responseParser{}
+var responseEmitters = map[Format]responseEmitter{}
 
-// RegisterToResponseInternal registers a response converter from protocol bytes to InternalResponse.
-func RegisterToResponseInternal(f Format, fn toResponseInternalFunc) {
-	toResponseRegistry[f] = fn
+// RegisterResponseParser registers a response converter from protocol bytes to InternalResponse.
+func RegisterResponseParser(f Format, fn responseParser) {
+	responseParsers[f] = fn
 }
 
-// RegisterFromResponseInternal registers a response converter from InternalResponse to protocol bytes.
-func RegisterFromResponseInternal(f Format, fn fromResponseInternalFunc) {
-	fromResponseRegistry[f] = fn
+// RegisterResponseEmitter registers a response converter from InternalResponse to protocol bytes.
+func RegisterResponseEmitter(f Format, fn responseEmitter) {
+	responseEmitters[f] = fn
 }
 
 // ConvertResponse converts a response from upstreamFormat to clientFormat.
 func ConvertResponse(upstreamFormat, clientFormat Format, body []byte) ([]byte, error) {
-	toResp, ok := toResponseRegistry[upstreamFormat]
+	toResp, ok := responseParsers[upstreamFormat]
 	if !ok {
-		return nil, fmt.Errorf("no response ToInternal converter for format %q", upstreamFormat)
+		return nil, fmt.Errorf("no response parser for format %q", upstreamFormat)
 	}
-	fromResp, ok := fromResponseRegistry[clientFormat]
+	fromResp, ok := responseEmitters[clientFormat]
 	if !ok {
-		return nil, fmt.Errorf("no response FromInternal converter for format %q", clientFormat)
+		return nil, fmt.Errorf("no response emitter for format %q", clientFormat)
 	}
 	ir, err := toResp(body)
 	if err != nil {

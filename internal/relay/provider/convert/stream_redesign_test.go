@@ -218,7 +218,7 @@ func TestGeminiStreamConverterHandlesCodeAssistResponseWrapper(t *testing.T) {
 func TestDirectGeminiToAnthropicStreamPreservesThoughtSignature(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatGemini, convert.FormatAnthropic)
 	if converter == nil {
-		t.Fatalf("missing chained gemini -> anthropic converter")
+		t.Fatalf("missing IR gemini -> anthropic converter")
 	}
 	out := converter.Convert([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true,"thoughtSignature":"sig_1"}]},"finishReason":"NOT_STARTED"}]}` + "\n\n"))
 	got := string(out)
@@ -232,7 +232,7 @@ func TestDirectGeminiToAnthropicStreamPreservesThoughtSignature(t *testing.T) {
 func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatGemini)
 	if converter == nil {
-		t.Fatalf("missing chained anthropic -> gemini converter")
+		t.Fatalf("missing IR anthropic -> gemini converter")
 	}
 	_ = converter.Convert([]byte(`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude"}}` + "\n\n"))
 	thinking := converter.Convert([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}` + "\n\n"))
@@ -248,7 +248,7 @@ func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
 func TestDirectResponsesToGeminiStreamPreservesEncryptedReasoning(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatGemini)
 	if converter == nil {
-		t.Fatalf("missing chained responses -> gemini converter")
+		t.Fatalf("missing IR responses -> gemini converter")
 	}
 	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
 	out := converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"enc_1","summary":[]}}` + "\n\n"))

@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// GeminiToInternal converts Gemini API request to InternalRequest.
-func GeminiToInternal(body []byte) (*InternalRequest, error) {
+// ParseGeminiRequest converts Gemini API request to the request envelope.
+func ParseGeminiRequest(body []byte) (*RequestEnvelope, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
 
-	ir := &InternalRequest{
+	ir := &RequestEnvelope{
 		Model:        "", // Will be set by caller
 		Stream:       false,
 		SourceFormat: FormatGemini,
@@ -43,8 +43,8 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 
 	// Convert contents to messages
 	for _, content := range req.Contents {
-		internalMsg := InternalMessage{
-			Role: geminiRoleToInternal(content.Role),
+		requestMsg := RequestMessage{
+			Role: geminiRoleToRequestRole(content.Role),
 		}
 
 		for _, part := range content.Parts {
@@ -55,26 +55,26 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 				if part.ThoughtSignature != "" {
 					extra = setRawString(extra, reasoningExtraThoughtSignature, part.ThoughtSignature)
 				}
-				appendReasoningItem(&internalMsg, schema.ContentPart{
+				appendReasoningItem(&requestMsg, schema.ContentPart{
 					Type:  "thinking",
 					Text:  part.Text,
 					Extra: extra,
 				}, rawPart)
 			case part.Text != "":
-				appendContentItem(&internalMsg, schema.ContentPart{
+				appendContentItem(&requestMsg, schema.ContentPart{
 					Type: "text",
 					Text: part.Text,
 				}, rawPart)
 			case part.InlineData != nil:
 				dataURI := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)
 				if strings.HasPrefix(part.InlineData.MimeType, "image/") {
-					appendContentItem(&internalMsg, schema.ContentPart{
+					appendContentItem(&requestMsg, schema.ContentPart{
 						Type:     "image_url",
 						ImageURL: &dataURI,
 						MimeType: part.InlineData.MimeType,
 					}, rawPart)
 				} else {
-					appendContentItem(&internalMsg, schema.ContentPart{
+					appendContentItem(&requestMsg, schema.ContentPart{
 						Type:     "file",
 						FileData: dataURI,
 						FileType: part.InlineData.MimeType,
@@ -95,27 +95,27 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 						Arguments: args,
 					},
 				}
-				appendToolCallItem(&internalMsg, call, rawPart)
+				appendToolCallItem(&requestMsg, call, rawPart)
 			case part.FunctionResponse != nil:
 				respBytes, _ := json.Marshal(part.FunctionResponse.Response)
-				appendToolResultItem(&internalMsg, schema.ToolResult{
+				appendToolResultItem(&requestMsg, schema.ToolResult{
 					ToolCallID: part.FunctionResponse.Name, // Use function name as ID since Gemini doesn't provide call ID
 					Content:    string(respBytes),
 				}, rawPart)
 			case part.ThoughtSignature != "":
-				appendReasoningItem(&internalMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
+				appendReasoningItem(&requestMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
 					reasoningExtraThoughtSignature: json.RawMessage(fmt.Sprintf(`%q`, part.ThoughtSignature)),
 				}), rawPart)
 			case part.FileData != nil:
 				fileURL := "file://" + part.FileData.FileURI
 				if strings.HasPrefix(part.FileData.MimeType, "image/") {
-					appendContentItem(&internalMsg, schema.ContentPart{
+					appendContentItem(&requestMsg, schema.ContentPart{
 						Type:     "image_url",
 						ImageURL: &fileURL,
 						MimeType: part.FileData.MimeType,
 					}, rawPart)
 				} else {
-					appendContentItem(&internalMsg, schema.ContentPart{
+					appendContentItem(&requestMsg, schema.ContentPart{
 						Type:     "file",
 						FileURL:  fileURL,
 						FileType: part.FileData.MimeType,
@@ -123,7 +123,7 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 					}, rawPart)
 				}
 			case part.ExecutableCode != nil:
-				appendContentItem(&internalMsg, schema.ContentPart{
+				appendContentItem(&requestMsg, schema.ContentPart{
 					Type: "executable_code",
 					Text: part.ExecutableCode.Code,
 					Extra: map[string]json.RawMessage{
@@ -131,7 +131,7 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 					},
 				}, rawPart)
 			case part.CodeExecutionResult != nil:
-				appendContentItem(&internalMsg, schema.ContentPart{
+				appendContentItem(&requestMsg, schema.ContentPart{
 					Type: "code_execution_result",
 					Text: part.CodeExecutionResult.Output,
 					Extra: map[string]json.RawMessage{
@@ -141,7 +141,7 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 			}
 		}
 
-		ir.Messages = append(ir.Messages, internalMsg)
+		ir.Messages = append(ir.Messages, requestMsg)
 	}
 
 	// Generation parameters from GenerationConfig
@@ -182,7 +182,7 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 
 	// Tools
 	if req.Tools != nil {
-		if tools := geminiRequestToolsToInternal(req.Tools); len(tools) > 0 {
+		if tools := parseGeminiRequestTools(req.Tools); len(tools) > 0 {
 			ir.Tools = tools
 		} else {
 			var tools []schema.Tool
@@ -209,8 +209,8 @@ func GeminiToInternal(body []byte) (*InternalRequest, error) {
 	return ir, nil
 }
 
-// InternalToGemini converts InternalRequest to Gemini API request.
-func InternalToGemini(ir *InternalRequest) ([]byte, error) {
+// EmitGeminiRequest converts the request envelope to Gemini API request.
+func EmitGeminiRequest(ir *RequestEnvelope) ([]byte, error) {
 	req := make(map[string]interface{})
 
 	// Convert Instructions to systemInstruction
@@ -256,7 +256,7 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	if ir.CandidateCount != nil {
 		genConfig["candidateCount"] = *ir.CandidateCount
 	}
-	if thinking := geminiThinkingFromInternal(ir); thinking != nil {
+	if thinking := geminiThinkingFromRequestEnvelope(ir); thinking != nil {
 		genConfig["thinkingConfig"] = thinking
 	}
 	if mimeType, schema := geminiResponseFormat(ir.ResponseFormat); mimeType != "" {
@@ -309,7 +309,7 @@ func InternalToGemini(ir *InternalRequest) ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func geminiPartsFromItems(source Format, msg InternalMessage, toolCallNames map[string]string) []map[string]interface{} {
+func geminiPartsFromItems(source Format, msg RequestMessage, toolCallNames map[string]string) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	parts := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -327,7 +327,7 @@ func geminiPartsFromItems(source Format, msg InternalMessage, toolCallNames map[
 	return parts
 }
 
-func geminiPartFromItem(item InternalContentItem, toolCallNames map[string]string) map[string]interface{} {
+func geminiPartFromItem(item ContentItem, toolCallNames map[string]string) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return geminiReasoningPart(item.Content)
@@ -507,7 +507,7 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 	}
 }
 
-func toolCallNameByID(messages []InternalMessage) map[string]string {
+func toolCallNameByID(messages []RequestMessage) map[string]string {
 	names := make(map[string]string)
 	for _, msg := range messages {
 		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
@@ -619,7 +619,7 @@ func isGeminiCLIEnvelopeExtra(key string) bool {
 	}
 }
 
-func geminiRoleToInternal(role string) string {
+func geminiRoleToRequestRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "model", "assistant":
 		return "assistant"
@@ -728,7 +728,7 @@ func normalizedFunctionTool(tool schema.Tool) (string, string, json.RawMessage) 
 	return strings.TrimSpace(tool.Name), strings.TrimSpace(tool.Description), parameters
 }
 
-func geminiRequestToolsToInternal(raw json.RawMessage) []schema.Tool {
+func parseGeminiRequestTools(raw json.RawMessage) []schema.Tool {
 	var rawTools []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &rawTools); err != nil {
 		return nil
@@ -851,6 +851,6 @@ func appendIfMissing(values []string, value string) []string {
 }
 
 func init() {
-	RegisterToInternal(FormatGemini, GeminiToInternal)
-	RegisterFromInternal(FormatGemini, InternalToGemini)
+	RegisterRequestParser(FormatGemini, ParseGeminiRequest)
+	RegisterRequestEmitter(FormatGemini, EmitGeminiRequest)
 }

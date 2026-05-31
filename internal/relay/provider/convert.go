@@ -41,15 +41,17 @@ func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte,
 	if err != nil {
 		return nil, err
 	}
-	internal, err := newconvert.ToInternalOnly(client, body)
+	req, err := newconvert.ToIR(client, body)
 	if err != nil {
-		return nil, fmt.Errorf("ToInternal(%s): %w", clientFormat, err)
+		return nil, fmt.Errorf("parse request %s: %w", clientFormat, err)
 	}
 	if clientFormat != upstreamFormat {
-		internal.Extra = nil
+		req.Native.Fields = nil
+		req.Native.Unknown = nil
+		req.Metadata = nil
 	}
 	if adaptor != nil {
-		return adaptor.FromInternal(internal)
+		return adaptor.FromIR(req)
 	}
 	upstream, err := toConvertFormat(upstreamFormat)
 	if err != nil {

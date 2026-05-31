@@ -7,14 +7,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// OpenAIChatToInternal converts OpenAI Chat Completions request to InternalRequest.
-func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
+// ParseOpenAIChatRequest converts OpenAI Chat Completions request to the request envelope.
+func ParseOpenAIChatRequest(body []byte) (*RequestEnvelope, error) {
 	var req schema.OpenAIChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat request: %w", err)
 	}
 
-	ir := &InternalRequest{
+	ir := &RequestEnvelope{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatOpenAIChatCompletions,
@@ -28,7 +28,7 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 
 	// Extract system/developer messages into Instructions
 	var instructions []string
-	var messages []InternalMessage
+	var messages []RequestMessage
 
 	for _, msg := range req.Messages {
 		if msg.Role == "system" || msg.Role == "developer" {
@@ -45,16 +45,16 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 			content = []schema.ContentPart{{Type: "text", Text: *msg.Content.Text}}
 		}
 
-		internalMsg := InternalMessage{
+		requestMsg := RequestMessage{
 			Role: msg.Role,
 			Name: msg.Name,
 		}
 		for _, part := range reasoningPartsFromOpenAIChatExtra(msg.Extra) {
-			internalMsg.Parts = append(internalMsg.Parts, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
+			requestMsg.Parts = append(requestMsg.Parts, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
 		}
 		if msg.Role != "tool" {
 			for _, part := range content {
-				appendContentItem(&internalMsg, part, rawJSON(part))
+				appendContentItem(&requestMsg, part, rawJSON(part))
 			}
 		}
 
@@ -73,19 +73,19 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 						Arguments: tc.Function.Arguments,
 					},
 				}
-				appendToolCallItem(&internalMsg, call, rawJSON(tc))
+				appendToolCallItem(&requestMsg, call, rawJSON(tc))
 			}
 		}
 
 		// Convert tool result (role=tool)
 		if msg.Role == "tool" {
-			appendToolResultItem(&internalMsg, schema.ToolResult{
+			appendToolResultItem(&requestMsg, schema.ToolResult{
 				ToolCallID: msg.ToolCallID,
 				Content:    msg.Content.ExtractText(),
 			}, rawJSON(msg))
 		}
 
-		messages = append(messages, internalMsg)
+		messages = append(messages, requestMsg)
 	}
 
 	// Set Instructions if any system/developer messages existed
@@ -171,8 +171,8 @@ func OpenAIChatToInternal(body []byte) (*InternalRequest, error) {
 	return ir, nil
 }
 
-// InternalToOpenAIChat converts InternalRequest to OpenAI Chat Completions request.
-func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
+// EmitOpenAIChatRequest converts the request envelope to OpenAI Chat Completions request.
+func EmitOpenAIChatRequest(ir *RequestEnvelope) ([]byte, error) {
 	req := schema.OpenAIChatRequest{
 		Model:  ir.Model,
 		Stream: ir.Stream,
@@ -193,7 +193,7 @@ func InternalToOpenAIChat(ir *InternalRequest) ([]byte, error) {
 		})
 	}
 
-	// Convert InternalMessages to ChatMessages
+	// Convert RequestMessages to ChatMessages
 	for _, msg := range ir.Messages {
 		items := canonicalMessageParts(msg)
 		content := contentPartsFromItems(items)
@@ -349,6 +349,6 @@ func joinNonEmpty(strs []string, sep string) string {
 }
 
 func init() {
-	RegisterToInternal(FormatOpenAIChatCompletions, OpenAIChatToInternal)
-	RegisterFromInternal(FormatOpenAIChatCompletions, InternalToOpenAIChat)
+	RegisterRequestParser(FormatOpenAIChatCompletions, ParseOpenAIChatRequest)
+	RegisterRequestEmitter(FormatOpenAIChatCompletions, EmitOpenAIChatRequest)
 }

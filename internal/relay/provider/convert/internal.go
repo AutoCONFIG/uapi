@@ -19,22 +19,19 @@ const (
 	FormatGeminiCLI             Format = "gemini_cli"
 )
 
-// InternalRequest is the compatibility shim used by existing provider
-// adaptors while request conversion migrates to ir.Request. New conversion
-// logic should treat IR and InternalMessage.Parts as canonical, and the
-// remaining legacy fields as indexed compatibility views.
-type InternalRequest struct {
+// RequestEnvelope is the structured request envelope used by provider-specific
+// parsers and emitters. Request routing is anchored on ir.Request; this type is
+// the protocol adapter view for code that still needs concrete provider fields.
+type RequestEnvelope struct {
 	Model    string
 	Stream   bool
-	Messages []InternalMessage
+	Messages []RequestMessage
 	Tools    []schema.Tool
 	// RawRequestBody preserves the exact client payload for same-protocol
 	// replay/audit and for the new IR native envelope.
 	RawRequestBody json.RawMessage
 
-	// IR is the canonical protocol-neutral representation used by the
-	// migration path. The legacy fields below are compatibility views until all
-	// converters parse and emit provider payloads directly through ir.Request.
+	// IR is the protocol-neutral representation used by request conversion.
 	IR *ir.Request `json:"-"`
 
 	// Instructions carries the unified system prompt extracted from:
@@ -82,19 +79,18 @@ type InternalRequest struct {
 	Extra map[string]json.RawMessage
 
 	// SourceFormat records which protocol this was parsed from,
-	// enabling selective field restoration during FromInternal.
+	// enabling selective field restoration during request emission.
 	SourceFormat Format
 
-	// Losses records known conversion/audit loss before the full IR migration
-	// moves loss accounting into provider-specific emitters.
+	// Losses records known conversion/audit loss.
 	Losses []ir.Loss `json:"-"`
 }
 
-// InternalMessage is a compatibility view over an ordered turn. Parts is the
-// only canonical ordering source.
-type InternalMessage struct {
+// RequestMessage is the provider-adapter view over an ordered turn. Parts is
+// the canonical ordering source.
+type RequestMessage struct {
 	Role    string
-	Parts   []InternalContentItem
+	Parts   []ContentItem
 	Name    string // for named messages
 	ItemID  string
 	Status  string
@@ -103,9 +99,9 @@ type InternalMessage struct {
 	Extra   map[string]json.RawMessage
 }
 
-// InternalContentItem preserves the original ordered content stream for the
-// compatibility shim. New code should map these items to ir.Item.
-type InternalContentItem struct {
+// ContentItem preserves the original ordered content stream for
+// provider parsers and emitters.
+type ContentItem struct {
 	Kind       string
 	Content    schema.ContentPart
 	ToolCall   schema.ToolCall
@@ -128,7 +124,7 @@ type InternalResponse struct {
 type InternalChoice struct {
 	Index        int
 	Role         string
-	Items        []InternalContentItem
+	Items        []ContentItem
 	FinishReason string
 }
 

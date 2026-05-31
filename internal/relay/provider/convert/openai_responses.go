@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// OpenAIResponsesToInternal converts OpenAI Responses API request to InternalRequest.
-func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
+// ParseOpenAIResponsesRequest converts OpenAI Responses API request to the request envelope.
+func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -17,7 +17,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	var rawRoot map[string]json.RawMessage
 	_ = json.Unmarshal(body, &rawRoot)
 
-	ir := &InternalRequest{
+	ir := &RequestEnvelope{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: append(json.RawMessage(nil), body...),
@@ -49,12 +49,12 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	}
 
 	// Parse Input - can be string or array
-	var messages []InternalMessage
+	var messages []RequestMessage
 	var inputItems []schema.ResponsesInputItem
 
 	if req.Input.Text != nil {
 		// Single string input becomes a user message
-		msg := InternalMessage{Role: "user"}
+		msg := RequestMessage{Role: "user"}
 		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
 		messages = append(messages, msg)
 	} else if len(req.Input.Items) > 0 {
@@ -63,7 +63,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 		// Empty input - no messages
 	}
 
-	// Convert input items to InternalMessages
+	// Convert input items to RequestMessages
 	for _, item := range inputItems {
 		rawItem := append(json.RawMessage(nil), item.Raw...)
 		switch item.Type {
@@ -74,7 +74,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 			} else if len(item.Content.Parts) > 0 {
 				content = item.Content.Parts
 			}
-			msg := InternalMessage{
+			msg := RequestMessage{
 				Role:    item.Role,
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -88,7 +88,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 			messages = append(messages, msg)
 
 		case "reasoning":
-			msg := InternalMessage{
+			msg := RequestMessage{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -102,7 +102,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 
 		case "function_call":
 			// function_call item becomes assistant message with tool calls
-			msg := InternalMessage{
+			msg := RequestMessage{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -125,7 +125,7 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 
 		case "function_call_output":
 			// function_call_output becomes tool result
-			msg := InternalMessage{
+			msg := RequestMessage{
 				Role:    "tool",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -138,8 +138,8 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 			}, rawItem)
 			messages = append(messages, msg)
 		default:
-			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item has no compatibility view yet and is preserved only as native raw/opaque IR"))
-			messages = append(messages, InternalMessage{
+			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item is preserved as native raw/opaque IR"))
+			messages = append(messages, RequestMessage{
 				ItemID:  item.ID,
 				Status:  item.Status,
 				Phase:   item.Phase,
@@ -190,9 +190,9 @@ func OpenAIResponsesToInternal(body []byte) (*InternalRequest, error) {
 	return ir, nil
 }
 
-// InternalToOpenAIResponses converts InternalRequest to OpenAI Responses API request.
+// EmitOpenAIResponsesRequest converts the request envelope to OpenAI Responses API request.
 // THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
+func EmitOpenAIResponsesRequest(ir *RequestEnvelope) ([]byte, error) {
 	// Use a map to build the JSON to ensure field ordering
 	resp := make(map[string]interface{})
 
@@ -262,7 +262,7 @@ func InternalToOpenAIResponses(ir *InternalRequest) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-func responsesInputItemsFromOrderedParts(msg InternalMessage) []map[string]interface{} {
+func responsesInputItemsFromOrderedParts(msg RequestMessage) []map[string]interface{} {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
 	flushContent := func() {
@@ -427,6 +427,6 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 }
 
 func init() {
-	RegisterToInternal(FormatOpenAIResponses, OpenAIResponsesToInternal)
-	RegisterFromInternal(FormatOpenAIResponses, InternalToOpenAIResponses)
+	RegisterRequestParser(FormatOpenAIResponses, ParseOpenAIResponsesRequest)
+	RegisterRequestEmitter(FormatOpenAIResponses, EmitOpenAIResponsesRequest)
 }

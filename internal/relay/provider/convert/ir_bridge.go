@@ -8,7 +8,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func (r *InternalRequest) ToIR() *ir.Request {
+func (r *RequestEnvelope) ToIR() *ir.Request {
 	if r == nil {
 		return nil
 	}
@@ -19,15 +19,7 @@ func (r *InternalRequest) ToIR() *ir.Request {
 	return r.IR
 }
 
-func (r *InternalRequest) RefreshIR() *ir.Request {
-	if r == nil {
-		return nil
-	}
-	r.IR = r.buildIR()
-	return r.IR
-}
-
-func (r *InternalRequest) buildIR() *ir.Request {
+func (r *RequestEnvelope) buildIR() *ir.Request {
 	req := &ir.Request{
 		SourceProtocol: irProtocol(r.SourceFormat),
 		Model:          r.Model,
@@ -82,7 +74,7 @@ func (r *InternalRequest) buildIR() *ir.Request {
 	return req
 }
 
-func irTurn(msg InternalMessage, source Format) ir.Turn {
+func irTurn(msg RequestMessage, source Format) ir.Turn {
 	turn := ir.Turn{
 		Role:     irRole(msg.Role),
 		Name:     msg.Name,
@@ -105,7 +97,7 @@ func irTurn(msg InternalMessage, source Format) ir.Turn {
 	return turn
 }
 
-func irItem(item InternalContentItem, source Format, index int) ir.Item {
+func irItem(item ContentItem, source Format, index int) ir.Item {
 	switch item.Kind {
 	case contentItemKindContent, contentItemKindReasoning:
 		return irContentPartItem(item.Kind, item.Content, item.Raw, source, index)
@@ -246,7 +238,13 @@ func irTool(tool schema.Tool, source Format) ir.Tool {
 		InputSchema: ir.CloneRaw(tool.InputSchema),
 		Parameters:  parameters,
 		Metadata:    ir.CloneRawMap(tool.Extra),
-		Native:      ir.NativeEnvelope{Protocol: irProtocol(source), Fields: ir.CloneRawMap(tool.Extra)},
+		FunctionMetadata: func() map[string]json.RawMessage {
+			if tool.Function == nil {
+				return nil
+			}
+			return ir.CloneRawMap(tool.Function.Extra)
+		}(),
+		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Fields: ir.CloneRawMap(tool.Extra)},
 	}
 }
 

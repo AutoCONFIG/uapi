@@ -20,14 +20,15 @@ const (
 )
 
 type Tool struct {
-	Kind        ToolKind                   `json:"kind"`
-	Name        string                     `json:"name,omitempty"`
-	Namespace   string                     `json:"namespace,omitempty"`
-	Description string                     `json:"description,omitempty"`
-	InputSchema json.RawMessage            `json:"input_schema,omitempty"`
-	Parameters  json.RawMessage            `json:"parameters,omitempty"`
-	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
-	Native      NativeEnvelope             `json:"native,omitempty"`
+	Kind             ToolKind                   `json:"kind"`
+	Name             string                     `json:"name,omitempty"`
+	Namespace        string                     `json:"namespace,omitempty"`
+	Description      string                     `json:"description,omitempty"`
+	InputSchema      json.RawMessage            `json:"input_schema,omitempty"`
+	Parameters       json.RawMessage            `json:"parameters,omitempty"`
+	Metadata         map[string]json.RawMessage `json:"metadata,omitempty"`
+	FunctionMetadata map[string]json.RawMessage `json:"function_metadata,omitempty"`
+	Native           NativeEnvelope             `json:"native,omitempty"`
 }
 
 type ToolChoice struct {

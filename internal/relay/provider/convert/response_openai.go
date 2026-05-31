@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// OpenAIChatResponseToInternal converts OpenAI Chat Completions response to InternalResponse.
-func OpenAIChatResponseToInternal(body []byte) (*InternalResponse, error) {
+// ParseOpenAIChatResponse converts OpenAI Chat Completions response to InternalResponse.
+func ParseOpenAIChatResponse(body []byte) (*InternalResponse, error) {
 	var resp schema.OpenAIChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat response: %w", err)
@@ -123,8 +123,8 @@ func mapOpenAIChatFinishReason(fr string) string {
 	}
 }
 
-// mapInternalToOpenAIChatFinishReason converts internal finish_reason to OpenAI format.
-func mapInternalToOpenAIChatFinishReason(fr string) string {
+// mapOpenAIChatResponseFinishReason converts internal finish_reason to OpenAI format.
+func mapOpenAIChatResponseFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
 		return "stop"
@@ -139,8 +139,8 @@ func mapInternalToOpenAIChatFinishReason(fr string) string {
 	}
 }
 
-// InternalToOpenAIChatResponse converts InternalResponse to OpenAI Chat Completions response.
-func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
+// EmitOpenAIChatResponse converts InternalResponse to OpenAI Chat Completions response.
+func EmitOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 	resp := schema.OpenAIChatResponse{
 		ID:      ir.ID,
 		Object:  "chat.completion",
@@ -175,7 +175,7 @@ func InternalToOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
 	for _, choice := range ir.Choices {
 		chatChoice := schema.ChatChoice{
 			Index:        choice.Index,
-			FinishReason: mapInternalToOpenAIChatFinishReason(choice.FinishReason),
+			FinishReason: mapOpenAIChatResponseFinishReason(choice.FinishReason),
 			Message: schema.ChatMessage{
 				Role: choice.Role,
 			},
@@ -252,8 +252,8 @@ func contentPartsText(parts []schema.ContentPart) string {
 	return strings.Join(out, "\n")
 }
 
-// OpenAIResponsesResponseToInternal converts OpenAI Responses API response to InternalResponse.
-func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
+// ParseOpenAIResponsesResponse converts OpenAI Responses API response to InternalResponse.
+func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
 	var resp schema.OpenAIResponsesResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses response: %w", err)
@@ -274,7 +274,7 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 	}
 
-	var pendingReasoning []InternalContentItem
+	var pendingReasoning []ContentItem
 	flushPendingReasoning := func() {
 		if len(pendingReasoning) == 0 {
 			return
@@ -295,7 +295,7 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 			choice := InternalChoice{
 				Index:        len(ir.Choices),
 				Role:         item.Role,
-				FinishReason: mapResponsesToInternalFinishReason(item.Status),
+				FinishReason: mapResponsesStatusToFinishReason(item.Status),
 			}
 			for _, pending := range pendingReasoning {
 				appendChoiceReasoningItem(&choice, pending.Content, pending.Raw)
@@ -332,7 +332,7 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 
 		case "reasoning":
 			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
-				pendingReasoning = append(pendingReasoning, InternalContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
+				pendingReasoning = append(pendingReasoning, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
 			}
 		}
 	}
@@ -341,8 +341,8 @@ func OpenAIResponsesResponseToInternal(body []byte) (*InternalResponse, error) {
 	return ir, nil
 }
 
-// mapResponsesToInternalFinishReason converts Responses API status to internal finish reason.
-func mapResponsesToInternalFinishReason(status string) string {
+// mapResponsesStatusToFinishReason converts Responses API status to internal finish reason.
+func mapResponsesStatusToFinishReason(status string) string {
 	switch status {
 	case "completed":
 		return "end_turn"
@@ -353,8 +353,8 @@ func mapResponsesToInternalFinishReason(status string) string {
 	}
 }
 
-// InternalToOpenAIResponsesResponse converts InternalResponse to OpenAI Responses API response.
-func InternalToOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
+// EmitOpenAIResponsesResponse converts InternalResponse to OpenAI Responses API response.
+func EmitOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 	resp := schema.OpenAIResponsesResponse{
 		ID:        ir.ID,
 		Object:    "response",
@@ -462,7 +462,7 @@ func responsesOutputItemsFromChoice(choice InternalChoice) []schema.ResponsesOut
 		case contentItemKindReasoning:
 			flushContent()
 			reasoningChoice := choice
-			reasoningChoice.Items = []InternalContentItem{item}
+			reasoningChoice.Items = []ContentItem{item}
 			out = append(out, responsesReasoningOutputItem(reasoningChoice))
 		case contentItemKindContent:
 			part := item.Content
@@ -558,8 +558,8 @@ func imageOutputFormatFromMime(mimeType string) string {
 }
 
 func init() {
-	RegisterToResponseInternal(FormatOpenAIChatCompletions, OpenAIChatResponseToInternal)
-	RegisterFromResponseInternal(FormatOpenAIChatCompletions, InternalToOpenAIChatResponse)
-	RegisterToResponseInternal(FormatOpenAIResponses, OpenAIResponsesResponseToInternal)
-	RegisterFromResponseInternal(FormatOpenAIResponses, InternalToOpenAIResponsesResponse)
+	RegisterResponseParser(FormatOpenAIChatCompletions, ParseOpenAIChatResponse)
+	RegisterResponseEmitter(FormatOpenAIChatCompletions, EmitOpenAIChatResponse)
+	RegisterResponseParser(FormatOpenAIResponses, ParseOpenAIResponsesResponse)
+	RegisterResponseEmitter(FormatOpenAIResponses, EmitOpenAIResponsesResponse)
 }

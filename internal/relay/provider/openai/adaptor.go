@@ -70,31 +70,22 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	return nil
 }
 
-// --- Intermediate format conversion ---
+// --- Request conversion ---
 
-func (a *OpenAIAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	// Determine format based on API format
+func (a *OpenAIAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
 	format := convert.FormatOpenAIChatCompletions
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
 		format = convert.FormatOpenAIResponses
 	}
-	ir, err := convert.ToInternalOnly(format, body)
-	if err != nil {
-		return nil, err
-	}
-	return ir, nil
+	return convert.ToIR(format, body)
 }
 
-func (a *OpenAIAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
+func (a *OpenAIAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
 	format := convert.FormatOpenAIChatCompletions
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
 		format = convert.FormatOpenAIResponses
 	}
-	fromInternal, ok := convert.GetFromInternalFunc(format)
-	if !ok {
-		return nil, fmt.Errorf("no FromInternal converter for format %q", format)
-	}
-	return fromInternal(req)
+	return convert.FromIR(req, format)
 }
 
 // --- Response/stream handling ---

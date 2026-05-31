@@ -10,12 +10,12 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func TestInternalToGeminiCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
-	req := &provider.InternalRequest{
+func TestEmitGeminiRequestCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
+	req := &provider.RequestEnvelope{
 		Model: "pro",
-		Messages: []provider.InternalMessage{{
+		Messages: []provider.RequestMessage{{
 			Role: "user",
-			Parts: []convert.InternalContentItem{{
+			Parts: []convert.ContentItem{{
 				Kind:    "content",
 				Content: schema.ContentPart{Type: "text", Text: "hello"},
 			}},

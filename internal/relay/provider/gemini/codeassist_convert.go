@@ -13,11 +13,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func internalToGeminiCodeAssistWithAccount(req *provider.InternalRequest, account *db.Account) ([]byte, error) {
+func internalToGeminiCodeAssistWithAccount(req *provider.RequestEnvelope, account *db.Account) ([]byte, error) {
 	model := resolveCodeAssistModel(req.Model)
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.InternalToGemini(&reqCopy)
+	gemBody, err := convert.EmitGeminiRequest(&reqCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func shouldUseGoogleOneCredits(account *db.Account, model string) bool {
 	return false
 }
 
-func codeAssistSessionID(req *provider.InternalRequest, account *db.Account) string {
+func codeAssistSessionID(req *provider.RequestEnvelope, account *db.Account) string {
 	if req != nil && req.Extra != nil {
 		for _, key := range []string{"session_id", "sessionId"} {
 			if value := strings.TrimSpace(stringFromAny(req.Extra[key])); value != "" {
@@ -107,7 +107,7 @@ func codeAssistSessionID(req *provider.InternalRequest, account *db.Account) str
 	return "uapi-" + hex.EncodeToString(sum[:8])
 }
 
-func codeAssistSessionSeed(req *provider.InternalRequest, account *db.Account) string {
+func codeAssistSessionSeed(req *provider.RequestEnvelope, account *db.Account) string {
 	var parts []string
 	if account != nil {
 		if account.ID != uuid.Nil {
@@ -134,7 +134,7 @@ func codeAssistSessionSeed(req *provider.InternalRequest, account *db.Account) s
 	return strings.Join(parts, "\n")
 }
 
-func firstMessageText(msg provider.InternalMessage) string {
+func firstMessageText(msg provider.RequestMessage) string {
 	for _, item := range msg.Parts {
 		if item.Kind == "content" && item.Content.Text != "" {
 			return item.Content.Text

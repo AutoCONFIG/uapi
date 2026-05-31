@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// GeminiResponseToInternal converts Gemini API response to InternalResponse.
-func GeminiResponseToInternal(body []byte) (*InternalResponse, error) {
+// ParseGeminiResponse converts Gemini API response to InternalResponse.
+func ParseGeminiResponse(body []byte) (*InternalResponse, error) {
 	var wrapped struct {
 		Response json.RawMessage `json:"response"`
 	}
@@ -127,8 +127,8 @@ func mapGeminiFinishReason(fr string) string {
 	}
 }
 
-// mapInternalToGeminiFinishReason converts internal finish_reason to Gemini format.
-func mapInternalToGeminiFinishReason(fr string) string {
+// mapGeminiResponseFinishReason converts internal finish_reason to Gemini format.
+func mapGeminiResponseFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
 		return "STOP"
@@ -145,8 +145,8 @@ func mapInternalToGeminiFinishReason(fr string) string {
 	}
 }
 
-// InternalToGeminiResponse converts InternalResponse to Gemini API response.
-func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
+// EmitGeminiResponse converts InternalResponse to Gemini API response.
+func EmitGeminiResponse(ir *InternalResponse) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	// Convert choices to candidates
@@ -154,7 +154,7 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 	for _, choice := range ir.Choices {
 		cand := map[string]interface{}{
 			"index":        choice.Index,
-			"finishReason": mapInternalToGeminiFinishReason(choice.FinishReason),
+			"finishReason": mapGeminiResponseFinishReason(choice.FinishReason),
 		}
 
 		items := canonicalChoiceItems(choice)
@@ -275,8 +275,8 @@ func InternalToGeminiResponse(ir *InternalResponse) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-// GeminiCLIResponseToInternal extracts InternalResponse from Gemini CLI envelope.
-func GeminiCLIResponseToInternal(body []byte) (*InternalResponse, error) {
+// ParseGeminiCLIResponse extracts InternalResponse from Gemini CLI envelope.
+func ParseGeminiCLIResponse(body []byte) (*InternalResponse, error) {
 	var env schema.GeminiCLIResponse
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI response: %w", err)
@@ -288,7 +288,7 @@ func GeminiCLIResponseToInternal(body []byte) (*InternalResponse, error) {
 		return nil, fmt.Errorf("failed to marshal inner Gemini response: %w", err)
 	}
 
-	ir, err := GeminiResponseToInternal(innerBody)
+	ir, err := ParseGeminiResponse(innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert inner Gemini response: %w", err)
 	}
@@ -296,10 +296,10 @@ func GeminiCLIResponseToInternal(body []byte) (*InternalResponse, error) {
 	return ir, nil
 }
 
-// InternalToGeminiCLIResponse wraps InternalResponse in Gemini CLI envelope.
-func InternalToGeminiCLIResponse(ir *InternalResponse) ([]byte, error) {
+// EmitGeminiCLIResponse wraps InternalResponse in Gemini CLI envelope.
+func EmitGeminiCLIResponse(ir *InternalResponse) ([]byte, error) {
 	// First convert to Gemini format
-	innerBody, err := InternalToGeminiResponse(ir)
+	innerBody, err := EmitGeminiResponse(ir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert to Gemini format: %w", err)
 	}
@@ -319,8 +319,8 @@ func InternalToGeminiCLIResponse(ir *InternalResponse) ([]byte, error) {
 }
 
 func init() {
-	RegisterToResponseInternal(FormatGemini, GeminiResponseToInternal)
-	RegisterFromResponseInternal(FormatGemini, InternalToGeminiResponse)
-	RegisterToResponseInternal(FormatGeminiCLI, GeminiCLIResponseToInternal)
-	RegisterFromResponseInternal(FormatGeminiCLI, InternalToGeminiCLIResponse)
+	RegisterResponseParser(FormatGemini, ParseGeminiResponse)
+	RegisterResponseEmitter(FormatGemini, EmitGeminiResponse)
+	RegisterResponseParser(FormatGeminiCLI, ParseGeminiCLIResponse)
+	RegisterResponseEmitter(FormatGeminiCLI, EmitGeminiCLIResponse)
 }

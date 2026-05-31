@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// AnthropicToInternal converts Anthropic Messages API request to InternalRequest.
-func AnthropicToInternal(body []byte) (*InternalRequest, error) {
+// ParseAnthropicRequest converts Anthropic Messages API request to the request envelope.
+func ParseAnthropicRequest(body []byte) (*RequestEnvelope, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
 	}
 
-	ir := &InternalRequest{
+	ir := &RequestEnvelope{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatAnthropic,
@@ -54,7 +54,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 
 	// Convert messages
 	for _, msg := range req.Messages {
-		internalMsg := InternalMessage{
+		requestMsg := RequestMessage{
 			Role: msg.Role,
 		}
 
@@ -68,7 +68,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 					Text:  block.Text,
 					Extra: block.Extra,
 				}
-				appendContentItem(&internalMsg, part, rawBlock)
+				appendContentItem(&requestMsg, part, rawBlock)
 			case "image":
 				if block.Source != nil {
 					dataURI := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
@@ -78,7 +78,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 						MimeType: block.Source.MediaType,
 						Extra:    block.Extra,
 					}
-					appendContentItem(&internalMsg, part, rawBlock)
+					appendContentItem(&requestMsg, part, rawBlock)
 				}
 			case "document":
 				if block.Source != nil {
@@ -108,7 +108,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 					case "file":
 						part.FileID = block.Source.FileID
 					}
-					appendContentItem(&internalMsg, part, rawBlock)
+					appendContentItem(&requestMsg, part, rawBlock)
 				}
 			case "tool_use":
 				args := rawJSONArgumentString(block.Input)
@@ -124,9 +124,9 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 						Arguments: args,
 					},
 				}
-				appendToolCallItem(&internalMsg, call, rawBlock)
+				appendToolCallItem(&requestMsg, call, rawBlock)
 			case "tool_result":
-				appendToolResultItem(&internalMsg, schema.ToolResult{
+				appendToolResultItem(&requestMsg, schema.ToolResult{
 					ToolCallID: block.ToolUseID,
 					Content:    block.ContentStr,
 					IsError:    block.IsError,
@@ -139,21 +139,21 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 				for k, v := range block.Extra {
 					extra[k] = v
 				}
-				appendReasoningItem(&internalMsg, schema.ContentPart{
+				appendReasoningItem(&requestMsg, schema.ContentPart{
 					Type:  "thinking",
 					Text:  block.Thinking,
 					Extra: extra,
 				}, rawBlock)
 			case "redacted_thinking":
 				if raw, ok := block.Extra[reasoningExtraData]; ok && rawString(raw) != "" {
-					appendReasoningItem(&internalMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
+					appendReasoningItem(&requestMsg, reasoningPartWithExtra("", map[string]json.RawMessage{
 						reasoningExtraData:             raw,
 						reasoningExtraEncryptedContent: raw,
 						reasoningExtraType:             json.RawMessage(`"reasoning.encrypted"`),
 					}), rawBlock)
 				}
 			default:
-				appendContentItem(&internalMsg, schema.ContentPart{
+				appendContentItem(&requestMsg, schema.ContentPart{
 					Type:  block.Type,
 					Text:  block.Text,
 					Extra: block.Extra,
@@ -161,7 +161,7 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 			}
 		}
 
-		ir.Messages = append(ir.Messages, internalMsg)
+		ir.Messages = append(ir.Messages, requestMsg)
 	}
 
 	// Generation parameters
@@ -193,8 +193,8 @@ func AnthropicToInternal(body []byte) (*InternalRequest, error) {
 	return ir, nil
 }
 
-// InternalToAnthropic converts InternalRequest to Anthropic Messages API request.
-func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
+// EmitAnthropicRequest converts the request envelope to Anthropic Messages API request.
+func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
 	req := make(map[string]interface{})
 	req["model"] = ir.Model
 	req["max_tokens"] = 4096 // default if not set
@@ -247,7 +247,7 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	if len(ir.StopWords) > 0 {
 		req["stop_sequences"] = ir.StopWords
 	}
-	if thinking := anthropicThinkingFromInternal(ir); thinking != nil {
+	if thinking := anthropicThinkingFromRequestEnvelope(ir); thinking != nil {
 		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
@@ -262,7 +262,7 @@ func InternalToAnthropic(ir *InternalRequest) ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func anthropicBlocksFromMessage(source Format, msg InternalMessage) []map[string]interface{} {
+func anthropicBlocksFromMessage(source Format, msg RequestMessage) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	blocks := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -280,7 +280,7 @@ func anthropicBlocksFromMessage(source Format, msg InternalMessage) []map[string
 	return blocks
 }
 
-func anthropicBlockFromItem(item InternalContentItem) map[string]interface{} {
+func anthropicBlockFromItem(item ContentItem) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return anthropicReasoningBlock(item.Content)
@@ -447,6 +447,6 @@ func anthropicToolResultBlock(result schema.ToolResult) map[string]interface{} {
 }
 
 func init() {
-	RegisterToInternal(FormatAnthropic, AnthropicToInternal)
-	RegisterFromInternal(FormatAnthropic, InternalToAnthropic)
+	RegisterRequestParser(FormatAnthropic, ParseAnthropicRequest)
+	RegisterRequestEmitter(FormatAnthropic, EmitAnthropicRequest)
 }

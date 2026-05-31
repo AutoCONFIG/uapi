@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// AnthropicResponseToInternal converts Anthropic response to InternalResponse.
-func AnthropicResponseToInternal(body []byte) (*InternalResponse, error) {
+// ParseAnthropicResponse converts Anthropic response to InternalResponse.
+func ParseAnthropicResponse(body []byte) (*InternalResponse, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
@@ -103,8 +103,8 @@ func mapAnthropicFinishReason(fr string) string {
 	}
 }
 
-// mapInternalToAnthropicFinishReason converts internal finish_reason to Anthropic format.
-func mapInternalToAnthropicFinishReason(fr string) string {
+// mapAnthropicResponseFinishReason converts internal finish_reason to Anthropic format.
+func mapAnthropicResponseFinishReason(fr string) string {
 	switch fr {
 	case "end_turn":
 		return "end_turn"
@@ -119,8 +119,8 @@ func mapInternalToAnthropicFinishReason(fr string) string {
 	}
 }
 
-// InternalToAnthropicResponse converts InternalResponse to Anthropic response.
-func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
+// EmitAnthropicResponse converts InternalResponse to Anthropic response.
+func EmitAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	resp["id"] = ir.ID
@@ -183,7 +183,7 @@ func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 		}
 
 		// Set finish reason
-		resp["stop_reason"] = mapInternalToAnthropicFinishReason(choice.FinishReason)
+		resp["stop_reason"] = mapAnthropicResponseFinishReason(choice.FinishReason)
 
 		// Only process first choice for now
 		break
@@ -223,6 +223,6 @@ func InternalToAnthropicResponse(ir *InternalResponse) ([]byte, error) {
 }
 
 func init() {
-	RegisterToResponseInternal(FormatAnthropic, AnthropicResponseToInternal)
-	RegisterFromResponseInternal(FormatAnthropic, InternalToAnthropicResponse)
+	RegisterResponseParser(FormatAnthropic, ParseAnthropicResponse)
+	RegisterResponseEmitter(FormatAnthropic, EmitAnthropicResponse)
 }

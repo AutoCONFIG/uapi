@@ -2,11 +2,11 @@ package convert
 
 import "testing"
 
-func TestAnthropicToInternalAcceptsStringContent(t *testing.T) {
+func TestParseAnthropicRequestAcceptsStringContent(t *testing.T) {
 	body := []byte(`{"model":"claude-test","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`)
-	got, err := AnthropicToInternal(body)
+	got, err := ParseAnthropicRequest(body)
 	if err != nil {
-		t.Fatalf("AnthropicToInternal() error = %v", err)
+		t.Fatalf("ParseAnthropicRequest() error = %v", err)
 	}
 	if len(got.Messages) != 1 || len(got.Messages[0].Parts) != 1 {
 		t.Fatalf("messages = %#v", got.Messages)

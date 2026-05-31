@@ -72,7 +72,7 @@ func internalChoiceFromIR(choice relayir.Choice) InternalChoice {
 			if part, ok := schemaContentFromIR(item); ok {
 				appendChoiceContentItem(&out, part, relayir.CloneRaw(item.Native.Raw))
 			} else {
-				out.Items = append(out.Items, InternalContentItem{Kind: string(item.Kind), Raw: relayir.CloneRaw(item.Native.Raw)})
+				out.Items = append(out.Items, ContentItem{Kind: string(item.Kind), Raw: relayir.CloneRaw(item.Native.Raw)})
 			}
 		}
 	}

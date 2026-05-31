@@ -8,42 +8,46 @@ import (
 )
 
 func ToIR(format Format, body []byte) (*relayir.Request, error) {
-	req, err := ToInternalOnly(format, body)
-	if err != nil {
-		return nil, err
+	body = cleanJSONUndefinedPlaceholders(body)
+	toIR, ok := requestIRParsers[format]
+	if !ok {
+		return nil, &NoRequestParserError{Format: format}
 	}
-	return req.ToIR(), nil
+	return toIR(body)
 }
 
 func FromIR(req *relayir.Request, target Format) ([]byte, error) {
-	internal := InternalFromIR(req)
-	internal.SourceFormat = protocolFormat(req.SourceProtocol)
-	if internal.SourceFormat == "" {
-		internal.SourceFormat = target
-	}
 	if req.TargetProtocol != "" {
 		target = protocolFormat(req.TargetProtocol)
 	}
-	from, ok := fromInternalRegistry[target]
+	from, ok := requestIREmitters[target]
 	if !ok {
-		return nil, &NoConverterError{Format: target}
+		return nil, &NoRequestEmitterError{Format: target}
 	}
-	return from(internal)
+	return from(req)
 }
 
-type NoConverterError struct {
+type NoRequestParserError struct {
 	Format Format
 }
 
-func (e *NoConverterError) Error() string {
-	return "no FromInternal converter for format " + string(e.Format)
+func (e *NoRequestParserError) Error() string {
+	return "no request parser for format " + string(e.Format)
 }
 
-func InternalFromIR(req *relayir.Request) *InternalRequest {
+type NoRequestEmitterError struct {
+	Format Format
+}
+
+func (e *NoRequestEmitterError) Error() string {
+	return "no request emitter for format " + string(e.Format)
+}
+
+func RequestEnvelopeFromIR(req *relayir.Request) *RequestEnvelope {
 	if req == nil {
 		return nil
 	}
-	out := &InternalRequest{
+	out := &RequestEnvelope{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: relayir.CloneRaw(req.Native.RawBody),
@@ -92,7 +96,7 @@ func InternalFromIR(req *relayir.Request) *InternalRequest {
 		out.ToolChoice = relayir.CloneRaw(req.ToolChoice.Raw)
 	}
 	for _, turn := range req.Turns {
-		out.Messages = append(out.Messages, internalMessageFromIRTurn(turn))
+		out.Messages = append(out.Messages, requestMessageFromIRTurn(turn))
 	}
 	out.IR = req
 	return out
@@ -107,8 +111,8 @@ func instructionText(inst relayir.Instruction) string {
 	return ""
 }
 
-func internalMessageFromIRTurn(turn relayir.Turn) InternalMessage {
-	msg := InternalMessage{
+func requestMessageFromIRTurn(turn relayir.Turn) RequestMessage {
+	msg := RequestMessage{
 		Role:    string(turn.Role),
 		Name:    turn.Name,
 		ItemID:  turn.ID,
@@ -257,6 +261,7 @@ func schemaToolFromIR(tool relayir.Tool) schema.Tool {
 			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  relayir.CloneRaw(tool.Parameters),
+			Extra:       relayir.CloneRawMap(tool.FunctionMetadata),
 		}
 	}
 	return out

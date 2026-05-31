@@ -50,22 +50,14 @@ func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials
 	return nil
 }
 
-// --- Intermediate format conversion ---
+// --- Request conversion ---
 
-func (a *AnthropicAdaptor) ToInternal(body []byte) (*provider.InternalRequest, error) {
-	ir, err := convert.ToInternalOnly(convert.FormatAnthropic, body)
-	if err != nil {
-		return nil, err
-	}
-	return ir, nil
+func (a *AnthropicAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+	return convert.ToIR(convert.FormatAnthropic, body)
 }
 
-func (a *AnthropicAdaptor) FromInternal(req *provider.InternalRequest) ([]byte, error) {
-	fromInternal, ok := convert.GetFromInternalFunc(convert.FormatAnthropic)
-	if !ok {
-		return nil, fmt.Errorf("no FromInternal converter for format %q", convert.FormatAnthropic)
-	}
-	return fromInternal(req)
+func (a *AnthropicAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+	return convert.FromIR(req, convert.FormatAnthropic)
 }
 
 func (a *AnthropicAdaptor) GetChannelType() string { return "anthropic" }

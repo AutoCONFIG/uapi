@@ -10,6 +10,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/valyala/fasthttp"
 )
 
@@ -25,8 +26,9 @@ const (
 	FormatAntigravity           Format = "antigravity"
 )
 
-type InternalRequest = convert.InternalRequest
-type InternalMessage = convert.InternalMessage
+type RequestEnvelope = convert.RequestEnvelope
+type RequestMessage = convert.RequestMessage
+type RequestIR = ir.Request
 
 type InternalResponse struct {
 	ID       string
@@ -38,7 +40,7 @@ type InternalResponse struct {
 
 type InternalChoice struct {
 	Index        int
-	Message      InternalMessage
+	Message      RequestMessage
 	FinishReason string
 }
 
@@ -112,8 +114,8 @@ type Adaptor interface {
 	SetRequestParams(model string, stream bool)
 	GetRequestURL(path string) (string, error)
 	SetupRequestHeader(req *fasthttp.Request, credentials string) error
-	ToInternal(body []byte) (*InternalRequest, error)
-	FromInternal(req *InternalRequest) ([]byte, error)
+	ToIR(body []byte) (*RequestIR, error)
+	FromIR(req *RequestIR) ([]byte, error)
 	ParseUsage(respBody []byte) (promptTokens, completionTokens int, err error)
 	ParseStreamUsage(lastChunk []byte) (promptTokens, completionTokens int, err error)
 	// ParseUsageFull returns full usage including cache tokens
