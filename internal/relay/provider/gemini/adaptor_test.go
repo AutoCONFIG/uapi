@@ -51,3 +51,14 @@ func TestParseUsageFullCapturesCodeAssistEnvelopeCachedContent(t *testing.T) {
 		t.Fatalf("usage = %#v, want prompt=12 completion=3 cache_read=7", usage)
 	}
 }
+
+func TestParseUsageFullCapturesNativeGeminiCachedContent(t *testing.T) {
+	adaptor := &GeminiAdaptor{}
+	usage, err := adaptor.ParseUsageFull([]byte(`{"usageMetadata":{"promptTokenCount":14,"candidatesTokenCount":5,"totalTokenCount":19,"cachedContentTokenCount":8}}`))
+	if err != nil {
+		t.Fatalf("ParseUsageFull: %v", err)
+	}
+	if usage.PromptTokens != 14 || usage.CompletionTokens != 5 || usage.CacheReadInputTokens != 8 {
+		t.Fatalf("usage = %#v, want prompt=14 completion=5 cache_read=8", usage)
+	}
+}

@@ -323,6 +323,39 @@ func TestStreamAndForwardConvertedTracksUsageFromNamedResponsesEvent(t *testing.
 	}
 }
 
+func TestStreamAndForwardTracksUsageFromMultiLineResponsesEvent(t *testing.T) {
+	body := "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\n" +
+		"data: \"response\":{\"usage\":{\"input_tokens\":17,\"output_tokens\":19,\"input_tokens_details\":{\"cached_tokens\":11}}}}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	convert := func(line []byte) []byte {
+		return line
+	}
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(responsesUsageParser{}), convert, nil, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.promptTokens != 17 || result.completionTokens != 19 {
+		t.Fatalf("usage from multiline Responses SSE event = (%d,%d), want (17,19)", result.promptTokens, result.completionTokens)
+	}
+	tracker := newStreamTracker(responsesUsageParser{})
+	for _, payload := range sseDataPayloads([]byte(body)) {
+		tracker.TrackChunk([]byte(payload))
+	}
+	if tracker.CacheReadTokens() != 11 {
+		t.Fatalf("cache read from multiline Responses SSE event = %d, want 11", tracker.CacheReadTokens())
+	}
+	if !result.finalized || result.failed {
+		t.Fatalf("multiline Responses terminal should finalize successfully: %+v", result)
+	}
+}
+
 func TestStreamTrackerCapturesCacheReadTokens(t *testing.T) {
 	tracker := newStreamTracker(responsesUsageParser{})
 	tracker.TrackChunk([]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":13,"input_tokens_details":{"cached_tokens":7}}}}`))

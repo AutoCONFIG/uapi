@@ -414,6 +414,30 @@ func TestSameProtocolNormalizerRemovesUndefinedSentinels(t *testing.T) {
 	}
 }
 
+func TestSameProtocolNormalizePreservesNativeGeminiStreamBodyShape(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hi","vendorField":{"keep":true}}]}],
+		"generationConfig":{"maxOutputTokens":"[undefined]","responseModalities":["TEXT"]},
+		"tools":[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]}]
+	}`)
+	normalized, err := convert.NormalizeRequestSameProtocol(convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("NormalizeRequestSameProtocol: %v", err)
+	}
+	got := string(normalized)
+	for _, want := range []string{`"contents"`, `"vendorField"`, `"responseModalities"`, `"tools"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("same-protocol normalize dropped native field %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"stream"`) {
+		t.Fatalf("same-protocol Gemini normalize must not inject OpenAI stream field:\n%s", got)
+	}
+	if strings.Contains(got, "[undefined]") || strings.Contains(got, "maxOutputTokens") {
+		t.Fatalf("undefined generationConfig field was not cleaned precisely:\n%s", got)
+	}
+}
+
 func TestOpenAIChatToolResultToGeminiDoesNotDuplicateAsText(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

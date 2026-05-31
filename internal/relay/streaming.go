@@ -732,11 +732,28 @@ func streamHasFailureEvent(event []byte) bool {
 }
 
 func sseDataPayloads(event []byte) []string {
-	normalized := normalizeSSEEventForConverter(event)
-	if len(normalized) == 0 {
+	lines := strings.Split(strings.TrimRight(string(event), "\n"), "\n")
+	dataParts := make([]string, 0, len(lines))
+	inData := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			if strings.HasPrefix(data, " ") {
+				data = strings.TrimPrefix(data, " ")
+			}
+			dataParts = append(dataParts, data)
+			inData = true
+			continue
+		}
+		if inData && !strings.HasPrefix(line, "event:") && strings.TrimSpace(line) != "" {
+			dataParts = append(dataParts, line)
+		}
+	}
+	if len(dataParts) == 0 {
 		return nil
 	}
-	raw := strings.TrimPrefix(strings.TrimSpace(string(normalized)), "data:")
+	raw := strings.Join(dataParts, "\n")
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "[DONE]" {
 		return nil
