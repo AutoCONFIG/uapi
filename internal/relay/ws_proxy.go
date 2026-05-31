@@ -190,13 +190,14 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 			// Settle billing
 			promptTokens, completionTokens := ts.usage()
+			cacheCreationTokens := extractStreamCacheCreationTokens(msg)
 			cacheReadTokens := extractStreamCacheReadTokens(msg)
 			estimateMissingUsage(&promptTokens, &completionTokens, wsCreateToHTTPBody(requestBody), msg, 0)
-			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, model, cacheReadTokens)
+			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, model, cacheCreationTokens, cacheReadTokens)
 			if ch.AffinityTTL > 0 {
 				h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
 			}
-			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, promptTokens, completionTokens, start, 200, cacheReadTokens)
+			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, promptTokens, completionTokens, start, 200, cacheCreationTokens, cacheReadTokens)
 			return
 		}
 	}

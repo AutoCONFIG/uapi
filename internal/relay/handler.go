@@ -632,10 +632,11 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
 			if errors.Is(result.err, io.ErrClosedPipe) {
 				pt, ct, _ := tracker.Result()
+				cacheCreationTokens := tracker.CacheCreationTokens()
 				cacheReadTokens := tracker.CacheReadTokens()
 				estimateMissingUsage(&pt, &ct, body, nil, tracker.EstimatedOutputTokens())
 				if pt > 0 || ct > 0 {
-					go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, 0, cacheReadTokens, start, 499, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+					go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, 499, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 				} else {
 					go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, 499, estTokens, "client disconnected", httputil.ClientIPForLog(ctx, r.trustedProxies), tokenPlanID)
 				}
@@ -661,6 +662,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			}
 		}
 		pt, ct, parseFailed := tracker.Result()
+		cacheCreationTokens := tracker.CacheCreationTokens()
 		cacheReadTokens := tracker.CacheReadTokens()
 		estimateMissingUsage(&pt, &ct, body, nil, tracker.EstimatedOutputTokens())
 		if parseFailed {
@@ -681,7 +683,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
-		go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, 0, cacheReadTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
+		go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, statusCode, estTokens, httputil.ClientIPForLog(ctx, r.trustedProxies))
 	}()
 }
 

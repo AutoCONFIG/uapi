@@ -1220,9 +1220,46 @@ func TestOpenAIResponsesUsageCachedTokensConvertsToChatUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Responses -> Chat response: %v", err)
 	}
-	text := string(converted)
-	if !strings.Contains(text, `"prompt_tokens_details":{"cached_tokens":7}`) {
+	var chat struct {
+		Usage struct {
+			PromptTokensDetails map[string]interface{} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(converted, &chat); err != nil {
+		t.Fatalf("decode Chat response: %v; body=%s", err, converted)
+	}
+	if chat.Usage.PromptTokensDetails["cached_tokens"] != float64(7) {
 		t.Fatalf("cached input tokens not preserved as chat cached_tokens: %s", converted)
+	}
+}
+
+func TestAnthropicCacheCreationUsageConvertsToChatCachedWriteTokens(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude",
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{"input_tokens":20,"output_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7}
+	}`)
+	converted, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Chat response: %v", err)
+	}
+	var chat struct {
+		Usage struct {
+			PromptTokensDetails map[string]interface{} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(converted, &chat); err != nil {
+		t.Fatalf("decode Chat response: %v; body=%s", err, converted)
+	}
+	if chat.Usage.PromptTokensDetails["cached_tokens"] != float64(7) {
+		t.Fatalf("cache read tokens not emitted as cached_tokens: %#v; body=%s", chat.Usage.PromptTokensDetails, converted)
+	}
+	if chat.Usage.PromptTokensDetails["cached_write_tokens"] != float64(5) {
+		t.Fatalf("cache creation tokens not emitted as cached_write_tokens: %#v; body=%s", chat.Usage.PromptTokensDetails, converted)
 	}
 }
 

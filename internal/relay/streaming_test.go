@@ -296,6 +296,27 @@ func TestStreamTrackerCapturesCacheReadTokens(t *testing.T) {
 	}
 }
 
+func TestStreamTrackerCapturesCacheCreationTokens(t *testing.T) {
+	tracker := newStreamTracker(testUsageParser{})
+	tracker.TrackChunk([]byte(`{"type":"message_delta","usage":{"output_tokens":13,"cache_creation_input_tokens":5,"cache_read_input_tokens":7}}`))
+
+	if got := tracker.CacheCreationTokens(); got != 5 {
+		t.Fatalf("cache creation tokens = %d, want 5", got)
+	}
+	if got := tracker.CacheReadTokens(); got != 7 {
+		t.Fatalf("cache read tokens = %d, want 7", got)
+	}
+}
+
+func TestStreamTrackerTotalsNestedAnthropicCacheCreationTokens(t *testing.T) {
+	tracker := newStreamTracker(testUsageParser{})
+	tracker.TrackChunk([]byte(`{"type":"message_delta","usage":{"output_tokens":13,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4}}}`))
+
+	if got := tracker.CacheCreationTokens(); got != 7 {
+		t.Fatalf("nested cache creation tokens = %d, want 7", got)
+	}
+}
+
 func TestStreamAndForwardResponsesIncompleteIsSuccessfulTerminal(t *testing.T) {
 	body := "event: response.incomplete\n" +
 		"data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"

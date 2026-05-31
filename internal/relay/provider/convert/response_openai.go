@@ -165,13 +165,14 @@ func emitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
 			resp.Usage.CompletionTokensDetails = ir.Usage.CompletionTokensDetails
 		}
 		if ir.Usage.CacheCreationInputTokens > 0 {
-			resp.Usage.PromptTokensDetails["cached_tokens"] = ir.Usage.CacheCreationInputTokens
+			resp.Usage.PromptTokensDetails["cached_write_tokens"] = ir.Usage.CacheCreationInputTokens
 		}
 		if ir.Usage.CacheReadInputTokens > 0 {
 			if resp.Usage.PromptTokensDetails == nil {
 				resp.Usage.PromptTokensDetails = map[string]interface{}{}
 			}
 			resp.Usage.PromptTokensDetails["cached_tokens"] = ir.Usage.CacheReadInputTokens
+			resp.Usage.PromptTokensDetails["cached_read_tokens"] = ir.Usage.CacheReadInputTokens
 		}
 		if ir.Usage.PromptCacheHitTokens > 0 {
 			resp.Usage.PromptCacheHitTokens = ir.Usage.PromptCacheHitTokens

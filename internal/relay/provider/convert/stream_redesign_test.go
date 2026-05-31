@@ -215,6 +215,46 @@ func TestGeminiStreamConverterHandlesCodeAssistResponseWrapper(t *testing.T) {
 	}
 }
 
+func TestResponsesToAnthropicDoesNotRepeatCompletedTextAfterDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"claude"}}` + "\n\n"))
+	delta := converter.Convert([]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"hello"}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.output_text.done","output_index":0,"text":"hello"}` + "\n\n"))
+	completed := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"claude","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}` + "\n\n"))
+	got := string(delta) + string(done) + string(completed)
+	if strings.Count(got, `"text":"hello"`) != 1 {
+		t.Fatalf("Anthropic stream repeated final text after delta:\n%s", got)
+	}
+}
+
+func TestResponsesToGeminiDoesNotRepeatCompletedTextAfterDelta(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatGemini)
+	delta := converter.Convert([]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"hello"}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.output_text.done","output_index":0,"text":"hello"}` + "\n\n"))
+	completed := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gemini","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}` + "\n\n"))
+	got := string(delta) + string(done) + string(completed)
+	if strings.Count(got, `"text":"hello"`) != 1 {
+		t.Fatalf("Gemini stream repeated final text after delta:\n%s", got)
+	}
+}
+
+func TestGeminiToChatFirstContentEventEmitsImmediately(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatGemini, convert.FormatOpenAIChatCompletions)
+	out := converter.Convert([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"h"}]},"finishReason":"NOT_STARTED"}]}` + "\n\n"))
+	if !strings.Contains(string(out), `"content":"h"`) {
+		t.Fatalf("Gemini first content event did not emit immediately: %s", out)
+	}
+}
+
+func TestAnthropicToChatFirstContentEventEmitsImmediately(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"h"}}` + "\n\n"))
+	if !strings.Contains(string(out), `"content":"h"`) {
+		t.Fatalf("Anthropic first content event did not emit immediately: %s", out)
+	}
+}
+
 func TestDirectGeminiToAnthropicStreamPreservesThoughtSignature(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatGemini, convert.FormatAnthropic)
 	if converter == nil {

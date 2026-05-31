@@ -297,16 +297,17 @@ func (h *WSHandler) bridgeSSEToWS(
 	}
 
 	pt, ct, _ := tracker.Result()
+	cacheCreationTokens := tracker.CacheCreationTokens()
 	cacheReadTokens := tracker.CacheReadTokens()
 	if pt == 0 && ct == 0 && (responsesPromptTokens > 0 || responsesCompletionTokens > 0) {
 		pt, ct = responsesPromptTokens, responsesCompletionTokens
 	}
 	estimateMissingUsage(&pt, &ct, requestBody, nil, tracker.EstimatedOutputTokens())
-	h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model, cacheReadTokens)
+	h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model, cacheCreationTokens, cacheReadTokens)
 	if ch.AffinityTTL > 0 {
 		h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
 	}
-	h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 200, cacheReadTokens)
+	h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 200, cacheCreationTokens, cacheReadTokens)
 	turnFinalized = true
 }
 

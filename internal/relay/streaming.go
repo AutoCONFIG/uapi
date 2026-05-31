@@ -33,6 +33,7 @@ type streamTracker struct {
 	mu                  sync.Mutex
 	promptTokens        int
 	completionTokens    int
+	cacheCreationTokens int
 	cacheReadTokens     int
 	hasPromptTokens     bool
 	hasCompletionTokens bool
@@ -64,7 +65,8 @@ func (t *streamTracker) TrackChunk(dataLine []byte) {
 		t.mu.Unlock()
 		return
 	}
-	if pt > 0 || ct > 0 || estimatedOutput > 0 {
+	cacheCreationTokens, cacheReadTokens := extractStreamCacheTokens(dataLine)
+	if pt > 0 || ct > 0 || estimatedOutput > 0 || cacheCreationTokens > 0 || cacheReadTokens > 0 {
 		t.mu.Lock()
 		t.estimatedOutput += estimatedOutput
 		if pt > 0 || !t.hasPromptTokens {
@@ -79,7 +81,10 @@ func (t *streamTracker) TrackChunk(dataLine []byte) {
 			t.completionTokens = ct
 			t.hasCompletionTokens = ct > 0
 		}
-		if cacheReadTokens := extractStreamCacheReadTokens(dataLine); cacheReadTokens > 0 {
+		if cacheCreationTokens > 0 {
+			t.cacheCreationTokens = cacheCreationTokens
+		}
+		if cacheReadTokens > 0 {
 			t.cacheReadTokens = cacheReadTokens
 		}
 		t.mu.Unlock()
@@ -105,6 +110,12 @@ func (t *streamTracker) Result() (int, int, bool) {
 	return pt, t.completionTokens, t.parseErrors > 0
 }
 
+func (t *streamTracker) CacheCreationTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cacheCreationTokens
+}
+
 func (t *streamTracker) CacheReadTokens() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -112,36 +123,83 @@ func (t *streamTracker) CacheReadTokens() int {
 }
 
 func extractStreamCacheReadTokens(dataLine []byte) int {
+	_, read := extractStreamCacheTokens(dataLine)
+	return read
+}
+
+func extractStreamCacheCreationTokens(dataLine []byte) int {
+	creation, _ := extractStreamCacheTokens(dataLine)
+	return creation
+}
+
+func extractStreamCacheTokens(dataLine []byte) (int, int) {
 	var root map[string]interface{}
 	if err := json.Unmarshal(dataLine, &root); err != nil {
-		return 0
+		return 0, 0
 	}
 	if usage, _ := root["usage"].(map[string]interface{}); usage != nil {
-		if cached := usageCacheReadTokens(usage); cached > 0 {
-			return cached
+		if creation, read := usageCacheTokens(usage); creation > 0 || read > 0 {
+			return creation, read
+		}
+	}
+	if usageMetadata, _ := root["usageMetadata"].(map[string]interface{}); usageMetadata != nil {
+		if creation, read := usageCacheTokens(usageMetadata); creation > 0 || read > 0 {
+			return creation, read
 		}
 	}
 	if response, _ := root["response"].(map[string]interface{}); response != nil {
 		if usage, _ := response["usage"].(map[string]interface{}); usage != nil {
-			if cached := usageCacheReadTokens(usage); cached > 0 {
-				return cached
+			if creation, read := usageCacheTokens(usage); creation > 0 || read > 0 {
+				return creation, read
+			}
+		}
+		if usageMetadata, _ := response["usageMetadata"].(map[string]interface{}); usageMetadata != nil {
+			if creation, read := usageCacheTokens(usageMetadata); creation > 0 || read > 0 {
+				return creation, read
 			}
 		}
 	}
-	return 0
+	return 0, 0
 }
 
-func usageCacheReadTokens(usage map[string]interface{}) int {
+func usageCacheTokens(usage map[string]interface{}) (int, int) {
+	creation := firstJSONInt(usage["cache_creation_input_tokens"], usage["cache_write_input_tokens"])
+	if creation == 0 {
+		creation = usageNestedCacheCreationTokens(usage["cache_creation"])
+	}
+	read := firstJSONInt(usage["cache_read_input_tokens"], usage["prompt_cache_hit_tokens"], usage["cached_tokens"])
 	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
 		if details, _ := usage[key].(map[string]interface{}); details != nil {
-			if value := jsonNumberToInt(details["cached_tokens"]); value > 0 {
-				return value
+			if creation == 0 {
+				creation = firstJSONInt(details["cached_write_tokens"], details["cache_creation_input_tokens"])
+			}
+			if read == 0 {
+				read = firstJSONInt(details["cached_read_tokens"], details["cached_tokens"], details["cache_read_input_tokens"])
 			}
 		}
 	}
-	for _, key := range []string{"cached_tokens", "prompt_cache_hit_tokens"} {
-		if value := jsonNumberToInt(usage[key]); value > 0 {
-			return value
+	if read == 0 {
+		read = jsonNumberToInt(usage["cachedContentTokenCount"])
+	}
+	return creation, read
+}
+
+func usageNestedCacheCreationTokens(value interface{}) int {
+	nested, _ := value.(map[string]interface{})
+	if nested == nil {
+		return 0
+	}
+	total := 0
+	for _, key := range []string{"ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"} {
+		total += jsonNumberToInt(nested[key])
+	}
+	return total
+}
+
+func firstJSONInt(values ...interface{}) int {
+	for _, value := range values {
+		if parsed := jsonNumberToInt(value); parsed > 0 {
+			return parsed
 		}
 	}
 	return 0

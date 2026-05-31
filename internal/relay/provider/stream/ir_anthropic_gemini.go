@@ -262,6 +262,7 @@ func (p *geminiIRParser) Done() []relayir.StreamEvent {
 func (p *geminiIRParser) Reset() { *p = geminiIRParser{} }
 
 type anthropicIREmitter struct {
+	streamedText           bool
 	id                     string
 	model                  string
 	started                bool
@@ -307,7 +308,18 @@ func (e *anthropicIREmitter) Emit(event relayir.StreamEvent) []byte {
 			out = append(out, sseEventJSON("content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": e.thinkingBlockIndex, "delta": map[string]interface{}{"type": "signature_delta", "signature": event.Delta.Signature}})...)
 		}
 		return out
-	case relayir.EventContentDelta, relayir.EventContentPartEnd:
+	case relayir.EventContentDelta:
+		if event.Delta.Text == "" {
+			return nil
+		}
+		e.streamedText = true
+		out := e.stopThinking()
+		out = append(out, e.ensureTextStarted()...)
+		return append(out, sseEventJSON("content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": e.textBlockIndex, "delta": map[string]interface{}{"type": "text_delta", "text": event.Delta.Text}})...)
+	case relayir.EventContentPartEnd:
+		if e.streamedText {
+			return nil
+		}
 		if event.Delta.Text == "" {
 			return nil
 		}
@@ -435,6 +447,7 @@ func (e *anthropicIREmitter) Done() []byte {
 func (e *anthropicIREmitter) Reset() { *e = *newAnthropicIREmitter().(*anthropicIREmitter) }
 
 type geminiIREmitter struct {
+	streamedText  bool
 	finished      bool
 	toolCallNames map[int]string
 	toolCallArgs  map[int]*strings.Builder
@@ -446,8 +459,14 @@ func newGeminiIREmitter() streamIREmitter {
 
 func (e *geminiIREmitter) Emit(event relayir.StreamEvent) []byte {
 	switch event.Type {
-	case relayir.EventContentDelta, relayir.EventContentPartEnd:
+	case relayir.EventContentDelta:
 		if event.Delta.Text == "" {
+			return nil
+		}
+		e.streamedText = true
+		return geminiStreamEvent(event.Delta.Text, "NOT_STARTED")
+	case relayir.EventContentPartEnd:
+		if e.streamedText || event.Delta.Text == "" {
 			return nil
 		}
 		return geminiStreamEvent(event.Delta.Text, "NOT_STARTED")

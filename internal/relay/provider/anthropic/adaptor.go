@@ -79,6 +79,10 @@ func (a *AnthropicAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 			OutputTokens             int `json:"output_tokens"`
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreation            *struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
@@ -86,6 +90,9 @@ func (a *AnthropicAdaptor) ParseUsage(respBody []byte) (int, int, error) {
 	}
 	// Store cache tokens in adaptor for later retrieval
 	a.lastCacheCreationInputTokens = resp.Usage.CacheCreationInputTokens
+	if a.lastCacheCreationInputTokens == 0 && resp.Usage.CacheCreation != nil {
+		a.lastCacheCreationInputTokens = resp.Usage.CacheCreation.Ephemeral5mInputTokens + resp.Usage.CacheCreation.Ephemeral1hInputTokens
+	}
 	a.lastCacheReadInputTokens = resp.Usage.CacheReadInputTokens
 	return resp.Usage.InputTokens, resp.Usage.OutputTokens, nil
 }
