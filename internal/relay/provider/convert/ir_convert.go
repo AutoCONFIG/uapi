@@ -43,11 +43,11 @@ func (e *NoRequestEmitterError) Error() string {
 	return "no request emitter for format " + string(e.Format)
 }
 
-func RequestEnvelopeFromIR(req *relayir.Request) *RequestEnvelope {
+func adapterRequestFromIR(req *relayir.Request) *adapterRequest {
 	if req == nil {
 		return nil
 	}
-	out := &RequestEnvelope{
+	out := &adapterRequest{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: relayir.CloneRaw(req.Native.RawBody),
@@ -111,8 +111,8 @@ func instructionText(inst relayir.Instruction) string {
 	return ""
 }
 
-func requestMessageFromIRTurn(turn relayir.Turn) RequestMessage {
-	msg := RequestMessage{
+func requestMessageFromIRTurn(turn relayir.Turn) adapterTurn {
+	msg := adapterTurn{
 		Role:    string(turn.Role),
 		Name:    turn.Name,
 		ItemID:  turn.ID,
@@ -273,12 +273,20 @@ func protocolFormat(protocol relayir.Protocol) Format {
 		return FormatOpenAIChatCompletions
 	case relayir.ProtocolOpenAIResponses:
 		return FormatOpenAIResponses
+	case relayir.ProtocolCodex:
+		return FormatCodexResponses
 	case relayir.ProtocolAnthropic:
 		return FormatAnthropic
+	case relayir.ProtocolClaudeCode:
+		return FormatClaudeCode
 	case relayir.ProtocolGemini:
 		return FormatGemini
-	case relayir.ProtocolGeminiCLI, relayir.ProtocolAntigravity:
+	case relayir.ProtocolGeminiCode:
+		return FormatGeminiCode
+	case relayir.ProtocolGeminiCLI:
 		return FormatGeminiCLI
+	case relayir.ProtocolAntigravity:
+		return FormatAntigravity
 	default:
 		return Format(protocol)
 	}

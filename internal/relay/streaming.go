@@ -339,9 +339,9 @@ func relayFormatToStreamFormat(format provider.Format) (streamconvert.Format, bo
 	switch format {
 	case provider.FormatOpenAIChatCompletions:
 		return streamconvert.FormatOpenAIChatCompletions, true
-	case provider.FormatOpenAIResponses:
+	case provider.FormatOpenAIResponses, provider.FormatCodexResponses:
 		return streamconvert.FormatOpenAIResponses, true
-	case provider.FormatAnthropic:
+	case provider.FormatAnthropic, provider.FormatClaudeCode:
 		return streamconvert.FormatAnthropic, true
 	case provider.FormatGemini, provider.FormatGeminiCode, provider.FormatGeminiCLI, provider.FormatAntigravity:
 		return streamconvert.FormatGemini, true

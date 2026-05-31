@@ -12,6 +12,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -114,10 +115,10 @@ func (a *AntigravityAdaptor) SetupRequestHeader(req *fasthttp.Request, credentia
 }
 
 func (a *AntigravityAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
-	return convert.ToIR(convert.FormatGeminiCLI, body)
+	return convert.ToIR(convert.FormatAntigravity, body)
 }
 
-func (a *AntigravityAdaptor) emitRequest(req *provider.RequestEnvelope) ([]byte, error) {
+func (a *AntigravityAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error) {
 	clientModel := req.Model
 	if clientModel == "" {
 		clientModel = a.model
@@ -130,7 +131,8 @@ func (a *AntigravityAdaptor) emitRequest(req *provider.RequestEnvelope) ([]byte,
 	model := ResolveRequestModelWithSettings(clientModel, effort, antigravityRequestSize(req, settings), settings, channelModels(a.channel))
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.EmitGeminiRequest(&reqCopy)
+	reqCopy.TargetProtocol = ir.ProtocolGemini
+	gemBody, err := convert.FromIR(&reqCopy, convert.FormatGemini)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +168,7 @@ func (a *AntigravityAdaptor) emitRequest(req *provider.RequestEnvelope) ([]byte,
 }
 
 func (a *AntigravityAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
-	return a.emitRequest(convert.RequestEnvelopeFromIR(req))
+	return a.emitRequest(req)
 }
 
 func channelModels(ch *db.Channel) []string {
@@ -176,24 +178,24 @@ func channelModels(ch *db.Channel) []string {
 	return strings.Split(ch.Models, ",")
 }
 
-func antigravityReasoningEffort(req *provider.RequestEnvelope) string {
+func antigravityReasoningEffort(req *provider.RequestIR) string {
 	if req == nil {
 		return ""
 	}
-	if effort := stringFromAnyPath(req.Reasoning, "effort"); effort != "" {
+	if effort := stringFromAnyPath(req.Generation.Reasoning, "effort"); effort != "" {
 		return effort
 	}
-	if effort := stringFromAnyPath(req.Thinking, "thinkingLevel"); effort != "" {
+	if effort := stringFromAnyPath(req.Generation.Thinking, "thinkingLevel"); effort != "" {
 		return effort
 	}
-	if effort := stringFromAnyPath(req.Thinking, "effort"); effort != "" {
+	if effort := stringFromAnyPath(req.Generation.Thinking, "effort"); effort != "" {
 		return effort
 	}
-	if req.Extra != nil {
-		if effort := stringFromAnyPath(req.Extra["reasoning_effort"]); effort != "" {
+	for _, fields := range []map[string]json.RawMessage{req.Metadata, req.Native.Fields, req.Native.Unknown} {
+		if effort := stringFromAnyPath(fields["reasoning_effort"]); effort != "" {
 			return effort
 		}
-		if effort := stringFromAnyPath(req.Extra["reasoning"], "effort"); effort != "" {
+		if effort := stringFromAnyPath(fields["reasoning"], "effort"); effort != "" {
 			return effort
 		}
 	}
@@ -287,7 +289,7 @@ func cleanStrings(values []string) []string {
 	return out
 }
 
-func antigravityRequestSize(req *provider.RequestEnvelope, settings ChannelSettings) string {
+func antigravityRequestSize(req *provider.RequestIR, settings ChannelSettings) string {
 	tokens := estimateAntigravityTokens(req)
 	switch {
 	case tokens > settings.LongTokenThreshold:
@@ -299,44 +301,58 @@ func antigravityRequestSize(req *provider.RequestEnvelope, settings ChannelSetti
 	}
 }
 
-func estimateAntigravityTokens(req *provider.RequestEnvelope) int {
+func estimateAntigravityTokens(req *provider.RequestIR) int {
 	if req == nil {
 		return 0
 	}
 	chars := 0
-	if req.Instructions != nil {
-		chars += len(*req.Instructions)
+	for _, inst := range req.Instructions {
+		chars += len(inst.Text)
+		for _, item := range inst.Items {
+			chars += estimateAntigravityItemChars(item)
+		}
 	}
-	for _, msg := range req.Messages {
-		for _, item := range msg.Parts {
-			switch item.Kind {
-			case "content":
-				part := item.Content
-				switch {
-				case part.Text != "":
-					chars += len(part.Text)
-				case part.ImageURL != nil:
-					chars += 4096
-				default:
-					chars += len(part.Type)
-				}
-			case "tool_call":
-				call := item.ToolCall
-				name := call.Name
-				if name == "" {
-					name = call.Function.Name
-				}
-				chars += len(name) + len(call.Function.Arguments)
-			case "tool_result":
-				chars += len(item.ToolResult.Content)
-			}
+	for _, turn := range req.Turns {
+		for _, item := range turn.Items {
+			chars += estimateAntigravityItemChars(item)
 		}
 	}
 	tokens := chars / 4
-	if req.MaxTokens != nil {
-		tokens += *req.MaxTokens
+	if req.Generation.MaxTokens != nil {
+		tokens += *req.Generation.MaxTokens
 	}
 	return tokens
+}
+
+func estimateAntigravityItemChars(item ir.Item) int {
+	switch item.Kind {
+	case ir.ItemText:
+		if item.Text != nil {
+			return len(item.Text.Text)
+		}
+	case ir.ItemImage:
+		return 4096
+	case ir.ItemFile, ir.ItemDocument, ir.ItemAudio, ir.ItemVideo:
+		return 2048
+	case ir.ItemToolUse, ir.ItemFunctionCall:
+		if item.ToolUse != nil {
+			return len(item.ToolUse.Name) + len(item.ToolUse.ArgumentsText) + len(item.ToolUse.Arguments)
+		}
+		return len(item.Name)
+	case ir.ItemToolResult, ir.ItemFunctionCallOutput:
+		if item.ToolResult != nil {
+			return len(item.ToolResult.OutputText)
+		}
+	case ir.ItemReasoning, ir.ItemThinking, ir.ItemRedactedThinking, ir.ItemEncryptedReasoning:
+		if item.Reasoning != nil {
+			return len(item.Reasoning.Text) + len(item.Reasoning.EncryptedContent) + len(item.Reasoning.RedactedContent)
+		}
+	case ir.ItemOpaque:
+		if item.Opaque != nil {
+			return len(item.Opaque.Text) + len(item.Opaque.Raw)
+		}
+	}
+	return len(item.Kind)
 }
 
 func normalizeAntigravityTools(request map[string]interface{}) bool {

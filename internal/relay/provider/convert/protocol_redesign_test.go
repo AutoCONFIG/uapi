@@ -1167,3 +1167,12 @@ func containsJSONKey(v interface{}, key string) bool {
 	}
 	return false
 }
+
+func indexOrFatal(t *testing.T, text, needle string) int {
+	t.Helper()
+	idx := strings.Index(text, needle)
+	if idx < 0 {
+		t.Fatalf("missing %s in %s", needle, text)
+	}
+	return idx
+}

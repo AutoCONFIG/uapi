@@ -436,13 +436,19 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var upstreamFormat provider.Format
 	switch targetChannel.Type {
 	case "openai":
-		if targetChannel.APIFormat == "responses" || targetChannel.APIFormat == "codex" {
+		if targetChannel.APIFormat == "codex" {
+			upstreamFormat = provider.FormatCodexResponses
+		} else if targetChannel.APIFormat == "responses" {
 			upstreamFormat = provider.FormatOpenAIResponses
 		} else {
 			upstreamFormat = provider.FormatOpenAIChatCompletions
 		}
 	case "anthropic":
-		upstreamFormat = provider.FormatAnthropic
+		if targetChannel.APIFormat == "claude_code" {
+			upstreamFormat = provider.FormatClaudeCode
+		} else {
+			upstreamFormat = provider.FormatAnthropic
+		}
 	case "gemini":
 		if targetChannel.APIFormat == "gemini_code" {
 			upstreamFormat = provider.FormatGeminiCode
@@ -514,7 +520,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
-	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatOpenAIResponses {
+	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses {
 		convertedBody = normalizeCodexResponsesRequest(convertedBody)
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
@@ -1871,9 +1877,9 @@ func (r *Relayer) finishFailedBuffered(ctx *fasthttp.RequestCtx, tokenID string,
 func normalizeErrorResponse(respBody []byte, clientFormat provider.Format, statusCode int) []byte {
 	errMsg := errorMessageFromResponse(respBody)
 	switch clientFormat {
-	case provider.FormatAnthropic:
+	case provider.FormatAnthropic, provider.FormatClaudeCode:
 		return formatAnthropicError(errMsg)
-	case provider.FormatGemini:
+	case provider.FormatGemini, provider.FormatGeminiCode, provider.FormatGeminiCLI, provider.FormatAntigravity:
 		return formatGeminiError(errMsg, statusCode)
 	default: // OpenAI Chat Completions API / OpenAI Responses API
 		return formatOpenAIError(errMsg)
@@ -2427,11 +2433,11 @@ func isOAuthAPIFormat(format string) bool {
 
 func permissionForFormat(format provider.Format) string {
 	switch format {
-	case provider.FormatAnthropic:
+	case provider.FormatAnthropic, provider.FormatClaudeCode:
 		return "messages"
-	case provider.FormatGemini:
+	case provider.FormatGemini, provider.FormatGeminiCode, provider.FormatGeminiCLI, provider.FormatAntigravity:
 		return "gemini"
-	case provider.FormatOpenAIResponses:
+	case provider.FormatOpenAIResponses, provider.FormatCodexResponses:
 		return "responses"
 	default:
 		return "chat"

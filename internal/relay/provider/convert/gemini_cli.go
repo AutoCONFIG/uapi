@@ -8,9 +8,9 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseGeminiCLIRequest converts Gemini CLI request to the request envelope.
+// ParseGeminiCLIRequest converts Gemini CLI request to an adapter request.
 // Extracts the inner Gemini request from the CLI envelope.
-func ParseGeminiCLIRequest(body []byte) (*RequestEnvelope, error) {
+func ParseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
 	var req schema.GeminiCLIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI request: %w", err)
@@ -58,9 +58,9 @@ func ParseGeminiCLIRequest(body []byte) (*RequestEnvelope, error) {
 	return ir, nil
 }
 
-// EmitGeminiCLIRequest converts the request envelope to Gemini CLI request.
+// EmitGeminiCLIRequest converts an adapter request to Gemini CLI request.
 // Wraps the Gemini request in the CLI envelope.
-func EmitGeminiCLIRequest(ir *RequestEnvelope) ([]byte, error) {
+func EmitGeminiCLIRequest(ir *adapterRequest) ([]byte, error) {
 	// First convert to Gemini format
 	innerBody, err := EmitGeminiRequest(ir)
 	if err != nil {

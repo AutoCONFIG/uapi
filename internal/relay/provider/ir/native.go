@@ -7,8 +7,11 @@ type Protocol string
 const (
 	ProtocolOpenAIChat      Protocol = "openai_chat"
 	ProtocolOpenAIResponses Protocol = "openai_responses"
+	ProtocolCodex           Protocol = "codex"
 	ProtocolAnthropic       Protocol = "anthropic"
+	ProtocolClaudeCode      Protocol = "claude_code"
 	ProtocolGemini          Protocol = "gemini"
+	ProtocolGeminiCode      Protocol = "gemini_code"
 	ProtocolGeminiCLI       Protocol = "gemini_cli"
 	ProtocolAntigravity     Protocol = "antigravity"
 )

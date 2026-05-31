@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseGeminiRequest converts Gemini API request to the request envelope.
-func ParseGeminiRequest(body []byte) (*RequestEnvelope, error) {
+// ParseGeminiRequest converts Gemini API request to an adapter request.
+func ParseGeminiRequest(body []byte) (*adapterRequest, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
 
-	ir := &RequestEnvelope{
+	ir := &adapterRequest{
 		Model:        "", // Will be set by caller
 		Stream:       false,
 		SourceFormat: FormatGemini,
@@ -43,7 +43,7 @@ func ParseGeminiRequest(body []byte) (*RequestEnvelope, error) {
 
 	// Convert contents to messages
 	for _, content := range req.Contents {
-		requestMsg := RequestMessage{
+		requestMsg := adapterTurn{
 			Role: geminiRoleToRequestRole(content.Role),
 		}
 
@@ -209,8 +209,8 @@ func ParseGeminiRequest(body []byte) (*RequestEnvelope, error) {
 	return ir, nil
 }
 
-// EmitGeminiRequest converts the request envelope to Gemini API request.
-func EmitGeminiRequest(ir *RequestEnvelope) ([]byte, error) {
+// EmitGeminiRequest converts an adapter request to Gemini API request.
+func EmitGeminiRequest(ir *adapterRequest) ([]byte, error) {
 	req := make(map[string]interface{})
 
 	// Convert Instructions to systemInstruction
@@ -256,7 +256,7 @@ func EmitGeminiRequest(ir *RequestEnvelope) ([]byte, error) {
 	if ir.CandidateCount != nil {
 		genConfig["candidateCount"] = *ir.CandidateCount
 	}
-	if thinking := geminiThinkingFromRequestEnvelope(ir); thinking != nil {
+	if thinking := geminiThinkingFromAdapterRequest(ir); thinking != nil {
 		genConfig["thinkingConfig"] = thinking
 	}
 	if mimeType, schema := geminiResponseFormat(ir.ResponseFormat); mimeType != "" {
@@ -300,7 +300,7 @@ func EmitGeminiRequest(ir *RequestEnvelope) ([]byte, error) {
 	// Add Extra fields. Gemini CLI envelope fields belong outside the inner
 	// request and must not be echoed into request.*.
 	for k, v := range ir.Extra {
-		if ir.SourceFormat == FormatGeminiCLI && isGeminiCLIEnvelopeExtra(k) {
+		if isGeminiEnvelopeFamily(ir.SourceFormat) && isGeminiCLIEnvelopeExtra(k) {
 			continue
 		}
 		req[k] = v
@@ -309,11 +309,15 @@ func EmitGeminiRequest(ir *RequestEnvelope) ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func geminiPartsFromItems(source Format, msg RequestMessage, toolCallNames map[string]string) []map[string]interface{} {
+func isGeminiEnvelopeFamily(format Format) bool {
+	return format == FormatGeminiCLI || format == FormatGeminiCode || format == FormatAntigravity
+}
+
+func geminiPartsFromItems(source Format, msg adapterTurn, toolCallNames map[string]string) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	parts := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		if (source == FormatGemini || source == FormatGeminiCLI) && len(item.Raw) > 0 {
+		if (source == FormatGemini || isGeminiEnvelopeFamily(source)) && len(item.Raw) > 0 {
 			var raw map[string]interface{}
 			if err := json.Unmarshal(item.Raw, &raw); err == nil {
 				parts = append(parts, raw)
@@ -327,7 +331,7 @@ func geminiPartsFromItems(source Format, msg RequestMessage, toolCallNames map[s
 	return parts
 }
 
-func geminiPartFromItem(item ContentItem, toolCallNames map[string]string) map[string]interface{} {
+func geminiPartFromItem(item adapterItem, toolCallNames map[string]string) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return geminiReasoningPart(item.Content)
@@ -507,7 +511,7 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 	}
 }
 
-func toolCallNameByID(messages []RequestMessage) map[string]string {
+func toolCallNameByID(messages []adapterTurn) map[string]string {
 	names := make(map[string]string)
 	for _, msg := range messages {
 		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
@@ -622,11 +626,11 @@ func isGeminiCLIEnvelopeExtra(key string) bool {
 func geminiRoleToRequestRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "model", "assistant":
-		return "assistant"
+		return "model"
 	case "user", "tool":
 		return "user"
 	default:
-		return "user"
+		return "unknown"
 	}
 }
 

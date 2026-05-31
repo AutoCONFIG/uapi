@@ -292,7 +292,7 @@ func reasoningOpaqueSignature(parts []schema.ContentPart) string {
 	return reasoningEncryptedContent(parts)
 }
 
-func geminiThinkingFromRequestEnvelope(ir *RequestEnvelope) interface{} {
+func geminiThinkingFromAdapterRequest(ir *adapterRequest) interface{} {
 	if ir == nil {
 		return nil
 	}
@@ -363,7 +363,7 @@ func geminiThinkingFromReasoning(raw json.RawMessage) interface{} {
 	return out
 }
 
-func anthropicThinkingFromRequestEnvelope(ir *RequestEnvelope) interface{} {
+func anthropicThinkingFromAdapterRequest(ir *adapterRequest) interface{} {
 	if ir == nil {
 		return nil
 	}

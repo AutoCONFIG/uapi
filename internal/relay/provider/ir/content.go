@@ -10,6 +10,9 @@ const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
+	RoleFunction  Role = "function"
+	RoleModel     Role = "model"
+	RoleUnknown   Role = "unknown"
 	RoleOpaque    Role = "opaque"
 )
 

@@ -7,14 +7,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIChatRequest converts OpenAI Chat Completions request to the request envelope.
-func ParseOpenAIChatRequest(body []byte) (*RequestEnvelope, error) {
+// ParseOpenAIChatRequest converts OpenAI Chat Completions request to an adapter request.
+func ParseOpenAIChatRequest(body []byte) (*adapterRequest, error) {
 	var req schema.OpenAIChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat request: %w", err)
 	}
 
-	ir := &RequestEnvelope{
+	ir := &adapterRequest{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatOpenAIChatCompletions,
@@ -28,7 +28,7 @@ func ParseOpenAIChatRequest(body []byte) (*RequestEnvelope, error) {
 
 	// Extract system/developer messages into Instructions
 	var instructions []string
-	var messages []RequestMessage
+	var messages []adapterTurn
 
 	for _, msg := range req.Messages {
 		if msg.Role == "system" || msg.Role == "developer" {
@@ -45,12 +45,12 @@ func ParseOpenAIChatRequest(body []byte) (*RequestEnvelope, error) {
 			content = []schema.ContentPart{{Type: "text", Text: *msg.Content.Text}}
 		}
 
-		requestMsg := RequestMessage{
+		requestMsg := adapterTurn{
 			Role: msg.Role,
 			Name: msg.Name,
 		}
 		for _, part := range reasoningPartsFromOpenAIChatExtra(msg.Extra) {
-			requestMsg.Parts = append(requestMsg.Parts, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
+			requestMsg.Parts = append(requestMsg.Parts, adapterItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(part)})
 		}
 		if msg.Role != "tool" {
 			for _, part := range content {
@@ -171,8 +171,8 @@ func ParseOpenAIChatRequest(body []byte) (*RequestEnvelope, error) {
 	return ir, nil
 }
 
-// EmitOpenAIChatRequest converts the request envelope to OpenAI Chat Completions request.
-func EmitOpenAIChatRequest(ir *RequestEnvelope) ([]byte, error) {
+// EmitOpenAIChatRequest converts an adapter request to OpenAI Chat Completions request.
+func EmitOpenAIChatRequest(ir *adapterRequest) ([]byte, error) {
 	req := schema.OpenAIChatRequest{
 		Model:  ir.Model,
 		Stream: ir.Stream,
@@ -193,7 +193,7 @@ func EmitOpenAIChatRequest(ir *RequestEnvelope) ([]byte, error) {
 		})
 	}
 
-	// Convert RequestMessages to ChatMessages
+	// Convert adapter turns to ChatMessages
 	for _, msg := range ir.Messages {
 		items := canonicalMessageParts(msg)
 		content := contentPartsFromItems(items)
@@ -201,7 +201,7 @@ func EmitOpenAIChatRequest(ir *RequestEnvelope) ([]byte, error) {
 		toolResult := toolResultFromItems(items)
 		reasoningContent := reasoningPartsFromItems(items)
 		chatMsg := schema.ChatMessage{
-			Role:    msg.Role,
+			Role:    openAIChatRole(msg.Role),
 			Name:    msg.Name,
 			Content: schema.NewPartsContent(openAIChatContentParts(content)...),
 		}
@@ -314,6 +314,19 @@ func EmitOpenAIChatRequest(ir *RequestEnvelope) ([]byte, error) {
 	}
 
 	return json.Marshal(req)
+}
+
+func openAIChatRole(role string) string {
+	switch role {
+	case "model":
+		return "assistant"
+	case "function":
+		return "tool"
+	case "unknown", "opaque", "":
+		return "user"
+	default:
+		return role
+	}
 }
 
 func openAIChatContentParts(parts []schema.ContentPart) []schema.ContentPart {

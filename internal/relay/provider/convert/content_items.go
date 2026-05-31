@@ -21,27 +21,27 @@ func rawJSON(v interface{}) json.RawMessage {
 	return raw
 }
 
-func appendContentItem(msg *RequestMessage, part schema.ContentPart, raw json.RawMessage) {
-	msg.Parts = append(msg.Parts, ContentItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+func appendContentItem(msg *adapterTurn, part schema.ContentPart, raw json.RawMessage) {
+	msg.Parts = append(msg.Parts, adapterItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendReasoningItem(msg *RequestMessage, part schema.ContentPart, raw json.RawMessage) {
-	msg.Parts = append(msg.Parts, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+func appendReasoningItem(msg *adapterTurn, part schema.ContentPart, raw json.RawMessage) {
+	msg.Parts = append(msg.Parts, adapterItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendToolCallItem(msg *RequestMessage, call schema.ToolCall, raw json.RawMessage) {
-	msg.Parts = append(msg.Parts, ContentItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
+func appendToolCallItem(msg *adapterTurn, call schema.ToolCall, raw json.RawMessage) {
+	msg.Parts = append(msg.Parts, adapterItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendToolResultItem(msg *RequestMessage, result schema.ToolResult, raw json.RawMessage) {
-	msg.Parts = append(msg.Parts, ContentItem{Kind: contentItemKindToolResult, ToolResult: result, Raw: append(json.RawMessage(nil), raw...)})
+func appendToolResultItem(msg *adapterTurn, result schema.ToolResult, raw json.RawMessage) {
+	msg.Parts = append(msg.Parts, adapterItem{Kind: contentItemKindToolResult, ToolResult: result, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func canonicalMessageParts(msg RequestMessage) []ContentItem {
+func canonicalMessageParts(msg adapterTurn) []adapterItem {
 	return msg.Parts
 }
 
-func contentPartsFromItems(items []ContentItem) []schema.ContentPart {
+func contentPartsFromItems(items []adapterItem) []schema.ContentPart {
 	parts := make([]schema.ContentPart, 0, len(items))
 	for _, item := range items {
 		if item.Kind == contentItemKindContent {
@@ -51,7 +51,7 @@ func contentPartsFromItems(items []ContentItem) []schema.ContentPart {
 	return parts
 }
 
-func reasoningPartsFromItems(items []ContentItem) []schema.ContentPart {
+func reasoningPartsFromItems(items []adapterItem) []schema.ContentPart {
 	parts := make([]schema.ContentPart, 0, len(items))
 	for _, item := range items {
 		if item.Kind == contentItemKindReasoning {
@@ -61,7 +61,7 @@ func reasoningPartsFromItems(items []ContentItem) []schema.ContentPart {
 	return parts
 }
 
-func toolCallsFromItems(items []ContentItem) []schema.ToolCall {
+func toolCallsFromItems(items []adapterItem) []schema.ToolCall {
 	calls := make([]schema.ToolCall, 0, len(items))
 	for _, item := range items {
 		if item.Kind == contentItemKindToolCall {
@@ -71,7 +71,7 @@ func toolCallsFromItems(items []ContentItem) []schema.ToolCall {
 	return calls
 }
 
-func toolResultFromItems(items []ContentItem) *schema.ToolResult {
+func toolResultFromItems(items []adapterItem) *schema.ToolResult {
 	for _, item := range items {
 		if item.Kind == contentItemKindToolResult {
 			result := item.ToolResult
@@ -81,22 +81,22 @@ func toolResultFromItems(items []ContentItem) *schema.ToolResult {
 	return nil
 }
 
-func appendChoiceContentItem(choice *InternalChoice, part schema.ContentPart, raw json.RawMessage) {
-	choice.Items = append(choice.Items, ContentItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+func appendChoiceContentItem(choice *adapterChoice, part schema.ContentPart, raw json.RawMessage) {
+	choice.Items = append(choice.Items, adapterItem{Kind: contentItemKindContent, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendChoiceReasoningItem(choice *InternalChoice, part schema.ContentPart, raw json.RawMessage) {
-	choice.Items = append(choice.Items, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
+func appendChoiceReasoningItem(choice *adapterChoice, part schema.ContentPart, raw json.RawMessage) {
+	choice.Items = append(choice.Items, adapterItem{Kind: contentItemKindReasoning, Content: part, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendChoiceToolCallItem(choice *InternalChoice, call schema.ToolCall, raw json.RawMessage) {
-	choice.Items = append(choice.Items, ContentItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
+func appendChoiceToolCallItem(choice *adapterChoice, call schema.ToolCall, raw json.RawMessage) {
+	choice.Items = append(choice.Items, adapterItem{Kind: contentItemKindToolCall, ToolCall: call, Raw: append(json.RawMessage(nil), raw...)})
 }
 
-func appendChoiceRefusalItem(choice *InternalChoice, refusal string) {
-	choice.Items = append(choice.Items, ContentItem{Kind: "refusal", Content: schema.ContentPart{Type: "refusal", Refusal: refusal}})
+func appendChoiceRefusalItem(choice *adapterChoice, refusal string) {
+	choice.Items = append(choice.Items, adapterItem{Kind: "refusal", Content: schema.ContentPart{Type: "refusal", Refusal: refusal}})
 }
 
-func canonicalChoiceItems(choice InternalChoice) []ContentItem {
+func canonicalChoiceItems(choice adapterChoice) []adapterItem {
 	return choice.Items
 }

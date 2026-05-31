@@ -366,13 +366,22 @@ func wsCreateToHTTPBody(msg []byte) []byte {
 func channelUpstreamFormat(ch *db.Channel) provider.Format {
 	switch ch.Type {
 	case "openai":
-		if ch.APIFormat == "responses" || ch.APIFormat == "codex" {
+		if ch.APIFormat == "codex" {
+			return provider.FormatCodexResponses
+		}
+		if ch.APIFormat == "responses" {
 			return provider.FormatOpenAIResponses
 		}
 		return provider.FormatOpenAIChatCompletions
 	case "anthropic":
+		if ch.APIFormat == "claude_code" {
+			return provider.FormatClaudeCode
+		}
 		return provider.FormatAnthropic
 	case "gemini":
+		if ch.APIFormat == "gemini_code" {
+			return provider.FormatGeminiCode
+		}
 		return provider.FormatGemini
 	case "antigravity":
 		return provider.FormatAntigravity

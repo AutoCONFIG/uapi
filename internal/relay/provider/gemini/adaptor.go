@@ -84,24 +84,23 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 func (a *GeminiAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
 	format := convert.FormatGemini
 	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
-		format = convert.FormatGeminiCLI
+		format = convert.FormatGeminiCode
 	}
 	return convert.ToIR(format, body)
 }
 
-func (a *GeminiAdaptor) emitRequest(req *provider.RequestEnvelope) ([]byte, error) {
+func (a *GeminiAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error) {
 	// Store model and stream for URL construction
 	a.model = req.Model
 	a.isStream = req.Stream
 	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
 		return internalToGeminiCodeAssistWithAccount(req, a.account)
 	}
-	return convert.EmitGeminiRequest(req)
+	return convert.FromIR(req, convert.FormatGemini)
 }
 
 func (a *GeminiAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
-	internal := convert.RequestEnvelopeFromIR(req)
-	return a.emitRequest(internal)
+	return a.emitRequest(req)
 }
 
 func (a *GeminiAdaptor) GetChannelType() string { return "gemini" }

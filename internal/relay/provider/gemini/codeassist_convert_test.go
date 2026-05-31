@@ -5,19 +5,17 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
 func TestEmitGeminiRequestCodeAssistAddsOfficialEnvelopeFields(t *testing.T) {
-	req := &provider.RequestEnvelope{
+	req := &ir.Request{
 		Model: "pro",
-		Messages: []provider.RequestMessage{{
-			Role: "user",
-			Parts: []convert.ContentItem{{
-				Kind:    "content",
-				Content: schema.ContentPart{Type: "text", Text: "hello"},
+		Turns: []ir.Turn{{
+			Role: ir.RoleUser,
+			Items: []ir.Item{{
+				Kind: ir.ItemText,
+				Text: &ir.Text{Text: "hello"},
 			}},
 		}},
 	}

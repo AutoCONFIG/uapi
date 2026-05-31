@@ -10,14 +10,16 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/google/uuid"
 )
 
-func internalToGeminiCodeAssistWithAccount(req *provider.RequestEnvelope, account *db.Account) ([]byte, error) {
+func internalToGeminiCodeAssistWithAccount(req *ir.Request, account *db.Account) ([]byte, error) {
 	model := resolveCodeAssistModel(req.Model)
 	reqCopy := *req
 	reqCopy.Model = model
-	gemBody, err := convert.EmitGeminiRequest(&reqCopy)
+	reqCopy.TargetProtocol = ir.ProtocolGemini
+	gemBody, err := convert.FromIR(&reqCopy, convert.FormatGemini)
 	if err != nil {
 		return nil, err
 	}
@@ -84,10 +86,10 @@ func shouldUseGoogleOneCredits(account *db.Account, model string) bool {
 	return false
 }
 
-func codeAssistSessionID(req *provider.RequestEnvelope, account *db.Account) string {
-	if req != nil && req.Extra != nil {
+func codeAssistSessionID(req *ir.Request, account *db.Account) string {
+	if req != nil {
 		for _, key := range []string{"session_id", "sessionId"} {
-			if value := strings.TrimSpace(stringFromAny(req.Extra[key])); value != "" {
+			if value := strings.TrimSpace(rawStringFromMaps(key, req.Metadata, req.Native.Fields, req.Native.Unknown)); value != "" {
 				return value
 			}
 		}
@@ -107,7 +109,7 @@ func codeAssistSessionID(req *provider.RequestEnvelope, account *db.Account) str
 	return "uapi-" + hex.EncodeToString(sum[:8])
 }
 
-func codeAssistSessionSeed(req *provider.RequestEnvelope, account *db.Account) string {
+func codeAssistSessionSeed(req *ir.Request, account *db.Account) string {
 	var parts []string
 	if account != nil {
 		if account.ID != uuid.Nil {
@@ -118,14 +120,17 @@ func codeAssistSessionSeed(req *provider.RequestEnvelope, account *db.Account) s
 		}
 	}
 	if req != nil {
-		if req.Instructions != nil && *req.Instructions != "" {
-			parts = append(parts, *req.Instructions)
+		for _, inst := range req.Instructions {
+			if inst.Text != "" {
+				parts = append(parts, inst.Text)
+				break
+			}
 		}
-		for _, msg := range req.Messages {
-			if !strings.EqualFold(msg.Role, "user") {
+		for _, turn := range req.Turns {
+			if !strings.EqualFold(string(turn.Role), "user") {
 				continue
 			}
-			if text := firstMessageText(msg); text != "" {
+			if text := firstTurnText(turn); text != "" {
 				parts = append(parts, text)
 				return strings.Join(parts, "\n")
 			}
@@ -134,10 +139,19 @@ func codeAssistSessionSeed(req *provider.RequestEnvelope, account *db.Account) s
 	return strings.Join(parts, "\n")
 }
 
-func firstMessageText(msg provider.RequestMessage) string {
-	for _, item := range msg.Parts {
-		if item.Kind == "content" && item.Content.Text != "" {
-			return item.Content.Text
+func firstTurnText(turn ir.Turn) string {
+	for _, item := range turn.Items {
+		if item.Text != nil && item.Text.Text != "" {
+			return item.Text.Text
+		}
+	}
+	return ""
+}
+
+func rawStringFromMaps(key string, maps ...map[string]json.RawMessage) string {
+	for _, values := range maps {
+		if value := stringFromAny(values[key]); value != "" {
+			return value
 		}
 	}
 	return ""

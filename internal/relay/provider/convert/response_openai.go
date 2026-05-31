@@ -8,17 +8,17 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIChatResponse converts OpenAI Chat Completions response to InternalResponse.
-func ParseOpenAIChatResponse(body []byte) (*InternalResponse, error) {
+// ParseOpenAIChatResponse converts OpenAI Chat Completions response to adapterResponse.
+func ParseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.OpenAIChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat response: %w", err)
 	}
 
-	ir := &InternalResponse{
+	ir := &adapterResponse{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]InternalChoice, 0, len(resp.Choices)),
+		Choices: make([]adapterChoice, 0, len(resp.Choices)),
 		Usage:   schema.Usage{},
 		Raw:     body, // Preserve raw for same-format passthrough
 	}
@@ -37,7 +37,7 @@ func ParseOpenAIChatResponse(body []byte) (*InternalResponse, error) {
 
 	// Convert choices
 	for _, choice := range resp.Choices {
-		internalChoice := InternalChoice{
+		internalChoice := adapterChoice{
 			Index:        choice.Index,
 			Role:         choice.Message.Role,
 			FinishReason: mapOpenAIChatFinishReason(choice.FinishReason),
@@ -139,8 +139,8 @@ func mapOpenAIChatResponseFinishReason(fr string) string {
 	}
 }
 
-// EmitOpenAIChatResponse converts InternalResponse to OpenAI Chat Completions response.
-func EmitOpenAIChatResponse(ir *InternalResponse) ([]byte, error) {
+// EmitOpenAIChatResponse converts adapterResponse to OpenAI Chat Completions response.
+func EmitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
 	resp := schema.OpenAIChatResponse{
 		ID:      ir.ID,
 		Object:  "chat.completion",
@@ -252,17 +252,17 @@ func contentPartsText(parts []schema.ContentPart) string {
 	return strings.Join(out, "\n")
 }
 
-// ParseOpenAIResponsesResponse converts OpenAI Responses API response to InternalResponse.
-func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
+// ParseOpenAIResponsesResponse converts OpenAI Responses API response to adapterResponse.
+func ParseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.OpenAIResponsesResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses response: %w", err)
 	}
 
-	ir := &InternalResponse{
+	ir := &adapterResponse{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]InternalChoice, 0),
+		Choices: make([]adapterChoice, 0),
 		Usage:   schema.Usage{},
 		Raw:     body, // Preserve raw for same-format passthrough
 	}
@@ -274,12 +274,12 @@ func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
 		ir.Usage.TotalTokens = resp.Usage.TotalTokens
 	}
 
-	var pendingReasoning []ContentItem
+	var pendingReasoning []adapterItem
 	flushPendingReasoning := func() {
 		if len(pendingReasoning) == 0 {
 			return
 		}
-		choice := InternalChoice{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
+		choice := adapterChoice{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
 		for _, item := range pendingReasoning {
 			appendChoiceReasoningItem(&choice, item.Content, item.Raw)
 		}
@@ -292,7 +292,7 @@ func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			choice := InternalChoice{
+			choice := adapterChoice{
 				Index:        len(ir.Choices),
 				Role:         item.Role,
 				FinishReason: mapResponsesStatusToFinishReason(item.Status),
@@ -307,7 +307,7 @@ func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
 			ir.Choices = append(ir.Choices, choice)
 
 		case "function_call":
-			choice := InternalChoice{
+			choice := adapterChoice{
 				Index:        len(ir.Choices),
 				Role:         item.Role,
 				FinishReason: "tool_use",
@@ -332,7 +332,7 @@ func ParseOpenAIResponsesResponse(body []byte) (*InternalResponse, error) {
 
 		case "reasoning":
 			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
-				pendingReasoning = append(pendingReasoning, ContentItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
+				pendingReasoning = append(pendingReasoning, adapterItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
 			}
 		}
 	}
@@ -353,8 +353,8 @@ func mapResponsesStatusToFinishReason(status string) string {
 	}
 }
 
-// EmitOpenAIResponsesResponse converts InternalResponse to OpenAI Responses API response.
-func EmitOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
+// EmitOpenAIResponsesResponse converts adapterResponse to OpenAI Responses API response.
+func EmitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
 	resp := schema.OpenAIResponsesResponse{
 		ID:        ir.ID,
 		Object:    "response",
@@ -395,7 +395,7 @@ func EmitOpenAIResponsesResponse(ir *InternalResponse) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-func responsesReasoningOutputItem(choice InternalChoice) schema.ResponsesOutputItem {
+func responsesReasoningOutputItem(choice adapterChoice) schema.ResponsesOutputItem {
 	reasoningContent := reasoningPartsFromItems(canonicalChoiceItems(choice))
 	extra := make(map[string]json.RawMessage)
 	if content := responsesReasoningContent(reasoningContent); len(content) > 0 {
@@ -441,7 +441,7 @@ func responsesReasoningContent(parts []schema.ContentPart) []map[string]interfac
 	return content
 }
 
-func responsesOutputItemsFromChoice(choice InternalChoice) []schema.ResponsesOutputItem {
+func responsesOutputItemsFromChoice(choice adapterChoice) []schema.ResponsesOutputItem {
 	var out []schema.ResponsesOutputItem
 	var pendingContent []schema.ContentPart
 	status := responsesStatusFromFinishReason(choice.FinishReason)
@@ -462,7 +462,7 @@ func responsesOutputItemsFromChoice(choice InternalChoice) []schema.ResponsesOut
 		case contentItemKindReasoning:
 			flushContent()
 			reasoningChoice := choice
-			reasoningChoice.Items = []ContentItem{item}
+			reasoningChoice.Items = []adapterItem{item}
 			out = append(out, responsesReasoningOutputItem(reasoningChoice))
 		case contentItemKindContent:
 			part := item.Content

@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIResponsesRequest converts OpenAI Responses API request to the request envelope.
-func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
+// ParseOpenAIResponsesRequest converts OpenAI Responses API request to an adapter request.
+func ParseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -17,7 +17,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 	var rawRoot map[string]json.RawMessage
 	_ = json.Unmarshal(body, &rawRoot)
 
-	ir := &RequestEnvelope{
+	ir := &adapterRequest{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: append(json.RawMessage(nil), body...),
@@ -49,12 +49,12 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 	}
 
 	// Parse Input - can be string or array
-	var messages []RequestMessage
+	var messages []adapterTurn
 	var inputItems []schema.ResponsesInputItem
 
 	if req.Input.Text != nil {
 		// Single string input becomes a user message
-		msg := RequestMessage{Role: "user"}
+		msg := adapterTurn{Role: "user"}
 		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
 		messages = append(messages, msg)
 	} else if len(req.Input.Items) > 0 {
@@ -63,7 +63,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 		// Empty input - no messages
 	}
 
-	// Convert input items to RequestMessages
+	// Convert input items to adapter turns
 	for _, item := range inputItems {
 		rawItem := append(json.RawMessage(nil), item.Raw...)
 		switch item.Type {
@@ -74,7 +74,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 			} else if len(item.Content.Parts) > 0 {
 				content = item.Content.Parts
 			}
-			msg := RequestMessage{
+			msg := adapterTurn{
 				Role:    item.Role,
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -88,7 +88,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 			messages = append(messages, msg)
 
 		case "reasoning":
-			msg := RequestMessage{
+			msg := adapterTurn{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -102,7 +102,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 
 		case "function_call":
 			// function_call item becomes assistant message with tool calls
-			msg := RequestMessage{
+			msg := adapterTurn{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -125,7 +125,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 
 		case "function_call_output":
 			// function_call_output becomes tool result
-			msg := RequestMessage{
+			msg := adapterTurn{
 				Role:    "tool",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -139,7 +139,7 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 			messages = append(messages, msg)
 		default:
 			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item is preserved as native raw/opaque IR"))
-			messages = append(messages, RequestMessage{
+			messages = append(messages, adapterTurn{
 				ItemID:  item.ID,
 				Status:  item.Status,
 				Phase:   item.Phase,
@@ -190,9 +190,9 @@ func ParseOpenAIResponsesRequest(body []byte) (*RequestEnvelope, error) {
 	return ir, nil
 }
 
-// EmitOpenAIResponsesRequest converts the request envelope to OpenAI Responses API request.
+// EmitOpenAIResponsesRequest converts an adapter request to OpenAI Responses API request.
 // THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func EmitOpenAIResponsesRequest(ir *RequestEnvelope) ([]byte, error) {
+func EmitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
 	// Use a map to build the JSON to ensure field ordering
 	resp := make(map[string]interface{})
 
@@ -200,7 +200,7 @@ func EmitOpenAIResponsesRequest(ir *RequestEnvelope) ([]byte, error) {
 	resp["stream"] = ir.Stream
 
 	// CRITICAL BUG FIX: Always emit instructions field, even if empty
-	// The old code was: if ir.Instructions != nil && *ir.Instructions != "" { ... }
+	// The previous bug was: if ir.Instructions != nil && *ir.Instructions != "" { ... }
 	// This caused "Instructions are required" error when no system message was present
 	if ir.Instructions != nil {
 		resp["instructions"] = *ir.Instructions
@@ -211,7 +211,7 @@ func EmitOpenAIResponsesRequest(ir *RequestEnvelope) ([]byte, error) {
 	// Convert messages to input array
 	input := make([]map[string]interface{}, 0)
 	for _, msg := range ir.Messages {
-		if ir.SourceFormat == FormatOpenAIResponses && len(msg.RawItem) > 0 {
+		if isResponsesFamily(ir.SourceFormat) && len(msg.RawItem) > 0 {
 			var raw map[string]interface{}
 			if err := decodeJSONUseNumber(msg.RawItem, &raw); err == nil {
 				input = append(input, raw)
@@ -262,7 +262,11 @@ func EmitOpenAIResponsesRequest(ir *RequestEnvelope) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-func responsesInputItemsFromOrderedParts(msg RequestMessage) []map[string]interface{} {
+func isResponsesFamily(format Format) bool {
+	return format == FormatOpenAIResponses || format == FormatCodexResponses
+}
+
+func responsesInputItemsFromOrderedParts(msg adapterTurn) []map[string]interface{} {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
 	flushContent := func() {
@@ -271,8 +275,8 @@ func responsesInputItemsFromOrderedParts(msg RequestMessage) []map[string]interf
 		}
 		item := map[string]interface{}{
 			"type":    "message",
-			"role":    msg.Role,
-			"content": responsesMessageContent(msg.Role, pendingContent),
+			"role":    responsesRole(msg.Role),
+			"content": responsesMessageContent(responsesRole(msg.Role), pendingContent),
 		}
 		if msg.ItemID != "" {
 			item["id"] = msg.ItemID
@@ -336,6 +340,19 @@ func responsesInputItemsFromOrderedParts(msg RequestMessage) []map[string]interf
 	}
 	flushContent()
 	return items
+}
+
+func responsesRole(role string) string {
+	switch role {
+	case "model":
+		return "assistant"
+	case "function":
+		return "tool"
+	case "unknown", "opaque", "":
+		return "user"
+	default:
+		return role
+	}
 }
 
 func generateResponsesReasoningID() string {

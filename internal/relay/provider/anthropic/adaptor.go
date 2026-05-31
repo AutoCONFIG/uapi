@@ -53,10 +53,16 @@ func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials
 // --- Request conversion ---
 
 func (a *AnthropicAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+	if a.channel != nil && a.channel.APIFormat == "claude_code" {
+		return convert.ToIR(convert.FormatClaudeCode, body)
+	}
 	return convert.ToIR(convert.FormatAnthropic, body)
 }
 
 func (a *AnthropicAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+	if a.channel != nil && a.channel.APIFormat == "claude_code" {
+		return convert.FromIR(req, convert.FormatClaudeCode)
+	}
 	return convert.FromIR(req, convert.FormatAnthropic)
 }
 

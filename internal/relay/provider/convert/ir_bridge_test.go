@@ -1,11 +1,9 @@
-package convert_test
+package convert
 
 import (
-	"testing"
-
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
+	"testing"
 )
 
 func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
@@ -22,7 +20,7 @@ func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
 		"parallel_tool_calls":false,
 		"store":false
 	}`)
-	req, err := convert.ParseOpenAIResponsesRequest(body)
+	req, err := ParseOpenAIResponsesRequest(body)
 	if err != nil {
 		t.Fatalf("ParseOpenAIResponsesRequest: %v", err)
 	}
@@ -68,7 +66,7 @@ func TestResponsesOpaqueItemRecordsAuditLoss(t *testing.T) {
 		"model":"gpt-5",
 		"input":[{"id":"fs_1","type":"file_search_call","status":"completed","queries":["uapi"]}]
 	}`)
-	req, err := convert.ParseOpenAIResponsesRequest(body)
+	req, err := ParseOpenAIResponsesRequest(body)
 	if err != nil {
 		t.Fatalf("ParseOpenAIResponsesRequest: %v", err)
 	}
@@ -97,7 +95,7 @@ func TestOrderedPartsDriveResponsesEmission(t *testing.T) {
 			{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"uapi"}}
 		]}]
 	}`)
-	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIResponses, body)
+	converted, err := ConvertRequest(FormatAnthropic, FormatOpenAIResponses, body)
 	if err != nil {
 		t.Fatalf("ConvertRequest: %v", err)
 	}
@@ -122,7 +120,7 @@ func TestGeminiFunctionResponseNativeFieldsSurviveSameFormat(t *testing.T) {
 			"vendorField":{"x":1}
 		}}]}]
 	}`)
-	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatGemini, body)
+	converted, err := ConvertRequest(FormatGemini, FormatGemini, body)
 	if err != nil {
 		t.Fatalf("ConvertRequest: %v", err)
 	}
@@ -154,7 +152,7 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 			},
 		}},
 	}
-	converted, err := convert.FromIR(req, convert.FormatOpenAIResponses)
+	converted, err := FromIR(req, FormatOpenAIResponses)
 	if err != nil {
 		t.Fatalf("FromIR: %v", err)
 	}
@@ -167,22 +165,22 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 	}
 }
 
-func TestInternalResponseToIRPreservesUsageAndOrderedItems(t *testing.T) {
-	resp := &convert.InternalResponse{
+func TestAdapterResponseToIRPreservesUsageAndOrderedItems(t *testing.T) {
+	resp := &adapterResponse{
 		ID:    "chatcmpl_1",
 		Model: "gpt-test",
 		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
-		Choices: []convert.InternalChoice{{
+		Choices: []adapterChoice{{
 			Index: 0,
 			Role:  "assistant",
-			Items: []convert.ContentItem{
+			Items: []adapterItem{
 				{Kind: "content", Content: schema.ContentPart{Type: "text", Text: "answer"}},
 				{Kind: "tool_call", ToolCall: schema.ToolCall{ID: "call_1", Type: "function", Name: "lookup"}},
 			},
 			FinishReason: "tool_calls",
 		}},
 	}
-	got := resp.ToIR(convert.FormatOpenAIChatCompletions)
+	got := resp.ToIR(FormatOpenAIChatCompletions)
 	if got.SourceProtocol != ir.ProtocolOpenAIChat || got.Usage == nil || got.Usage.CacheReadTokens != 2 {
 		t.Fatalf("response IR metadata/usage not preserved: %#v", got)
 	}

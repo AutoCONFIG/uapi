@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
-	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/valyala/fasthttp"
 )
@@ -19,30 +18,16 @@ type Format string
 const (
 	FormatOpenAIChatCompletions Format = "openai_chat"
 	FormatOpenAIResponses       Format = "openai_responses"
+	FormatCodexResponses        Format = "codex"
 	FormatAnthropic             Format = "anthropic"
+	FormatClaudeCode            Format = "claude_code"
 	FormatGemini                Format = "gemini"
 	FormatGeminiCode            Format = "gemini_code"
 	FormatGeminiCLI             Format = "gemini_cli" // Gemini CLI / Antigravity protocol
 	FormatAntigravity           Format = "antigravity"
 )
 
-type RequestEnvelope = convert.RequestEnvelope
-type RequestMessage = convert.RequestMessage
 type RequestIR = ir.Request
-
-type InternalResponse struct {
-	ID       string
-	Model    string
-	Choices  []InternalChoice
-	Usage    InternalUsage
-	Metadata map[string]interface{}
-}
-
-type InternalChoice struct {
-	Index        int
-	Message      RequestMessage
-	FinishReason string
-}
 
 type InternalUsage struct {
 	PromptTokens             int

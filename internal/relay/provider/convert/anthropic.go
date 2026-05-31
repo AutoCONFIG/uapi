@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseAnthropicRequest converts Anthropic Messages API request to the request envelope.
-func ParseAnthropicRequest(body []byte) (*RequestEnvelope, error) {
+// ParseAnthropicRequest converts Anthropic Messages API request to an adapter request.
+func ParseAnthropicRequest(body []byte) (*adapterRequest, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
 	}
 
-	ir := &RequestEnvelope{
+	ir := &adapterRequest{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatAnthropic,
@@ -54,7 +54,7 @@ func ParseAnthropicRequest(body []byte) (*RequestEnvelope, error) {
 
 	// Convert messages
 	for _, msg := range req.Messages {
-		requestMsg := RequestMessage{
+		requestMsg := adapterTurn{
 			Role: msg.Role,
 		}
 
@@ -193,8 +193,8 @@ func ParseAnthropicRequest(body []byte) (*RequestEnvelope, error) {
 	return ir, nil
 }
 
-// EmitAnthropicRequest converts the request envelope to Anthropic Messages API request.
-func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
+// EmitAnthropicRequest converts an adapter request to Anthropic Messages API request.
+func EmitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
 	req := make(map[string]interface{})
 	req["model"] = ir.Model
 	req["max_tokens"] = 4096 // default if not set
@@ -209,7 +209,7 @@ func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
 	}
 
 	// Add system message from Instructions
-	if ir.SourceFormat == FormatAnthropic && len(ir.InstructionsRaw) > 0 {
+	if isAnthropicFamily(ir.SourceFormat) && len(ir.InstructionsRaw) > 0 {
 		req["system"] = ir.InstructionsRaw
 	} else if ir.Instructions != nil {
 		req["system"] = *ir.Instructions
@@ -219,8 +219,8 @@ func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
 	messages := make([]map[string]interface{}, 0)
 	for _, msg := range ir.Messages {
 		msgMap := make(map[string]interface{})
-		role := msg.Role
-		if role == "tool" {
+		role := anthropicRole(msg.Role)
+		if role == "tool" || role == "function" {
 			role = "user"
 		}
 		msgMap["role"] = role
@@ -247,7 +247,7 @@ func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
 	if len(ir.StopWords) > 0 {
 		req["stop_sequences"] = ir.StopWords
 	}
-	if thinking := anthropicThinkingFromRequestEnvelope(ir); thinking != nil {
+	if thinking := anthropicThinkingFromAdapterRequest(ir); thinking != nil {
 		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
@@ -262,11 +262,26 @@ func EmitAnthropicRequest(ir *RequestEnvelope) ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func anthropicBlocksFromMessage(source Format, msg RequestMessage) []map[string]interface{} {
+func anthropicRole(role string) string {
+	switch role {
+	case "model":
+		return "assistant"
+	case "unknown", "opaque", "":
+		return "user"
+	default:
+		return role
+	}
+}
+
+func isAnthropicFamily(format Format) bool {
+	return format == FormatAnthropic || format == FormatClaudeCode
+}
+
+func anthropicBlocksFromMessage(source Format, msg adapterTurn) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	blocks := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		if source == FormatAnthropic && len(item.Raw) > 0 {
+		if isAnthropicFamily(source) && len(item.Raw) > 0 {
 			var raw map[string]interface{}
 			if err := json.Unmarshal(item.Raw, &raw); err == nil {
 				blocks = append(blocks, raw)
@@ -280,7 +295,7 @@ func anthropicBlocksFromMessage(source Format, msg RequestMessage) []map[string]
 	return blocks
 }
 
-func anthropicBlockFromItem(item ContentItem) map[string]interface{} {
+func anthropicBlockFromItem(item adapterItem) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return anthropicReasoningBlock(item.Content)

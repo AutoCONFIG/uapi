@@ -7,17 +7,17 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseAnthropicResponse converts Anthropic response to InternalResponse.
-func ParseAnthropicResponse(body []byte) (*InternalResponse, error) {
+// ParseAnthropicResponse converts Anthropic response to adapterResponse.
+func ParseAnthropicResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
 	}
 
-	ir := &InternalResponse{
+	ir := &adapterResponse{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]InternalChoice, 0, len(resp.Content)),
+		Choices: make([]adapterChoice, 0, len(resp.Content)),
 		Usage: schema.Usage{
 			PromptTokens:             resp.Usage.InputTokens,
 			CompletionTokens:         resp.Usage.OutputTokens,
@@ -28,7 +28,7 @@ func ParseAnthropicResponse(body []byte) (*InternalResponse, error) {
 	}
 
 	// Convert content blocks to a single choice
-	choice := InternalChoice{
+	choice := adapterChoice{
 		Index: 0,
 		Role:  resp.Role,
 	}
@@ -119,8 +119,8 @@ func mapAnthropicResponseFinishReason(fr string) string {
 	}
 }
 
-// EmitAnthropicResponse converts InternalResponse to Anthropic response.
-func EmitAnthropicResponse(ir *InternalResponse) ([]byte, error) {
+// EmitAnthropicResponse converts adapterResponse to Anthropic response.
+func EmitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	resp["id"] = ir.ID

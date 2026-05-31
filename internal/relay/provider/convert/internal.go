@@ -14,18 +14,22 @@ type Format string
 const (
 	FormatOpenAIChatCompletions Format = "openai_chat"
 	FormatOpenAIResponses       Format = "openai_responses"
+	FormatCodexResponses        Format = "codex"
 	FormatAnthropic             Format = "anthropic"
+	FormatClaudeCode            Format = "claude_code"
 	FormatGemini                Format = "gemini"
+	FormatGeminiCode            Format = "gemini_code"
 	FormatGeminiCLI             Format = "gemini_cli"
+	FormatAntigravity           Format = "antigravity"
 )
 
-// RequestEnvelope is the structured request envelope used by provider-specific
-// parsers and emitters. Request routing is anchored on ir.Request; this type is
-// the protocol adapter view for code that still needs concrete provider fields.
-type RequestEnvelope struct {
+// adapterRequest is the package-private protocol adapter view used by concrete
+// serializers. Request routing is anchored on ir.Request; protocol entry points
+// register IR parsers and emitters directly.
+type adapterRequest struct {
 	Model    string
 	Stream   bool
-	Messages []RequestMessage
+	Messages []adapterTurn
 	Tools    []schema.Tool
 	// RawRequestBody preserves the exact client payload for same-protocol
 	// replay/audit and for the new IR native envelope.
@@ -86,11 +90,11 @@ type RequestEnvelope struct {
 	Losses []ir.Loss `json:"-"`
 }
 
-// RequestMessage is the provider-adapter view over an ordered turn. Parts is
+// adapterTurn is the provider-adapter view over an ordered turn. Parts is
 // the canonical ordering source.
-type RequestMessage struct {
+type adapterTurn struct {
 	Role    string
-	Parts   []ContentItem
+	Parts   []adapterItem
 	Name    string // for named messages
 	ItemID  string
 	Status  string
@@ -99,9 +103,9 @@ type RequestMessage struct {
 	Extra   map[string]json.RawMessage
 }
 
-// ContentItem preserves the original ordered content stream for
+// adapterItem preserves the original ordered content stream for
 // provider parsers and emitters.
-type ContentItem struct {
+type adapterItem struct {
 	Kind       string
 	Content    schema.ContentPart
 	ToolCall   schema.ToolCall
@@ -109,22 +113,22 @@ type ContentItem struct {
 	Raw        json.RawMessage
 }
 
-// InternalResponse is the protocol-neutral response intermediate.
-type InternalResponse struct {
+// adapterResponse is the internal response serialization view.
+type adapterResponse struct {
 	ID      string
 	Model   string
-	Choices []InternalChoice
+	Choices []adapterChoice
 	Usage   schema.Usage
 	Raw     json.RawMessage // preserved for same-format passthrough
 	IR      *ir.Response    `json:"-"`
 	Losses  []ir.Loss       `json:"-"`
 }
 
-// InternalChoice represents a single choice in a response.
-type InternalChoice struct {
+// adapterChoice represents a single choice in a response.
+type adapterChoice struct {
 	Index        int
 	Role         string
-	Items        []ContentItem
+	Items        []adapterItem
 	FinishReason string
 }
 
