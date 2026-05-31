@@ -8,7 +8,7 @@ import (
 )
 
 func parseCodexRequest(body []byte) (*relayir.Request, error) {
-	req, err := ParseOpenAIResponsesRequest(body)
+	req, err := parseOpenAIResponsesRequest(body)
 	if err != nil {
 		return nil, err
 	}
@@ -22,11 +22,11 @@ func parseCodexRequest(body []byte) (*relayir.Request, error) {
 func emitCodexRequest(req *relayir.Request) ([]byte, error) {
 	internal := adapterRequestFromIR(req)
 	internal.SourceFormat = FormatCodexResponses
-	return EmitOpenAIResponsesRequest(internal)
+	return emitOpenAIResponsesRequest(internal)
 }
 
 func parseClaudeCodeRequest(body []byte) (*relayir.Request, error) {
-	req, err := ParseAnthropicRequest(body)
+	req, err := parseAnthropicRequest(body)
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +40,11 @@ func parseClaudeCodeRequest(body []byte) (*relayir.Request, error) {
 func emitClaudeCodeRequest(req *relayir.Request) ([]byte, error) {
 	internal := adapterRequestFromIR(req)
 	internal.SourceFormat = FormatClaudeCode
-	return EmitAnthropicRequest(internal)
+	return emitAnthropicRequest(internal)
 }
 
 func parseGeminiCodeRequest(body []byte) (*relayir.Request, error) {
-	req, err := ParseGeminiCLIRequest(body)
+	req, err := parseGeminiCLIRequest(body)
 	if err != nil {
 		return nil, err
 	}
@@ -58,11 +58,11 @@ func parseGeminiCodeRequest(body []byte) (*relayir.Request, error) {
 func emitGeminiCodeRequest(req *relayir.Request) ([]byte, error) {
 	internal := adapterRequestFromIR(req)
 	internal.SourceFormat = FormatGeminiCode
-	return EmitGeminiCLIRequest(internal)
+	return emitGeminiCLIRequest(internal)
 }
 
 func parseAntigravityRequest(body []byte) (*relayir.Request, error) {
-	req, err := ParseGeminiCLIRequest(body)
+	req, err := parseGeminiCLIRequest(body)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func parseAntigravityRequest(body []byte) (*relayir.Request, error) {
 func emitAntigravityRequest(req *relayir.Request) ([]byte, error) {
 	internal := adapterRequestFromIR(req)
 	internal.SourceFormat = FormatAntigravity
-	body, err := EmitGeminiCLIRequest(internal)
+	body, err := emitGeminiCLIRequest(internal)
 	if err != nil {
 		return nil, err
 	}
@@ -94,20 +94,20 @@ func emitAntigravityRequest(req *relayir.Request) ([]byte, error) {
 }
 
 func init() {
-	RegisterRequestIRParser(FormatCodexResponses, parseCodexRequest)
-	RegisterRequestIREmitter(FormatCodexResponses, emitCodexRequest)
-	RegisterResponseParser(FormatCodexResponses, ParseOpenAIResponsesResponse)
-	RegisterResponseEmitter(FormatCodexResponses, EmitOpenAIResponsesResponse)
-	RegisterRequestIRParser(FormatClaudeCode, parseClaudeCodeRequest)
-	RegisterRequestIREmitter(FormatClaudeCode, emitClaudeCodeRequest)
-	RegisterResponseParser(FormatClaudeCode, ParseAnthropicResponse)
-	RegisterResponseEmitter(FormatClaudeCode, EmitAnthropicResponse)
-	RegisterRequestIRParser(FormatGeminiCode, parseGeminiCodeRequest)
-	RegisterRequestIREmitter(FormatGeminiCode, emitGeminiCodeRequest)
-	RegisterResponseParser(FormatGeminiCode, ParseGeminiCLIResponse)
-	RegisterResponseEmitter(FormatGeminiCode, EmitGeminiCLIResponse)
-	RegisterRequestIRParser(FormatAntigravity, parseAntigravityRequest)
-	RegisterRequestIREmitter(FormatAntigravity, emitAntigravityRequest)
-	RegisterResponseParser(FormatAntigravity, ParseGeminiCLIResponse)
-	RegisterResponseEmitter(FormatAntigravity, EmitGeminiCLIResponse)
+	registerRequestIRParser(FormatCodexResponses, parseCodexRequest)
+	registerRequestIREmitter(FormatCodexResponses, emitCodexRequest)
+	registerAdapterResponseParser(FormatCodexResponses, parseOpenAIResponsesResponse)
+	registerAdapterResponseEmitter(FormatCodexResponses, emitOpenAIResponsesResponse)
+	registerRequestIRParser(FormatClaudeCode, parseClaudeCodeRequest)
+	registerRequestIREmitter(FormatClaudeCode, emitClaudeCodeRequest)
+	registerAdapterResponseParser(FormatClaudeCode, parseAnthropicResponse)
+	registerAdapterResponseEmitter(FormatClaudeCode, emitAnthropicResponse)
+	registerRequestIRParser(FormatGeminiCode, parseGeminiCodeRequest)
+	registerRequestIREmitter(FormatGeminiCode, emitGeminiCodeRequest)
+	registerAdapterResponseParser(FormatGeminiCode, parseGeminiCLIResponse)
+	registerAdapterResponseEmitter(FormatGeminiCode, emitGeminiCLIResponse)
+	registerRequestIRParser(FormatAntigravity, parseAntigravityRequest)
+	registerRequestIREmitter(FormatAntigravity, emitAntigravityRequest)
+	registerAdapterResponseParser(FormatAntigravity, parseGeminiCLIResponse)
+	registerAdapterResponseEmitter(FormatAntigravity, emitGeminiCLIResponse)
 }

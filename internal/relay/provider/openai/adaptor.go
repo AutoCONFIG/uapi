@@ -8,6 +8,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -72,7 +73,7 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 
 // --- Request conversion ---
 
-func (a *OpenAIAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+func (a *OpenAIAdaptor) ToIR(body []byte) (*ir.Request, error) {
 	format := convert.FormatOpenAIChatCompletions
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
 		format = convert.FormatOpenAIResponses
@@ -83,7 +84,7 @@ func (a *OpenAIAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
 	return convert.ToIR(format, body)
 }
 
-func (a *OpenAIAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+func (a *OpenAIAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	format := convert.FormatOpenAIChatCompletions
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
 		format = convert.FormatOpenAIResponses

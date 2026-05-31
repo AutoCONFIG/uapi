@@ -27,8 +27,6 @@ const (
 	FormatAntigravity           Format = "antigravity"
 )
 
-type RequestIR = ir.Request
-
 type InternalUsage struct {
 	PromptTokens             int
 	CompletionTokens         int
@@ -99,8 +97,8 @@ type Adaptor interface {
 	SetRequestParams(model string, stream bool)
 	GetRequestURL(path string) (string, error)
 	SetupRequestHeader(req *fasthttp.Request, credentials string) error
-	ToIR(body []byte) (*RequestIR, error)
-	FromIR(req *RequestIR) ([]byte, error)
+	ToIR(body []byte) (*ir.Request, error)
+	FromIR(req *ir.Request) ([]byte, error)
 	ParseUsage(respBody []byte) (promptTokens, completionTokens int, err error)
 	ParseStreamUsage(lastChunk []byte) (promptTokens, completionTokens int, err error)
 	// ParseUsageFull returns full usage including cache tokens

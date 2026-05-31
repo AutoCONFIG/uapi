@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseGeminiRequest converts Gemini API request to an adapter request.
-func ParseGeminiRequest(body []byte) (*adapterRequest, error) {
+// parseGeminiRequest converts Gemini API request to an adapter request.
+func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
@@ -209,8 +209,8 @@ func ParseGeminiRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// EmitGeminiRequest converts an adapter request to Gemini API request.
-func EmitGeminiRequest(ir *adapterRequest) ([]byte, error) {
+// emitGeminiRequest converts an adapter request to Gemini API request.
+func emitGeminiRequest(ir *adapterRequest) ([]byte, error) {
 	req := make(map[string]interface{})
 
 	// Convert Instructions to systemInstruction
@@ -855,6 +855,6 @@ func appendIfMissing(values []string, value string) []string {
 }
 
 func init() {
-	RegisterRequestParser(FormatGemini, ParseGeminiRequest)
-	RegisterRequestEmitter(FormatGemini, EmitGeminiRequest)
+	registerAdapterRequestParser(FormatGemini, parseGeminiRequest)
+	registerAdapterRequestEmitter(FormatGemini, emitGeminiRequest)
 }

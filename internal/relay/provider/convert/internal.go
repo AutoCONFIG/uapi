@@ -35,9 +35,6 @@ type adapterRequest struct {
 	// replay/audit and for the new IR native envelope.
 	RawRequestBody json.RawMessage
 
-	// IR is the protocol-neutral representation used by request conversion.
-	IR *ir.Request `json:"-"`
-
 	// Instructions carries the unified system prompt extracted from:
 	//   - OpenAI Chat: messages[role=system/developer]
 	//   - OpenAI Responses: instructions field
@@ -120,7 +117,6 @@ type adapterResponse struct {
 	Choices []adapterChoice
 	Usage   schema.Usage
 	Raw     json.RawMessage // preserved for same-format passthrough
-	IR      *ir.Response    `json:"-"`
 	Losses  []ir.Loss       `json:"-"`
 }
 

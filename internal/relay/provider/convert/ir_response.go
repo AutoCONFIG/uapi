@@ -11,9 +11,6 @@ func (r *adapterResponse) ToIR(source Format) *relayir.Response {
 	if r == nil {
 		return nil
 	}
-	if r.IR != nil {
-		return r.IR
-	}
 	resp := &relayir.Response{
 		SourceProtocol: irProtocol(source),
 		ID:             r.ID,
@@ -25,7 +22,6 @@ func (r *adapterResponse) ToIR(source Format) *relayir.Response {
 	for _, choice := range r.Choices {
 		resp.Choices = append(resp.Choices, choiceToIR(choice, source))
 	}
-	r.IR = resp
 	return resp
 }
 
@@ -38,7 +34,6 @@ func adapterResponseFromIR(resp *relayir.Response) *adapterResponse {
 		Model:  resp.Model,
 		Usage:  responseUsageFromIR(resp.Usage),
 		Raw:    relayir.CloneRaw(resp.Native.RawBody),
-		IR:     resp,
 		Losses: append([]relayir.Loss(nil), resp.Losses...),
 	}
 	for _, choice := range resp.Choices {

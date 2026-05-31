@@ -206,13 +206,13 @@ func TestProviderBridgePreservesNativeMessageAndToolPrecision(t *testing.T) {
 		"include":["reasoning.encrypted_content"],
 		"parallel_tool_calls":false
 	}`)
-	ir, err := convert.ParseOpenAIResponsesRequest(body)
+	reqIR, err := convert.ToIR(convert.FormatOpenAIResponses, body)
 	if err != nil {
-		t.Fatalf("ParseOpenAIResponsesRequest: %v", err)
+		t.Fatalf("ToIR: %v", err)
 	}
-	converted, err := convert.EmitOpenAIResponsesRequest(ir)
+	converted, err := convert.FromIR(reqIR, convert.FormatOpenAIResponses)
 	if err != nil {
-		t.Fatalf("EmitOpenAIResponsesRequest: %v", err)
+		t.Fatalf("FromIR: %v", err)
 	}
 	for _, want := range []string{
 		`"id":"msg_1"`,

@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIResponsesRequest converts OpenAI Responses API request to an adapter request.
-func ParseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
+// parseOpenAIResponsesRequest converts OpenAI Responses API request to an adapter request.
+func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -190,9 +190,9 @@ func ParseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// EmitOpenAIResponsesRequest converts an adapter request to OpenAI Responses API request.
+// emitOpenAIResponsesRequest converts an adapter request to OpenAI Responses API request.
 // THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func EmitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
+func emitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
 	// Use a map to build the JSON to ensure field ordering
 	resp := make(map[string]interface{})
 
@@ -444,6 +444,6 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 }
 
 func init() {
-	RegisterRequestParser(FormatOpenAIResponses, ParseOpenAIResponsesRequest)
-	RegisterRequestEmitter(FormatOpenAIResponses, EmitOpenAIResponsesRequest)
+	registerAdapterRequestParser(FormatOpenAIResponses, parseOpenAIResponsesRequest)
+	registerAdapterRequestEmitter(FormatOpenAIResponses, emitOpenAIResponsesRequest)
 }

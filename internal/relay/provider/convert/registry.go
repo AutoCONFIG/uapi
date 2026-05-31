@@ -8,23 +8,21 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
-// adapterRequestParser converts raw protocol bytes into a adapter request.
+// adapterRequestParser is a protocol-local parser stage; the package registry
+// exposes only ir.Request parsers.
 type adapterRequestParser func(body []byte) (*adapterRequest, error)
 
-// adapterRequestEmitter converts a adapter request into raw protocol bytes.
+// adapterRequestEmitter is a protocol-local emitter stage; the package registry
+// exposes only ir.Request emitters.
 type adapterRequestEmitter func(ir *adapterRequest) ([]byte, error)
 
 type requestIRParser func(body []byte) (*ir.Request, error)
 type requestIREmitter func(req *ir.Request) ([]byte, error)
 
-var adapterRequestParsers = map[Format]adapterRequestParser{}
-var adapterRequestEmitters = map[Format]adapterRequestEmitter{}
 var requestIRParsers = map[Format]requestIRParser{}
 var requestIREmitters = map[Format]requestIREmitter{}
 
-// RegisterRequestParser registers a converter from protocol bytes to a adapter request.
-func RegisterRequestParser(f Format, fn adapterRequestParser) {
-	adapterRequestParsers[f] = fn
+func registerAdapterRequestParser(f Format, fn adapterRequestParser) {
 	requestIRParsers[f] = func(body []byte) (*ir.Request, error) {
 		req, err := parseAdapterRequest(f, body, fn)
 		if err != nil {
@@ -34,9 +32,7 @@ func RegisterRequestParser(f Format, fn adapterRequestParser) {
 	}
 }
 
-// RegisterRequestEmitter registers a converter from a adapter request to protocol bytes.
-func RegisterRequestEmitter(f Format, fn adapterRequestEmitter) {
-	adapterRequestEmitters[f] = fn
+func registerAdapterRequestEmitter(f Format, fn adapterRequestEmitter) {
 	requestIREmitters[f] = func(req *ir.Request) ([]byte, error) {
 		internal := adapterRequestFromIR(req)
 		if internal.SourceFormat == "" {
@@ -49,15 +45,15 @@ func RegisterRequestEmitter(f Format, fn adapterRequestEmitter) {
 	}
 }
 
-// RegisterRequestIRParser registers a native IR parser for protocols with
+// registerRequestIRParser registers a native IR parser for protocols with
 // protocol-specific envelopes.
-func RegisterRequestIRParser(f Format, fn requestIRParser) {
+func registerRequestIRParser(f Format, fn requestIRParser) {
 	requestIRParsers[f] = fn
 }
 
-// RegisterRequestIREmitter registers a native IR emitter for protocols whose
+// registerRequestIREmitter registers a native IR emitter for protocols whose
 // output needs protocol-specific envelope handling.
-func RegisterRequestIREmitter(f Format, fn requestIREmitter) {
+func registerRequestIREmitter(f Format, fn requestIREmitter) {
 	requestIREmitters[f] = fn
 }
 
@@ -73,6 +69,7 @@ func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([
 	body = cleanJSONUndefinedPlaceholders(body)
 	if clientFormat == upstreamFormat && clientFormat == FormatOpenAIChatCompletions {
 		req, _ := ToIR(clientFormat, body)
+		PrepareRequestForTarget(req, clientFormat, upstreamFormat)
 		return body, req, nil
 	}
 	toIR, ok := requestIRParsers[clientFormat]
@@ -151,7 +148,6 @@ func parseAdapterRequest(format Format, body []byte, parse adapterRequestParser)
 		return nil, err
 	}
 	attachRawRequest(ir, body)
-	ir.IR = ir.buildIR()
 	return ir, nil
 }
 
@@ -165,35 +161,50 @@ func attachRawRequest(ir *adapterRequest, body []byte) {
 // response converter types
 type responseParser func(body []byte) (*adapterResponse, error)
 type responseEmitter func(ir *adapterResponse) ([]byte, error)
+type responseIRParser func(body []byte) (*ir.Response, error)
+type responseIREmitter func(resp *ir.Response) ([]byte, error)
 
-var responseParsers = map[Format]responseParser{}
-var responseEmitters = map[Format]responseEmitter{}
+var responseIRParsers = map[Format]responseIRParser{}
+var responseIREmitters = map[Format]responseIREmitter{}
 
-// RegisterResponseParser registers a response converter from protocol bytes to adapterResponse.
-func RegisterResponseParser(f Format, fn responseParser) {
-	responseParsers[f] = fn
+func registerAdapterResponseParser(f Format, fn responseParser) {
+	responseIRParsers[f] = func(body []byte) (*ir.Response, error) {
+		resp, err := fn(body)
+		if err != nil {
+			return nil, err
+		}
+		return resp.ToIR(f), nil
+	}
 }
 
-// RegisterResponseEmitter registers a response converter from adapterResponse to protocol bytes.
-func RegisterResponseEmitter(f Format, fn responseEmitter) {
-	responseEmitters[f] = fn
+func registerAdapterResponseEmitter(f Format, fn responseEmitter) {
+	responseIREmitters[f] = func(resp *ir.Response) ([]byte, error) {
+		return fn(adapterResponseFromIR(resp))
+	}
+}
+
+func ToResponseIR(format Format, body []byte) (*ir.Response, error) {
+	parser, ok := responseIRParsers[format]
+	if !ok {
+		return nil, fmt.Errorf("no response parser for format %q", format)
+	}
+	return parser(body)
+}
+
+func FromResponseIR(resp *ir.Response, target Format) ([]byte, error) {
+	emitter, ok := responseIREmitters[target]
+	if !ok {
+		return nil, fmt.Errorf("no response emitter for format %q", target)
+	}
+	return emitter(resp)
 }
 
 // ConvertResponse converts a response from upstreamFormat to clientFormat.
 func ConvertResponse(upstreamFormat, clientFormat Format, body []byte) ([]byte, error) {
-	toResp, ok := responseParsers[upstreamFormat]
-	if !ok {
-		return nil, fmt.Errorf("no response parser for format %q", upstreamFormat)
-	}
-	fromResp, ok := responseEmitters[clientFormat]
-	if !ok {
-		return nil, fmt.Errorf("no response emitter for format %q", clientFormat)
-	}
-	ir, err := toResp(body)
+	respIR, err := ToResponseIR(upstreamFormat, body)
 	if err != nil {
 		return nil, err
 	}
-	respIR := ir.ToIR(upstreamFormat)
 	respIR.TargetProtocol = irProtocol(clientFormat)
-	return fromResp(adapterResponseFromIR(respIR))
+	return FromResponseIR(respIR, clientFormat)
 }

@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIChatResponse converts OpenAI Chat Completions response to adapterResponse.
-func ParseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
+// parseOpenAIChatResponse converts OpenAI Chat Completions response to adapterResponse.
+func parseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.OpenAIChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat response: %w", err)
@@ -139,8 +139,8 @@ func mapOpenAIChatResponseFinishReason(fr string) string {
 	}
 }
 
-// EmitOpenAIChatResponse converts adapterResponse to OpenAI Chat Completions response.
-func EmitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
+// emitOpenAIChatResponse converts adapterResponse to OpenAI Chat Completions response.
+func emitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
 	resp := schema.OpenAIChatResponse{
 		ID:      ir.ID,
 		Object:  "chat.completion",
@@ -252,8 +252,8 @@ func contentPartsText(parts []schema.ContentPart) string {
 	return strings.Join(out, "\n")
 }
 
-// ParseOpenAIResponsesResponse converts OpenAI Responses API response to adapterResponse.
-func ParseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
+// parseOpenAIResponsesResponse converts OpenAI Responses API response to adapterResponse.
+func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.OpenAIResponsesResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses response: %w", err)
@@ -353,8 +353,8 @@ func mapResponsesStatusToFinishReason(status string) string {
 	}
 }
 
-// EmitOpenAIResponsesResponse converts adapterResponse to OpenAI Responses API response.
-func EmitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
+// emitOpenAIResponsesResponse converts adapterResponse to OpenAI Responses API response.
+func emitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
 	resp := schema.OpenAIResponsesResponse{
 		ID:        ir.ID,
 		Object:    "response",
@@ -558,8 +558,8 @@ func imageOutputFormatFromMime(mimeType string) string {
 }
 
 func init() {
-	RegisterResponseParser(FormatOpenAIChatCompletions, ParseOpenAIChatResponse)
-	RegisterResponseEmitter(FormatOpenAIChatCompletions, EmitOpenAIChatResponse)
-	RegisterResponseParser(FormatOpenAIResponses, ParseOpenAIResponsesResponse)
-	RegisterResponseEmitter(FormatOpenAIResponses, EmitOpenAIResponsesResponse)
+	registerAdapterResponseParser(FormatOpenAIChatCompletions, parseOpenAIChatResponse)
+	registerAdapterResponseEmitter(FormatOpenAIChatCompletions, emitOpenAIChatResponse)
+	registerAdapterResponseParser(FormatOpenAIResponses, parseOpenAIResponsesResponse)
+	registerAdapterResponseEmitter(FormatOpenAIResponses, emitOpenAIResponsesResponse)
 }

@@ -12,11 +12,7 @@ func (r *adapterRequest) ToIR() *ir.Request {
 	if r == nil {
 		return nil
 	}
-	if r.IR != nil {
-		return r.IR
-	}
-	r.IR = r.buildIR()
-	return r.IR
+	return r.buildIR()
 }
 
 func (r *adapterRequest) buildIR() *ir.Request {

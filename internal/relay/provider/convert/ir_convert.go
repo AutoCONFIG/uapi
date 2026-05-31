@@ -98,7 +98,6 @@ func adapterRequestFromIR(req *relayir.Request) *adapterRequest {
 	for _, turn := range req.Turns {
 		out.Messages = append(out.Messages, requestMessageFromIRTurn(turn))
 	}
-	out.IR = req
 	return out
 }
 

@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseAnthropicResponse converts Anthropic response to adapterResponse.
-func ParseAnthropicResponse(body []byte) (*adapterResponse, error) {
+// parseAnthropicResponse converts Anthropic response to adapterResponse.
+func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
@@ -119,8 +119,8 @@ func mapAnthropicResponseFinishReason(fr string) string {
 	}
 }
 
-// EmitAnthropicResponse converts adapterResponse to Anthropic response.
-func EmitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
+// emitAnthropicResponse converts adapterResponse to Anthropic response.
+func emitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	resp["id"] = ir.ID
@@ -223,6 +223,6 @@ func EmitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
 }
 
 func init() {
-	RegisterResponseParser(FormatAnthropic, ParseAnthropicResponse)
-	RegisterResponseEmitter(FormatAnthropic, EmitAnthropicResponse)
+	registerAdapterResponseParser(FormatAnthropic, parseAnthropicResponse)
+	registerAdapterResponseEmitter(FormatAnthropic, emitAnthropicResponse)
 }

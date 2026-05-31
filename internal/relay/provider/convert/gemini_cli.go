@@ -8,9 +8,9 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseGeminiCLIRequest converts Gemini CLI request to an adapter request.
+// parseGeminiCLIRequest converts Gemini CLI request to an adapter request.
 // Extracts the inner Gemini request from the CLI envelope.
-func ParseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
+func parseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
 	var req schema.GeminiCLIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI request: %w", err)
@@ -22,7 +22,7 @@ func ParseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
 		return nil, fmt.Errorf("failed to marshal inner Gemini request: %w", err)
 	}
 
-	ir, err := ParseGeminiRequest(innerBody)
+	ir, err := parseGeminiRequest(innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert inner Gemini request: %w", err)
 	}
@@ -58,11 +58,11 @@ func ParseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// EmitGeminiCLIRequest converts an adapter request to Gemini CLI request.
+// emitGeminiCLIRequest converts an adapter request to Gemini CLI request.
 // Wraps the Gemini request in the CLI envelope.
-func EmitGeminiCLIRequest(ir *adapterRequest) ([]byte, error) {
+func emitGeminiCLIRequest(ir *adapterRequest) ([]byte, error) {
 	// First convert to Gemini format
-	innerBody, err := EmitGeminiRequest(ir)
+	innerBody, err := emitGeminiRequest(ir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert to Gemini format: %w", err)
 	}
@@ -123,6 +123,6 @@ func generateRequestID() string {
 }
 
 func init() {
-	RegisterRequestParser(FormatGeminiCLI, ParseGeminiCLIRequest)
-	RegisterRequestEmitter(FormatGeminiCLI, EmitGeminiCLIRequest)
+	registerAdapterRequestParser(FormatGeminiCLI, parseGeminiCLIRequest)
+	registerAdapterRequestEmitter(FormatGeminiCLI, emitGeminiCLIRequest)
 }

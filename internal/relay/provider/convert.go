@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	newconvert "github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
 func toConvertFormat(format Format) (newconvert.Format, error) {
@@ -44,7 +45,7 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 	return newconvert.ConvertRequest(client, upstream, body)
 }
 
-func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([]byte, *RequestIR, error) {
+func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([]byte, *ir.Request, error) {
 	client, err := toConvertFormat(clientFormat)
 	if err != nil {
 		return nil, nil, err

@@ -114,11 +114,11 @@ func (a *AntigravityAdaptor) SetupRequestHeader(req *fasthttp.Request, credentia
 	return nil
 }
 
-func (a *AntigravityAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+func (a *AntigravityAdaptor) ToIR(body []byte) (*ir.Request, error) {
 	return convert.ToIR(convert.FormatAntigravity, body)
 }
 
-func (a *AntigravityAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error) {
+func (a *AntigravityAdaptor) emitRequest(req *ir.Request) ([]byte, error) {
 	clientModel := req.Model
 	if clientModel == "" {
 		clientModel = a.model
@@ -167,7 +167,7 @@ func (a *AntigravityAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error
 	return json.Marshal(body)
 }
 
-func (a *AntigravityAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+func (a *AntigravityAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	return a.emitRequest(req)
 }
 
@@ -178,7 +178,7 @@ func channelModels(ch *db.Channel) []string {
 	return strings.Split(ch.Models, ",")
 }
 
-func antigravityReasoningEffort(req *provider.RequestIR) string {
+func antigravityReasoningEffort(req *ir.Request) string {
 	if req == nil {
 		return ""
 	}
@@ -289,7 +289,7 @@ func cleanStrings(values []string) []string {
 	return out
 }
 
-func antigravityRequestSize(req *provider.RequestIR, settings ChannelSettings) string {
+func antigravityRequestSize(req *ir.Request, settings ChannelSettings) string {
 	tokens := estimateAntigravityTokens(req)
 	switch {
 	case tokens > settings.LongTokenThreshold:
@@ -301,7 +301,7 @@ func antigravityRequestSize(req *provider.RequestIR, settings ChannelSettings) s
 	}
 }
 
-func estimateAntigravityTokens(req *provider.RequestIR) int {
+func estimateAntigravityTokens(req *ir.Request) int {
 	if req == nil {
 		return 0
 	}
@@ -540,15 +540,19 @@ func (a *AntigravityAdaptor) ParseStreamUsage(lastChunk []byte) (int, int, error
 }
 
 func (a *AntigravityAdaptor) ParseUsageFull(respBody []byte) (provider.InternalUsage, error) {
-	internal, err := convert.ParseGeminiResponse(respBody)
+	resp, err := convert.ToResponseIR(convert.FormatGemini, respBody)
 	if err != nil {
 		return provider.InternalUsage{}, err
 	}
+	usage := resp.Usage
+	if usage == nil {
+		return provider.InternalUsage{}, nil
+	}
 	return provider.InternalUsage{
-		PromptTokens:             internal.Usage.PromptTokens,
-		CompletionTokens:         internal.Usage.CompletionTokens,
-		CacheCreationInputTokens: internal.Usage.CacheCreationInputTokens,
-		CacheReadInputTokens:     internal.Usage.CacheReadInputTokens,
+		PromptTokens:             usage.PromptTokens,
+		CompletionTokens:         usage.CompletionTokens,
+		CacheCreationInputTokens: usage.CacheCreationTokens,
+		CacheReadInputTokens:     usage.CacheReadTokens,
 	}, nil
 }
 

@@ -9,7 +9,7 @@ import (
 
 func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *testing.T) {
 	imageURL := "data:image/png;base64,aGVsbG8="
-	body, err := EmitOpenAIResponsesResponse(&adapterResponse{
+	body, err := emitOpenAIResponsesResponse(&adapterResponse{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
 		Choices: []adapterChoice{{
@@ -52,7 +52,7 @@ func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *test
 
 func TestEmitOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *testing.T) {
 	imageURL := "data:image/webp;base64,aW1n"
-	body, err := EmitOpenAIResponsesResponse(&adapterResponse{
+	body, err := emitOpenAIResponsesResponse(&adapterResponse{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
 		Choices: []adapterChoice{{

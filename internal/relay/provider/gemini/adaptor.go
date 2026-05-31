@@ -8,6 +8,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -81,7 +82,7 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 
 // --- Request conversion ---
 
-func (a *GeminiAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+func (a *GeminiAdaptor) ToIR(body []byte) (*ir.Request, error) {
 	format := convert.FormatGemini
 	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
 		format = convert.FormatGeminiCode
@@ -89,7 +90,7 @@ func (a *GeminiAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
 	return convert.ToIR(format, body)
 }
 
-func (a *GeminiAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error) {
+func (a *GeminiAdaptor) emitRequest(req *ir.Request) ([]byte, error) {
 	// Store model and stream for URL construction
 	a.model = req.Model
 	a.isStream = req.Stream
@@ -99,7 +100,7 @@ func (a *GeminiAdaptor) emitRequest(req *provider.RequestIR) ([]byte, error) {
 	return convert.FromIR(req, convert.FormatGemini)
 }
 
-func (a *GeminiAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+func (a *GeminiAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	return a.emitRequest(req)
 }
 

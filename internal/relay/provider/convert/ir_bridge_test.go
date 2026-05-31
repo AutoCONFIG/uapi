@@ -20,9 +20,9 @@ func TestOpenAIResponsesToIRPreservesOrderedItemsAndNativeRaw(t *testing.T) {
 		"parallel_tool_calls":false,
 		"store":false
 	}`)
-	req, err := ParseOpenAIResponsesRequest(body)
+	req, err := parseOpenAIResponsesRequest(body)
 	if err != nil {
-		t.Fatalf("ParseOpenAIResponsesRequest: %v", err)
+		t.Fatalf("parseOpenAIResponsesRequest: %v", err)
 	}
 	got := req.ToIR()
 	if got.Native.Protocol != ir.ProtocolOpenAIResponses {
@@ -66,9 +66,9 @@ func TestResponsesOpaqueItemRecordsAuditLoss(t *testing.T) {
 		"model":"gpt-5",
 		"input":[{"id":"fs_1","type":"file_search_call","status":"completed","queries":["uapi"]}]
 	}`)
-	req, err := ParseOpenAIResponsesRequest(body)
+	req, err := parseOpenAIResponsesRequest(body)
 	if err != nil {
-		t.Fatalf("ParseOpenAIResponsesRequest: %v", err)
+		t.Fatalf("parseOpenAIResponsesRequest: %v", err)
 	}
 	got := req.ToIR()
 	if len(got.Losses) != 1 {

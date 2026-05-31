@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseAnthropicRequest converts Anthropic Messages API request to an adapter request.
-func ParseAnthropicRequest(body []byte) (*adapterRequest, error) {
+// parseAnthropicRequest converts Anthropic Messages API request to an adapter request.
+func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
@@ -193,8 +193,8 @@ func ParseAnthropicRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// EmitAnthropicRequest converts an adapter request to Anthropic Messages API request.
-func EmitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
+// emitAnthropicRequest converts an adapter request to Anthropic Messages API request.
+func emitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
 	req := make(map[string]interface{})
 	req["model"] = ir.Model
 	req["max_tokens"] = 4096 // default if not set
@@ -462,6 +462,6 @@ func anthropicToolResultBlock(result schema.ToolResult) map[string]interface{} {
 }
 
 func init() {
-	RegisterRequestParser(FormatAnthropic, ParseAnthropicRequest)
-	RegisterRequestEmitter(FormatAnthropic, EmitAnthropicRequest)
+	registerAdapterRequestParser(FormatAnthropic, parseAnthropicRequest)
+	registerAdapterRequestEmitter(FormatAnthropic, emitAnthropicRequest)
 }

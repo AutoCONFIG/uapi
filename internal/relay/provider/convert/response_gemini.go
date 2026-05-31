@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseGeminiResponse converts Gemini API response to adapterResponse.
-func ParseGeminiResponse(body []byte) (*adapterResponse, error) {
+// parseGeminiResponse converts Gemini API response to adapterResponse.
+func parseGeminiResponse(body []byte) (*adapterResponse, error) {
 	var wrapped struct {
 		Response json.RawMessage `json:"response"`
 	}
@@ -145,8 +145,8 @@ func mapGeminiResponseFinishReason(fr string) string {
 	}
 }
 
-// EmitGeminiResponse converts adapterResponse to Gemini API response.
-func EmitGeminiResponse(ir *adapterResponse) ([]byte, error) {
+// emitGeminiResponse converts adapterResponse to Gemini API response.
+func emitGeminiResponse(ir *adapterResponse) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	// Convert choices to candidates
@@ -275,8 +275,8 @@ func EmitGeminiResponse(ir *adapterResponse) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-// ParseGeminiCLIResponse extracts adapterResponse from Gemini CLI envelope.
-func ParseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
+// parseGeminiCLIResponse extracts adapterResponse from Gemini CLI envelope.
+func parseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
 	var env schema.GeminiCLIResponse
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI response: %w", err)
@@ -288,7 +288,7 @@ func ParseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
 		return nil, fmt.Errorf("failed to marshal inner Gemini response: %w", err)
 	}
 
-	ir, err := ParseGeminiResponse(innerBody)
+	ir, err := parseGeminiResponse(innerBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert inner Gemini response: %w", err)
 	}
@@ -296,10 +296,10 @@ func ParseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
 	return ir, nil
 }
 
-// EmitGeminiCLIResponse wraps adapterResponse in Gemini CLI envelope.
-func EmitGeminiCLIResponse(ir *adapterResponse) ([]byte, error) {
+// emitGeminiCLIResponse wraps adapterResponse in Gemini CLI envelope.
+func emitGeminiCLIResponse(ir *adapterResponse) ([]byte, error) {
 	// First convert to Gemini format
-	innerBody, err := EmitGeminiResponse(ir)
+	innerBody, err := emitGeminiResponse(ir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert to Gemini format: %w", err)
 	}
@@ -319,8 +319,8 @@ func EmitGeminiCLIResponse(ir *adapterResponse) ([]byte, error) {
 }
 
 func init() {
-	RegisterResponseParser(FormatGemini, ParseGeminiResponse)
-	RegisterResponseEmitter(FormatGemini, EmitGeminiResponse)
-	RegisterResponseParser(FormatGeminiCLI, ParseGeminiCLIResponse)
-	RegisterResponseEmitter(FormatGeminiCLI, EmitGeminiCLIResponse)
+	registerAdapterResponseParser(FormatGemini, parseGeminiResponse)
+	registerAdapterResponseEmitter(FormatGemini, emitGeminiResponse)
+	registerAdapterResponseParser(FormatGeminiCLI, parseGeminiCLIResponse)
+	registerAdapterResponseEmitter(FormatGeminiCLI, emitGeminiCLIResponse)
 }

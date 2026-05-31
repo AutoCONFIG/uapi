@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// ParseOpenAIChatRequest converts OpenAI Chat Completions request to an adapter request.
-func ParseOpenAIChatRequest(body []byte) (*adapterRequest, error) {
+// parseOpenAIChatRequest converts OpenAI Chat Completions request to an adapter request.
+func parseOpenAIChatRequest(body []byte) (*adapterRequest, error) {
 	var req schema.OpenAIChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat request: %w", err)
@@ -171,8 +171,8 @@ func ParseOpenAIChatRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// EmitOpenAIChatRequest converts an adapter request to OpenAI Chat Completions request.
-func EmitOpenAIChatRequest(ir *adapterRequest) ([]byte, error) {
+// emitOpenAIChatRequest converts an adapter request to OpenAI Chat Completions request.
+func emitOpenAIChatRequest(ir *adapterRequest) ([]byte, error) {
 	req := schema.OpenAIChatRequest{
 		Model:  ir.Model,
 		Stream: ir.Stream,
@@ -362,6 +362,6 @@ func joinNonEmpty(strs []string, sep string) string {
 }
 
 func init() {
-	RegisterRequestParser(FormatOpenAIChatCompletions, ParseOpenAIChatRequest)
-	RegisterRequestEmitter(FormatOpenAIChatCompletions, EmitOpenAIChatRequest)
+	registerAdapterRequestParser(FormatOpenAIChatCompletions, parseOpenAIChatRequest)
+	registerAdapterRequestEmitter(FormatOpenAIChatCompletions, emitOpenAIChatRequest)
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/valyala/fasthttp"
 )
@@ -52,14 +53,14 @@ func (a *AnthropicAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials
 
 // --- Request conversion ---
 
-func (a *AnthropicAdaptor) ToIR(body []byte) (*provider.RequestIR, error) {
+func (a *AnthropicAdaptor) ToIR(body []byte) (*ir.Request, error) {
 	if a.channel != nil && a.channel.APIFormat == "claude_code" {
 		return convert.ToIR(convert.FormatClaudeCode, body)
 	}
 	return convert.ToIR(convert.FormatAnthropic, body)
 }
 
-func (a *AnthropicAdaptor) FromIR(req *provider.RequestIR) ([]byte, error) {
+func (a *AnthropicAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	if a.channel != nil && a.channel.APIFormat == "claude_code" {
 		return convert.FromIR(req, convert.FormatClaudeCode)
 	}
