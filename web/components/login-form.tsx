@@ -9,9 +9,11 @@ export function LoginForm() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setHydrated(true);
 
     async function redirectToSetupWhenNeeded() {
       try {
@@ -77,18 +79,18 @@ export function LoginForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit}>
+    <form method="post" onSubmit={handleSubmit}>
       <h1 className="auth-title">登录</h1>
       <div className="field">
         <label htmlFor="email">邮箱</label>
-        <input className="input" id="email" name="email" type="email" />
+        <input className="input" id="email" name="email" type="email" autoComplete="username" />
       </div>
       <div className="field">
         <label htmlFor="password">密码</label>
-        <input className="input" id="password" name="password" type="password" />
+        <input className="input" id="password" name="password" type="password" autoComplete="current-password" />
       </div>
       {error ? <p className="form-error">{error}</p> : null}
-      <button className="btn primary" disabled={loading} style={{ width: "100%", marginTop: 4 }} type="submit">
+      <button className="btn primary" disabled={loading || !hydrated} style={{ width: "100%", marginTop: 4 }} type="submit">
         {loading ? "登录中" : "登录"}
       </button>
       <div className="auth-links">

@@ -1226,6 +1226,33 @@ func TestOpenAIResponsesUsageCachedTokensConvertsToChatUsage(t *testing.T) {
 	}
 }
 
+func TestAnthropicCacheUsageConvertsToGeminiCachedContentReadTokens(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude",
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{"input_tokens":20,"output_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7}
+	}`)
+	converted, err := convert.ConvertResponse(convert.FormatAnthropic, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> Gemini response: %v", err)
+	}
+	var resp struct {
+		UsageMetadata struct {
+			CachedContentTokenCount int `json:"cachedContentTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	if err := json.Unmarshal(converted, &resp); err != nil {
+		t.Fatalf("decode Gemini response: %v; body=%s", err, converted)
+	}
+	if resp.UsageMetadata.CachedContentTokenCount != 7 {
+		t.Fatalf("Gemini cachedContentTokenCount = %d, want cache read tokens 7; body=%s", resp.UsageMetadata.CachedContentTokenCount, converted)
+	}
+}
+
 func TestGeminiPDFInlineDataConvertsToOpenAIResponsesInputFile(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[

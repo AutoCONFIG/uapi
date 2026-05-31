@@ -54,6 +54,13 @@ func TestSettledDeltaSubtractsRatioAdjustedPreConsume(t *testing.T) {
 	}
 }
 
+func TestBillableTokenEquivalentChargesCacheAtReducedRate(t *testing.T) {
+	got := billableTokenEquivalent(100, 20, 0, 40, 1.25, 0.1)
+	if got != 84 {
+		t.Fatalf("billable tokens = %d, want 84", got)
+	}
+}
+
 func TestPlanAnchoredWeekWindow(t *testing.T) {
 	start := time.Date(2026, 5, 30, 11, 20, 0, 0, time.UTC)
 	now := start.Add(8*24*time.Hour + time.Minute)

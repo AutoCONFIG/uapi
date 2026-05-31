@@ -6,7 +6,7 @@ export default function ForgotPasswordPage() {
       <section className="auth-card">
         <h1>找回密码</h1>
         <p className="lede" style={{ marginBottom: 22 }}>输入注册邮箱。后续接入邮件服务后，这里会发送重置链接。</p>
-        <form>
+        <form method="post">
           <div className="field">
             <label htmlFor="email">邮箱</label>
             <input className="input" id="email" name="email" type="email" placeholder="you@example.com" />

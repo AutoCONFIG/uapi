@@ -149,10 +149,8 @@ func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 		return fmt.Errorf("parse model ratios: %w", err)
 	}
 
-	// Cache tokens are included in prompt-equivalent tokens at reduced rates
-	cacheEquivalent := int(float64(cacheCreationTokens)*cacheCreationRatio) +
-		int(float64(cacheReadTokens)*cacheReadRatio)
-	actual := int(math.Ceil(float64(promptTokens+cacheEquivalent+completionTokens) * ratio))
+	actualTokens := billableTokenEquivalent(promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens, cacheCreationRatio, cacheReadRatio)
+	actual := int(math.Ceil(float64(actualTokens) * ratio))
 	if actual <= 0 {
 		actual = preConsumeChargeForPlan(plan.Type, estTokens, model, rawRatios)
 	}
@@ -161,6 +159,17 @@ func refundAndSettleTxForPlan(tx *gorm.DB, tokenID string, tokenPlanID uuid.UUID
 		return err
 	}
 	return nil
+}
+
+func billableTokenEquivalent(promptTokens, completionTokens, cacheCreationTokens, cacheReadTokens int, cacheCreationRatio, cacheReadRatio float64) int {
+	regularPromptTokens := promptTokens - cacheCreationTokens - cacheReadTokens
+	if regularPromptTokens < 0 {
+		regularPromptTokens = 0
+	}
+	return int(math.Ceil(float64(regularPromptTokens) +
+		float64(cacheCreationTokens)*cacheCreationRatio +
+		float64(cacheReadTokens)*cacheReadRatio +
+		float64(completionTokens)))
 }
 
 func (b *BillingService) DBTransactionRefund(tokenID string, tokenPlanID uuid.UUID, amount int) error {

@@ -40,23 +40,24 @@ type RelayConfigAccount struct {
 }
 
 type UsageEventRequest struct {
-	RequestID        string    `json:"request_id"`
-	TokenID          uuid.UUID `json:"token_id"`
-	TokenPlanID      uuid.UUID `json:"token_plan_id"`
-	ChannelID        uuid.UUID `json:"channel_id"`
-	AccountID        uuid.UUID `json:"account_id"`
-	Model            string    `json:"model"`
-	RoutedModel      string    `json:"routed_model"`
-	ClientFormat     string    `json:"client_format"`
-	UpstreamFormat   string    `json:"upstream_format"`
-	IsStream         bool      `json:"is_stream"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	CacheReadTokens  int       `json:"cache_read_tokens"`
-	EstimatedTokens  int       `json:"estimated_tokens"`
-	StatusCode       int       `json:"status_code"`
-	LatencyMs        int64     `json:"latency_ms"`
-	ClientIP         string    `json:"client_ip"`
+	RequestID           string    `json:"request_id"`
+	TokenID             uuid.UUID `json:"token_id"`
+	TokenPlanID         uuid.UUID `json:"token_plan_id"`
+	ChannelID           uuid.UUID `json:"channel_id"`
+	AccountID           uuid.UUID `json:"account_id"`
+	Model               string    `json:"model"`
+	RoutedModel         string    `json:"routed_model"`
+	ClientFormat        string    `json:"client_format"`
+	UpstreamFormat      string    `json:"upstream_format"`
+	IsStream            bool      `json:"is_stream"`
+	PromptTokens        int       `json:"prompt_tokens"`
+	CompletionTokens    int       `json:"completion_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	EstimatedTokens     int       `json:"estimated_tokens"`
+	StatusCode          int       `json:"status_code"`
+	LatencyMs           int64     `json:"latency_ms"`
+	ClientIP            string    `json:"client_ip"`
 }
 
 type RelayAccountUpdateRequest struct {
@@ -221,7 +222,7 @@ func (h *Handler) RelayAccountUpdate(ctx *fasthttp.RequestCtx) {
 
 func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 	return h.db.Transaction(func(tx *gorm.DB) error {
-		event := db.UsageEvent{ID: uuid.New(), RequestID: req.RequestID, TokenID: req.TokenID, TokenPlanID: req.TokenPlanID, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: req.PromptTokens, CompletionTokens: req.CompletionTokens, CacheReadTokens: req.CacheReadTokens, EstimatedTokens: req.EstimatedTokens, StatusCode: req.StatusCode, LatencyMs: req.LatencyMs, Settled: false, CreatedAt: time.Now()}
+		event := db.UsageEvent{ID: uuid.New(), RequestID: req.RequestID, TokenID: req.TokenID, TokenPlanID: req.TokenPlanID, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: req.PromptTokens, CompletionTokens: req.CompletionTokens, CacheCreationTokens: req.CacheCreationTokens, CacheReadTokens: req.CacheReadTokens, EstimatedTokens: req.EstimatedTokens, StatusCode: req.StatusCode, LatencyMs: req.LatencyMs, Settled: false, CreatedAt: time.Now()}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&event).Error; err != nil {
 			return err
 		}
@@ -232,7 +233,7 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 		if existing.Settled {
 			return nil
 		}
-		logEntry := db.Log{TokenID: req.TokenID, ClientIP: req.ClientIP, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), CacheReadTokens: int64(req.CacheReadTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
+		logEntry := db.Log{TokenID: req.TokenID, ClientIP: req.ClientIP, ChannelID: req.ChannelID, AccountID: req.AccountID, Model: req.Model, RoutedModel: req.RoutedModel, ClientFormat: req.ClientFormat, UpstreamFormat: req.UpstreamFormat, IsStream: req.IsStream, PromptTokens: int64(req.PromptTokens), CompletionTokens: int64(req.CompletionTokens), CacheCreationTokens: int64(req.CacheCreationTokens), CacheReadTokens: int64(req.CacheReadTokens), TotalTokens: int64(req.PromptTokens + req.CompletionTokens), LatencyMs: req.LatencyMs, StatusCode: req.StatusCode}
 		if err := tx.Create(&logEntry).Error; err != nil {
 			return err
 		}
@@ -246,24 +247,25 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 				return err
 			}
 		} else {
-			if err := relay.RefundAndSettleTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, 0, req.CacheReadTokens, req.Model, modelRatios); err != nil {
+			if err := relay.RefundAndSettleTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.PromptTokens, req.CompletionTokens, req.CacheCreationTokens, req.CacheReadTokens, req.Model, modelRatios); err != nil {
 				return err
 			}
 		}
 		return tx.Model(&existing).Updates(map[string]interface{}{
-			"token_plan_id":     planID,
-			"prompt_tokens":     req.PromptTokens,
-			"completion_tokens": req.CompletionTokens,
-			"cache_read_tokens": req.CacheReadTokens,
-			"estimated_tokens":  req.EstimatedTokens,
-			"status_code":       req.StatusCode,
-			"latency_ms":        req.LatencyMs,
-			"is_stream":         req.IsStream,
-			"model":             req.Model,
-			"routed_model":      req.RoutedModel,
-			"client_format":     req.ClientFormat,
-			"upstream_format":   req.UpstreamFormat,
-			"settled":           true,
+			"token_plan_id":         planID,
+			"prompt_tokens":         req.PromptTokens,
+			"completion_tokens":     req.CompletionTokens,
+			"cache_creation_tokens": req.CacheCreationTokens,
+			"cache_read_tokens":     req.CacheReadTokens,
+			"estimated_tokens":      req.EstimatedTokens,
+			"status_code":           req.StatusCode,
+			"latency_ms":            req.LatencyMs,
+			"is_stream":             req.IsStream,
+			"model":                 req.Model,
+			"routed_model":          req.RoutedModel,
+			"client_format":         req.ClientFormat,
+			"upstream_format":       req.UpstreamFormat,
+			"settled":               true,
 		}).Error
 	})
 }

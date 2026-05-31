@@ -365,12 +365,13 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 
 // ── Per-turn billing helpers ───────────────────────────────────────────────────
 
-func (h *WSHandler) settleBilling(tokenID string, tokenPlanID uuid.UUID, estTokens, promptTokens, completionTokens int, model string) {
+func (h *WSHandler) settleBilling(tokenID string, tokenPlanID uuid.UUID, estTokens, promptTokens, completionTokens int, model string, cacheReadTokenValues ...int) {
 	if h.billing == nil {
 		return
 	}
+	cacheReadTokens := firstInt(cacheReadTokenValues...)
 	go func() {
-		if err := h.billing.DBTransactionRefundAndSettle(tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, 0, 0, model); err != nil {
+		if err := h.billing.DBTransactionRefundAndSettle(tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, 0, cacheReadTokens, model); err != nil {
 			logger.Component("relay.ws").Warn("billing settle error", logger.F("token_id", tokenID), logger.F("model", model), logger.Err(err))
 		}
 	}()
@@ -390,8 +391,18 @@ func (h *WSHandler) refundBilling(tokenID string, tokenPlanID uuid.UUID, estToke
 	}()
 }
 
-func (h *WSHandler) writeWSLog(tokenID, channelID, accountID interface{}, model string, pt, ct int, start time.Time, statusCode int) {
-	h.relayer.writeLog(tokenID, channelID, accountID, model, true, pt, ct, start, statusCode)
+func (h *WSHandler) writeWSLog(tokenID, channelID, accountID interface{}, model string, pt, ct int, start time.Time, statusCode int, cacheReadTokenValues ...int) {
+	cacheReadTokens := firstInt(cacheReadTokenValues...)
+	h.relayer.writeLogWithRoutedModelFormatsErrorAndCache(tokenID, channelID, accountID, model, model, true, "", "", pt, ct, 0, cacheReadTokens, start, statusCode, "")
+}
+
+func firstInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // ── Upstream WS dialer ─────────────────────────────────────────────────────────

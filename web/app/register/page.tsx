@@ -46,14 +46,14 @@ export default function RegisterPage() {
         <p className="eyebrow">开始使用</p>
         <h1>创建账号</h1>
         <p className="lede" style={{ marginBottom: 22 }}>获取一个 OpenAI 兼容密钥，开始接入多上游中转。</p>
-        <form onSubmit={handleSubmit}>
+        <form method="post" onSubmit={handleSubmit}>
           <div className="field">
             <label htmlFor="email">邮箱</label>
-            <input className="input" id="email" name="email" type="email" placeholder="you@example.com" required />
+            <input className="input" id="email" name="email" type="email" placeholder="you@example.com" required autoComplete="username" />
           </div>
           <div className="field">
             <label htmlFor="password">密码</label>
-            <input className="input" id="password" name="password" type="password" placeholder="至少 8 位" required minLength={8} />
+            <input className="input" id="password" name="password" type="password" placeholder="至少 8 位" required minLength={8} autoComplete="new-password" />
           </div>
           {error ? <p className="form-error">{error}</p> : null}
           <button className="btn primary" style={{ width: "100%", marginTop: 4 }} type="submit" disabled={loading}>

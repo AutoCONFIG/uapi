@@ -74,22 +74,22 @@ export default function SetupPage() {
   return (
     <main className="form-page">
       <section className="auth-card">
-        <form onSubmit={handleSubmit}>
+        <form method="post" onSubmit={handleSubmit}>
           <h1 className="auth-title">初始化设置</h1>
           <p style={{ color: "var(--muted)", marginBottom: 16, fontSize: 14 }}>
             首次使用，请创建管理员账号
           </p>
           <div className="field">
             <label htmlFor="email">管理员邮箱</label>
-            <input className="input" id="email" name="email" type="email" required autoFocus />
+            <input className="input" id="email" name="email" type="email" required autoFocus autoComplete="username" />
           </div>
           <div className="field">
             <label htmlFor="password">密码</label>
-            <input className="input" id="password" name="password" type="password" required minLength={8} />
+            <input className="input" id="password" name="password" type="password" required minLength={8} autoComplete="new-password" />
           </div>
           <div className="field">
             <label htmlFor="confirm">确认密码</label>
-            <input className="input" id="confirm" name="confirm" type="password" required minLength={8} />
+            <input className="input" id="confirm" name="confirm" type="password" required minLength={8} autoComplete="new-password" />
           </div>
           {error ? <p className="form-error">{error}</p> : null}
           <button className="btn primary" disabled={loading} style={{ width: "100%", marginTop: 4 }} type="submit">

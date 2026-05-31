@@ -251,8 +251,8 @@ func emitGeminiResponse(ir *adapterResponse) ([]byte, error) {
 		if reasoningTokens := usageDetailInt(ir.Usage.CompletionTokensDetails, "reasoning_tokens"); reasoningTokens > 0 {
 			usage["thoughtsTokenCount"] = reasoningTokens
 		}
-		if ir.Usage.CacheCreationInputTokens > 0 {
-			usage["cachedContentTokenCount"] = ir.Usage.CacheCreationInputTokens
+		if ir.Usage.CacheReadInputTokens > 0 {
+			usage["cachedContentTokenCount"] = ir.Usage.CacheReadInputTokens
 		}
 		resp["usageMetadata"] = usage
 	}

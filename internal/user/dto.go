@@ -84,21 +84,22 @@ type UsageDailyPoint struct {
 }
 
 type UsageLogItem struct {
-	ID               int64  `json:"id"`
-	CreatedAt        string `json:"created_at"`
-	Model            string `json:"model"`
-	RoutedModel      string `json:"routed_model"`
-	ClientFormat     string `json:"client_format"`
-	UpstreamFormat   string `json:"upstream_format"`
-	ClientIP         string `json:"client_ip,omitempty"`
-	IsStream         bool   `json:"is_stream"`
-	PromptTokens     int64  `json:"prompt_tokens"`
-	CompletionTokens int64  `json:"completion_tokens"`
-	CacheReadTokens  int64  `json:"cache_read_tokens"`
-	TotalTokens      int64  `json:"total_tokens"`
-	LatencyMs        int64  `json:"latency_ms"`
-	StatusCode       int    `json:"status_code"`
-	ErrorMessage     string `json:"error_message,omitempty"`
+	ID                  int64  `json:"id"`
+	CreatedAt           string `json:"created_at"`
+	Model               string `json:"model"`
+	RoutedModel         string `json:"routed_model"`
+	ClientFormat        string `json:"client_format"`
+	UpstreamFormat      string `json:"upstream_format"`
+	ClientIP            string `json:"client_ip,omitempty"`
+	IsStream            bool   `json:"is_stream"`
+	PromptTokens        int64  `json:"prompt_tokens"`
+	CompletionTokens    int64  `json:"completion_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	CacheReadTokens     int64  `json:"cache_read_tokens"`
+	TotalTokens         int64  `json:"total_tokens"`
+	LatencyMs           int64  `json:"latency_ms"`
+	StatusCode          int    `json:"status_code"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
 type UsageLogsResponse struct {

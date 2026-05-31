@@ -890,7 +890,7 @@ export function AdminChannelConsole() {
             </div>
 
             <div className="drawer-body">
-              <form className="account-edit-form" onSubmit={(event) => { event.preventDefault(); updateAccountFromForm(selectedAccount, event.currentTarget); }}>
+              <form className="account-edit-form" method="post" onSubmit={(event) => { event.preventDefault(); updateAccountFromForm(selectedAccount, event.currentTarget); }}>
                 <div className="field">
                   <label>账号名称</label>
                   <input className="input" name="name" defaultValue={selectedAccount.name} />
@@ -906,7 +906,7 @@ export function AdminChannelConsole() {
                 {selectedAccount.cred_type === "api_key" ? (
                   <div className="field">
                     <label>更新密钥</label>
-                    <input className="input" name="credentials" placeholder="留空则不更新" type="password" />
+                    <input className="input" name="credentials" placeholder="留空则不更新" type="password" autoComplete="off" />
                   </div>
                 ) : null}
                 {selectedAccount.cred_type === "api_key" ? (() => {

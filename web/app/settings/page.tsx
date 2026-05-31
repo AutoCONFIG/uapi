@@ -104,7 +104,7 @@ export default function SettingsPage() {
         description="管理用户控制台账号的登录邮箱和密码。"
       />
       <div className="grid grid-2">
-        <form className="card card-pad" onSubmit={handleEmailSubmit}>
+        <form className="card card-pad" method="post" onSubmit={handleEmailSubmit}>
           <h2>邮箱</h2>
           {currentEmail ? <p className="muted">当前邮箱：{currentEmail}</p> : null}
           <div className="field">
@@ -113,7 +113,7 @@ export default function SettingsPage() {
           </div>
           <div className="field">
             <label htmlFor="email-password">当前密码</label>
-            <input className="input" id="email-password" name="password" type="password" />
+            <input className="input" id="email-password" name="password" type="password" autoComplete="current-password" />
           </div>
           {emailState.error ? <p className="form-error">{emailState.error}</p> : null}
           {emailState.success ? <p className="form-success">{emailState.success}</p> : null}
@@ -122,15 +122,15 @@ export default function SettingsPage() {
           </button>
         </form>
 
-        <form className="card card-pad" onSubmit={handlePasswordSubmit}>
+        <form className="card card-pad" method="post" onSubmit={handlePasswordSubmit}>
           <h2>密码</h2>
           <div className="field">
             <label htmlFor="old-password">当前密码</label>
-            <input className="input" id="old-password" name="old_password" type="password" />
+            <input className="input" id="old-password" name="old_password" type="password" autoComplete="current-password" />
           </div>
           <div className="field">
             <label htmlFor="new-password">新密码</label>
-            <input className="input" id="new-password" name="new_password" minLength={8} type="password" />
+            <input className="input" id="new-password" name="new_password" minLength={8} type="password" autoComplete="new-password" />
           </div>
           {passwordState.error ? <p className="form-error">{passwordState.error}</p> : null}
           {passwordState.success ? <p className="form-success">{passwordState.success}</p> : null}
