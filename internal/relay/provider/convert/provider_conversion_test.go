@@ -34,7 +34,7 @@ func TestGeminiStreamMapsThoughtTextToReasoningContent(t *testing.T) {
 	if strings.Contains(got, `"object":"error"`) {
 		t.Fatalf("Gemini thought text must not produce conversion error: %s", got)
 	}
-	if !strings.Contains(got, `"reasoning_content":"thinking"`) || !strings.Contains(got, `"reasoning":"thinking"`) || !strings.Contains(got, `"content":"answer"`) {
+	if !strings.Contains(got, `"reasoning_content":"thinking"`) || strings.Contains(got, `"reasoning":"thinking"`) || !strings.Contains(got, `"content":"answer"`) {
 		t.Fatalf("Gemini thought and answer text must be separated: %s", got)
 	}
 }
@@ -68,7 +68,7 @@ func TestGeminiResponseSkipsThoughtSignatureMetadata(t *testing.T) {
 	}
 }
 
-func TestOpenAIChatResponsePreservesReasoningOutsideContent(t *testing.T) {
+func TestOpenAIChatResponseEmitsOnlyReasoningContent(t *testing.T) {
 	out, err := provider.ConvertResponse(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIChatCompletions, []byte(`{
 		"id":"chatcmpl-test",
 		"model":"gpt-test",
@@ -78,7 +78,7 @@ func TestOpenAIChatResponsePreservesReasoningOutsideContent(t *testing.T) {
 		t.Fatalf("ConvertResponse: %v", err)
 	}
 	got := string(out)
-	if !strings.Contains(got, `"content":"answer"`) || !strings.Contains(got, `"reasoning_content":"thinking"`) || !strings.Contains(got, `"reasoning":"thinking"`) {
-		t.Fatalf("OpenAI Chat output must preserve reasoning fields: %s", got)
+	if !strings.Contains(got, `"content":"answer"`) || !strings.Contains(got, `"reasoning_content":"thinking"`) || strings.Contains(got, `"reasoning":"thinking"`) {
+		t.Fatalf("OpenAI Chat output must use a single reasoning text field: %s", got)
 	}
 }

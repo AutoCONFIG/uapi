@@ -68,6 +68,7 @@ type adapterRequest struct {
 	LogitBias         json.RawMessage
 	ServiceTier       string
 	Store             *bool
+	User              string
 	Thinking          json.RawMessage // Anthropic extended thinking config
 	SafetySettings    json.RawMessage // Gemini safety settings
 	CandidateCount    *int            // Gemini candidate count
@@ -76,7 +77,7 @@ type adapterRequest struct {
 	// model yet, such as responseLogprobs, routingConfig, and media settings.
 	GeminiGenerationConfigExtra map[string]json.RawMessage
 
-	// Extra preserves protocol-specific fields for same-format passthrough.
+	// Extra preserves protocol-specific fields through the native envelope.
 	Extra map[string]json.RawMessage
 
 	// SourceFormat records which protocol this was parsed from,
@@ -116,7 +117,7 @@ type adapterResponse struct {
 	Model   string
 	Choices []adapterChoice
 	Usage   schema.Usage
-	Raw     json.RawMessage // preserved for same-format passthrough
+	Raw     json.RawMessage // preserved for native replay and field recovery
 	Losses  []ir.Loss       `json:"-"`
 }
 

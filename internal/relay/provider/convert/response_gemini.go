@@ -26,7 +26,7 @@ func parseGeminiResponse(body []byte) (*adapterResponse, error) {
 		Model:   resp.ModelVersion,
 		Choices: make([]adapterChoice, 0, len(resp.Candidates)),
 		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for same-format passthrough
+		Raw:     body, // Preserve raw for native replay and field recovery
 	}
 
 	// Convert usage

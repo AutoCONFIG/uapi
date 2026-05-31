@@ -24,7 +24,7 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 		},
-		Raw: body, // Preserve raw for same-format passthrough
+		Raw: body, // Preserve raw for native replay and field recovery
 	}
 
 	// Convert content blocks to a single choice

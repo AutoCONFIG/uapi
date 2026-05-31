@@ -86,6 +86,7 @@ func adapterRequestFromIR(req *relayir.Request) *adapterRequest {
 	out.Thinking = relayir.CloneRaw(req.Generation.Thinking)
 	out.ServiceTier = req.Generation.ServiceTier
 	out.Store = req.Generation.Store
+	out.User = req.Generation.User
 	out.ParallelToolCalls = req.Generation.ParallelToolCalls
 	out.GeminiGenerationConfigExtra = relayir.CloneRawMap(req.Generation.Extra)
 	out.SafetySettings = relayir.CloneRaw(req.Safety.Settings)

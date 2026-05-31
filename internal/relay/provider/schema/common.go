@@ -122,7 +122,7 @@ func (p ContentPart) MarshalJSON() ([]byte, error) {
 	if p.Type != "" {
 		out["type"] = p.Type
 	}
-	if p.Text != "" {
+	if p.Text != "" || p.Type == "text" || p.Type == "input_text" || p.Type == "output_text" {
 		out["text"] = p.Text
 	}
 	if p.ImageURL != nil {

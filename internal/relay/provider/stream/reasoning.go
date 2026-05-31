@@ -34,7 +34,6 @@ func reasoningTextDelta(text string, index int, signature string) map[string]int
 	}
 	return map[string]interface{}{
 		"reasoning_content": text,
-		"reasoning":         text,
 		"reasoning_details": []interface{}{detail},
 	}
 }

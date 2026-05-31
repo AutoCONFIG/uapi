@@ -42,6 +42,7 @@ func (r *adapterRequest) buildIR() *ir.Request {
 			Thinking:          ir.CloneRaw(r.Thinking),
 			ServiceTier:       r.ServiceTier,
 			Store:             r.Store,
+			User:              r.User,
 			ParallelToolCalls: r.ParallelToolCalls,
 			Extra:             ir.CloneRawMap(r.GeminiGenerationConfigExtra),
 		},

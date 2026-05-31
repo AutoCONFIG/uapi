@@ -150,8 +150,6 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 			}
 		} else if reasoning, ok := delta["reasoning_content"].(string); ok {
 			reasoningBuilder.WriteString(reasoning)
-		} else if reasoning, ok := delta["reasoning"].(string); ok {
-			reasoningBuilder.WriteString(reasoning)
 		}
 
 		// Tool calls delta
@@ -227,14 +225,12 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 		details, reasoning := finalizeStreamReasoningDetails(reasoningDetails)
 		if reasoning != "" {
 			msg["reasoning_content"] = reasoning
-			msg["reasoning"] = reasoning
 		}
 		if len(details) > 0 {
 			msg["reasoning_details"] = details
 		}
 	} else if reasoning := reasoningBuilder.String(); reasoning != "" {
 		msg["reasoning_content"] = reasoning
-		msg["reasoning"] = reasoning
 		msg["reasoning_details"] = []interface{}{
 			map[string]interface{}{
 				"index": 0,

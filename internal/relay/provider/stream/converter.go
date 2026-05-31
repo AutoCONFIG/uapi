@@ -40,7 +40,7 @@ func RegisterIREmitter(format convert.Format, factory func() streamIREmitter) {
 }
 
 // NewConverter creates a StreamConverter for the given direction.
-// Returns nil if no converter is registered (same-format passthrough).
+// Returns nil when no protocol conversion is required.
 func NewConverter(upstream, client convert.Format) StreamConverter {
 	if parserFactory, ok := streamIRParsers[upstream]; ok {
 		if emitterFactory, ok := streamIREmitters[client]; ok && upstream != client {

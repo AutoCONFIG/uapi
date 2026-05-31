@@ -67,11 +67,6 @@ func ConvertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, e
 // auditing loss records and native preservation decisions.
 func ConvertRequestDetailed(clientFormat, upstreamFormat Format, body []byte) ([]byte, *ir.Request, error) {
 	body = cleanJSONUndefinedPlaceholders(body)
-	if clientFormat == upstreamFormat && clientFormat == FormatOpenAIChatCompletions {
-		req, _ := ToIR(clientFormat, body)
-		PrepareRequestForTarget(req, clientFormat, upstreamFormat)
-		return body, req, nil
-	}
 	toIR, ok := requestIRParsers[clientFormat]
 	if !ok {
 		return nil, nil, fmt.Errorf("no request parser for format %q", clientFormat)

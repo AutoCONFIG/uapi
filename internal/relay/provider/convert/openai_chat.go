@@ -158,6 +158,12 @@ func parseOpenAIChatRequest(body []byte) (*adapterRequest, error) {
 	if req.Store != nil {
 		ir.Store = req.Store
 	}
+	if req.User != "" {
+		ir.User = req.User
+	}
+	if len(req.StreamOptions) > 0 {
+		ir.Extra["stream_options"] = append(json.RawMessage(nil), req.StreamOptions...)
+	}
 	if req.ReasoningEffort != "" {
 		ir.Reasoning = json.RawMessage(fmt.Sprintf(`{"effort":%q}`, req.ReasoningEffort))
 	}
@@ -235,7 +241,6 @@ func emitOpenAIChatRequest(ir *adapterRequest) ([]byte, error) {
 				chatMsg.Extra = make(map[string]json.RawMessage)
 			}
 			chatMsg.Extra["reasoning_content"] = raw
-			chatMsg.Extra["reasoning"] = raw
 		}
 		if details := reasoningDetailsFromParts(reasoningContent); len(details) > 0 {
 			raw, _ := json.Marshal(details)
@@ -305,6 +310,9 @@ func emitOpenAIChatRequest(ir *adapterRequest) ([]byte, error) {
 	}
 	if ir.Store != nil {
 		req.Store = ir.Store
+	}
+	if ir.User != "" {
+		req.User = ir.User
 	}
 	if ir.Tools != nil {
 		req.Tools = ir.Tools

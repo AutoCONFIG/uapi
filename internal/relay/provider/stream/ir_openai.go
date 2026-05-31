@@ -64,7 +64,6 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 		Role             string          `json:"role"`
 		Content          string          `json:"content"`
 		ReasoningContent string          `json:"reasoning_content"`
-		Reasoning        string          `json:"reasoning"`
 		ReasoningDetails json.RawMessage `json:"reasoning_details"`
 		ToolCalls        []struct {
 			Index    int    `json:"index"`
@@ -130,7 +129,6 @@ func (p *chatIRParser) reasoningEvents(choiceIndex int, delta struct {
 	Role             string          `json:"role"`
 	Content          string          `json:"content"`
 	ReasoningContent string          `json:"reasoning_content"`
-	Reasoning        string          `json:"reasoning"`
 	ReasoningDetails json.RawMessage `json:"reasoning_details"`
 	ToolCalls        []struct {
 		Index    int    `json:"index"`
@@ -151,12 +149,8 @@ func (p *chatIRParser) reasoningEvents(choiceIndex int, delta struct {
 			out = append(out, relayir.StreamEvent{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: p.model, ChoiceIndex: choiceIndex, ItemIndex: detail.Index, Delta: relayir.ItemDelta{Kind: relayir.ItemReasoning, Text: text, Signature: reasoningDetailSignature(detail)}})
 		}
 	}
-	text := delta.ReasoningContent
-	if text == "" {
-		text = delta.Reasoning
-	}
-	if text != "" {
-		out = append(out, relayir.StreamEvent{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: p.model, ChoiceIndex: choiceIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemReasoning, Text: text}})
+	if delta.ReasoningContent != "" {
+		out = append(out, relayir.StreamEvent{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: p.model, ChoiceIndex: choiceIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemReasoning, Text: delta.ReasoningContent}})
 	}
 	return out
 }

@@ -154,7 +154,7 @@ func TestOpenAIChatSameFormatPreservesExplicitFalseAndNativeFields(t *testing.T)
 		t.Fatalf("ConvertRequest: %v", err)
 	}
 	for _, want := range []string{
-		`"content":""`,
+		`"content":[{"text":"","type":"text"}]`,
 		`"max_completion_tokens":123`,
 		`"logprobs":false`,
 		`"parallel_tool_calls":false`,

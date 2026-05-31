@@ -20,7 +20,7 @@ func parseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
 		Model:   resp.Model,
 		Choices: make([]adapterChoice, 0, len(resp.Choices)),
 		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for same-format passthrough
+		Raw:     body, // Preserve raw for native replay and field recovery
 	}
 
 	// Convert usage
@@ -202,7 +202,6 @@ func emitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
 			if reasoning != "" {
 				raw, _ := json.Marshal(reasoning)
 				chatChoice.Message.Extra["reasoning_content"] = raw
-				chatChoice.Message.Extra["reasoning"] = raw
 			}
 			if details := reasoningDetailsFromParts(reasoningContent); len(details) > 0 {
 				raw, _ := json.Marshal(details)
@@ -264,7 +263,7 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 		Model:   resp.Model,
 		Choices: make([]adapterChoice, 0),
 		Usage:   schema.Usage{},
-		Raw:     body, // Preserve raw for same-format passthrough
+		Raw:     body, // Preserve raw for native replay and field recovery
 	}
 
 	// Convert usage
