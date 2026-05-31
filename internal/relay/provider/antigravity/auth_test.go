@@ -14,3 +14,14 @@ func TestAntigravityUserAgentUsesCurrentFallback(t *testing.T) {
 		t.Fatalf("LoadCodeAssistUserAgent() = %q, want %q plus node client", got, ua)
 	}
 }
+
+func TestParseUsageFullCapturesGeminiCachedContent(t *testing.T) {
+	adaptor := &AntigravityAdaptor{}
+	usage, err := adaptor.ParseUsageFull([]byte(`{"usageMetadata":{"promptTokenCount":22,"candidatesTokenCount":4,"cachedContentTokenCount":9}}`))
+	if err != nil {
+		t.Fatalf("ParseUsageFull: %v", err)
+	}
+	if usage.PromptTokens != 22 || usage.CompletionTokens != 4 || usage.CacheReadInputTokens != 9 {
+		t.Fatalf("usage = %#v, want prompt=22 completion=4 cache_read=9", usage)
+	}
+}

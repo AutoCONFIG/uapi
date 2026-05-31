@@ -8,17 +8,17 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseOpenAIChatResponse converts OpenAI Chat Completions response to adapterResponse.
-func parseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
+// parseOpenAIChatResponse converts OpenAI Chat Completions response to protocolResponseView.
+func parseOpenAIChatResponse(body []byte) (*protocolResponseView, error) {
 	var resp schema.OpenAIChatResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Chat response: %w", err)
 	}
 
-	ir := &adapterResponse{
+	ir := &protocolResponseView{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]adapterChoice, 0, len(resp.Choices)),
+		Choices: make([]protocolChoiceView, 0, len(resp.Choices)),
 		Usage:   schema.Usage{},
 		Raw:     body, // Preserve raw for native replay and field recovery
 	}
@@ -41,7 +41,7 @@ func parseOpenAIChatResponse(body []byte) (*adapterResponse, error) {
 
 	// Convert choices
 	for _, choice := range resp.Choices {
-		internalChoice := adapterChoice{
+		internalChoice := protocolChoiceView{
 			Index:        choice.Index,
 			Role:         choice.Message.Role,
 			FinishReason: mapOpenAIChatFinishReason(choice.FinishReason),
@@ -143,8 +143,8 @@ func mapOpenAIChatResponseFinishReason(fr string) string {
 	}
 }
 
-// emitOpenAIChatResponse converts adapterResponse to OpenAI Chat Completions response.
-func emitOpenAIChatResponse(ir *adapterResponse) ([]byte, error) {
+// emitOpenAIChatResponse converts protocolResponseView to OpenAI Chat Completions response.
+func emitOpenAIChatResponse(ir *protocolResponseView) ([]byte, error) {
 	resp := schema.OpenAIChatResponse{
 		ID:      ir.ID,
 		Object:  "chat.completion",
@@ -259,17 +259,17 @@ func contentPartsText(parts []schema.ContentPart) string {
 	return strings.Join(out, "\n")
 }
 
-// parseOpenAIResponsesResponse converts OpenAI Responses API response to adapterResponse.
-func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
+// parseOpenAIResponsesResponse converts OpenAI Responses API response to protocolResponseView.
+func parseOpenAIResponsesResponse(body []byte) (*protocolResponseView, error) {
 	var resp schema.OpenAIResponsesResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses response: %w", err)
 	}
 
-	ir := &adapterResponse{
+	ir := &protocolResponseView{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]adapterChoice, 0),
+		Choices: make([]protocolChoiceView, 0),
 		Usage:   schema.Usage{},
 		Raw:     body, // Preserve raw for native replay and field recovery
 	}
@@ -290,12 +290,12 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 		}
 	}
 
-	var pendingReasoning []adapterItem
+	var pendingReasoning []protocolItemView
 	flushPendingReasoning := func() {
 		if len(pendingReasoning) == 0 {
 			return
 		}
-		choice := adapterChoice{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
+		choice := protocolChoiceView{Index: len(ir.Choices), Role: "assistant", FinishReason: "end_turn"}
 		for _, item := range pendingReasoning {
 			appendChoiceReasoningItem(&choice, item.Content, item.Raw)
 		}
@@ -308,7 +308,7 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			choice := adapterChoice{
+			choice := protocolChoiceView{
 				Index:        len(ir.Choices),
 				Role:         item.Role,
 				FinishReason: mapResponsesStatusToFinishReason(item.Status),
@@ -323,7 +323,7 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 			ir.Choices = append(ir.Choices, choice)
 
 		case "function_call":
-			choice := adapterChoice{
+			choice := protocolChoiceView{
 				Index:        len(ir.Choices),
 				Role:         item.Role,
 				FinishReason: "tool_use",
@@ -348,7 +348,7 @@ func parseOpenAIResponsesResponse(body []byte) (*adapterResponse, error) {
 
 		case "reasoning":
 			for _, part := range reasoningPartsFromResponsesExtra(item.Extra) {
-				pendingReasoning = append(pendingReasoning, adapterItem{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
+				pendingReasoning = append(pendingReasoning, protocolItemView{Kind: contentItemKindReasoning, Content: part, Raw: rawJSON(item)})
 			}
 		}
 	}
@@ -369,8 +369,8 @@ func mapResponsesStatusToFinishReason(status string) string {
 	}
 }
 
-// emitOpenAIResponsesResponse converts adapterResponse to OpenAI Responses API response.
-func emitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
+// emitOpenAIResponsesResponse converts protocolResponseView to OpenAI Responses API response.
+func emitOpenAIResponsesResponse(ir *protocolResponseView) ([]byte, error) {
 	resp := schema.OpenAIResponsesResponse{
 		ID:        ir.ID,
 		Object:    "response",
@@ -415,7 +415,7 @@ func emitOpenAIResponsesResponse(ir *adapterResponse) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-func responsesReasoningOutputItem(choice adapterChoice) schema.ResponsesOutputItem {
+func responsesReasoningOutputItem(choice protocolChoiceView) schema.ResponsesOutputItem {
 	reasoningContent := reasoningPartsFromItems(canonicalChoiceItems(choice))
 	extra := make(map[string]json.RawMessage)
 	if content := responsesReasoningContent(reasoningContent); len(content) > 0 {
@@ -461,7 +461,7 @@ func responsesReasoningContent(parts []schema.ContentPart) []map[string]interfac
 	return content
 }
 
-func responsesOutputItemsFromChoice(choice adapterChoice) []schema.ResponsesOutputItem {
+func responsesOutputItemsFromChoice(choice protocolChoiceView) []schema.ResponsesOutputItem {
 	var out []schema.ResponsesOutputItem
 	var pendingContent []schema.ContentPart
 	status := responsesStatusFromFinishReason(choice.FinishReason)
@@ -482,7 +482,7 @@ func responsesOutputItemsFromChoice(choice adapterChoice) []schema.ResponsesOutp
 		case contentItemKindReasoning:
 			flushContent()
 			reasoningChoice := choice
-			reasoningChoice.Items = []adapterItem{item}
+			reasoningChoice.Items = []protocolItemView{item}
 			out = append(out, responsesReasoningOutputItem(reasoningChoice))
 		case contentItemKindContent:
 			part := item.Content
@@ -578,8 +578,8 @@ func imageOutputFormatFromMime(mimeType string) string {
 }
 
 func init() {
-	registerAdapterResponseParser(FormatOpenAIChatCompletions, parseOpenAIChatResponse)
-	registerAdapterResponseEmitter(FormatOpenAIChatCompletions, emitOpenAIChatResponse)
-	registerAdapterResponseParser(FormatOpenAIResponses, parseOpenAIResponsesResponse)
-	registerAdapterResponseEmitter(FormatOpenAIResponses, emitOpenAIResponsesResponse)
+	registerResponseIRParser(FormatOpenAIChatCompletions, parseOpenAIChatResponseIR)
+	registerResponseIREmitter(FormatOpenAIChatCompletions, emitOpenAIChatResponseIR)
+	registerResponseIRParser(FormatOpenAIResponses, parseOpenAIResponsesResponseIR)
+	registerResponseIREmitter(FormatOpenAIResponses, emitOpenAIResponsesResponseIR)
 }

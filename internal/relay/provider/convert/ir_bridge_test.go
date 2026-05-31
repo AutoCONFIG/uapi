@@ -191,15 +191,15 @@ func TestIRToOpenAIResponsesUsesOrderedItems(t *testing.T) {
 	}
 }
 
-func TestAdapterResponseToIRPreservesUsageAndOrderedItems(t *testing.T) {
-	resp := &adapterResponse{
+func TestProtocolResponseViewToIRPreservesUsageAndOrderedItems(t *testing.T) {
+	resp := &protocolResponseView{
 		ID:    "chatcmpl_1",
 		Model: "gpt-test",
 		Usage: schema.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8, CacheReadInputTokens: 2},
-		Choices: []adapterChoice{{
+		Choices: []protocolChoiceView{{
 			Index: 0,
 			Role:  "assistant",
-			Items: []adapterItem{
+			Items: []protocolItemView{
 				{Kind: "content", Content: schema.ContentPart{Type: "text", Text: "answer"}},
 				{Kind: "tool_call", ToolCall: schema.ToolCall{ID: "call_1", Type: "function", Name: "lookup"}},
 			},

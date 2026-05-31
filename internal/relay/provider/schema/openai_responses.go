@@ -94,16 +94,17 @@ func (in *ResponsesInput) UnmarshalJSON(data []byte) error {
 
 // ResponsesInputItem represents a single item in the Responses API input array.
 type ResponsesInputItem struct {
-	Type      string         `json:"type,omitempty"`
-	Role      string         `json:"role,omitempty"`
-	Content   MessageContent `json:"content,omitempty"`
-	CallID    string         `json:"call_id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Arguments string         `json:"arguments,omitempty"`
-	Output    string         `json:"output,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	Phase     string         `json:"phase,omitempty"`
+	Type      string          `json:"type,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   MessageContent  `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
+	OutputRaw json.RawMessage `json:"-"`
+	ID        string          `json:"id,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Phase     string          `json:"phase,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 	Raw   json.RawMessage            `json:"-"`
@@ -112,11 +113,27 @@ type ResponsesInputItem struct {
 // UnmarshalJSON captures unknown top-level keys into Extra.
 func (item *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 	type Alias ResponsesInputItem
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	outputRaw := append(json.RawMessage(nil), raw["output"]...)
+	delete(raw, "output")
+	stripped, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
 	var a Alias
-	if err := json.Unmarshal(data, &a); err != nil {
+	if err := json.Unmarshal(stripped, &a); err != nil {
 		return err
 	}
 	*item = ResponsesInputItem(a)
+	if len(outputRaw) > 0 {
+		item.OutputRaw = outputRaw
+		if err := json.Unmarshal(outputRaw, &item.Output); err != nil {
+			item.Output = string(outputRaw)
+		}
+	}
 	item.Raw = append(json.RawMessage(nil), data...)
 	return unmarshalExtra(data, item, &item.Extra)
 }

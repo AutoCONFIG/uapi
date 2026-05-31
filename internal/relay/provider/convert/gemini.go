@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiRequest converts Gemini API request to an adapter request.
-func parseGeminiRequest(body []byte) (*adapterRequest, error) {
+// parseGeminiRequest converts Gemini API request to an protocol request view.
+func parseGeminiRequest(body []byte) (*protocolRequestView, error) {
 	var req schema.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini request: %w", err)
 	}
 
-	ir := &adapterRequest{
+	ir := &protocolRequestView{
 		Model:        rawString(req.Extra["model"]),
 		Stream:       false,
 		SourceFormat: FormatGemini,
@@ -52,7 +52,7 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 
 	// Convert contents to messages
 	for _, content := range req.Contents {
-		requestMsg := adapterTurn{
+		requestMsg := protocolTurnView{
 			Role: geminiRoleToRequestRole(content.Role),
 		}
 
@@ -230,7 +230,7 @@ func parseGeminiRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-func appendGeminiPartExtraLosses(req *adapterRequest, path string, part schema.GeminiPart, rawPart json.RawMessage) {
+func appendGeminiPartExtraLosses(req *protocolRequestView, path string, part schema.GeminiPart, rawPart json.RawMessage) {
 	if req == nil {
 		return
 	}
@@ -242,7 +242,7 @@ func appendGeminiPartExtraLosses(req *adapterRequest, path string, part schema.G
 	}
 }
 
-func appendGeminiFunctionResponseLosses(req *adapterRequest, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
+func appendGeminiFunctionResponseLosses(req *protocolRequestView, resp *schema.GeminiFuncResponse, rawPart json.RawMessage) {
 	if req == nil || resp == nil {
 		return
 	}
@@ -278,8 +278,8 @@ func appendGeminiFunctionResponseLosses(req *adapterRequest, resp *schema.Gemini
 	}
 }
 
-// emitGeminiRequest converts an adapter request to Gemini API request.
-func emitGeminiRequest(ir *adapterRequest) ([]byte, error) {
+// emitGeminiRequest converts an protocol request view to Gemini API request.
+func emitGeminiRequest(ir *protocolRequestView) ([]byte, error) {
 	req := make(map[string]interface{})
 
 	// Convert Instructions to systemInstruction
@@ -325,7 +325,7 @@ func emitGeminiRequest(ir *adapterRequest) ([]byte, error) {
 	if ir.CandidateCount != nil {
 		genConfig["candidateCount"] = *ir.CandidateCount
 	}
-	if thinking := geminiThinkingFromAdapterRequest(ir); thinking != nil {
+	if thinking := geminiThinkingFromProtocolRequest(ir); thinking != nil {
 		genConfig["thinkingConfig"] = thinking
 	}
 	if mimeType, schema := geminiResponseFormat(ir.ResponseFormat); mimeType != "" {
@@ -382,7 +382,7 @@ func isGeminiEnvelopeFamily(format Format) bool {
 	return format == FormatGeminiCLI || format == FormatGeminiCode || format == FormatAntigravity
 }
 
-func geminiPartsFromItems(source Format, msg adapterTurn, toolCallNames map[string]string) []map[string]interface{} {
+func geminiPartsFromItems(source Format, msg protocolTurnView, toolCallNames map[string]string) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	parts := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -400,7 +400,7 @@ func geminiPartsFromItems(source Format, msg adapterTurn, toolCallNames map[stri
 	return parts
 }
 
-func geminiPartFromItem(item adapterItem, toolCallNames map[string]string) map[string]interface{} {
+func geminiPartFromItem(item protocolItemView, toolCallNames map[string]string) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return geminiReasoningPart(item.Content)
@@ -571,7 +571,11 @@ func geminiToolCallPart(tc schema.ToolCall) map[string]interface{} {
 
 func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]string) map[string]interface{} {
 	var response interface{}
-	_ = json.Unmarshal([]byte(result.Content), &response)
+	if len(result.ContentRaw) > 0 {
+		_ = json.Unmarshal(result.ContentRaw, &response)
+	} else {
+		_ = json.Unmarshal([]byte(result.Content), &response)
+	}
 	return map[string]interface{}{
 		"functionResponse": map[string]interface{}{
 			"name":     toolResponseName(result.ToolCallID, toolCallNames),
@@ -580,7 +584,7 @@ func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]str
 	}
 }
 
-func toolCallNameByID(messages []adapterTurn) map[string]string {
+func toolCallNameByID(messages []protocolTurnView) map[string]string {
 	names := make(map[string]string)
 	for _, msg := range messages {
 		for _, call := range toolCallsFromItems(canonicalMessageParts(msg)) {
@@ -789,7 +793,22 @@ func geminiTools(tools []schema.Tool) []map[string]interface{} {
 
 func normalizedFunctionTool(tool schema.Tool) (string, string, json.RawMessage) {
 	if tool.Function != nil {
-		return strings.TrimSpace(tool.Function.Name), strings.TrimSpace(tool.Function.Description), tool.Function.Parameters
+		parameters := tool.Function.Parameters
+		if len(parameters) == 0 {
+			parameters = tool.Parameters
+		}
+		if len(parameters) == 0 {
+			parameters = tool.InputSchema
+		}
+		description := tool.Function.Description
+		if description == "" {
+			description = tool.Description
+		}
+		name := tool.Function.Name
+		if name == "" {
+			name = tool.Name
+		}
+		return strings.TrimSpace(name), strings.TrimSpace(description), parameters
 	}
 	if tool.Type != "" && tool.Type != "function" {
 		return "", "", nil
@@ -924,6 +943,6 @@ func appendIfMissing(values []string, value string) []string {
 }
 
 func init() {
-	registerAdapterRequestParser(FormatGemini, parseGeminiRequest)
-	registerAdapterRequestEmitter(FormatGemini, emitGeminiRequest)
+	registerRequestIRParser(FormatGemini, parseGeminiRequestIR)
+	registerRequestIREmitter(FormatGemini, emitGeminiRequestIR)
 }

@@ -331,3 +331,29 @@ func jsonStringField(t *testing.T, payload, field string) string {
 	value, _ := obj[field].(string)
 	return value
 }
+
+func TestResponsesStreamErrorConvertsToChatError(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	out := converter.Convert([]byte(`data: {"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"object":"error"`, `"type":"invalid_request_error"`, `"code":"context_length_exceeded"`, `"message":"too long"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s in converted error:\n%s", want, got)
+		}
+	}
+}
+
+func TestChatStreamErrorConvertsToResponsesFailed(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIResponses)
+	if converter != nil {
+		t.Fatalf("same-format converter should be nil")
+	}
+	converter = stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	out := converter.Convert([]byte(`data: {"object":"error","error":{"type":"invalid_request_error","message":"bad"}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`event: response.failed`, `"type":"response.failed"`, `"message":"bad"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s in converted error:\n%s", want, got)
+		}
+	}
+}

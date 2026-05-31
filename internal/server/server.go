@@ -64,7 +64,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		if s.relayer != nil {
 			fallback = s.relayer.HandleRelay
 		}
-		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second)
+		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second, gateway.WithLocalFirst(cfg.Server.Mode == "all"))
 		refreshPool := makeRefreshPool(database, pools)
 		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools))
 		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)

@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func (r *adapterRequest) ToIR() *ir.Request {
+func (r *protocolRequestView) ToIR() *ir.Request {
 	if r == nil {
 		return nil
 	}
 	return r.buildIR()
 }
 
-func (r *adapterRequest) buildIR() *ir.Request {
+func (r *protocolRequestView) buildIR() *ir.Request {
 	req := &ir.Request{
 		SourceProtocol: irProtocol(r.SourceFormat),
 		Model:          r.Model,
@@ -71,7 +71,7 @@ func (r *adapterRequest) buildIR() *ir.Request {
 	return req
 }
 
-func irTurn(msg adapterTurn, source Format) ir.Turn {
+func irTurn(msg protocolTurnView, source Format) ir.Turn {
 	turn := ir.Turn{
 		Role:     irRole(msg.Role),
 		Name:     msg.Name,
@@ -94,7 +94,7 @@ func irTurn(msg adapterTurn, source Format) ir.Turn {
 	return turn
 }
 
-func irItem(item adapterItem, source Format, index int) ir.Item {
+func irItem(item protocolItemView, source Format, index int) ir.Item {
 	switch item.Kind {
 	case contentItemKindContent, contentItemKindReasoning:
 		return irContentPartItem(item.Kind, item.Content, item.Raw, source, index)
@@ -207,6 +207,7 @@ func irToolResultItem(result schema.ToolResult, raw json.RawMessage, source Form
 			ToolUseID:  result.ToolCallID,
 			CallID:     result.ToolCallID,
 			OutputText: result.Content,
+			OutputRaw:  ir.CloneRaw(result.ContentRaw),
 			IsError:    result.IsError,
 		},
 		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_result", Raw: ir.CloneRaw(raw), Index: index},

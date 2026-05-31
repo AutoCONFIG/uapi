@@ -8,8 +8,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseOpenAIResponsesRequest converts OpenAI Responses API request to an adapter request.
-func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
+// parseOpenAIResponsesRequest converts OpenAI Responses API request to an protocol request view.
+func parseOpenAIResponsesRequest(body []byte) (*protocolRequestView, error) {
 	var req schema.OpenAIResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal OpenAI Responses request: %w", err)
@@ -17,7 +17,7 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	var rawRoot map[string]json.RawMessage
 	_ = json.Unmarshal(body, &rawRoot)
 
-	ir := &adapterRequest{
+	ir := &protocolRequestView{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: append(json.RawMessage(nil), body...),
@@ -49,12 +49,12 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	}
 
 	// Parse Input - can be string or array
-	var messages []adapterTurn
+	var messages []protocolTurnView
 	var inputItems []schema.ResponsesInputItem
 
 	if req.Input.Text != nil {
 		// Single string input becomes a user message
-		msg := adapterTurn{Role: "user"}
+		msg := protocolTurnView{Role: "user"}
 		appendContentItem(&msg, schema.ContentPart{Type: "text", Text: *req.Input.Text}, nil)
 		messages = append(messages, msg)
 	} else if len(req.Input.Items) > 0 {
@@ -74,7 +74,7 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 			} else if len(item.Content.Parts) > 0 {
 				content = item.Content.Parts
 			}
-			msg := adapterTurn{
+			msg := protocolTurnView{
 				Role:    item.Role,
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -88,7 +88,7 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 			messages = append(messages, msg)
 
 		case "reasoning":
-			msg := adapterTurn{
+			msg := protocolTurnView{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -102,7 +102,7 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 
 		case "function_call":
 			// function_call item becomes assistant message with tool calls
-			msg := adapterTurn{
+			msg := protocolTurnView{
 				Role:    "assistant",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -125,7 +125,7 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 
 		case "function_call_output":
 			// function_call_output becomes tool result
-			msg := adapterTurn{
+			msg := protocolTurnView{
 				Role:    "tool",
 				ItemID:  item.ID,
 				Status:  item.Status,
@@ -135,11 +135,12 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 			appendToolResultItem(&msg, schema.ToolResult{
 				ToolCallID: item.CallID,
 				Content:    item.Output,
+				ContentRaw: item.OutputRaw,
 			}, rawItem)
 			messages = append(messages, msg)
 		default:
 			ir.Losses = append(ir.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, rawItem, "Responses input item is preserved as native raw/opaque IR"))
-			messages = append(messages, adapterTurn{
+			messages = append(messages, protocolTurnView{
 				ItemID:  item.ID,
 				Status:  item.Status,
 				Phase:   item.Phase,
@@ -190,9 +191,9 @@ func parseOpenAIResponsesRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// emitOpenAIResponsesRequest converts an adapter request to OpenAI Responses API request.
+// emitOpenAIResponsesRequest converts an protocol request view to OpenAI Responses API request.
 // THIS IS WHERE THE BUG FIX IS - instructions always emitted
-func emitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
+func emitOpenAIResponsesRequest(ir *protocolRequestView) ([]byte, error) {
 	// Use a map to build the JSON to ensure field ordering
 	resp := make(map[string]interface{})
 
@@ -246,7 +247,7 @@ func emitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
 		resp["reasoning"] = ir.Reasoning
 	}
 	if ir.Tools != nil {
-		tools, _ := json.Marshal(ir.Tools)
+		tools, _ := json.Marshal(openAIResponsesTools(ir.Tools))
 		resp["tools"] = json.RawMessage(tools)
 	}
 	if ir.ToolChoice != nil {
@@ -262,11 +263,68 @@ func emitOpenAIResponsesRequest(ir *adapterRequest) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
+func openAIResponsesTools(tools []schema.Tool) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		normalized := openAIResponsesTool(tool)
+		if normalized != nil {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+func openAIResponsesTool(tool schema.Tool) map[string]interface{} {
+	name, description, parameters := normalizedFunctionTool(tool)
+	if name != "" {
+		out := map[string]interface{}{
+			"type": "function",
+			"name": name,
+		}
+		if description != "" {
+			out["description"] = description
+		}
+		if len(parameters) > 0 && string(parameters) != "null" {
+			out["parameters"] = json.RawMessage(parameters)
+		} else {
+			out["parameters"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+		}
+		for key, value := range tool.Extra {
+			out[key] = value
+		}
+		if tool.Function != nil {
+			for key, value := range tool.Function.Extra {
+				out[key] = value
+			}
+		}
+		return out
+	}
+
+	toolType := tool.Type
+	if toolType == "" {
+		return nil
+	}
+	out := map[string]interface{}{"type": toolType}
+	if tool.Name != "" {
+		out["name"] = tool.Name
+	}
+	if tool.Description != "" {
+		out["description"] = tool.Description
+	}
+	if len(tool.Parameters) > 0 && string(tool.Parameters) != "null" {
+		out["parameters"] = json.RawMessage(tool.Parameters)
+	}
+	for key, value := range tool.Extra {
+		out[key] = value
+	}
+	return out
+}
+
 func isResponsesFamily(format Format) bool {
 	return format == FormatOpenAIResponses || format == FormatCodexResponses
 }
 
-func responsesInputItemsFromOrderedParts(msg adapterTurn) []map[string]interface{} {
+func responsesInputItemsFromOrderedParts(msg protocolTurnView) []map[string]interface{} {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
 	flushContent := func() {
@@ -334,7 +392,7 @@ func responsesInputItemsFromOrderedParts(msg adapterTurn) []map[string]interface
 			items = append(items, map[string]interface{}{
 				"type":    "function_call_output",
 				"call_id": part.ToolResult.ToolCallID,
-				"output":  part.ToolResult.Content,
+				"output":  responsesToolResultOutput(part.ToolResult),
 			})
 		}
 	}
@@ -353,6 +411,16 @@ func responsesRole(role string) string {
 	default:
 		return role
 	}
+}
+
+func responsesToolResultOutput(result schema.ToolResult) interface{} {
+	if len(result.ContentRaw) > 0 {
+		var value interface{}
+		if err := json.Unmarshal(result.ContentRaw, &value); err == nil {
+			return value
+		}
+	}
+	return result.Content
 }
 
 func generateResponsesReasoningID() string {
@@ -468,6 +536,6 @@ func responsesDefaultFilename(part schema.ContentPart) string {
 }
 
 func init() {
-	registerAdapterRequestParser(FormatOpenAIResponses, parseOpenAIResponsesRequest)
-	registerAdapterRequestEmitter(FormatOpenAIResponses, emitOpenAIResponsesRequest)
+	registerRequestIRParser(FormatOpenAIResponses, parseOpenAIResponsesRequestIR)
+	registerRequestIREmitter(FormatOpenAIResponses, emitOpenAIResponsesRequestIR)
 }

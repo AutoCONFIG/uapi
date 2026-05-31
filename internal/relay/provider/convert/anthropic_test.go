@@ -125,6 +125,84 @@ func TestAnthropicToolWithoutTypeDoesNotBecomeOpaqueForClaudeCode(t *testing.T) 
 	}
 }
 
+func TestAnthropicSkillToolToOpenAIResponsesUsesParameters(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"name":"Skill","description":"Execute skill","input_schema":{"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"]}}]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Responses: %v", err)
+	}
+	var got struct {
+		Tools []map[string]interface{} `json:"tools"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %#v; body=%s", got.Tools, converted)
+	}
+	tool := got.Tools[0]
+	if tool["type"] != "function" || tool["name"] != "Skill" {
+		t.Fatalf("tool not normalized as OpenAI Responses function: %#v; body=%s", tool, converted)
+	}
+	if tool["input_schema"] != nil {
+		t.Fatalf("OpenAI Responses tool must not expose Anthropic input_schema: %#v; body=%s", tool, converted)
+	}
+	params, ok := tool["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("parameters missing: %#v; body=%s", tool, converted)
+	}
+	required, ok := params["required"].([]interface{})
+	if !ok || len(required) != 1 || required[0] != "skill" {
+		t.Fatalf("required skill not preserved: %#v; body=%s", params, converted)
+	}
+}
+
+func TestAnthropicSkillToolToOpenAIChatUsesFunctionParameters(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"name":"Skill","description":"Execute skill","input_schema":{"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"]}}]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Chat: %v", err)
+	}
+	var got struct {
+		Tools []map[string]interface{} `json:"tools"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %#v; body=%s", got.Tools, converted)
+	}
+	tool := got.Tools[0]
+	if tool["type"] != "function" {
+		t.Fatalf("tool not normalized as OpenAI Chat function: %#v; body=%s", tool, converted)
+	}
+	function, ok := tool["function"].(map[string]interface{})
+	if !ok || function["name"] != "Skill" {
+		t.Fatalf("function missing: %#v; body=%s", tool, converted)
+	}
+	if tool["input_schema"] != nil {
+		t.Fatalf("OpenAI Chat tool must not expose Anthropic input_schema: %#v; body=%s", tool, converted)
+	}
+	params, ok := function["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("function parameters missing: %#v; body=%s", function, converted)
+	}
+	required, ok := params["required"].([]interface{})
+	if !ok || len(required) != 1 || required[0] != "skill" {
+		t.Fatalf("required skill not preserved: %#v; body=%s", params, converted)
+	}
+}
+
 func TestOpenAIFunctionToolToAnthropicOmitsFunctionType(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

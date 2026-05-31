@@ -43,11 +43,11 @@ func (e *NoRequestEmitterError) Error() string {
 	return "no request emitter for format " + string(e.Format)
 }
 
-func adapterRequestFromIR(req *relayir.Request) *adapterRequest {
+func protocolRequestViewFromIR(req *relayir.Request) *protocolRequestView {
 	if req == nil {
 		return nil
 	}
-	out := &adapterRequest{
+	out := &protocolRequestView{
 		Model:          req.Model,
 		Stream:         req.Stream,
 		RawRequestBody: relayir.CloneRaw(req.Native.RawBody),
@@ -111,8 +111,8 @@ func instructionText(inst relayir.Instruction) string {
 	return ""
 }
 
-func requestMessageFromIRTurn(turn relayir.Turn) adapterTurn {
-	msg := adapterTurn{
+func requestMessageFromIRTurn(turn relayir.Turn) protocolTurnView {
+	msg := protocolTurnView{
 		Role:    string(turn.Role),
 		Name:    turn.Name,
 		ItemID:  turn.ID,
@@ -239,6 +239,7 @@ func schemaToolResultFromIR(item relayir.Item) schema.ToolResult {
 	if item.ToolResult != nil {
 		result.ToolCallID = firstNonEmptyString(item.ToolResult.CallID, item.ToolResult.ToolUseID, result.ToolCallID)
 		result.Content = item.ToolResult.OutputText
+		result.ContentRaw = relayir.CloneRaw(item.ToolResult.OutputRaw)
 		result.IsError = item.ToolResult.IsError
 	}
 	return result
@@ -249,7 +250,7 @@ func schemaToolFromIR(tool relayir.Tool) schema.Tool {
 		Type:        string(tool.Kind),
 		Name:        tool.Name,
 		Description: tool.Description,
-		Parameters:  relayir.CloneRaw(tool.Parameters),
+		Parameters:  firstRawMessage(tool.Parameters, tool.InputSchema),
 		InputSchema: relayir.CloneRaw(tool.InputSchema),
 		Extra:       relayir.CloneRawMap(tool.Metadata),
 	}
@@ -260,7 +261,7 @@ func schemaToolFromIR(tool relayir.Tool) schema.Tool {
 		out.Function = &schema.ToolFunction{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  relayir.CloneRaw(tool.Parameters),
+			Parameters:  firstRawMessage(tool.Parameters, tool.InputSchema),
 			Extra:       relayir.CloneRawMap(tool.FunctionMetadata),
 		}
 	}
@@ -290,6 +291,15 @@ func protocolFormat(protocol relayir.Protocol) Format {
 	default:
 		return Format(protocol)
 	}
+}
+
+func firstRawMessage(values ...json.RawMessage) json.RawMessage {
+	for _, value := range values {
+		if len(value) > 0 && string(value) != "null" {
+			return relayir.CloneRaw(value)
+		}
+	}
+	return nil
 }
 
 func stringPtr(value string) *string {

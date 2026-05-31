@@ -8,9 +8,9 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiCLIRequest converts Gemini CLI request to an adapter request.
+// parseGeminiCLIRequest converts Gemini CLI request to an protocol request view.
 // Extracts the inner Gemini request from the CLI envelope.
-func parseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
+func parseGeminiCLIRequest(body []byte) (*protocolRequestView, error) {
 	var req schema.GeminiCLIRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI request: %w", err)
@@ -58,9 +58,9 @@ func parseGeminiCLIRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// emitGeminiCLIRequest converts an adapter request to Gemini CLI request.
+// emitGeminiCLIRequest converts an protocol request view to Gemini CLI request.
 // Wraps the Gemini request in the CLI envelope.
-func emitGeminiCLIRequest(ir *adapterRequest) ([]byte, error) {
+func emitGeminiCLIRequest(ir *protocolRequestView) ([]byte, error) {
 	// First convert to Gemini format
 	innerBody, err := emitGeminiRequest(ir)
 	if err != nil {
@@ -123,6 +123,6 @@ func generateRequestID() string {
 }
 
 func init() {
-	registerAdapterRequestParser(FormatGeminiCLI, parseGeminiCLIRequest)
-	registerAdapterRequestEmitter(FormatGeminiCLI, emitGeminiCLIRequest)
+	registerRequestIRParser(FormatGeminiCLI, parseGeminiCLIRequestIR)
+	registerRequestIREmitter(FormatGeminiCLI, emitGeminiCLIRequestIR)
 }

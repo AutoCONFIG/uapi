@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -30,15 +31,17 @@ const (
 	healthHealthy         = "healthy"
 	defaultCacheTTL       = 5 * time.Minute
 	passiveFailCooldown   = 10 * time.Second
+	dnsFailCooldown       = 5 * time.Minute
 	defaultTokenCacheSize = 10000
 )
 
 type Gateway struct {
-	db       *gorm.DB
-	billing  *relay.BillingService
-	fallback fasthttp.RequestHandler
-	client   *fasthttp.Client
-	limiter  *relay.ConcurrencyLimiter
+	db         *gorm.DB
+	billing    *relay.BillingService
+	fallback   fasthttp.RequestHandler
+	client     *fasthttp.Client
+	limiter    *relay.ConcurrencyLimiter
+	localFirst bool
 
 	internalSecret    string
 	gatewayID         string
@@ -189,7 +192,15 @@ type relayRequest struct {
 	MaxTokens int    `json:"max_tokens,omitempty"`
 }
 
-func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string, streamIdleTimeout time.Duration) *Gateway {
+type Option func(*Gateway)
+
+func WithLocalFirst(localFirst bool) Option {
+	return func(g *Gateway) {
+		g.localFirst = localFirst
+	}
+}
+
+func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string, streamIdleTimeout time.Duration, opts ...Option) *Gateway {
 	if cacheTTL <= 0 {
 		cacheTTL = defaultCacheTTL
 	}
@@ -199,7 +210,7 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 	if streamIdleTimeout <= 0 {
 		streamIdleTimeout = 300 * time.Second
 	}
-	return &Gateway{
+	g := &Gateway{
 		db:                database,
 		billing:           billing,
 		fallback:          fallback,
@@ -219,6 +230,10 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 			DisableHeaderNamesNormalizing: true,
 		},
 	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
 }
 
 func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
@@ -228,6 +243,10 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 	if string(ctx.Method()) == fasthttp.MethodGet && isGeminiModelsPath(string(ctx.Path())) {
 		g.handleGeminiModels(ctx)
+		return
+	}
+	if g.localFirst && g.fallback != nil {
+		g.fallback(ctx)
 		return
 	}
 
@@ -357,6 +376,9 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		logger.Warnf("gateway.proxy", "relay proxy failed, trying local fallback", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
 		releaseNode(true)
 		releaseNode = nil
+		if isDNSError(err) {
+			g.markPassiveFailureFor(node.ID, dnsFailCooldown)
+		}
 		if precharged {
 			if err := g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model); err != nil {
 				logger.Warnf("gateway.billing", "refund before local fallback failed", logger.F("token_id", tokenID), logger.Err(err))
@@ -771,14 +793,29 @@ func channelSupportsGatewayModel(model, apiFormat, models, aliases string, setti
 }
 
 func (g *Gateway) markPassiveFailure(id uuid.UUID) {
+	g.markPassiveFailureFor(id, passiveFailCooldown)
+}
+
+func (g *Gateway) markPassiveFailureFor(id uuid.UUID, cooldown time.Duration) {
+	if cooldown <= 0 {
+		cooldown = passiveFailCooldown
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, node := range g.nodes {
 		if node.ID == id {
-			node.FailUntil = time.Now().Add(passiveFailCooldown)
+			node.FailUntil = time.Now().Add(cooldown)
 			return
 		}
 	}
+}
+
+func isDNSError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	return strings.Contains(err.Error(), "no such host")
 }
 
 func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL string) error {

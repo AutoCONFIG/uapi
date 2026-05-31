@@ -37,6 +37,10 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 		Usage map[string]interface{} `json:"usage,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(data), &event); err != nil || len(event.Choices) == 0 {
+		if errEvent := chatStreamError([]byte(data)); errEvent != nil {
+			p.finished = true
+			return []relayir.StreamEvent{{Type: relayir.EventError, ResponseID: p.id, Model: p.model, Error: errEvent}}
+		}
 		return nil
 	}
 	if p.id == "" && event.ID != "" {
@@ -242,6 +246,9 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 			delta.CallID = event.ItemID
 		}
 		return []relayir.StreamEvent{{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: delta.Arguments}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: rawMeta("call_id", delta.CallID)}}}
+	case "error", "response.failed":
+		p.finished = true
+		return []relayir.StreamEvent{{Type: relayir.EventError, ResponseID: p.id, Model: p.model, Error: responsesStreamError([]byte(data))}}
 	case "response.completed":
 		p.finished = true
 		return p.completed(event.Response, relayir.FinishStop, "stop")
@@ -387,6 +394,9 @@ func (e *chatIREmitter) Emit(event relayir.StreamEvent) []byte {
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		idx := e.toolCallIDToIndex[callID]
 		return chatChunk(e.id, e.model, map[string]interface{}{"tool_calls": []interface{}{map[string]interface{}{"index": idx, "id": callID, "type": "function", "function": map[string]interface{}{"arguments": event.Delta.Arguments}}}}, nil, nil)
+	case relayir.EventError:
+		e.finished = true
+		return sseJSON(map[string]interface{}{"object": "error", "error": irErrorMap(event.Error)})
 	case relayir.EventResponseDone:
 		e.finished = true
 		return chatChunk(e.id, e.model, map[string]interface{}{}, irFinishToChat(event.Finish), irUsageToChat(event.Usage))
@@ -528,6 +538,9 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 		return sseEventJSON("response.function_call_arguments.delta", map[string]interface{}{
 			"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": callID, "arguments": event.Delta.Arguments},
 		})
+	case relayir.EventError:
+		e.finished = true
+		return sseEventJSON("response.failed", map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"id": e.id, "status": "failed", "model": e.model, "error": irErrorMap(event.Error)}})
 	case relayir.EventResponseDone:
 		return e.completedEvent()
 	}
@@ -828,6 +841,67 @@ type responsesOutputItem struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"summary"`
+}
+
+func chatStreamError(data []byte) *relayir.Error {
+	var event struct {
+		Object string `json:"object"`
+		Error  *struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(data, &event)
+	if event.Error == nil {
+		return nil
+	}
+	return &relayir.Error{Code: event.Error.Code, Type: event.Error.Type, Message: event.Error.Message}
+}
+
+func responsesStreamError(data []byte) *relayir.Error {
+	var event struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Error *struct {
+				Code    string `json:"code"`
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	_ = json.Unmarshal(data, &event)
+	src := event.Error
+	if src == nil {
+		src = event.Response.Error
+	}
+	if src == nil {
+		return &relayir.Error{Type: "upstream_error", Message: "upstream stream error"}
+	}
+	return &relayir.Error{Code: src.Code, Type: src.Type, Message: src.Message}
+}
+
+func irErrorMap(err *relayir.Error) map[string]interface{} {
+	out := map[string]interface{}{}
+	if err == nil {
+		out["type"] = "upstream_error"
+		out["message"] = "upstream stream error"
+		return out
+	}
+	if err.Code != "" {
+		out["code"] = err.Code
+	}
+	if err.Type != "" {
+		out["type"] = err.Type
+	}
+	if err.Message != "" {
+		out["message"] = err.Message
+	}
+	return out
 }
 
 func numericUsageValue(usage map[string]interface{}, keys ...string) int {

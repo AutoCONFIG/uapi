@@ -23,13 +23,149 @@ const (
 	FormatAntigravity           Format = "antigravity"
 )
 
-// adapterRequest is the package-private protocol adapter view used by concrete
+// protocolRequestViewParser is a protocol-local parser stage used only by serializer-view wrappers.
+type protocolRequestViewParser func(body []byte) (*protocolRequestView, error)
+
+// protocolRequestViewEmitter is a protocol-local emitter stage used only by serializer-view wrappers.
+type protocolRequestViewEmitter func(ir *protocolRequestView) ([]byte, error)
+
+type responseParser func(body []byte) (*protocolResponseView, error)
+type responseEmitter func(ir *protocolResponseView) ([]byte, error)
+
+func parseOpenAIChatRequestIR(body []byte) (*ir.Request, error) {
+	return parseRequestWithProtocolView(FormatOpenAIChatCompletions, body, parseOpenAIChatRequest)
+}
+
+func emitOpenAIChatRequestIR(req *ir.Request) ([]byte, error) {
+	return emitRequestWithProtocolView(FormatOpenAIChatCompletions, req, emitOpenAIChatRequest)
+}
+
+func parseOpenAIResponsesRequestIR(body []byte) (*ir.Request, error) {
+	return parseRequestWithProtocolView(FormatOpenAIResponses, body, parseOpenAIResponsesRequest)
+}
+
+func emitOpenAIResponsesRequestIR(req *ir.Request) ([]byte, error) {
+	return emitRequestWithProtocolView(FormatOpenAIResponses, req, emitOpenAIResponsesRequest)
+}
+
+func parseAnthropicRequestIR(body []byte) (*ir.Request, error) {
+	return parseRequestWithProtocolView(FormatAnthropic, body, parseAnthropicRequest)
+}
+
+func emitAnthropicRequestIR(req *ir.Request) ([]byte, error) {
+	return emitRequestWithProtocolView(FormatAnthropic, req, emitAnthropicRequest)
+}
+
+func parseGeminiRequestIR(body []byte) (*ir.Request, error) {
+	return parseRequestWithProtocolView(FormatGemini, body, parseGeminiRequest)
+}
+
+func emitGeminiRequestIR(req *ir.Request) ([]byte, error) {
+	return emitRequestWithProtocolView(FormatGemini, req, emitGeminiRequest)
+}
+
+func parseGeminiCLIRequestIR(body []byte) (*ir.Request, error) {
+	return parseRequestWithProtocolView(FormatGeminiCLI, body, parseGeminiCLIRequest)
+}
+
+func emitGeminiCLIRequestIR(req *ir.Request) ([]byte, error) {
+	return emitRequestWithProtocolView(FormatGeminiCLI, req, emitGeminiCLIRequest)
+}
+
+func parseRequestWithProtocolView(format Format, body []byte, parse protocolRequestViewParser) (*ir.Request, error) {
+	parsed, err := parseProtocolRequestView(format, body, parse)
+	if err != nil {
+		return nil, err
+	}
+	return parsed.ToIR(), nil
+}
+
+func emitRequestWithProtocolView(format Format, req *ir.Request, emit protocolRequestViewEmitter) ([]byte, error) {
+	view := protocolRequestViewFromIR(req)
+	if view.SourceFormat == "" {
+		view.SourceFormat = protocolFormat(req.SourceProtocol)
+	}
+	if view.SourceFormat == "" {
+		view.SourceFormat = format
+	}
+	return emit(view)
+}
+
+func parseProtocolRequestView(format Format, body []byte, parse protocolRequestViewParser) (*protocolRequestView, error) {
+	ir, err := parse(body)
+	if err != nil {
+		return nil, err
+	}
+	attachRawRequest(ir, body)
+	return ir, nil
+}
+
+func attachRawRequest(ir *protocolRequestView, body []byte) {
+	if ir == nil || len(ir.RawRequestBody) > 0 {
+		return
+	}
+	ir.RawRequestBody = append([]byte(nil), body...)
+}
+
+func parseOpenAIChatResponseIR(body []byte) (*ir.Response, error) {
+	return parseResponseWithProtocolView(FormatOpenAIChatCompletions, body, parseOpenAIChatResponse)
+}
+
+func emitOpenAIChatResponseIR(resp *ir.Response) ([]byte, error) {
+	return emitResponseWithProtocolView(resp, emitOpenAIChatResponse)
+}
+
+func parseOpenAIResponsesResponseIR(body []byte) (*ir.Response, error) {
+	return parseResponseWithProtocolView(FormatOpenAIResponses, body, parseOpenAIResponsesResponse)
+}
+
+func emitOpenAIResponsesResponseIR(resp *ir.Response) ([]byte, error) {
+	return emitResponseWithProtocolView(resp, emitOpenAIResponsesResponse)
+}
+
+func parseAnthropicResponseIR(body []byte) (*ir.Response, error) {
+	return parseResponseWithProtocolView(FormatAnthropic, body, parseAnthropicResponse)
+}
+
+func emitAnthropicResponseIR(resp *ir.Response) ([]byte, error) {
+	return emitResponseWithProtocolView(resp, emitAnthropicResponse)
+}
+
+func parseGeminiResponseIR(body []byte) (*ir.Response, error) {
+	return parseResponseWithProtocolView(FormatGemini, body, parseGeminiResponse)
+}
+
+func emitGeminiResponseIR(resp *ir.Response) ([]byte, error) {
+	return emitResponseWithProtocolView(resp, emitGeminiResponse)
+}
+
+func parseGeminiCLIResponseIR(body []byte) (*ir.Response, error) {
+	return parseResponseWithProtocolView(FormatGeminiCLI, body, parseGeminiCLIResponse)
+}
+
+func emitGeminiCLIResponseIR(resp *ir.Response) ([]byte, error) {
+	return emitResponseWithProtocolView(resp, emitGeminiCLIResponse)
+}
+
+func parseResponseWithProtocolView(format Format, body []byte, parse responseParser) (*ir.Response, error) {
+	resp, err := parse(body)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ToIR(format), nil
+}
+
+func emitResponseWithProtocolView(resp *ir.Response, emit responseEmitter) ([]byte, error) {
+	return emit(protocolResponseViewFromIR(resp))
+}
+
+// protocolRequestView is the package-private protocol serializer view used by concrete
 // serializers. Request routing is anchored on ir.Request; protocol entry points
 // register IR parsers and emitters directly.
-type adapterRequest struct {
+type protocolRequestView struct {
 	Model    string
 	Stream   bool
-	Messages []adapterTurn
+	Messages []protocolTurnView
 	Tools    []schema.Tool
 	// RawRequestBody preserves the exact client payload for same-protocol
 	// replay/audit and for the new IR native envelope.
@@ -88,11 +224,11 @@ type adapterRequest struct {
 	Losses []ir.Loss `json:"-"`
 }
 
-// adapterTurn is the provider-adapter view over an ordered turn. Parts is
+// protocolTurnView is the protocol serializer view over an ordered turn. Parts is
 // the canonical ordering source.
-type adapterTurn struct {
+type protocolTurnView struct {
 	Role    string
-	Parts   []adapterItem
+	Parts   []protocolItemView
 	Name    string // for named messages
 	ItemID  string
 	Status  string
@@ -101,9 +237,9 @@ type adapterTurn struct {
 	Extra   map[string]json.RawMessage
 }
 
-// adapterItem preserves the original ordered content stream for
+// protocolItemView preserves the original ordered content stream for
 // provider parsers and emitters.
-type adapterItem struct {
+type protocolItemView struct {
 	Kind       string
 	Content    schema.ContentPart
 	ToolCall   schema.ToolCall
@@ -111,21 +247,21 @@ type adapterItem struct {
 	Raw        json.RawMessage
 }
 
-// adapterResponse is the internal response serialization view.
-type adapterResponse struct {
+// protocolResponseView is the internal response serialization view.
+type protocolResponseView struct {
 	ID      string
 	Model   string
-	Choices []adapterChoice
+	Choices []protocolChoiceView
 	Usage   schema.Usage
 	Raw     json.RawMessage // preserved for native replay and field recovery
 	Losses  []ir.Loss       `json:"-"`
 }
 
-// adapterChoice represents a single choice in a response.
-type adapterChoice struct {
+// protocolChoiceView represents a protocol response choice in a response.
+type protocolChoiceView struct {
 	Index        int
 	Role         string
-	Items        []adapterItem
+	Items        []protocolItemView
 	FinishReason string
 }
 

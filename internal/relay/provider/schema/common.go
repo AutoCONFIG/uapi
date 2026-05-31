@@ -211,9 +211,10 @@ type ToolCall struct {
 }
 
 type ToolResult struct {
-	ToolCallID string `json:"tool_call_id"`
-	Content    string `json:"content"`
-	IsError    bool   `json:"is_error,omitempty"`
+	ToolCallID string          `json:"tool_call_id"`
+	Content    string          `json:"content"`
+	ContentRaw json.RawMessage `json:"-"`
+	IsError    bool            `json:"is_error,omitempty"`
 }
 
 type Tool struct {

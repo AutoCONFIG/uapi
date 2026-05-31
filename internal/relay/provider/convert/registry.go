@@ -8,51 +8,16 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
-// adapterRequestParser is a protocol-local parser stage; the package registry
-// exposes only ir.Request parsers.
-type adapterRequestParser func(body []byte) (*adapterRequest, error)
-
-// adapterRequestEmitter is a protocol-local emitter stage; the package registry
-// exposes only ir.Request emitters.
-type adapterRequestEmitter func(ir *adapterRequest) ([]byte, error)
-
 type requestIRParser func(body []byte) (*ir.Request, error)
 type requestIREmitter func(req *ir.Request) ([]byte, error)
 
 var requestIRParsers = map[Format]requestIRParser{}
 var requestIREmitters = map[Format]requestIREmitter{}
 
-func registerAdapterRequestParser(f Format, fn adapterRequestParser) {
-	requestIRParsers[f] = func(body []byte) (*ir.Request, error) {
-		req, err := parseAdapterRequest(f, body, fn)
-		if err != nil {
-			return nil, err
-		}
-		return req.ToIR(), nil
-	}
-}
-
-func registerAdapterRequestEmitter(f Format, fn adapterRequestEmitter) {
-	requestIREmitters[f] = func(req *ir.Request) ([]byte, error) {
-		internal := adapterRequestFromIR(req)
-		if internal.SourceFormat == "" {
-			internal.SourceFormat = protocolFormat(req.SourceProtocol)
-		}
-		if internal.SourceFormat == "" {
-			internal.SourceFormat = f
-		}
-		return fn(internal)
-	}
-}
-
-// registerRequestIRParser registers a native IR parser for protocols with
-// protocol-specific envelopes.
 func registerRequestIRParser(f Format, fn requestIRParser) {
 	requestIRParsers[f] = fn
 }
 
-// registerRequestIREmitter registers a native IR emitter for protocols whose
-// output needs protocol-specific envelope handling.
 func registerRequestIREmitter(f Format, fn requestIREmitter) {
 	requestIREmitters[f] = fn
 }
@@ -114,21 +79,38 @@ func PrepareRequestForTarget(req *ir.Request, clientFormat, upstreamFormat Forma
 }
 
 func recordTargetSpecificContentLosses(req *ir.Request, clientFormat, upstreamFormat Format) {
-	if req == nil || !isResponsesFamily(upstreamFormat) || isResponsesFamily(clientFormat) {
+	if req == nil {
 		return
 	}
-	recordItemMetadataLosses := func(items []ir.Item) {
+	recordItemLosses := func(items []ir.Item) {
 		for i := range items {
-			if raw := items[i].Metadata["cache_control"]; len(raw) > 0 {
-				items[i].Losses = append(items[i].Losses, irloss(clientFormat, upstreamFormat, "$.content[].cache_control", "cache_control", raw, "Anthropic cache_control has no OpenAI Responses content-part equivalent and is not emitted"))
+			if isResponsesFamily(upstreamFormat) && !isResponsesFamily(clientFormat) {
+				if raw := items[i].Metadata["cache_control"]; len(raw) > 0 {
+					items[i].Losses = append(items[i].Losses, irloss(clientFormat, upstreamFormat, "$.content[].cache_control", "cache_control", raw, "Anthropic cache_control has no OpenAI Responses content-part equivalent and is not emitted"))
+				}
+			}
+			if items[i].ToolResult != nil && len(items[i].ToolResult.OutputRaw) > 0 && !supportsStructuredToolResultOutput(upstreamFormat) {
+				items[i].Losses = append(items[i].Losses, irloss(clientFormat, upstreamFormat, "$.tool_result.output", "output", items[i].ToolResult.OutputRaw, "structured tool result output is serialized as text for target protocol"))
 			}
 		}
 	}
 	for i := range req.Instructions {
-		recordItemMetadataLosses(req.Instructions[i].Items)
+		recordItemLosses(req.Instructions[i].Items)
 	}
 	for i := range req.Turns {
-		recordItemMetadataLosses(req.Turns[i].Items)
+		recordItemLosses(req.Turns[i].Items)
+	}
+}
+
+func supportsStructuredToolResultOutput(format Format) bool {
+	if isResponsesFamily(format) {
+		return true
+	}
+	switch format {
+	case FormatGemini, FormatGeminiCode, FormatGeminiCLI, FormatAntigravity:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -221,45 +203,18 @@ func rawHash(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func parseAdapterRequest(format Format, body []byte, parse adapterRequestParser) (*adapterRequest, error) {
-	ir, err := parse(body)
-	if err != nil {
-		return nil, err
-	}
-	attachRawRequest(ir, body)
-	return ir, nil
-}
-
-func attachRawRequest(ir *adapterRequest, body []byte) {
-	if ir == nil || len(ir.RawRequestBody) > 0 {
-		return
-	}
-	ir.RawRequestBody = append([]byte(nil), body...)
-}
-
-// response converter types
-type responseParser func(body []byte) (*adapterResponse, error)
-type responseEmitter func(ir *adapterResponse) ([]byte, error)
 type responseIRParser func(body []byte) (*ir.Response, error)
 type responseIREmitter func(resp *ir.Response) ([]byte, error)
 
 var responseIRParsers = map[Format]responseIRParser{}
 var responseIREmitters = map[Format]responseIREmitter{}
 
-func registerAdapterResponseParser(f Format, fn responseParser) {
-	responseIRParsers[f] = func(body []byte) (*ir.Response, error) {
-		resp, err := fn(body)
-		if err != nil {
-			return nil, err
-		}
-		return resp.ToIR(f), nil
-	}
+func registerResponseIRParser(f Format, fn responseIRParser) {
+	responseIRParsers[f] = fn
 }
 
-func registerAdapterResponseEmitter(f Format, fn responseEmitter) {
-	responseIREmitters[f] = func(resp *ir.Response) ([]byte, error) {
-		return fn(adapterResponseFromIR(resp))
-	}
+func registerResponseIREmitter(f Format, fn responseIREmitter) {
+	responseIREmitters[f] = fn
 }
 
 func ToResponseIR(format Format, body []byte) (*ir.Response, error) {

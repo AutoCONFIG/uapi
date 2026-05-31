@@ -53,6 +53,7 @@ type ToolResult struct {
 	ToolUseID  string                     `json:"tool_use_id,omitempty"`
 	CallID     string                     `json:"call_id,omitempty"`
 	OutputText string                     `json:"output_text,omitempty"`
+	OutputRaw  json.RawMessage            `json:"output_raw,omitempty"`
 	Output     []Item                     `json:"output,omitempty"`
 	IsError    bool                       `json:"is_error,omitempty"`
 	Action     json.RawMessage            `json:"action,omitempty"`

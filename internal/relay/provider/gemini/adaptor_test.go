@@ -40,3 +40,14 @@ func TestSetupRequestHeaderUsesQueryKeyForAPIKey(t *testing.T) {
 		t.Fatalf("key query parameter = %q, want API key", got)
 	}
 }
+
+func TestParseUsageFullCapturesCodeAssistEnvelopeCachedContent(t *testing.T) {
+	adaptor := &GeminiAdaptor{}
+	usage, err := adaptor.ParseUsageFull([]byte(`{"response":{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"cachedContentTokenCount":7}}}`))
+	if err != nil {
+		t.Fatalf("ParseUsageFull: %v", err)
+	}
+	if usage.PromptTokens != 12 || usage.CompletionTokens != 3 || usage.CacheReadInputTokens != 7 {
+		t.Fatalf("usage = %#v, want prompt=12 completion=3 cache_read=7", usage)
+	}
+}

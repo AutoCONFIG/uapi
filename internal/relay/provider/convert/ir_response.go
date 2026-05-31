@@ -7,7 +7,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-func (r *adapterResponse) ToIR(source Format) *relayir.Response {
+func (r *protocolResponseView) ToIR(source Format) *relayir.Response {
 	if r == nil {
 		return nil
 	}
@@ -25,11 +25,11 @@ func (r *adapterResponse) ToIR(source Format) *relayir.Response {
 	return resp
 }
 
-func adapterResponseFromIR(resp *relayir.Response) *adapterResponse {
+func protocolResponseViewFromIR(resp *relayir.Response) *protocolResponseView {
 	if resp == nil {
 		return nil
 	}
-	out := &adapterResponse{
+	out := &protocolResponseView{
 		ID:     resp.ID,
 		Model:  resp.Model,
 		Usage:  responseUsageFromIR(resp.Usage),
@@ -42,8 +42,8 @@ func adapterResponseFromIR(resp *relayir.Response) *adapterResponse {
 	return out
 }
 
-func internalChoiceFromIR(choice relayir.Choice) adapterChoice {
-	out := adapterChoice{
+func internalChoiceFromIR(choice relayir.Choice) protocolChoiceView {
+	out := protocolChoiceView{
 		Index: choice.Index,
 		Role:  string(choice.Role),
 	}
@@ -67,14 +67,14 @@ func internalChoiceFromIR(choice relayir.Choice) adapterChoice {
 			if part, ok := schemaContentFromIR(item); ok {
 				appendChoiceContentItem(&out, part, relayir.CloneRaw(item.Native.Raw))
 			} else {
-				out.Items = append(out.Items, adapterItem{Kind: string(item.Kind), Raw: relayir.CloneRaw(item.Native.Raw)})
+				out.Items = append(out.Items, protocolItemView{Kind: string(item.Kind), Raw: relayir.CloneRaw(item.Native.Raw)})
 			}
 		}
 	}
 	return out
 }
 
-func choiceToIR(choice adapterChoice, source Format) relayir.Choice {
+func choiceToIR(choice protocolChoiceView, source Format) relayir.Choice {
 	out := relayir.Choice{
 		Index: choice.Index,
 		Role:  irRole(choice.Role),

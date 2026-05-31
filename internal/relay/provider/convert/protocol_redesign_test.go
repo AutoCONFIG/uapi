@@ -1400,3 +1400,24 @@ func indexOrFatal(t *testing.T, text, needle string) int {
 	}
 	return idx
 }
+
+func TestResponsesFunctionCallOutputStructuredOutputPreservedInIRAndResponses(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","input":[{"type":"function_call_output","call_id":"call_1","output":{"items":[{"type":"text","text":"ok"}],"count":2}}]}`)
+	req, err := convert.ToIR(convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+	if len(req.Turns) != 1 || len(req.Turns[0].Items) != 1 || req.Turns[0].Items[0].ToolResult == nil {
+		t.Fatalf("tool result missing from IR: %#v", req.Turns)
+	}
+	if got := string(req.Turns[0].Items[0].ToolResult.OutputRaw); !strings.Contains(got, `"count":2`) {
+		t.Fatalf("structured output raw not preserved: %s", got)
+	}
+	out, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	if !strings.Contains(string(out), `"output":{`) || !strings.Contains(string(out), `"count":2`) {
+		t.Fatalf("structured output not emitted as JSON object: %s", out)
+	}
+}

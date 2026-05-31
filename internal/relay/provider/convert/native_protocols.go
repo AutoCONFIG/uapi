@@ -19,7 +19,7 @@ func parseCodexRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitCodexRequest(req *relayir.Request) ([]byte, error) {
-	internal := adapterRequestFromIR(req)
+	internal := protocolRequestViewFromIR(req)
 	internal.SourceFormat = FormatCodexResponses
 	return emitOpenAIResponsesRequest(internal)
 }
@@ -36,7 +36,7 @@ func parseClaudeCodeRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitClaudeCodeRequest(req *relayir.Request) ([]byte, error) {
-	internal := adapterRequestFromIR(req)
+	internal := protocolRequestViewFromIR(req)
 	internal.SourceFormat = FormatClaudeCode
 	return emitAnthropicRequest(internal)
 }
@@ -53,7 +53,7 @@ func parseGeminiCodeRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitGeminiCodeRequest(req *relayir.Request) ([]byte, error) {
-	internal := adapterRequestFromIR(req)
+	internal := protocolRequestViewFromIR(req)
 	internal.SourceFormat = FormatGeminiCode
 	return emitGeminiCLIRequest(internal)
 }
@@ -70,7 +70,7 @@ func parseAntigravityRequest(body []byte) (*relayir.Request, error) {
 }
 
 func emitAntigravityRequest(req *relayir.Request) ([]byte, error) {
-	internal := adapterRequestFromIR(req)
+	internal := protocolRequestViewFromIR(req)
 	internal.SourceFormat = FormatAntigravity
 	body, err := emitGeminiCLIRequest(internal)
 	if err != nil {
@@ -124,18 +124,18 @@ func normalizeNativeRequestProtocol(req *relayir.Request, protocol relayir.Proto
 func init() {
 	registerRequestIRParser(FormatCodexResponses, parseCodexRequest)
 	registerRequestIREmitter(FormatCodexResponses, emitCodexRequest)
-	registerAdapterResponseParser(FormatCodexResponses, parseOpenAIResponsesResponse)
-	registerAdapterResponseEmitter(FormatCodexResponses, emitOpenAIResponsesResponse)
+	registerResponseIRParser(FormatCodexResponses, parseOpenAIResponsesResponseIR)
+	registerResponseIREmitter(FormatCodexResponses, emitOpenAIResponsesResponseIR)
 	registerRequestIRParser(FormatClaudeCode, parseClaudeCodeRequest)
 	registerRequestIREmitter(FormatClaudeCode, emitClaudeCodeRequest)
-	registerAdapterResponseParser(FormatClaudeCode, parseAnthropicResponse)
-	registerAdapterResponseEmitter(FormatClaudeCode, emitAnthropicResponse)
+	registerResponseIRParser(FormatClaudeCode, parseAnthropicResponseIR)
+	registerResponseIREmitter(FormatClaudeCode, emitAnthropicResponseIR)
 	registerRequestIRParser(FormatGeminiCode, parseGeminiCodeRequest)
 	registerRequestIREmitter(FormatGeminiCode, emitGeminiCodeRequest)
-	registerAdapterResponseParser(FormatGeminiCode, parseGeminiCLIResponse)
-	registerAdapterResponseEmitter(FormatGeminiCode, emitGeminiCLIResponse)
+	registerResponseIRParser(FormatGeminiCode, parseGeminiCLIResponseIR)
+	registerResponseIREmitter(FormatGeminiCode, emitGeminiCLIResponseIR)
 	registerRequestIRParser(FormatAntigravity, parseAntigravityRequest)
 	registerRequestIREmitter(FormatAntigravity, emitAntigravityRequest)
-	registerAdapterResponseParser(FormatAntigravity, parseGeminiCLIResponse)
-	registerAdapterResponseEmitter(FormatAntigravity, emitGeminiCLIResponse)
+	registerResponseIRParser(FormatAntigravity, parseGeminiCLIResponseIR)
+	registerResponseIREmitter(FormatAntigravity, emitGeminiCLIResponseIR)
 }

@@ -8,14 +8,14 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseAnthropicRequest converts Anthropic Messages API request to an adapter request.
-func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
+// parseAnthropicRequest converts Anthropic Messages API request to an protocol request view.
+func parseAnthropicRequest(body []byte) (*protocolRequestView, error) {
 	var req schema.AnthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic request: %w", err)
 	}
 
-	ir := &adapterRequest{
+	ir := &protocolRequestView{
 		Model:        req.Model,
 		Stream:       req.Stream,
 		SourceFormat: FormatAnthropic,
@@ -57,7 +57,7 @@ func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 
 	// Convert messages
 	for _, msg := range req.Messages {
-		requestMsg := adapterTurn{
+		requestMsg := protocolTurnView{
 			Role: msg.Role,
 		}
 
@@ -203,8 +203,8 @@ func parseAnthropicRequest(body []byte) (*adapterRequest, error) {
 	return ir, nil
 }
 
-// emitAnthropicRequest converts an adapter request to Anthropic Messages API request.
-func emitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
+// emitAnthropicRequest converts an protocol request view to Anthropic Messages API request.
+func emitAnthropicRequest(ir *protocolRequestView) ([]byte, error) {
 	req := make(map[string]interface{})
 	req["model"] = ir.Model
 	req["max_tokens"] = 4096 // default if not set
@@ -262,7 +262,7 @@ func emitAnthropicRequest(ir *adapterRequest) ([]byte, error) {
 	if forcedToolChoice {
 		removeAnthropicForcedThinkingExtras(req)
 	}
-	if thinking := anthropicThinkingFromAdapterRequest(ir); thinking != nil && !forcedToolChoice {
+	if thinking := anthropicThinkingFromProtocolRequest(ir); thinking != nil && !forcedToolChoice {
 		req["thinking"] = thinking
 	}
 	if ir.Tools != nil {
@@ -496,7 +496,7 @@ func isAnthropicFamily(format Format) bool {
 	return format == FormatAnthropic || format == FormatClaudeCode
 }
 
-func anthropicBlocksFromMessage(source Format, msg adapterTurn) []map[string]interface{} {
+func anthropicBlocksFromMessage(source Format, msg protocolTurnView) []map[string]interface{} {
 	items := canonicalMessageParts(msg)
 	blocks := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
@@ -514,7 +514,7 @@ func anthropicBlocksFromMessage(source Format, msg adapterTurn) []map[string]int
 	return blocks
 }
 
-func anthropicBlockFromItem(item adapterItem) map[string]interface{} {
+func anthropicBlockFromItem(item protocolItemView) map[string]interface{} {
 	switch item.Kind {
 	case contentItemKindReasoning:
 		return anthropicReasoningBlock(item.Content)
@@ -707,6 +707,6 @@ func anthropicToolResultContentString(raw json.RawMessage) string {
 }
 
 func init() {
-	registerAdapterRequestParser(FormatAnthropic, parseAnthropicRequest)
-	registerAdapterRequestEmitter(FormatAnthropic, emitAnthropicRequest)
+	registerRequestIRParser(FormatAnthropic, parseAnthropicRequestIR)
+	registerRequestIREmitter(FormatAnthropic, emitAnthropicRequestIR)
 }

@@ -7,17 +7,17 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseAnthropicResponse converts Anthropic response to adapterResponse.
-func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
+// parseAnthropicResponse converts Anthropic response to protocolResponseView.
+func parseAnthropicResponse(body []byte) (*protocolResponseView, error) {
 	var resp schema.AnthropicResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Anthropic response: %w", err)
 	}
 
-	ir := &adapterResponse{
+	ir := &protocolResponseView{
 		ID:      resp.ID,
 		Model:   resp.Model,
-		Choices: make([]adapterChoice, 0, len(resp.Content)),
+		Choices: make([]protocolChoiceView, 0, len(resp.Content)),
 		Usage: schema.Usage{
 			PromptTokens:             resp.Usage.InputTokens,
 			CompletionTokens:         resp.Usage.OutputTokens,
@@ -27,8 +27,8 @@ func parseAnthropicResponse(body []byte) (*adapterResponse, error) {
 		Raw: body, // Preserve raw for native replay and field recovery
 	}
 
-	// Convert content blocks to a single choice
-	choice := adapterChoice{
+	// Convert content blocks to a protocol response choice
+	choice := protocolChoiceView{
 		Index: 0,
 		Role:  resp.Role,
 	}
@@ -129,8 +129,8 @@ func mapAnthropicResponseFinishReason(fr string) string {
 	}
 }
 
-// emitAnthropicResponse converts adapterResponse to Anthropic response.
-func emitAnthropicResponse(ir *adapterResponse) ([]byte, error) {
+// emitAnthropicResponse converts protocolResponseView to Anthropic response.
+func emitAnthropicResponse(ir *protocolResponseView) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	resp["id"] = ir.ID
@@ -297,6 +297,6 @@ func anthropicUnknownBlockExtra(block schema.AnthropicContentBlock) map[string]j
 }
 
 func init() {
-	registerAdapterResponseParser(FormatAnthropic, parseAnthropicResponse)
-	registerAdapterResponseEmitter(FormatAnthropic, emitAnthropicResponse)
+	registerResponseIRParser(FormatAnthropic, parseAnthropicResponseIR)
+	registerResponseIREmitter(FormatAnthropic, emitAnthropicResponseIR)
 }

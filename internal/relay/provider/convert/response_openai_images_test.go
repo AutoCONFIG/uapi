@@ -9,12 +9,12 @@ import (
 
 func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *testing.T) {
 	imageURL := "data:image/png;base64,aGVsbG8="
-	body, err := emitOpenAIResponsesResponse(&adapterResponse{
+	body, err := emitOpenAIResponsesResponse(&protocolResponseView{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
-		Choices: []adapterChoice{{
+		Choices: []protocolChoiceView{{
 			Role: "model",
-			Items: []adapterItem{{
+			Items: []protocolItemView{{
 				Kind: contentItemKindContent,
 				Content: schema.ContentPart{
 					Type:     "image_url",
@@ -52,12 +52,12 @@ func TestEmitOpenAIResponsesResponseMapsInlineImageToImageGenerationCall(t *test
 
 func TestEmitOpenAIResponsesResponsePreservesTextBesideGeneratedImage(t *testing.T) {
 	imageURL := "data:image/webp;base64,aW1n"
-	body, err := emitOpenAIResponsesResponse(&adapterResponse{
+	body, err := emitOpenAIResponsesResponse(&protocolResponseView{
 		ID:    "resp_1",
 		Model: "nano-banana-2",
-		Choices: []adapterChoice{{
+		Choices: []protocolChoiceView{{
 			Role: "model",
-			Items: []adapterItem{
+			Items: []protocolItemView{
 				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "text", Text: "Here is the image."}},
 				{Kind: contentItemKindContent, Content: schema.ContentPart{Type: "image_url", ImageURL: &imageURL}},
 			},

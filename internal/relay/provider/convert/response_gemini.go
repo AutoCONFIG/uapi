@@ -7,8 +7,8 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
 )
 
-// parseGeminiResponse converts Gemini API response to adapterResponse.
-func parseGeminiResponse(body []byte) (*adapterResponse, error) {
+// parseGeminiResponse converts Gemini API response to protocolResponseView.
+func parseGeminiResponse(body []byte) (*protocolResponseView, error) {
 	var wrapped struct {
 		Response json.RawMessage `json:"response"`
 	}
@@ -21,10 +21,10 @@ func parseGeminiResponse(body []byte) (*adapterResponse, error) {
 		return nil, fmt.Errorf("failed to unmarshal Gemini response: %w", err)
 	}
 
-	ir := &adapterResponse{
+	ir := &protocolResponseView{
 		ID:      "", // Gemini doesn't have an ID field
 		Model:   resp.ModelVersion,
-		Choices: make([]adapterChoice, 0, len(resp.Candidates)),
+		Choices: make([]protocolChoiceView, 0, len(resp.Candidates)),
 		Usage:   schema.Usage{},
 		Raw:     body, // Preserve raw for native replay and field recovery
 	}
@@ -48,7 +48,7 @@ func parseGeminiResponse(body []byte) (*adapterResponse, error) {
 
 	// Convert candidates to choices
 	for _, cand := range resp.Candidates {
-		choice := adapterChoice{
+		choice := protocolChoiceView{
 			Index:        cand.Index,
 			FinishReason: mapGeminiFinishReason(cand.FinishReason),
 		}
@@ -145,8 +145,8 @@ func mapGeminiResponseFinishReason(fr string) string {
 	}
 }
 
-// emitGeminiResponse converts adapterResponse to Gemini API response.
-func emitGeminiResponse(ir *adapterResponse) ([]byte, error) {
+// emitGeminiResponse converts protocolResponseView to Gemini API response.
+func emitGeminiResponse(ir *protocolResponseView) ([]byte, error) {
 	resp := make(map[string]interface{})
 
 	// Convert choices to candidates
@@ -275,14 +275,14 @@ func emitGeminiResponse(ir *adapterResponse) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
-// parseGeminiCLIResponse extracts adapterResponse from Gemini CLI envelope.
-func parseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
+// parseGeminiCLIResponse extracts protocolResponseView from Gemini CLI envelope.
+func parseGeminiCLIResponse(body []byte) (*protocolResponseView, error) {
 	var env schema.GeminiCLIResponse
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Gemini CLI response: %w", err)
 	}
 
-	// Convert inner Gemini response to adapterResponse
+	// Convert inner Gemini response to protocolResponseView
 	innerBody, err := json.Marshal(env.Response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal inner Gemini response: %w", err)
@@ -296,8 +296,8 @@ func parseGeminiCLIResponse(body []byte) (*adapterResponse, error) {
 	return ir, nil
 }
 
-// emitGeminiCLIResponse wraps adapterResponse in Gemini CLI envelope.
-func emitGeminiCLIResponse(ir *adapterResponse) ([]byte, error) {
+// emitGeminiCLIResponse wraps protocolResponseView in Gemini CLI envelope.
+func emitGeminiCLIResponse(ir *protocolResponseView) ([]byte, error) {
 	// First convert to Gemini format
 	innerBody, err := emitGeminiResponse(ir)
 	if err != nil {
@@ -319,8 +319,8 @@ func emitGeminiCLIResponse(ir *adapterResponse) ([]byte, error) {
 }
 
 func init() {
-	registerAdapterResponseParser(FormatGemini, parseGeminiResponse)
-	registerAdapterResponseEmitter(FormatGemini, emitGeminiResponse)
-	registerAdapterResponseParser(FormatGeminiCLI, parseGeminiCLIResponse)
-	registerAdapterResponseEmitter(FormatGeminiCLI, emitGeminiCLIResponse)
+	registerResponseIRParser(FormatGemini, parseGeminiResponseIR)
+	registerResponseIREmitter(FormatGemini, emitGeminiResponseIR)
+	registerResponseIRParser(FormatGeminiCLI, parseGeminiCLIResponseIR)
+	registerResponseIREmitter(FormatGeminiCLI, emitGeminiCLIResponseIR)
 }
