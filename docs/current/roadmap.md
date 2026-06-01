@@ -1,119 +1,48 @@
-# UAPI Roadmap And Scope
+# 当前范围和暂缓项
 
-This document defines what UAPI should absorb from reference projects during the
-current early-development period. UAPI has not shipped to production, so obsolete
-first-draft behavior should be removed or rewritten instead of preserved behind
-stale layers.
+本文只记录当前项目范围，不作为长期产品路线承诺。
 
-`docs/api-reference/` is different from product planning documents: it is the
-protocol-standard corpus used to keep OpenAI Chat Completions, OpenAI Responses,
-Gemini, and Anthropic Messages behavior aligned with upstream API contracts. Do
-not delete or treat it as business-feature scope unless a file is a duplicate or
-known-bad copy.
+## 已在当前代码中落地
 
-## Product Boundary
+- 用户注册、登录、refresh token、资料读取、密码和邮箱修改。
+- 用户 API Key 创建、列表、删除、IP 白名单、过期时间、模型和 endpoint permission 限制。
+- 用户套餐、兑换码、用量汇总和日志查询。
+- 管理员初始化、登录、refresh token。
+- 管理后台 dashboard、用户、套餐、access policy、兑换码、系统设置、日志、审计日志。
+- 渠道、账号、Relay 节点、节点-渠道绑定管理。
+- OAuth 渠道创建、授权、导入、绑定、metadata/quota 展示支持。
+- Gateway API Key 鉴权、模型列表、模型别名、策略限制、并发限制、预扣费和调度。
+- Remote Relay 运行时配置拉取、HMAC 执行请求、usage event 上报和 account update 回写。
+- OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Gemini generateContent 的文本类转换。
+- OpenAI-compatible Images/Audio/Embeddings/Moderations/Realtime HTTP/Video 的明确支持矩阵。
+- Antigravity image generation/edit/variation 转换。
+- 结构化 stdout 日志和数据库请求日志。
+- Next.js 静态前端。
 
-UAPI should remain a high-performance, high-concurrency AI API gateway with a
-necessary control plane. It should not become a heavy all-in-one business system.
-Business features are included only when they directly support gateway operation,
-security, troubleshooting, or a simple plan/subscription workflow.
+## 当前保留边界
 
-The request hot path should stay small:
+- 单 Gateway 是当前控制面边界。
+- 远程 Relay 是执行节点，不独立拥有业务配置。
+- 用户请求模型列表只读本地数据库。
+- 管理端手动触发 channel model sync。
+- 套餐绑定用户，不绑定 API Key。
+- `token_plans` 表名保留，但业务含义是用户套餐订阅。
 
-1. Authenticate API key.
-2. Resolve the user's active plan and limits.
-3. Resolve public model name to upstream model name.
-4. Select Relay node, channel, and account.
-5. Forward the request.
-6. Persist logs, usage, audit, and cleanup work outside the critical forwarding
-   path where possible.
+## 暂缓项
 
-The hot path must not synchronously call upstream model-list APIs, refresh quota
-dashboards, aggregate reports, execute cleanup jobs, or depend on Redis for
-remote Relay runtime state.
+- 多 Gateway 控制面。
+- 分布式限流和分布式计费锁。
+- Redis 作为 Relay 热路径状态。
+- Relay 配置长连接推送。
+- mTLS。
+- Gateway/Relay 跨节点 WebSocket relay。
+- usage event 和 OAuth account update 的持久重试队列。
+- 节点级凭据加密。
+- 在线支付。
+- 邮箱验证。
+- 多租户组织。
+- 管理员侧独立 API Key 产品页面。
 
-## Stage 1: Gateway Core And Necessary Control Plane
+## 文档维护规则
 
-Stage 1 is the current implementation focus.
-
-| Area | Scope | Reference Projects | Decision |
-| --- | --- | --- | --- |
-| Gateway/Relay split | Gateway owns auth, plan policy, scheduling, billing; Relay only executes signed forwarding | CLIProxyAPI, new-api | implement now |
-| Channel/account model | channels define provider/protocol/model scope; accounts hold credentials and endpoints | new-api, CLIProxyAPI | implement now |
-| Two credential classes | OAuth/login channels and API-key channels | CLIProxyAPI, cockpit-tools | implement now |
-| Node binding | bind nodes to channels; runtime expands channel to enabled accounts | UAPI design | implement now |
-| Local model catalog | `/v1/models` and `/v1beta/models` read local DB only | new-api, CLIProxyAPI | implement now |
-| Manual model sync | admin button/API syncs upstream models into channel config | new-api, CLIProxyAPI | implement now |
-| Model alias/redirect | map upstream model IDs to public model IDs; hide upstream aliases downstream | Antigravity-Manager, new-api | implement now |
-| Account health | enabled state, cooldown, quota status, credential validity | new-api, cockpit-tools | implement now |
-| Request logs | user, IP, token, node, channel, account, model, tokens, latency, status, compact error | CLIProxyAPI, Antigravity-Manager | implement now |
-| Audit logs | meaningful admin/user operations, credential export, model sync, plan assignment | Antigravity-Manager | implement now |
-| Plans | one active plan per user, upgrade-oriented assignment, plan validity dates | UAPI product need | implement now |
-| Redeem codes | redeem codes map to plans, not arbitrary custom values | UAPI product need | implement now |
-| Admin/user auth | low-resource AT/RT for admin and user; short AT, long RT | common web practice | implement now |
-| Admin boundary | admin manages business; admin should not generate/use downstream API keys | UAPI product need | implement now |
-
-Stage 1 should actively remove superseded first-draft product surfaces: standalone
-admin token-management UI, account-as-primary navigation, token-bound access
-policies, account-bound node bindings, real-time upstream model discovery on
-client `/models`, and any UI copy that describes those superseded concepts.
-
-## Stage 2: Operational Hardening And Lightweight Business Features
-
-Stage 2 can be planned now and implemented after Stage 1 stabilizes. These
-features are useful but should remain lightweight and optional where possible.
-
-| Area | Scope | Reference Projects | Decision |
-| --- | --- | --- | --- |
-| Quota dashboard | compact quota buckets, reset time, warning/exhausted/invalid states | cockpit-tools | plan for Stage 2 |
-| Background quota refresh | scheduled refresh with configurable interval, not request-time refresh | cockpit-tools | plan for Stage 2 |
-| Better failure handling | account cooldown by error class, automatic skip, cleanup suggestions | new-api, CLIProxyAPI | plan for Stage 2 |
-| Usage retention | configurable request-log and redeem-code retention cleanup | Antigravity-Manager | plan for Stage 2 |
-| Lightweight statistics | daily/hourly request, token, success-rate summaries | CLIProxyAPI, Antigravity-Manager | plan for Stage 2 |
-| Security hardening | credential export password verification, later two-factor hooks | cockpit-tools, common practice | plan for Stage 2 |
-| Provider modularity | stable provider module interface for adding more OAuth/API-key channels | CLIProxyAPI | plan for Stage 2 |
-| Admin UX polish | denser channel/node pages, clearer drawers, less redundant copy | cockpit-tools | plan for Stage 2 |
-| System settings | retention, refresh intervals, advanced operational toggles | Antigravity-Manager | plan for Stage 2 |
-
-Stage 2 should still protect the request hot path. Prefer background jobs,
-precomputed summaries, pagination, and retention limits over synchronous report
-building.
-
-## Stage 3: Candidate Pool Only
-
-Stage 3 items may be useful later, but they are not approved for implementation
-just because they appear here. They are a candidate pool for future selection.
-
-| Candidate | Value | Risk |
-| --- | --- | --- |
-| Online payment integration | self-service purchase flow | high business complexity |
-| Model price table and cost estimation | operator-facing cost visibility | large config surface and maintenance |
-| LiteLLM/provider price sync | reduces manual pricing work | external dependency and mismatch risk |
-| Advanced BI dashboards | better business operations | storage/query pressure and UI complexity |
-| Multi-tenant organizations | enterprise use cases | large auth/permission expansion |
-| Multi-Gateway/distributed limiter | higher availability and scale | major architecture complexity |
-| Full session/device management | admin security control | requires server-side session state |
-| Mandatory two-factor authentication | stronger admin/user security | UX and recovery complexity |
-| Plugin/channel marketplace | faster provider expansion | requires versioning and trust model |
-| Provider-specific public routes | debugging and explicit routing | can fragment the clean public API |
-
-Stage 3 remains documentation-only until explicitly selected.
-
-## Reference Project Takeaways
-
-- new-api: useful for channel management, model mapping, quota and log ideas;
-  avoid copying heavy business-platform complexity early.
-- CLIProxyAPI: strongest reference for provider adaptation, model conversion,
-  account pools, provider-specific routing, and request monitoring.
-- Antigravity-Manager: useful for Antigravity auth, model remapping, quota/account
-  status, and operational stats; avoid desktop-specific account switching ideas.
-- cockpit-tools: useful for compact quota display, account state colors, scheduled
-  refresh, and credential safety prompts; avoid local-client injection workflows.
-
-## No Legacy Burden
-
-Because UAPI has not had a production release, abandoned first-draft logic is
-not protected product surface. When the source of truth changes, update the DB
-model, backend route behavior, frontend workflow, and docs together. If an
-internal control-plane API exists only for composition, keep it out of
-user-facing product docs.
+已经移除或尚未实现的功能不写成当前事实。需要保留想法时只能放在“暂缓项”，不能混入实现说明。

@@ -1,118 +1,135 @@
-# UAPI Frontend Notes
+# UAPI 前端说明
 
-For a concise current-state handoff, read `docs/current/handoff.md` first.
+前端位于 `web/`，使用 Next.js 15 App Router 静态导出。生产构建输出在 `web/out`，由 `web/scripts/static-server.mjs` 或外部 nginx 托管。
 
-UAPI is the public-facing name for the frontend product. It is short for
-Unified API / Your API and is presented as a unified AI API gateway.
+## 技术栈
 
-## Current Frontend Shape
+- Next.js 15
+- React 19
+- TypeScript
+- 纯 CSS
+- lucide-react
 
-The frontend lives entirely under `web/` and is intentionally separated from the Go
-backend. It is a Next.js 15 static export that can be served from `web/out`.
+`web/next.config.ts` 设置：
 
-Primary surfaces:
+```ts
+output: "export"
+trailingSlash: true
+images.unoptimized: true
+```
 
-- Public auth: `/`, `/login`, `/register`, `/forgot-password`
-- User console: `/overview`, `/keys`, `/usage`, `/plans`, `/settings`
-- Admin console: `/admin/dashboard`, `/admin/relay-nodes`, `/admin/channels`,
-  `/admin/users`, `/admin/plans`, `/admin/logs`, `/admin/audit-logs`,
-  `/admin/settings`
+## 路由
 
-The user console does not expose admin navigation. The admin console does not expose
-user self-service navigation. Admins who want to use the API should create a normal
-user account.
+公共和用户页面：
 
-## Backend API Alignment
+```text
+/
+/login
+/register
+/forgot-password
+/setup
+/overview
+/keys
+/usage
+/plans
+/settings
+```
 
-The frontend calls the implemented backend routes:
+管理页面：
 
-- User auth: `POST /api/user/register`, `POST /api/user/login`,
-  `POST /api/user/refresh`
-- User console: `/api/user/profile`, `/api/user/keys`, `/api/user/usage`,
-  `/api/user/usage/logs`, `/api/user/subscription`, `/api/user/redeem`,
-  `/api/user/password`, `/api/user/email`
+```text
+/admin
+/admin/dashboard
+/admin/relay-nodes
+/admin/channels
+/admin/users
+/admin/plans
+/admin/logs
+/admin/audit-logs
+/admin/settings
+```
 
-`/api/user/subscription` is the user-facing source for the current plan name,
-plan validity, and hourly/weekly/monthly usage-window remaining quota. The
-monthly window is the package quota and resets with the monthly billing window.
-Window units follow the plan type: requests for `count_based`, tokens for
-`token_based`; `0` means no remaining quota, not unlimited.
-- Admin auth/setup: `/api/admin/login`, `/api/admin/init-status`,
-  `/api/admin/setup`
-- Admin CRUD: `/api/admin/access-policies` for plan-composed policy resources,
-  `/api/admin/relay-nodes`, `/api/admin/channels`, `/api/admin/accounts`,
-  `/api/admin/users`, `/api/admin/plans`, `/api/admin/logs`,
-  `/api/admin/audit-logs`, `/api/admin/settings`, and `/api/admin/redeem-codes`
-- Admin model sync: `POST /api/admin/channels/models/sync?id=<channel_id>`
-- Admin channel OAuth: `POST /api/admin/channels/oauth/auth-url`,
-  `POST /api/admin/channels/oauth/complete`,
-  `GET /api/admin/channels/oauth/status`, and
-  `POST /api/admin/channels/oauth/bind`. Provider callbacks return to
-  `GET /api/admin/channels/oauth/callback`.
+用户控制台不显示管理导航。管理控制台不混入用户自助入口。管理员需要调用下游模型 API 时，应创建普通用户账号和用户 API Key。
 
-The unified login form tries user login first, then admin login.
+## API 客户端
 
-## Admin Channel Model
+主要封装在 `web/lib/api.ts`，类型在 `web/types/api.ts`。
 
-The UI treats channels as the single top-level object for upstream access. Accounts,
-API keys, and OAuth credentials are represented as credentials within a channel rather
-than as a separate primary navigation item. The admin UI should not expose
-standalone admin-side API key management in the first-stage product surface.
+前端对齐的后端 API：
 
-The `/admin/channels` page treats each channel as a top-level item. The left rail
-lists channels directly, while the right side shows the selected channel's account
-cards and drawer-based channel/account editing.
+- 用户认证：`POST /api/user/register`、`POST /api/user/login`、`POST /api/user/refresh`。
+- 用户资料和设置：`GET /api/user/profile`、`POST /api/user/password`、`POST /api/user/email`。
+- API Key：`GET/POST /api/user/keys`、`DELETE /api/user/keys/:keyID`。
+- 用量：`GET /api/user/usage`、`GET /api/user/usage/logs`。
+- 套餐：`GET /api/user/subscription`、`GET /api/user/plans`、`POST /api/user/redeem`。
+- 可见模型：`GET /api/user/models`。
+- 管理：channels、accounts、relay-nodes、node-channels、plans、access-policies、users、logs、audit-logs、settings、redeem-codes。
+- 导入导出：settings/users 的 import/export，以及 account credential export。
+- OAuth：auth-url、callback、complete、status、bind。
 
-The channel drawer and create drawer support OpenAI, Gemini, Anthropic, and
-Antigravity OAuth provider families. Channels define provider family, protocol
-variant,
-and model scope only. API-key accounts carry their own upstream endpoint. The UI
-edits it as Base URL plus a route prefix; leaving the route prefix blank uses the
-provider standard path such as `/v1` or `/v1beta`, while compatible providers can
-use paths like `/api/openai` or `/compatible/v2`. OAuth accounts do not
-expose endpoint editing in the UI; the backend stores the
-provider default endpoint on the account when OAuth binding completes. OpenAI
-also exposes the `standard` Chat Completions and `responses` API format switch.
-OAuth channel buttons create Codex, Gemini Code, Claude Code, or Antigravity
-OAuth channels. The backend returns a provider authorization URL, the UI polls
-callback status by `state` where possible, and a completed session is bound as an `oauth_token`
-account inside the channel. OAuth account metadata is shown in the credential
-list when available. OAuth channel presets pre-fill model allow-lists from the
-local upstream client source trees, and the credential list displays provider
-quota or credit metadata when the backend has synced it.
+登录表单先尝试用户登录，失败后尝试管理员登录。
 
-Channel model lists are local control-plane data. The channel page can ask the
-backend to sync models from the selected upstream account/channel, but downstream
-`/v1/models` and `/v1beta/models` should remain fast local reads. Model aliases
-are edited on the channel as one mapping per line in `upstream=public` form.
+## 页面职责
 
-The `/keys` page is for normal users. A normal user defaults to one API key, and
-the key can be viewed/copied after creation. Admins should create a normal user
-account when they need downstream API access; the first-stage admin UI does not
-provide an admin-side API key management surface. Optional key fields are
-`ip_whitelist`, `expires_at`, `models`, and `permissions`. Permissions map to
-relay entry points: `chat`, `responses`, `messages`, `gemini`, and `images`.
+- `/overview`：用户概览和快速开始。
+- `/keys`：普通用户 API Key 管理，支持 IP 白名单、过期时间、模型限制和 endpoint permission。
+- `/usage`：用量汇总和请求日志。
+- `/plans`：当前套餐、可公开领取套餐和兑换码。
+- `/settings`：用户密码和邮箱修改。
+- `/admin/dashboard`：管理概览。
+- `/admin/relay-nodes`：Relay 节点和节点-渠道绑定。
+- `/admin/channels`：渠道、账号、OAuth 登录、模型同步、账号额度刷新。
+- `/admin/users`：用户管理、导入导出。
+- `/admin/plans`：套餐和 access policy 组合管理。
+- `/admin/logs`：请求日志。
+- `/admin/audit-logs`：审计日志。
+- `/admin/settings`：系统设置、壁纸、导入导出。
 
-The `/usage` page consumes typed `UsageSummary` and `UsageLogs` responses from
-`/api/user/usage` and `/api/user/usage/logs`.
+## 渠道管理 UI
 
-Plan display is user-owned rather than API-key-owned. Deleting or rotating a
-key must not remove the user's package. The user plans page should show the
-active package and remaining count/token quota from `/api/user/subscription`;
-admin-created plans are not directly usable by normal users until assigned by
-an admin or redeemed with a redeem code.
+当前 UI 把 channel 作为上游访问的顶层对象，账号是 channel 内的 credential。没有独立的账号主导航，也没有第一阶段的管理员侧 API Key 页面。
 
+Channel 负责：
 
-## Gateway Management Surface
+- provider family：`type`
+- 协议变体：`api_format`
+- 模型目录：`models`
+- 模型别名：`model_aliases`
+- force stream、affinity、settings 等 channel 级配置
 
-The frontend manages Gateway/Control Plane state. It does not manage Relay nodes
-directly as independent authorities. Relay nodes are execution workers configured
-through Gateway. The `/admin/relay-nodes` page is the current management surface
-for node address, region, egress IP, weight, max concurrency, and status. Node
-bindings are channel-level. The node page should describe this as binding nodes
-to channels; Gateway expands the selected channels to their enabled accounts at
-runtime.
+Account 负责：
 
-## Known Backend Gaps
+- API Key 或 OAuth token 凭据
+- endpoint
+- weight
+- enabled
+- cooldown
+- OAuth metadata 和 token expiry
 
-No frontend placeholder is currently waiting on the original known backend gap list.
+API Key account 的 endpoint 可编辑。OAuth account 绑定时由后端写入 provider 默认 endpoint，前端不提供手动 endpoint 编辑。
+
+## 权限和模型
+
+普通用户 API Key 可配置：
+
+- `ip_whitelist`
+- `expires_at`
+- `models`
+- `permissions`
+
+Permission 与 Gateway endpoint 对齐：
+
+```text
+chat, responses, messages, gemini, images, audio,
+embeddings, moderations, realtime, videos
+```
+
+用户可见模型来自本地 channel model catalog、model aliases 和用户 active plan policy。下游模型列表不触发上游请求。
+
+## 构建命令
+
+```bash
+npm --prefix web install
+npm --prefix web run build
+npm --prefix web run serve:static
+```
