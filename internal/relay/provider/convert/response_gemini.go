@@ -23,7 +23,22 @@ func parseGeminiResponseDirectIR(body []byte) (*relayir.Response, error) {
 		SourceProtocol: relayir.ProtocolGemini,
 		Model:          resp.ModelVersion,
 		Usage:          geminiResponseUsageToIR(resp.UsageMetadata),
-		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, RawBody: relayir.CloneRaw(body)},
+		Metadata:       relayir.CloneRawMap(resp.Extra),
+		Native:         relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, RawBody: relayir.CloneRaw(body), Fields: relayir.CloneRawMap(resp.Extra), Unknown: relayir.CloneRawMap(resp.Extra)},
+	}
+	if resp.PromptFeedback != nil && (resp.PromptFeedback.BlockReason != "" || len(resp.PromptFeedback.SafetyRatings) > 0) {
+		rawFeedback := rawJSON(resp.PromptFeedback)
+		out.Choices = append(out.Choices, relayir.Choice{
+			Index: 0,
+			Finish: &relayir.Finish{
+				Reason:       relayir.FinishSafety,
+				NativeReason: resp.PromptFeedback.BlockReason,
+				Native:       relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "promptFeedback", Raw: rawFeedback},
+			},
+			Items:  []relayir.Item{geminiSafetyBlockItem(resp.PromptFeedback.BlockReason, resp.PromptFeedback.BlockReasonMessage, rawFeedback, 0)},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "promptFeedback", Raw: rawFeedback, Fields: relayir.CloneRawMap(resp.PromptFeedback.Extra)},
+			Losses: []relayir.Loss{irloss(FormatGemini, "", "$.promptFeedback", "promptFeedback", rawFeedback, "Gemini prompt feedback safety block is preserved as IR safety_block and native metadata")},
+		})
 	}
 	for _, cand := range resp.Candidates {
 		choice := relayir.Choice{
@@ -31,18 +46,55 @@ func parseGeminiResponseDirectIR(body []byte) (*relayir.Response, error) {
 			Finish: &relayir.Finish{
 				Reason:       finishReasonToIR(mapGeminiFinishReason(cand.FinishReason)),
 				NativeReason: cand.FinishReason,
+				Native:       geminiFinishNative(cand),
 			},
-			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "candidate", Raw: rawJSON(cand)},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "candidate", Raw: rawJSON(cand), Fields: relayir.CloneRawMap(cand.Extra), Unknown: relayir.CloneRawMap(cand.Extra)},
 		}
 		if cand.Content != nil {
 			choice.Role = relayir.Role(geminiRoleToRequestRole(cand.Content.Role))
 			for idx, part := range cand.Content.Parts {
-				choice.Items = append(choice.Items, geminiPartToIRItem(part, idx, nil, "$.candidates[].content.parts[]"))
+				choice.Items = append(choice.Items, geminiResponsePartToIRItem(part, idx))
 			}
+		}
+		if cand.FinishReason == "SAFETY" || len(cand.SafetyRatings) > 0 {
+			choice.Items = append(choice.Items, geminiSafetyBlockItem(cand.FinishReason, cand.FinishMessage, rawJSON(cand), len(choice.Items)))
+			choice.Losses = append(choice.Losses, irloss(FormatGemini, "", "$.candidates[].safetyRatings", "safetyRatings", cand.SafetyRatings, "Gemini safety ratings are preserved as IR safety_block native metadata"))
 		}
 		out.Choices = append(out.Choices, choice)
 	}
 	return out, nil
+}
+
+func geminiResponsePartToIRItem(part schema.GeminiPart, idx int) relayir.Item {
+	item := geminiPartToIRItem(part, idx, nil, "$.candidates[].content.parts[]")
+	if part.FunctionResponse != nil {
+		item.Losses = append(item.Losses, geminiFunctionResponseLosses(part.FunctionResponse)...)
+	}
+	return item
+}
+
+func geminiSafetyBlockItem(reason, message string, raw json.RawMessage, index int) relayir.Item {
+	return relayir.Item{
+		Kind:          relayir.ItemSafetyBlock,
+		OriginalIndex: index,
+		SafetyBlock:   &relayir.SafetyBlock{Reason: reason, Message: message, Raw: relayir.CloneRaw(raw)},
+		Native:        relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "safety_block", Raw: relayir.CloneRaw(raw), Index: index},
+		Losses:        []relayir.Loss{irloss(FormatGemini, "", "$.safety", "safety", raw, "Gemini safety metadata has no direct target protocol field and is preserved as IR safety_block")},
+	}
+}
+
+func geminiFinishNative(cand schema.GeminiCandidate) relayir.NativeEnvelope {
+	meta := map[string]json.RawMessage{}
+	if cand.FinishMessage != "" {
+		meta["finishMessage"] = rawJSON(cand.FinishMessage)
+	}
+	if len(cand.SafetyRatings) > 0 {
+		meta["safetyRatings"] = relayir.CloneRaw(cand.SafetyRatings)
+	}
+	if len(meta) == 0 {
+		return relayir.NativeEnvelope{}
+	}
+	return relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Kind: "finish", Meta: meta}
 }
 
 func geminiResponseUsageToIR(usage *schema.GeminiUsageMetadata) *relayir.Usage {
@@ -78,7 +130,11 @@ func emitGeminiResponseDirectIR(resp *relayir.Response) ([]byte, error) {
 		if len(choice.Items) > 0 {
 			parts := make([]map[string]interface{}, 0, len(choice.Items))
 			for _, item := range choice.Items {
-				if part := geminiPartFromIRItem(item, nil); part != nil {
+				part, err := geminiPartFromIRItem(item, nil)
+				if err != nil {
+					return nil, err
+				}
+				if part != nil {
 					parts = append(parts, part)
 				}
 			}

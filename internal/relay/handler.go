@@ -1893,7 +1893,7 @@ func (r *Relayer) finishFailedBuffered(ctx *fasthttp.RequestCtx, tokenID string,
 // normalizeErrorResponse converts an upstream error body into the client's expected format.
 func normalizeErrorResponse(respBody []byte, clientFormat provider.Format, statusCode int) []byte {
 	errMsg := errorMessageFromResponse(respBody)
-	if statusCode == fasthttp.StatusRequestEntityTooLarge && errMsg == "upstream error" {
+	if statusCode == fasthttp.StatusRequestEntityTooLarge && (errMsg == "upstream error" || errMsg == "openai_error" || errMsg == "api_error") {
 		errMsg = "upstream returned HTTP 413: request body too large"
 	}
 	switch clientFormat {

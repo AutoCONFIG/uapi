@@ -80,16 +80,6 @@ func (a *GeminiAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	return nil
 }
 
-// --- Request conversion ---
-
-func (a *GeminiAdaptor) ToIR(body []byte) (*ir.Request, error) {
-	format := convert.FormatGemini
-	if a.channel != nil && a.channel.APIFormat == "gemini_code" {
-		format = convert.FormatGeminiCode
-	}
-	return convert.ToIR(format, body)
-}
-
 func (a *GeminiAdaptor) emitRequest(req *ir.Request) ([]byte, error) {
 	// Store model and stream for URL construction
 	a.model = req.Model

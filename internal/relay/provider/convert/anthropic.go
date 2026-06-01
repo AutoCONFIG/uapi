@@ -182,7 +182,11 @@ func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
 			role = "user"
 		}
 		msg := map[string]interface{}{"role": role}
-		if blocks := anthropicBlocksFromIRTurn(req.SourceProtocol, turn); len(blocks) > 0 {
+		blocks, err := anthropicBlocksFromIRTurn(req.SourceProtocol, turn)
+		if err != nil {
+			return nil, err
+		}
+		if len(blocks) > 0 {
 			msg["content"] = blocks
 		}
 		messages = append(messages, msg)
@@ -259,7 +263,11 @@ func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instr
 	var blocks []map[string]interface{}
 	for _, inst := range instructions {
 		for _, item := range inst.Items {
-			if block := anthropicBlockFromIRItem(item); block != nil {
+			block, err := anthropicBlockFromIRItem(item)
+			if err != nil {
+				continue
+			}
+			if block != nil {
 				blocks = append(blocks, block)
 			}
 		}
@@ -512,7 +520,7 @@ func isAnthropicFamily(format Format) bool {
 	return format == FormatAnthropic || format == FormatClaudeCode
 }
 
-func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) []map[string]interface{} {
+func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) ([]map[string]interface{}, error) {
 	blocks := make([]map[string]interface{}, 0, len(turn.Items))
 	for _, item := range turn.Items {
 		if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(item.Native.Raw) > 0 {
@@ -522,27 +530,42 @@ func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) []map
 				continue
 			}
 		}
-		if block := anthropicBlockFromIRItem(item); block != nil {
+		block, err := anthropicBlockFromIRItem(item)
+		if err != nil {
+			return nil, err
+		}
+		if block != nil {
 			blocks = append(blocks, block)
 		}
 	}
-	return blocks
+	return blocks, nil
 }
 
-func anthropicBlockFromIRItem(item relayir.Item) map[string]interface{} {
+func anthropicBlockFromIRItem(item relayir.Item) (map[string]interface{}, error) {
 	switch item.Kind {
 	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
-		return anthropicReasoningBlock(schemaReasoningFromIR(item))
+		return anthropicReasoningBlock(schemaReasoningFromIR(item)), nil
 	case relayir.ItemToolUse, relayir.ItemFunctionCall:
-		return anthropicToolUseBlock(schemaToolCallFromIR(item))
+		block := anthropicToolUseBlock(schemaToolCallFromIR(item))
+		if block["name"] == "" {
+			return nil, fmt.Errorf("cannot emit Anthropic tool_use for IR item %d: missing required name", item.OriginalIndex)
+		}
+		if block["id"] == "" {
+			return nil, fmt.Errorf("cannot emit Anthropic tool_use for IR item %d: missing required id", item.OriginalIndex)
+		}
+		return block, nil
 	case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
-		return anthropicToolResultBlock(schemaToolResultFromIR(item))
+		block := anthropicToolResultBlock(schemaToolResultFromIR(item))
+		if block["tool_use_id"] == "" {
+			return nil, fmt.Errorf("cannot emit Anthropic tool_result for IR item %d: missing required tool_use_id", item.OriginalIndex)
+		}
+		return block, nil
 	default:
 		if part, ok := schemaContentFromIR(item); ok {
-			return anthropicContentBlock(part)
+			return anthropicContentBlock(part), nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func anthropicReasoningBlock(rc schema.ContentPart) map[string]interface{} {

@@ -71,19 +71,6 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 	return nil
 }
 
-// --- Request conversion ---
-
-func (a *OpenAIAdaptor) ToIR(body []byte) (*ir.Request, error) {
-	format := convert.FormatOpenAIChatCompletions
-	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
-		format = convert.FormatOpenAIResponses
-		if a.channel.APIFormat == "codex" {
-			format = convert.FormatCodexResponses
-		}
-	}
-	return convert.ToIR(format, body)
-}
-
 func (a *OpenAIAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	format := convert.FormatOpenAIChatCompletions
 	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {

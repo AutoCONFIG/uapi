@@ -114,10 +114,6 @@ func (a *AntigravityAdaptor) SetupRequestHeader(req *fasthttp.Request, credentia
 	return nil
 }
 
-func (a *AntigravityAdaptor) ToIR(body []byte) (*ir.Request, error) {
-	return convert.ToIR(convert.FormatAntigravity, body)
-}
-
 func (a *AntigravityAdaptor) emitRequest(req *ir.Request) ([]byte, error) {
 	clientModel := req.Model
 	if clientModel == "" {

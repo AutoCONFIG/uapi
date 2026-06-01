@@ -1183,6 +1183,39 @@ func TestResponsesInputFileConvertsToOpenAIChatFileBlock(t *testing.T) {
 	}
 }
 
+func TestTypelessResponsesMessageInputFileConvertsToOpenAIChatFileBlock(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[{"role":"user","content":[
+			{"type":"input_text","text":"summarize"},
+			{"type":"input_file","file_data":"data:application/pdf;base64,AA==","filename":"paper.pdf","file_type":"application/pdf"}
+		]}],
+		"temperature":"[undefined]",
+		"tools":"[undefined]"
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> Chat: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if strings.Contains(string(converted), "[undefined]") {
+		t.Fatalf("undefined sentinel survived conversion: %s", converted)
+	}
+	messages := got["messages"].([]interface{})
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	file := content[1].(map[string]interface{})
+	if file["type"] != "file" {
+		t.Fatalf("typeless Responses message input_file was not converted to Chat file block: %s", converted)
+	}
+	fileBody := file["file"].(map[string]interface{})
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" || fileBody["file_type"] != "application/pdf" {
+		t.Fatalf("typeless Responses file block lost fields: %s", converted)
+	}
+}
+
 func TestGeminiPDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[
@@ -1211,6 +1244,37 @@ func TestGeminiPDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
 	fileBody := file["file"].(map[string]interface{})
 	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["file_type"] != "application/pdf" {
 		t.Fatalf("Gemini PDF file block lost fields: %s", converted)
+	}
+}
+
+func TestGeminiSnakeCasePDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"text":"summarize"},
+			{"inline_data":{"mime_type":"application/pdf","data":"AA=="}}
+		]}],
+		"generationConfig":{"maxOutputTokens":"[undefined]"}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatGemini, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Gemini -> Chat: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	messages := got["messages"].([]interface{})
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	file := content[1].(map[string]interface{})
+	if file["type"] != "file" {
+		t.Fatalf("snake_case Gemini inline_data PDF was not converted to Chat file block: %s", converted)
+	}
+	fileBody := file["file"].(map[string]interface{})
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["file_type"] != "application/pdf" {
+		t.Fatalf("snake_case Gemini PDF file block lost fields: %s", converted)
+	}
+	if strings.Contains(string(converted), "inline_data") || strings.Contains(string(converted), "mime_type") {
+		t.Fatalf("Gemini native snake_case fields leaked into Chat body: %s", converted)
 	}
 }
 
@@ -1398,8 +1462,8 @@ func TestOpenAIChatFileConvertsToGeminiInlineData(t *testing.T) {
 
 func TestAnthropicDocumentConvertsToOpenAIChatFileBlock(t *testing.T) {
 	body := []byte(`{"model":"claude","max_tokens":100,"messages":[{"role":"user","content":[
-		{"type":"text","text":"summarize"},
-		{"type":"document","title":"paper.pdf","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}
+		{"type":"text","text":"summarize","cache_control":"[undefined]"},
+		{"type":"document","title":"paper.pdf","cache_control":"[undefined]","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}
 	]}]}`)
 	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
 	if err != nil {
@@ -1409,6 +1473,11 @@ func TestAnthropicDocumentConvertsToOpenAIChatFileBlock(t *testing.T) {
 		!strings.Contains(string(converted), `"file_data":"data:application/pdf;base64,AA=="`) ||
 		!strings.Contains(string(converted), `"filename":"paper.pdf"`) {
 		t.Fatalf("Anthropic document did not become Chat file block: %s", converted)
+	}
+	for _, rejected := range []string{`"[undefined]"`, `"cache_control"`, `"source"`, `"title"`} {
+		if strings.Contains(string(converted), rejected) {
+			t.Fatalf("Anthropic native/undefined field leaked into Chat body (%s): %s", rejected, converted)
+		}
 	}
 }
 

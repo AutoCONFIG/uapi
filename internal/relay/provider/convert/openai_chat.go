@@ -137,7 +137,11 @@ func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		out.Messages = append(out.Messages, openAIChatInstructionMessage(inst))
 	}
 	for _, turn := range req.Turns {
-		out.Messages = append(out.Messages, openAIChatTurnMessage(turn))
+		msg, err := openAIChatTurnMessage(turn)
+		if err != nil {
+			return nil, err
+		}
+		out.Messages = append(out.Messages, msg)
 	}
 	if req.Generation.MaxTokens != nil {
 		if req.Generation.MaxTokensField == "max_completion_tokens" {
@@ -211,7 +215,7 @@ func openAIChatInstructionMessage(inst relayir.Instruction) schema.ChatMessage {
 	return msg
 }
 
-func openAIChatTurnMessage(turn relayir.Turn) schema.ChatMessage {
+func openAIChatTurnMessage(turn relayir.Turn) (schema.ChatMessage, error) {
 	role := openAIChatRole(string(turn.Role))
 	msg := schema.ChatMessage{Role: role, Name: turn.Name, Extra: relayir.CloneRawMap(turn.Metadata)}
 	var content []schema.ContentPart
@@ -221,9 +225,19 @@ func openAIChatTurnMessage(turn relayir.Turn) schema.ChatMessage {
 		case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
 			reasoning = append(reasoning, schemaReasoningFromIR(item))
 		case relayir.ItemToolUse, relayir.ItemFunctionCall:
-			msg.ToolCalls = append(msg.ToolCalls, schemaToolCallFromIR(item))
+			call := schemaToolCallFromIR(item)
+			if firstNonEmptyString(call.Name, call.Function.Name) == "" {
+				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required function name", item.OriginalIndex)
+			}
+			if firstNonEmptyString(call.ID, item.CallID, item.ID) == "" {
+				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required id", item.OriginalIndex)
+			}
+			msg.ToolCalls = append(msg.ToolCalls, call)
 		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 			result := schemaToolResultFromIR(item)
+			if result.ToolCallID == "" {
+				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool result for IR item %d: missing required tool_call_id", item.OriginalIndex)
+			}
 			msg.ToolCallID = result.ToolCallID
 			if len(result.ContentRaw) > 0 {
 				var mc schema.MessageContent
@@ -258,7 +272,7 @@ func openAIChatTurnMessage(turn relayir.Turn) schema.ChatMessage {
 			msg.Extra["reasoning_details"] = rawJSON(details)
 		}
 	}
-	return msg
+	return msg, nil
 }
 
 func contentPartsFromIRItems(items []relayir.Item) []schema.ContentPart {
@@ -373,9 +387,24 @@ func openAIChatContentParts(parts []schema.ContentPart) []schema.ContentPart {
 		if part.Type == "input_text" || part.Type == "output_text" {
 			part.Type = "text"
 		}
+		if part.Type == "file" {
+			part = openAIChatFilePart(part)
+		}
 		out = append(out, part)
 	}
 	return out
+}
+
+func openAIChatFilePart(part schema.ContentPart) schema.ContentPart {
+	fileType := firstNonEmptyString(part.FileType, part.MimeType, mimeTypeFromFilename(part.Filename))
+	return schema.ContentPart{
+		Type:     "file",
+		FileData: part.FileData,
+		FileURL:  part.FileURL,
+		FileID:   part.FileID,
+		Filename: part.Filename,
+		FileType: fileType,
+	}
 }
 
 // joinNonEmpty joins non-empty strings with the given separator.

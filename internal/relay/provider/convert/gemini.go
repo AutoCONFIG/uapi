@@ -152,9 +152,20 @@ func appendGeminiFunctionResponseLossesIR(req *relayir.Request, resp *schema.Gem
 	if req == nil || resp == nil {
 		return
 	}
+	req.Losses = append(req.Losses, geminiFunctionResponseLosses(resp)...)
+	if len(resp.Extra) > 0 && len(rawPart) > 0 {
+		req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[]", "functionResponse", rawPart, "Gemini functionResponse native part is preserved for audit"))
+	}
+}
+
+func geminiFunctionResponseLosses(resp *schema.GeminiFuncResponse) []relayir.Loss {
+	if resp == nil {
+		return nil
+	}
+	var losses []relayir.Loss
 	add := func(field string, raw json.RawMessage, reason string) {
 		if len(raw) > 0 {
-			req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[].functionResponse."+field, field, raw, reason))
+			losses = append(losses, irloss(FormatGemini, "", "$.contents[].parts[].functionResponse."+field, field, raw, reason))
 		}
 	}
 	add("response", resp.Response, "Gemini functionResponse.response is serialized into protocol tool-result output text across protocols")
@@ -171,9 +182,7 @@ func appendGeminiFunctionResponseLossesIR(req *relayir.Request, resp *schema.Gem
 	for key, raw := range resp.Extra {
 		add(key, raw, "Gemini functionResponse vendor field is preserved in native raw part but not emitted across protocols")
 	}
-	if len(resp.Extra) > 0 && len(rawPart) > 0 {
-		req.Losses = append(req.Losses, irloss(FormatGemini, "", "$.contents[].parts[]", "functionResponse", rawPart, "Gemini functionResponse native part is preserved for audit"))
-	}
+	return losses
 }
 
 func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
@@ -182,7 +191,11 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 		var parts []map[string]interface{}
 		for _, inst := range reqIR.Instructions {
 			for _, item := range inst.Items {
-				if part := geminiPartFromIRItem(item, nil); part != nil {
+				part, err := geminiPartFromIRItem(item, nil)
+				if err != nil {
+					return nil, err
+				}
+				if part != nil {
 					parts = append(parts, part)
 				}
 			}
@@ -197,9 +210,13 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 	names := toolCallNameByIDIR(reqIR.Turns)
 	var contents []map[string]interface{}
 	for _, turn := range reqIR.Turns {
+		parts, err := geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names)
+		if err != nil {
+			return nil, err
+		}
 		contents = append(contents, map[string]interface{}{
 			"role":  internalRoleToGemini(string(turn.Role)),
-			"parts": geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names),
+			"parts": parts,
 		})
 	}
 	out["contents"] = contents
@@ -287,7 +304,7 @@ func isGeminiEnvelopeProtocol(protocol relayir.Protocol) bool {
 	return protocol == relayir.ProtocolGeminiCLI || protocol == relayir.ProtocolGeminiCode || protocol == relayir.ProtocolAntigravity
 }
 
-func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string) []map[string]interface{} {
+func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string) ([]map[string]interface{}, error) {
 	parts := make([]map[string]interface{}, 0, len(turn.Items))
 	for _, item := range turn.Items {
 		if (source == relayir.ProtocolGemini || isGeminiEnvelopeProtocol(source)) && len(item.Native.Raw) > 0 {
@@ -297,27 +314,41 @@ func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map
 				continue
 			}
 		}
-		if part := geminiPartFromIRItem(item, names); part != nil {
+		part, err := geminiPartFromIRItem(item, names)
+		if err != nil {
+			return nil, err
+		}
+		if part != nil {
 			parts = append(parts, part)
 		}
 	}
-	return parts
+	return parts, nil
 }
 
-func geminiPartFromIRItem(item relayir.Item, names map[string]string) map[string]interface{} {
+func geminiPartFromIRItem(item relayir.Item, names map[string]string) (map[string]interface{}, error) {
 	switch item.Kind {
 	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
-		return geminiReasoningPart(schemaReasoningFromIR(item))
+		return geminiReasoningPart(schemaReasoningFromIR(item)), nil
 	case relayir.ItemToolUse, relayir.ItemFunctionCall:
-		return geminiToolCallPart(schemaToolCallFromIR(item))
+		part := geminiToolCallPart(schemaToolCallFromIR(item))
+		call := part["functionCall"].(map[string]interface{})
+		if call["name"] == "" {
+			return nil, fmt.Errorf("cannot emit Gemini functionCall for IR item %d: missing required name", item.OriginalIndex)
+		}
+		return part, nil
 	case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
-		return geminiToolResultPart(schemaToolResultFromIR(item), names)
+		part := geminiToolResultPart(schemaToolResultFromIR(item), names)
+		resp := part["functionResponse"].(map[string]interface{})
+		if resp["name"] == "" {
+			return nil, fmt.Errorf("cannot emit Gemini functionResponse for IR item %d: missing required name", item.OriginalIndex)
+		}
+		return part, nil
 	default:
 		if part, ok := schemaContentFromIR(item); ok {
-			return geminiContentPart(part)
+			return geminiContentPart(part), nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func toolCallNameByIDIR(turns []relayir.Turn) map[string]string {

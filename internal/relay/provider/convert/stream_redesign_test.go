@@ -220,6 +220,18 @@ func TestResponsesFunctionCallDoneArgumentsConvertToAnthropicToolInput(t *testin
 	}
 }
 
+func TestResponsesFunctionCallWithoutNameFailsBeforeInvalidAnthropicToolUse(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	out := converter.Convert([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","arguments":"{}"}}` + "\n\n"))
+	got := string(out)
+	if !strings.Contains(got, `"type":"error"`) || !strings.Contains(got, `conversion_error`) {
+		t.Fatalf("missing conversion error for function_call without name:\n%s", got)
+	}
+	if strings.Contains(got, `"type":"tool_use"`) || strings.Contains(got, `"name":""`) {
+		t.Fatalf("must not emit invalid Anthropic tool_use with empty name:\n%s", got)
+	}
+}
+
 func TestResponsesFunctionCallDoneDoesNotDuplicateArgumentDelta(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
 	_ = converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent"}}` + "\n\n"))
@@ -239,6 +251,27 @@ func TestResponsesFunctionCallArgumentsDoneEmitsOnlyMissingSuffix(t *testing.T) 
 	got := string(delta) + string(done)
 	if strings.Count(got, `description`) != 1 || !strings.Contains(string(done), `prompt`) || strings.Contains(string(done), `description`) {
 		t.Fatalf("Responses function_call_arguments.done should emit only missing suffix:\n%s", got)
+	}
+}
+
+func TestResponsesCompletedFunctionCallBackfillsAnthropicToolInput(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Agent","arguments":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"}]}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{`"type":"tool_use"`, `"id":"call_1"`, `"name":"Agent"`, `"partial_json":"{\"description\":\"Audit API\",\"prompt\":\"Audit protocol conversion\"}"`, `"type":"message_stop"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses completed function_call not backfilled into Anthropic tool input, missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestResponsesContentPartDoneBackfillsTextWithoutOutputTextDone(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
+	out := converter.Convert([]byte(`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":"content part final"}}` + "\n\n"))
+	if !strings.Contains(string(out), `"content":"content part final"`) {
+		t.Fatalf("Responses content_part.done did not backfill text:\n%s", out)
 	}
 }
 

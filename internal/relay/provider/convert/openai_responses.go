@@ -67,8 +67,9 @@ func parseOpenAIResponsesRequestDirectIR(body []byte) (*relayir.Request, error) 
 		})
 	} else {
 		for _, item := range req.Input.Items {
-			if !knownResponsesInputItemType(item.Type) {
-				out.Losses = append(out.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", item.Type, item.Raw, "Responses input item is preserved as native raw/opaque IR"))
+			itemType := effectiveResponsesInputItemType(item)
+			if !knownResponsesInputItemType(itemType) {
+				out.Losses = append(out.Losses, irloss(FormatOpenAIResponses, "", "$.input[]", itemType, item.Raw, "Responses input item is preserved as native raw/opaque IR"))
 			}
 			out.Turns = append(out.Turns, responsesInputItemToIRTurn(item))
 		}
@@ -112,8 +113,19 @@ func knownResponsesInputItemType(typ string) bool {
 	}
 }
 
+func effectiveResponsesInputItemType(item schema.ResponsesInputItem) string {
+	if item.Type != "" {
+		return item.Type
+	}
+	if item.Role != "" || item.Content.Text != nil || len(item.Content.Parts) > 0 {
+		return "message"
+	}
+	return ""
+}
+
 func responsesInputItemToIRTurn(item schema.ResponsesInputItem) relayir.Turn {
 	rawItem := relayir.CloneRaw(item.Raw)
+	itemType := effectiveResponsesInputItemType(item)
 	turn := relayir.Turn{
 		Role:     relayir.Role(responsesRole(item.Role)),
 		ID:       item.ID,
@@ -122,12 +134,12 @@ func responsesInputItemToIRTurn(item schema.ResponsesInputItem) relayir.Turn {
 		Metadata: relayir.CloneRawMap(item.Extra),
 		Native: relayir.NativeEnvelope{
 			Protocol: relayir.ProtocolOpenAIResponses,
-			Kind:     item.Type,
+			Kind:     itemType,
 			Raw:      rawItem,
 			Fields:   relayir.CloneRawMap(item.Extra),
 		},
 	}
-	switch item.Type {
+	switch itemType {
 	case "message":
 		var content []schema.ContentPart
 		if item.Content.Text != nil {
@@ -171,16 +183,16 @@ func responsesInputItemToIRTurn(item schema.ResponsesInputItem) relayir.Turn {
 		turn.Items = append(turn.Items, relayir.Item{
 			ID:     item.ID,
 			Kind:   relayir.ItemOpaque,
-			Opaque: &relayir.Opaque{Type: item.Type, Raw: rawItem},
-			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: item.Type, Raw: rawItem},
+			Opaque: &relayir.Opaque{Type: itemType, Raw: rawItem},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: itemType, Raw: rawItem},
 		})
 	}
 	if len(turn.Items) == 0 && len(rawItem) > 0 {
 		turn.Items = append(turn.Items, relayir.Item{
 			ID:     item.ID,
 			Kind:   relayir.ItemOpaque,
-			Opaque: &relayir.Opaque{Type: item.Type, Raw: rawItem},
-			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: item.Type, Raw: rawItem},
+			Opaque: &relayir.Opaque{Type: itemType, Raw: rawItem},
+			Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Kind: itemType, Raw: rawItem},
 		})
 	}
 	return turn
@@ -208,7 +220,11 @@ func emitOpenAIResponsesRequestDirectIR(req *relayir.Request) ([]byte, error) {
 				continue
 			}
 		}
-		input = append(input, responsesInputItemsFromIRTurn(turn)...)
+		items, err := responsesInputItemsFromIRTurn(turn)
+		if err != nil {
+			return nil, err
+		}
+		input = append(input, items...)
 	}
 	resp["input"] = input
 	if req.Generation.MaxTokens != nil {
@@ -315,7 +331,7 @@ func isResponsesFamily(format Format) bool {
 	return format == FormatOpenAIResponses || format == FormatCodexResponses
 }
 
-func responsesInputItemsFromIRTurn(turn relayir.Turn) []map[string]interface{} {
+func responsesInputItemsFromIRTurn(turn relayir.Turn) ([]map[string]interface{}, error) {
 	var items []map[string]interface{}
 	var pendingContent []schema.ContentPart
 	role := responsesRole(string(turn.Role))
@@ -376,15 +392,25 @@ func responsesInputItemsFromIRTurn(turn relayir.Turn) []map[string]interface{} {
 			if name == "" {
 				name = call.Function.Name
 			}
+			callID := firstNonEmptyString(call.ID, item.CallID, item.ID)
+			if name == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call for IR item %d: missing required name", item.OriginalIndex)
+			}
+			if callID == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call for IR item %d: missing required call_id", item.OriginalIndex)
+			}
 			items = append(items, map[string]interface{}{
 				"type":      "function_call",
-				"call_id":   firstNonEmptyString(call.ID, item.CallID, item.ID),
+				"call_id":   callID,
 				"name":      name,
 				"arguments": call.Function.Arguments,
 			})
 		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 			flushContent()
 			result := schemaToolResultFromIR(item)
+			if result.ToolCallID == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call_output for IR item %d: missing required call_id", item.OriginalIndex)
+			}
 			items = append(items, map[string]interface{}{
 				"type":    "function_call_output",
 				"call_id": result.ToolCallID,
@@ -393,7 +419,7 @@ func responsesInputItemsFromIRTurn(turn relayir.Turn) []map[string]interface{} {
 		}
 	}
 	flushContent()
-	return items
+	return items, nil
 }
 
 func responsesRole(role string) string {

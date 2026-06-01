@@ -195,6 +195,7 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 		Type        string          `json:"type"`
 		Delta       json.RawMessage `json:"delta,omitempty"`
 		Item        json.RawMessage `json:"item,omitempty"`
+		Part        json.RawMessage `json:"part,omitempty"`
 		ItemID      string          `json:"item_id,omitempty"`
 		OutputIndex int             `json:"output_index,omitempty"`
 		Response    json.RawMessage `json:"response,omitempty"`
@@ -229,6 +230,18 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 		text := event.Text
 		if text == "" {
 			text = responsesTextDelta(event.Delta)
+		}
+		return []relayir.StreamEvent{{Type: relayir.EventContentPartEnd, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemText, Text: text}}}
+	case "response.content_part.done":
+		text := responsesContentPartText(event.Part)
+		if text == "" {
+			text = event.Text
+		}
+		if text == "" {
+			text = responsesTextDelta(event.Delta)
+		}
+		if text == "" {
+			return nil
 		}
 		return []relayir.StreamEvent{{Type: relayir.EventContentPartEnd, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemText, Text: text}}}
 	case "response.reasoning.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
@@ -420,6 +433,10 @@ func (p *responsesIRParser) completed(raw json.RawMessage, reason relayir.Finish
 			}
 			continue
 		}
+		if item.Type == "function_call" {
+			out = append(out, p.outputFunctionCallDone(idx, firstNonEmpty(item.CallID, item.ID), item.Name, item.Arguments)...)
+			continue
+		}
 		if item.Type != "" && item.Type != "message" {
 			continue
 		}
@@ -487,6 +504,9 @@ func (e *chatIREmitter) Emit(event relayir.StreamEvent) []byte {
 	case relayir.EventToolCallStart:
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		name := rawMetaString(event.Native.Meta, "name")
+		if name == "" {
+			return sseJSON(map[string]interface{}{"object": "error", "error": map[string]interface{}{"type": "conversion_error", "message": "cannot emit OpenAI Chat tool_call without required function name"}})
+		}
 		if callID == "" {
 			callID = "call_" + strconv.Itoa(len(e.toolCallIDToIndex))
 		}
@@ -628,6 +648,10 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 		out := e.ensureStarted()
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		name := rawMetaString(event.Native.Meta, "name")
+		if name == "" {
+			e.finished = true
+			return append(out, sseEventJSON("response.failed", map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"id": e.id, "status": "failed", "model": e.model, "error": map[string]interface{}{"type": "conversion_error", "message": "cannot emit OpenAI Responses function_call without required name"}}})...)
+		}
 		if callID == "" {
 			callID = randomID("call_")
 		}
@@ -794,6 +818,9 @@ func chatChunkFromIR(event relayir.StreamEvent) []byte {
 	case relayir.EventToolCallStart:
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		name := rawMetaString(event.Native.Meta, "name")
+		if name == "" {
+			return sseJSON(map[string]interface{}{"object": "error", "error": map[string]interface{}{"type": "conversion_error", "message": "cannot emit OpenAI Chat tool_call without required function name"}})
+		}
 		return chatChunk(id, model, map[string]interface{}{"tool_calls": []interface{}{map[string]interface{}{"index": event.ItemIndex, "id": callID, "type": "function", "function": map[string]interface{}{"name": name, "arguments": ""}}}}, nil, nil)
 	case relayir.EventToolArgDelta:
 		callID := rawMetaString(event.Native.Meta, "call_id")
@@ -1013,6 +1040,10 @@ func responsesTextDelta(raw json.RawMessage) string {
 
 type responsesOutputItem struct {
 	Type             string `json:"type"`
+	ID               string `json:"id"`
+	CallID           string `json:"call_id"`
+	Name             string `json:"name"`
+	Arguments        string `json:"arguments"`
 	EncryptedContent string `json:"encrypted_content"`
 	Content          []struct {
 		Type       string `json:"type"`
@@ -1023,6 +1054,29 @@ type responsesOutputItem struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"summary"`
+}
+
+func responsesContentPartText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var part struct {
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		OutputText string `json:"output_text"`
+		Refusal    string `json:"refusal"`
+	}
+	if err := json.Unmarshal(raw, &part); err != nil {
+		return ""
+	}
+	switch {
+	case part.Text != "":
+		return part.Text
+	case part.OutputText != "":
+		return part.OutputText
+	default:
+		return part.Refusal
+	}
 }
 
 func chatStreamError(data []byte) *relayir.Error {

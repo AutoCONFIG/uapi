@@ -339,6 +339,10 @@ func (e *anthropicIREmitter) Emit(event relayir.StreamEvent) []byte {
 		out = append(out, e.stopText()...)
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		name := rawMetaString(event.Native.Meta, "name")
+		if name == "" {
+			e.finished = true
+			return append(out, sseEventJSON("error", map[string]interface{}{"type": "error", "error": map[string]interface{}{"type": "conversion_error", "message": "cannot emit Anthropic tool_use without required name"}})...)
+		}
 		if callID == "" {
 			callID = randomID("toolu_")
 		}

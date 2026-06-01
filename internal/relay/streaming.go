@@ -9,7 +9,6 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
-	streamconvert "github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
 )
 
@@ -435,15 +434,7 @@ func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([
 	if upstreamFormat == clientFormat {
 		return nil
 	}
-	upstream, ok := relayFormatToStreamFormat(upstreamFormat)
-	if !ok {
-		return nil
-	}
-	client, ok := relayFormatToStreamFormat(clientFormat)
-	if !ok {
-		return nil
-	}
-	converter := stream.NewConverter(upstream, client)
+	converter := stream.NewConverter(upstreamFormat, clientFormat)
 	if converter == nil {
 		return nil
 	}
@@ -464,21 +455,6 @@ func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([
 			converter.Reset()
 		}
 		return out
-	}
-}
-
-func relayFormatToStreamFormat(format provider.Format) (streamconvert.Format, bool) {
-	switch format {
-	case provider.FormatOpenAIChatCompletions:
-		return streamconvert.FormatOpenAIChatCompletions, true
-	case provider.FormatOpenAIResponses, provider.FormatCodexResponses:
-		return streamconvert.FormatOpenAIResponses, true
-	case provider.FormatAnthropic, provider.FormatClaudeCode:
-		return streamconvert.FormatAnthropic, true
-	case provider.FormatGemini, provider.FormatGeminiCode, provider.FormatGeminiCLI, provider.FormatAntigravity:
-		return streamconvert.FormatGemini, true
-	default:
-		return "", false
 	}
 }
 

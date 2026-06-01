@@ -410,12 +410,16 @@ func emitOpenAIResponsesResponseDirectIR(resp *relayir.Response) ([]byte, error)
 	if resp == nil {
 		return json.Marshal(map[string]interface{}{})
 	}
+	output, err := responsesOutputItemsFromIR(resp)
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]interface{}{
 		"id":         resp.ID,
 		"object":     "response",
 		"created_at": int64(0),
 		"model":      resp.Model,
-		"output":     responsesOutputItemsFromIR(resp),
+		"output":     output,
 	}
 	if resp.Usage != nil {
 		out["usage"] = responsesUsageFromIR(resp.Usage)
@@ -432,19 +436,23 @@ func emitOpenAIResponsesResponseDirectIR(resp *relayir.Response) ([]byte, error)
 	return json.Marshal(out)
 }
 
-func responsesOutputItemsFromIR(resp *relayir.Response) []map[string]interface{} {
+func responsesOutputItemsFromIR(resp *relayir.Response) ([]map[string]interface{}, error) {
 	var out []map[string]interface{}
 	for _, choice := range resp.Choices {
-		out = append(out, responsesOutputItemsFromIRChoice(choice)...)
+		items, err := responsesOutputItemsFromIRChoice(choice)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
 	}
-	return out
+	return out, nil
 }
 
-func responsesOutputItemsFromIRChoice(choice relayir.Choice) []map[string]interface{} {
+func responsesOutputItemsFromIRChoice(choice relayir.Choice) ([]map[string]interface{}, error) {
 	if isResponsesFamily(protocolFormat(choice.Native.Protocol)) && len(choice.Native.Raw) > 0 {
 		var raw map[string]interface{}
 		if err := decodeJSONUseNumber(choice.Native.Raw, &raw); err == nil {
-			return []map[string]interface{}{raw}
+			return []map[string]interface{}{raw}, nil
 		}
 	}
 	var out []map[string]interface{}
@@ -501,17 +509,27 @@ func responsesOutputItemsFromIRChoice(choice relayir.Choice) []map[string]interf
 			if name == "" {
 				name = call.Function.Name
 			}
+			callID := firstNonEmptyString(call.ID, item.CallID, item.ID)
+			if name == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call output item %d: missing required name", item.OriginalIndex)
+			}
+			if callID == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call output item %d: missing required call_id", item.OriginalIndex)
+			}
 			out = append(out, map[string]interface{}{
 				"type":      "function_call",
 				"role":      role,
 				"status":    status,
-				"call_id":   firstNonEmptyString(call.ID, item.CallID, item.ID),
+				"call_id":   callID,
 				"name":      name,
 				"arguments": call.Function.Arguments,
 			})
 		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 			flushContent()
 			result := schemaToolResultFromIR(item)
+			if result.ToolCallID == "" {
+				return nil, fmt.Errorf("cannot emit OpenAI Responses function_call_output item %d: missing required call_id", item.OriginalIndex)
+			}
 			out = append(out, map[string]interface{}{
 				"type":    "function_call_output",
 				"call_id": result.ToolCallID,
@@ -520,7 +538,7 @@ func responsesOutputItemsFromIRChoice(choice relayir.Choice) []map[string]interf
 		}
 	}
 	flushContent()
-	return out
+	return out, nil
 }
 
 func responsesReasoningOutputItemFromIR(item relayir.Item, status string) map[string]interface{} {

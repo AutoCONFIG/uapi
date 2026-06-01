@@ -9,22 +9,23 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/valyala/fasthttp"
 )
 
-type Format string
+type Format = convert.Format
 
 const (
-	FormatOpenAIChatCompletions Format = "openai_chat"
-	FormatOpenAIResponses       Format = "openai_responses"
-	FormatCodexResponses        Format = "codex"
-	FormatAnthropic             Format = "anthropic"
-	FormatClaudeCode            Format = "claude_code"
-	FormatGemini                Format = "gemini"
-	FormatGeminiCode            Format = "gemini_code"
-	FormatGeminiCLI             Format = "gemini_cli" // Gemini CLI / Antigravity protocol
-	FormatAntigravity           Format = "antigravity"
+	FormatOpenAIChatCompletions = convert.FormatOpenAIChatCompletions
+	FormatOpenAIResponses       = convert.FormatOpenAIResponses
+	FormatCodexResponses        = convert.FormatCodexResponses
+	FormatAnthropic             = convert.FormatAnthropic
+	FormatClaudeCode            = convert.FormatClaudeCode
+	FormatGemini                = convert.FormatGemini
+	FormatGeminiCode            = convert.FormatGeminiCode
+	FormatGeminiCLI             = convert.FormatGeminiCLI // Gemini CLI / Antigravity protocol
+	FormatAntigravity           = convert.FormatAntigravity
 )
 
 type InternalUsage struct {
@@ -98,7 +99,6 @@ type Adaptor interface {
 	SetRequestParams(model string, stream bool)
 	GetRequestURL(path string) (string, error)
 	SetupRequestHeader(req *fasthttp.Request, credentials string) error
-	ToIR(body []byte) (*ir.Request, error)
 	FromIR(req *ir.Request) ([]byte, error)
 	ParseUsage(respBody []byte) (promptTokens, completionTokens int, err error)
 	ParseStreamUsage(lastChunk []byte) (promptTokens, completionTokens int, err error)

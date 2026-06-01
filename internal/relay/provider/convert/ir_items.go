@@ -77,7 +77,7 @@ func irToolUseItem(call schema.ToolCall, raw json.RawMessage, source Format, ind
 	if name == "" {
 		name = call.Function.Name
 	}
-	return ir.Item{
+	item := ir.Item{
 		ID:            call.ID,
 		CallID:        call.ID,
 		Name:          name,
@@ -92,10 +92,17 @@ func irToolUseItem(call schema.ToolCall, raw json.RawMessage, source Format, ind
 		},
 		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_call", Raw: ir.CloneRaw(raw), Index: index},
 	}
+	if item.CallID == "" {
+		item.Losses = append(item.Losses, ir.NewLoss(irProtocol(source), "", "$.tool_call.id", "id", "source tool call is missing the id/call_id required by target protocols", ir.LossError))
+	}
+	if item.Name == "" {
+		item.Losses = append(item.Losses, ir.NewLoss(irProtocol(source), "", "$.tool_call.name", "name", "source tool call is missing the function/tool name required by target protocols", ir.LossError))
+	}
+	return item
 }
 
 func irToolResultItem(result schema.ToolResult, raw json.RawMessage, source Format, index int) ir.Item {
-	return ir.Item{
+	item := ir.Item{
 		CallID:        result.ToolCallID,
 		OriginalIndex: index,
 		Kind:          ir.ItemToolResult,
@@ -108,6 +115,10 @@ func irToolResultItem(result schema.ToolResult, raw json.RawMessage, source Form
 		},
 		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_result", Raw: ir.CloneRaw(raw), Index: index},
 	}
+	if item.CallID == "" {
+		item.Losses = append(item.Losses, ir.NewLoss(irProtocol(source), "", "$.tool_result.tool_use_id", "tool_use_id", "source tool result is missing the tool/function call id required by target protocols", ir.LossError))
+	}
+	return item
 }
 
 func irTool(tool schema.Tool, source Format) ir.Tool {
