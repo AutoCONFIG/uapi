@@ -1178,8 +1178,14 @@ func TestResponsesInputFileConvertsToOpenAIChatFileBlock(t *testing.T) {
 		t.Fatalf("input_file was not converted to Chat file block: %s", converted)
 	}
 	fileBody := file["file"].(map[string]interface{})
-	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" || fileBody["file_type"] != "application/pdf" {
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" {
 		t.Fatalf("file block lost fields: %s", converted)
+	}
+	if _, ok := fileBody["file_type"]; ok {
+		t.Fatalf("Chat file block leaked unsupported file_type: %s", converted)
+	}
+	if _, ok := fileBody["file_url"]; ok {
+		t.Fatalf("Chat file block leaked unsupported file_url: %s", converted)
 	}
 }
 
@@ -1211,8 +1217,14 @@ func TestTypelessResponsesMessageInputFileConvertsToOpenAIChatFileBlock(t *testi
 		t.Fatalf("typeless Responses message input_file was not converted to Chat file block: %s", converted)
 	}
 	fileBody := file["file"].(map[string]interface{})
-	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" || fileBody["file_type"] != "application/pdf" {
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["filename"] != "paper.pdf" {
 		t.Fatalf("typeless Responses file block lost fields: %s", converted)
+	}
+	if _, ok := fileBody["file_type"]; ok {
+		t.Fatalf("typeless Responses Chat file block leaked unsupported file_type: %s", converted)
+	}
+	if _, ok := fileBody["file_url"]; ok {
+		t.Fatalf("typeless Responses Chat file block leaked unsupported file_url: %s", converted)
 	}
 }
 
@@ -1242,8 +1254,14 @@ func TestGeminiPDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T) {
 		t.Fatalf("PDF inlineData was not converted to Chat file block: %s", converted)
 	}
 	fileBody := file["file"].(map[string]interface{})
-	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["file_type"] != "application/pdf" {
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" {
 		t.Fatalf("Gemini PDF file block lost fields: %s", converted)
+	}
+	if _, ok := fileBody["file_type"]; ok {
+		t.Fatalf("Gemini Chat file block leaked unsupported file_type: %s", converted)
+	}
+	if _, ok := fileBody["file_url"]; ok {
+		t.Fatalf("Gemini Chat file block leaked unsupported file_url: %s", converted)
 	}
 }
 
@@ -1270,8 +1288,14 @@ func TestGeminiSnakeCasePDFInlineDataConvertsToOpenAIChatFileBlock(t *testing.T)
 		t.Fatalf("snake_case Gemini inline_data PDF was not converted to Chat file block: %s", converted)
 	}
 	fileBody := file["file"].(map[string]interface{})
-	if fileBody["file_data"] != "data:application/pdf;base64,AA==" || fileBody["file_type"] != "application/pdf" {
+	if fileBody["file_data"] != "data:application/pdf;base64,AA==" {
 		t.Fatalf("snake_case Gemini PDF file block lost fields: %s", converted)
+	}
+	if _, ok := fileBody["file_type"]; ok {
+		t.Fatalf("snake_case Gemini Chat file block leaked unsupported file_type: %s", converted)
+	}
+	if _, ok := fileBody["file_url"]; ok {
+		t.Fatalf("snake_case Gemini Chat file block leaked unsupported file_url: %s", converted)
 	}
 	if strings.Contains(string(converted), "inline_data") || strings.Contains(string(converted), "mime_type") {
 		t.Fatalf("Gemini native snake_case fields leaked into Chat body: %s", converted)

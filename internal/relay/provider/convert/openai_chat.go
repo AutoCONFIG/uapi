@@ -396,14 +396,11 @@ func openAIChatContentParts(parts []schema.ContentPart) []schema.ContentPart {
 }
 
 func openAIChatFilePart(part schema.ContentPart) schema.ContentPart {
-	fileType := firstNonEmptyString(part.FileType, part.MimeType, mimeTypeFromFilename(part.Filename))
 	return schema.ContentPart{
 		Type:     "file",
 		FileData: part.FileData,
-		FileURL:  part.FileURL,
 		FileID:   part.FileID,
 		Filename: part.Filename,
-		FileType: fileType,
 	}
 }
 
