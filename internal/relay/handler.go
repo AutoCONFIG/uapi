@@ -226,6 +226,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
 	requestType := detectRelayRequestType(path)
+	if requestType == requestTypeUnsupported {
+		ctx.Error(`{"error":"unsupported route"}`, fasthttp.StatusBadRequest)
+		return
+	}
 
 	// Detect client format from request path
 	clientFormat := requestType.clientFormat()

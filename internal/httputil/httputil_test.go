@@ -35,3 +35,46 @@ func TestClientIPForGatewayLogFallsBackToRemoteIP(t *testing.T) {
 		t.Fatalf("ClientIPForGatewayLog() = %q, want remote IP", got)
 	}
 }
+
+func TestModelFromRequestPathExtractsGeminiModel(t *testing.T) {
+	cases := []struct {
+		name      string
+		path      string
+		bodyModel string
+		want      string
+	}{
+		{
+			name: "generate content action",
+			path: "/v1beta/models/gemini-2.5-pro:generateContent",
+			want: "gemini-2.5-pro",
+		},
+		{
+			name: "stream generate content action",
+			path: "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+			want: "gemini-2.5-pro",
+		},
+		{
+			name: "slash suffix",
+			path: "/v1beta/models/gemini-2.5-pro:generateContent/extra",
+			want: "gemini-2.5-pro",
+		},
+		{
+			name:      "body model wins",
+			path:      "/v1beta/models/gemini-2.5-pro:generateContent",
+			bodyModel: "body-model",
+			want:      "body-model",
+		},
+		{
+			name: "non gemini path without body model",
+			path: "/v1/chat/completions",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ModelFromRequestPath(tc.path, tc.bodyModel); got != tc.want {
+				t.Fatalf("ModelFromRequestPath(%q, %q) = %q, want %q", tc.path, tc.bodyModel, got, tc.want)
+			}
+		})
+	}
+}

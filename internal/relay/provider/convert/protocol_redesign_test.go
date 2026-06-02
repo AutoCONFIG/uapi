@@ -10,6 +10,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 )
 
 func TestChatToResponsesAlwaysEmitsInstructions(t *testing.T) {
@@ -322,6 +323,92 @@ func TestSameFormatGeminiPreservesUnmodeledCodeAssistFields(t *testing.T) {
 		if !strings.Contains(string(converted), want) {
 			t.Fatalf("same-format Gemini conversion dropped %s:\n%s", want, converted)
 		}
+	}
+}
+
+func TestGeminiCachedContentMapsThroughIR(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"cachedContent":"cachedContents/abc"
+	}`)
+	reqIR, err := convert.ToIR(convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ToIR: %v", err)
+	}
+	if reqIR.Cache.CachedContent != "cachedContents/abc" {
+		t.Fatalf("Cache.CachedContent = %q, want cachedContents/abc", reqIR.Cache.CachedContent)
+	}
+	converted, err := convert.FromIR(reqIR, convert.FormatGemini)
+	if err != nil {
+		t.Fatalf("FromIR: %v", err)
+	}
+	if !strings.Contains(string(converted), `"cachedContent":"cachedContents/abc"`) {
+		t.Fatalf("Gemini cachedContent not emitted from IR:\n%s", converted)
+	}
+}
+
+func TestOpenAIChatEmitterRejectsMissingToolIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *relayir.Request
+		want string
+	}{
+		{
+			name: "missing tool call function name",
+			req: &relayir.Request{
+				Model: "gpt-5",
+				Turns: []relayir.Turn{{
+					Role: relayir.RoleAssistant,
+					Items: []relayir.Item{{
+						Kind:          relayir.ItemToolUse,
+						OriginalIndex: 7,
+						CallID:        "call_1",
+					}},
+				}},
+			},
+			want: "cannot emit OpenAI Chat tool_call for IR item 7: missing required function name",
+		},
+		{
+			name: "missing tool call id",
+			req: &relayir.Request{
+				Model: "gpt-5",
+				Turns: []relayir.Turn{{
+					Role: relayir.RoleAssistant,
+					Items: []relayir.Item{{
+						Kind:          relayir.ItemToolUse,
+						OriginalIndex: 8,
+						Name:          "lookup",
+					}},
+				}},
+			},
+			want: "cannot emit OpenAI Chat tool_call for IR item 8: missing required id",
+		},
+		{
+			name: "missing tool result call id",
+			req: &relayir.Request{
+				Model: "gpt-5",
+				Turns: []relayir.Turn{{
+					Role: relayir.RoleTool,
+					Items: []relayir.Item{{
+						Kind:          relayir.ItemToolResult,
+						OriginalIndex: 9,
+					}},
+				}},
+			},
+			want: "cannot emit OpenAI Chat tool result for IR item 9: missing required tool_call_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := convert.FromIR(tt.req, convert.FormatOpenAIChatCompletions)
+			if err == nil {
+				t.Fatalf("FromIR returned nil error, want %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want containing %q", err.Error(), tt.want)
+			}
+		})
 	}
 }
 

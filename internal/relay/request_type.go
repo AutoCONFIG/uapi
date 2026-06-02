@@ -23,18 +23,34 @@ const (
 	requestTypeModeration      relayRequestType = "moderation"
 	requestTypeRealtime        relayRequestType = "realtime"
 	requestTypeVideoGeneration relayRequestType = "video_generation"
+	requestTypeUnsupported     relayRequestType = "unsupported"
 )
 
 func detectRelayRequestType(path string) relayRequestType {
 	switch {
-	case strings.HasPrefix(path, "/v1/chat/completions"):
+	case path == "/v1/chat/completions" || path == "/v1/chat/completions/":
 		return requestTypeChatCompletion
+	case strings.HasPrefix(path, "/v1/async/"):
+		return requestTypeUnsupported
 	case strings.HasPrefix(path, "/v1/responses"):
-		return requestTypeResponses
+		if path == "/v1/responses" || path == "/v1/responses/" {
+			return requestTypeResponses
+		}
+		return requestTypeUnsupported
 	case strings.HasPrefix(path, "/v1/messages"):
-		return requestTypeMessages
+		if path == "/v1/messages" || path == "/v1/messages/" {
+			return requestTypeMessages
+		}
+		return requestTypeUnsupported
 	case strings.HasPrefix(path, "/v1beta/"):
+		if isUnsupportedGeminiRoute(path) {
+			return requestTypeUnsupported
+		}
 		return requestTypeGeminiGenerate
+	case strings.HasPrefix(path, "/v1/files") ||
+		strings.HasPrefix(path, "/v1/containers") ||
+		strings.HasPrefix(path, "/v1/batches"):
+		return requestTypeUnsupported
 	case strings.HasPrefix(path, "/v1/images/generations"):
 		return requestTypeImageGeneration
 	case strings.HasPrefix(path, "/v1/images/edits"):
@@ -56,8 +72,33 @@ func detectRelayRequestType(path string) relayRequestType {
 	case strings.HasPrefix(path, "/v1/videos") || strings.HasPrefix(path, "/v1/video/"):
 		return requestTypeVideoGeneration
 	default:
-		return requestTypeChatCompletion
+		return requestTypeUnsupported
 	}
+}
+
+func isUnsupportedGeminiRoute(path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/upload/v1beta/files"):
+		return true
+	case strings.HasPrefix(path, "/v1beta/files"),
+		strings.HasPrefix(path, "/v1beta/cachedContents"),
+		strings.HasPrefix(path, "/v1beta/batches"),
+		strings.HasPrefix(path, "/v1beta/operations"):
+		return true
+	}
+	for _, action := range []string{
+		":countTokens",
+		":embedContent",
+		":batchEmbedContents",
+		":predict",
+		":predictLongRunning",
+		":batchGenerateContent",
+	} {
+		if strings.Contains(path, action) {
+			return true
+		}
+	}
+	return false
 }
 
 func (rt relayRequestType) clientFormat() provider.Format {
@@ -68,6 +109,8 @@ func (rt relayRequestType) clientFormat() provider.Format {
 		return provider.FormatAnthropic
 	case requestTypeGeminiGenerate:
 		return provider.FormatGemini
+	case requestTypeUnsupported:
+		return ""
 	default:
 		return provider.FormatOpenAIChatCompletions
 	}
@@ -93,6 +136,8 @@ func (rt relayRequestType) permission() string {
 		return "realtime"
 	case requestTypeVideoGeneration:
 		return "videos"
+	case requestTypeUnsupported:
+		return ""
 	default:
 		return "chat"
 	}

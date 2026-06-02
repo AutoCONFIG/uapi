@@ -154,6 +154,13 @@ func (a *AntigravityAdaptor) emitRequest(req *ir.Request) ([]byte, error) {
 		if hasFunctionDeclarations || (strings.Contains(model, "claude") && request["toolConfig"] != nil) {
 			ensureFunctionCallingValidated(request)
 		}
+
+		normalizeAntigravityThinkingConfig(request, effort)
+
+		if hasGoogleSearch(request) && hasFunctionDeclarationsInRequest(request) {
+			return nil, fmt.Errorf("googleSearch and functionDeclarations cannot coexist in the same request")
+		}
+
 		if !strings.Contains(model, "claude") {
 			if gc, ok := request["generationConfig"].(map[string]interface{}); ok {
 				delete(gc, "maxOutputTokens")
@@ -626,4 +633,98 @@ func ensureFunctionCallingValidated(request map[string]interface{}) {
 		return
 	}
 	fcc["mode"] = "VALIDATED"
+}
+
+func normalizeAntigravityThinkingConfig(request map[string]interface{}, effort string) {
+	gc, _ := request["generationConfig"].(map[string]interface{})
+	if gc == nil {
+		return
+	}
+	tc, _ := gc["thinkingConfig"].(map[string]interface{})
+	if tc == nil {
+		return
+	}
+	if effort == "" {
+		effort = stringFromAnyPath(tc, "thinkingLevel")
+	}
+	if effort == "" {
+		return
+	}
+	if budget, ok := antigravityThinkingBudget(effort, maxOutputTokensFromGenerationConfig(gc)); ok {
+		delete(tc, "thinkingLevel")
+		tc["thinkingBudget"] = budget
+	}
+}
+
+func antigravityThinkingBudget(effort string, cap int) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none", "disabled":
+		return 0, true
+	case "low":
+		return maxInt(4096, cap/4), true
+	case "medium":
+		return maxInt(8192, cap/2), true
+	case "high":
+		if cap > 0 {
+			return cap, true
+		}
+		return 4096, true
+	default:
+		return 0, false
+	}
+}
+
+func maxOutputTokensFromGenerationConfig(gc map[string]interface{}) int {
+	if gc == nil {
+		return 0
+	}
+	value, ok := gc["maxOutputTokens"]
+	if !ok {
+		return 0
+	}
+	tokens, _ := intSetting(value)
+	return tokens
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// hasGoogleSearch checks if the request contains a googleSearch tool
+func hasGoogleSearch(request map[string]interface{}) bool {
+	tools, ok := request["tools"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if gs, ok := tool["googleSearch"].(map[string]interface{}); ok && gs != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFunctionDeclarationsInRequest checks if the request contains functionDeclarations
+func hasFunctionDeclarationsInRequest(request map[string]interface{}) bool {
+	tools, ok := request["tools"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, ok := tool["functionDeclarations"]; ok {
+			return true
+		}
+	}
+	return false
 }

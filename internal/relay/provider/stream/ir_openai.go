@@ -669,7 +669,7 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 		e.finished = true
 		return sseEventJSON("response.failed", map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"id": e.id, "status": "failed", "model": e.model, "error": irErrorMap(event.Error)}})
 	case relayir.EventResponseDone:
-		return e.completedEvent()
+		return e.completedEvent(event.Usage)
 	}
 	return nil
 }
@@ -747,7 +747,7 @@ func (e *responsesIREmitter) ensureOutputTextPart() []byte {
 	return out
 }
 
-func (e *responsesIREmitter) completedEvent() []byte {
+func (e *responsesIREmitter) completedEvent(usage *relayir.Usage) []byte {
 	if e.finished {
 		return nil
 	}
@@ -779,11 +779,15 @@ func (e *responsesIREmitter) completedEvent() []byte {
 		out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{"type": "response.output_item.done", "output_index": e.outputIndex, "item": item})...)
 		output = append(output, item)
 	}
-	out = append(out, sseEventJSON("response.completed", map[string]interface{}{"type": "response.completed", "response": map[string]interface{}{"id": e.id, "object": "response", "created_at": e.created, "status": "completed", "model": e.model, "output": output}})...)
+	response := map[string]interface{}{"id": e.id, "object": "response", "created_at": e.created, "status": "completed", "model": e.model, "output": output}
+	if usageOut := irUsageToResponses(usage); usageOut != nil {
+		response["usage"] = usageOut
+	}
+	out = append(out, sseEventJSON("response.completed", map[string]interface{}{"type": "response.completed", "response": response})...)
 	return out
 }
 
-func (e *responsesIREmitter) Done() []byte { return e.completedEvent() }
+func (e *responsesIREmitter) Done() []byte { return e.completedEvent(nil) }
 
 func (e *responsesIREmitter) Reset() {
 	*e = responsesIREmitter{outputIndex: -1, reasoningIndex: -1, toolCallIDToIndex: map[string]int{}}
@@ -932,6 +936,35 @@ func irUsageToChat(usage *relayir.Usage) map[string]interface{} {
 			details["cached_write_tokens"] = usage.CacheWriteTokens
 		}
 		out["prompt_tokens_details"] = details
+	}
+	return out
+}
+
+func irUsageToResponses(usage *relayir.Usage) map[string]interface{} {
+	if usage == nil {
+		return nil
+	}
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.InputTokens + usage.OutputTokens
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && total == 0 {
+		return nil
+	}
+	out := map[string]interface{}{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens, "total_tokens": total}
+	if usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheWriteTokens > 0 {
+		details := map[string]interface{}{}
+		if usage.CacheReadTokens > 0 {
+			details["cached_tokens"] = usage.CacheReadTokens
+			details["cached_read_tokens"] = usage.CacheReadTokens
+		}
+		if usage.CacheCreationTokens > 0 {
+			details["cache_creation_input_tokens"] = usage.CacheCreationTokens
+			details["cached_write_tokens"] = usage.CacheCreationTokens
+		} else if usage.CacheWriteTokens > 0 {
+			details["cached_write_tokens"] = usage.CacheWriteTokens
+		}
+		out["input_tokens_details"] = details
 	}
 	return out
 }

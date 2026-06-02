@@ -284,6 +284,24 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth token JSON import is only supported for Google OAuth, Codex, and Antigravity channels")
 				return
 			}
+			if session.Provider == "codex" {
+				if imported.AuthMode != "chatgpt" {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json auth_mode must be chatgpt")
+					return
+				}
+				if !imported.HasTokens {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex oauth_json must be official auth.json with tokens")
+					return
+				}
+				if imported.IDToken == "" {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens.id_token is required")
+					return
+				}
+				if imported.AccountID == "" {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens.account_id is required")
+					return
+				}
+			}
 			if imported.AccessToken == "" || imported.RefreshToken == "" {
 				h.jsonError(ctx, fasthttp.StatusBadRequest, "oauth_json requires access_token and refresh_token")
 				return
@@ -401,6 +419,10 @@ type oauthJSONImport struct {
 	Scope        string
 	TokenType    string
 	Expiry       *time.Time
+	AccountID    string
+	FedRAMP      bool
+	HasTokens    bool
+	AuthMode     string
 }
 
 func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
@@ -408,6 +430,7 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &data); err != nil {
 		return nil, fmt.Errorf("invalid oauth_json")
 	}
+	tokens := jsonObject(data, "tokens")
 	imp := &oauthJSONImport{
 		State:        jsonString(data, "state", "oauth_state"),
 		Code:         jsonString(data, "code", "authorization_code", "auth_code"),
@@ -418,13 +441,17 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		ClientID:     jsonString(data, "client_id"),
 		ClientSecret: jsonString(data, "client_secret"),
 		TokenURL:     jsonString(data, "token_url"),
-		AccessToken:  jsonString(data, "access_token", "token"),
-		IDToken:      jsonString(data, "id_token"),
+		AccessToken:  firstNonEmpty(jsonString(tokens, "access_token"), jsonString(data, "access_token", "token")),
+		IDToken:      firstNonEmpty(jsonString(tokens, "id_token"), jsonString(data, "id_token")),
 		APIKey:       jsonString(data, "api_key", "key"),
-		RefreshToken: jsonString(data, "refresh_token"),
-		Scope:        jsonString(data, "scope"),
-		TokenType:    jsonString(data, "token_type"),
+		RefreshToken: firstNonEmpty(jsonString(tokens, "refresh_token"), jsonString(data, "refresh_token")),
+		Scope:        firstNonEmpty(jsonString(tokens, "scope"), jsonString(data, "scope")),
+		TokenType:    firstNonEmpty(jsonString(tokens, "token_type"), jsonString(data, "token_type")),
 		Expiry:       jsonExpiry(data),
+		AccountID:    firstNonEmpty(jsonString(tokens, "account_id", "chatgpt_account_id"), jsonString(data, "account_id", "chatgpt_account_id")),
+		FedRAMP:      jsonBool(tokens, "chatgpt_account_is_fedramp", "fedramp") || jsonBool(data, "chatgpt_account_is_fedramp", "fedramp"),
+		HasTokens:    tokens != nil,
+		AuthMode:     jsonString(data, "auth_mode"),
 	}
 	if imp.CallbackURL != "" {
 		if parsed, err := url.Parse(imp.CallbackURL); err == nil {
@@ -441,6 +468,16 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		}
 	}
 	return imp, nil
+}
+
+func jsonObject(data map[string]interface{}, key string) map[string]interface{} {
+	if data == nil {
+		return nil
+	}
+	if value, ok := data[key].(map[string]interface{}); ok {
+		return value
+	}
+	return nil
 }
 
 func (h *Handler) applyOAuthJSONImport(state string, imp *oauthJSONImport) {
@@ -470,6 +507,9 @@ func (h *Handler) applyOAuthJSONImport(state string, imp *oauthJSONImport) {
 }
 
 func jsonString(data map[string]interface{}, keys ...string) string {
+	if data == nil {
+		return ""
+	}
 	for _, key := range keys {
 		if v, ok := data[key]; ok {
 			switch value := v.(type) {
@@ -483,6 +523,32 @@ func jsonString(data map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func jsonBool(data map[string]interface{}, keys ...string) bool {
+	if data == nil {
+		return false
+	}
+	for _, key := range keys {
+		if v, ok := data[key]; ok {
+			switch value := v.(type) {
+			case bool:
+				return value
+			case string:
+				return strings.EqualFold(strings.TrimSpace(value), "true")
+			}
+		}
+	}
+	return false
 }
 
 func jsonExpiry(data map[string]interface{}) *time.Time {
@@ -676,6 +742,9 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 			logger.Warnf("admin.oauth", "oauth metadata sync failed", logger.F("provider", session.Provider), logger.F("channel_id", account.ChannelID.String()), logger.Err(err))
 		}
 	}
+	if session.Provider == "codex" {
+		account.Metadata = normalizeCodexAccountMetadata(account.Metadata)
+	}
 	account.ID = uuid.New()
 	if err := h.db.Create(&account).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "create account failed")
@@ -849,6 +918,9 @@ func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshT
 		metadata = map[string]interface{}{}
 	}
 	metadata["oauth_provider"] = session.Provider
+	if session.Provider == "codex" {
+		metadata = normalizeCodexAccountMetadata(metadata)
+	}
 	return result.Credential, result.RefreshToken, result.Expiry, metadata, nil
 }
 
@@ -907,10 +979,21 @@ func importedMetadata(imp *oauthJSONImport) map[string]interface{} {
 	}
 	if imp.IDToken != "" {
 		metadata["oauth_has_id_token"] = true
+		if tokenMetadata, err := openai.ParseIDTokenMetadata(imp.IDToken); err == nil {
+			metadata = mergeMetadata(metadata, tokenMetadata)
+		}
 	}
 	if imp.Expiry != nil {
 		metadata["oauth_expiry"] = imp.Expiry.UTC().Format(time.RFC3339)
 	}
+	if imp.AccountID != "" {
+		metadata["account_id"] = imp.AccountID
+		metadata["chatgpt_account_id"] = imp.AccountID
+	}
+	if imp.FedRAMP {
+		metadata["chatgpt_account_is_fedramp"] = true
+	}
+	metadata = normalizeCodexAccountMetadata(metadata)
 	return metadata
 }
 
@@ -926,6 +1009,25 @@ func mergeMetadata(base, overlay map[string]interface{}) map[string]interface{} 
 		merged[key] = value
 	}
 	return merged
+}
+
+func normalizeCodexAccountMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		return nil
+	}
+	metadata["auth_mode"] = "chatgpt"
+	accountID := ""
+	if id, ok := metadata["account_id"].(string); ok && strings.TrimSpace(id) != "" {
+		accountID = strings.TrimSpace(id)
+	}
+	if id, ok := metadata["chatgpt_account_id"].(string); ok && strings.TrimSpace(id) != "" {
+		accountID = strings.TrimSpace(id)
+	}
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
+	}
+	return metadata
 }
 
 func randomURLToken(size int) (string, error) {

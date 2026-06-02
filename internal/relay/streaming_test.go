@@ -464,6 +464,49 @@ func TestStreamAndForwardChatToResponsesCompletesLifecycle(t *testing.T) {
 			t.Fatalf("converted Responses SSE missing %s:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("normal Responses downstream stream must not include OpenAI Chat [DONE]:\n%s", got)
+	}
+}
+
+func TestStreamAndForwardNormalNonChatTargetsDoNotAppendDone(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	tests := []struct {
+		name   string
+		target provider.Format
+		want   string
+	}{
+		{name: "responses", target: provider.FormatOpenAIResponses, want: "event: response.completed"},
+		{name: "anthropic", target: provider.FormatAnthropic, want: `"type":"message_stop"`},
+		{name: "gemini", target: provider.FormatGemini, want: `"finishReason":"STOP"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := NewSSEStreamReader()
+			done := make(chan streamResult, 1)
+			outputConvert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, tt.target)
+			go func() {
+				done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+			}()
+
+			out, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatalf("read stream: %v", err)
+			}
+			result := <-done
+			if !result.finalized || result.failed {
+				t.Fatalf("chat to %s stream must finalize successfully: %+v\n%s", tt.target, result, out)
+			}
+			got := string(out)
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("converted %s stream missing %s:\n%s", tt.target, tt.want, got)
+			}
+			if strings.Contains(got, "data: [DONE]") {
+				t.Fatalf("normal %s downstream stream must not include OpenAI Chat [DONE]:\n%s", tt.target, got)
+			}
+		})
+	}
 }
 
 func TestStreamConverterFuncClosesOnTerminalEventWithoutDone(t *testing.T) {

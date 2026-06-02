@@ -387,6 +387,41 @@ func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
 	}
 }
 
+func TestDirectAnthropicToResponsesStreamCoversTextToolThinkingAndUsage(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatOpenAIResponses)
+	if converter == nil {
+		t.Fatalf("missing IR anthropic -> responses converter")
+	}
+	var out []byte
+	out = append(out, converter.Convert([]byte(`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"weather\"}"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":12,"output_tokens":5,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}`+"\n\n"))...)
+	got := string(out)
+	for _, want := range []string{
+		`event: response.created`,
+		`event: response.reasoning_summary_text.delta`,
+		`"delta":"think"`,
+		`event: response.output_text.delta`,
+		`"delta":"answer"`,
+		`"type":"function_call"`,
+		`"name":"lookup"`,
+		`event: response.function_call_arguments.delta`,
+		`"arguments":"{\"q\":\"weather\"}"`,
+		`event: response.completed`,
+		`"input_tokens":12`,
+		`"output_tokens":5`,
+		`"cached_tokens":4`,
+		`"cached_write_tokens":3`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Anthropic -> Responses stream missing %s:\n%s", want, got)
+		}
+	}
+}
+
 func TestDirectResponsesToGeminiStreamPreservesEncryptedReasoning(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatGemini)
 	if converter == nil {
@@ -396,6 +431,34 @@ func TestDirectResponsesToGeminiStreamPreservesEncryptedReasoning(t *testing.T) 
 	out := converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"enc_1","summary":[]}}` + "\n\n"))
 	if !strings.Contains(string(out), `"thoughtSignature":"enc_1"`) {
 		t.Fatalf("Responses encrypted reasoning not preserved into Gemini thoughtSignature:\n%s", out)
+	}
+}
+
+func TestDirectResponsesToGeminiStreamCoversTextFunctionCallAndReasoningText(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatGemini)
+	if converter == nil {
+		t.Fatalf("missing IR responses -> gemini converter")
+	}
+	var out []byte
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gemini"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"plan"}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.output_text.delta","output_index":1,"delta":"answer"}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.function_call_arguments.delta","output_index":2,"item_id":"call_1","delta":{"call_id":"call_1","arguments":"{\"q\":\"weather\"}"}}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gemini","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}"}]}}`+"\n\n"))...)
+	got := string(out)
+	for _, want := range []string{
+		`"thought":true`,
+		`"text":"plan"`,
+		`"text":"answer"`,
+		`"functionCall"`,
+		`"name":"lookup"`,
+		`"q":"weather"`,
+		`"finishReason":"STOP"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses -> Gemini stream missing %s:\n%s", want, got)
+		}
 	}
 }
 

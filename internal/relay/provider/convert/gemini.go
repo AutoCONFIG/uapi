@@ -39,6 +39,9 @@ func parseGeminiRequestDirectIR(body []byte) (*relayir.Request, error) {
 			out.Generation.ResponseFormat = responseFormatFromGemini(req.GenerationConfig.ResponseMimeType, req.GenerationConfig.ResponseSchema)
 		}
 	}
+	if cachedContent := rawString(req.Extra["cachedContent"]); cachedContent != "" {
+		out.Cache.CachedContent = cachedContent
+	}
 	out.Safety.Settings = relayir.CloneRaw(req.SafetySettings)
 	if req.Tools != nil {
 		if tools := parseGeminiRequestTools(req.Tools); len(tools) > 0 {
@@ -259,6 +262,9 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 	if len(reqIR.Safety.Settings) > 0 {
 		out["safetySettings"] = relayir.CloneRaw(reqIR.Safety.Settings)
 	}
+	if reqIR.Cache.CachedContent != "" {
+		out["cachedContent"] = reqIR.Cache.CachedContent
+	}
 	hasGeminiTools := false
 	if len(reqIR.Tools) > 0 {
 		tools := make([]schema.Tool, 0, len(reqIR.Tools))
@@ -279,10 +285,16 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 		if isGeminiEnvelopeProtocol(reqIR.SourceProtocol) && isGeminiCLIEnvelopeExtra(k) {
 			continue
 		}
+		if k == "cachedContent" && reqIR.Cache.CachedContent != "" {
+			continue
+		}
 		out[k] = v
 	}
 	for k, v := range reqIR.Native.Fields {
 		if isGeminiEnvelopeProtocol(reqIR.SourceProtocol) && isGeminiCLIEnvelopeExtra(k) {
+			continue
+		}
+		if k == "cachedContent" && reqIR.Cache.CachedContent != "" {
 			continue
 		}
 		out[k] = v

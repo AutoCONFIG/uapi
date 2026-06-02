@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/valyala/fasthttp"
 )
 
 func TestGetRequestURLPassesThroughOpenAIMediaPaths(t *testing.T) {
@@ -48,6 +49,34 @@ func TestGetRequestURLKeepsCodexBaseForTextButNotOpenAIPlatformMedia(t *testing.
 	}
 	if got != CodexAPIBaseURL+"/images/generations" {
 		t.Fatalf("codex images URL = %q", got)
+	}
+}
+
+func TestCodexSetupRequestHeaderUsesNativeContract(t *testing.T) {
+	adaptor := &OpenAIAdaptor{}
+	adaptor.Init(&db.Channel{Type: "openai", APIFormat: "codex", Endpoint: "https://api.openai.com/v1"}, &db.Account{
+		Metadata: map[string]interface{}{
+			"chatgpt_account_id":         "acc_123",
+			"chatgpt_account_is_fedramp": true,
+		},
+	})
+
+	var req fasthttp.Request
+	if err := adaptor.SetupRequestHeader(&req, "sk-test"); err != nil {
+		t.Fatalf("SetupRequestHeader: %v", err)
+	}
+	wants := map[string]string{
+		"Authorization":      "Bearer sk-test",
+		"originator":         CodexOriginator,
+		"User-Agent":         CodexUserAgent,
+		"ChatGPT-Account-ID": "acc_123",
+		"X-OpenAI-Fedramp":   "true",
+		"Content-Type":       "application/json",
+	}
+	for header, want := range wants {
+		if got := string(req.Header.Peek(header)); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
 	}
 }
 

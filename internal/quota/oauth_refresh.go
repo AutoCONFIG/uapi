@@ -84,6 +84,9 @@ func (s *Scheduler) refreshOAuthAccessToken(acc *db.Account, ch db.Channel) (str
 	}
 	acc.Metadata["oauth_last_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
 	s.syncOAuthMetadata(acc, ch, quotaToken, result.Scope)
+	if ch.APIFormat == "codex" {
+		normalizeCodexMetadata(acc.Metadata)
+	}
 	updates["metadata"] = acc.Metadata
 
 	if err := s.db.Model(&db.Account{}).Where("id = ?", acc.ID).Updates(updates).Error; err != nil {
@@ -251,6 +254,24 @@ func mergeMetadata(acc *db.Account, metadata map[string]interface{}) {
 	}
 	for key, value := range metadata {
 		acc.Metadata[key] = value
+	}
+}
+
+func normalizeCodexMetadata(metadata map[string]interface{}) {
+	if metadata == nil {
+		return
+	}
+	metadata["auth_mode"] = "chatgpt"
+	accountID := ""
+	if id, ok := metadata["account_id"].(string); ok && strings.TrimSpace(id) != "" {
+		accountID = strings.TrimSpace(id)
+	}
+	if id, ok := metadata["chatgpt_account_id"].(string); ok && strings.TrimSpace(id) != "" {
+		accountID = strings.TrimSpace(id)
+	}
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		metadata["chatgpt_account_id"] = accountID
 	}
 }
 

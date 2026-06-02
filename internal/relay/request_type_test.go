@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestDetectRelayRequestTypeCoversProtocolFamilies(t *testing.T) {
@@ -24,6 +26,65 @@ func TestDetectRelayRequestTypeCoversProtocolFamilies(t *testing.T) {
 	for path, want := range cases {
 		if got := detectRelayRequestType(path); got != want {
 			t.Fatalf("detectRelayRequestType(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestDetectRelayRequestTypeRejectsUnsupportedConversionRoutes(t *testing.T) {
+	paths := []string{
+		"/v1/responses/input_tokens",
+		"/v1/messages/count_tokens",
+		"/v1/messages/batches",
+		"/v1/messages/raw",
+		"/v1/async/responses",
+		"/v1/async/chat/completions",
+		"/v1/chat/completions/extra",
+		"/openai/v1/chat/completions",
+		"/openai/chat/completions",
+		"/openai/deployments/dep/chat/completions",
+		"/v1/batches",
+		"/v1/files",
+		"/v1/files/file_1",
+		"/v1/containers",
+		"/v1beta/models/gemini:countTokens",
+		"/v1beta/models/gemini:embedContent",
+		"/v1beta/models/gemini:batchEmbedContents",
+		"/v1beta/models/imagen:predict",
+		"/v1beta/models/veo:predictLongRunning",
+		"/v1beta/models/gemini:batchGenerateContent",
+		"/v1beta/files",
+		"/v1beta/cachedContents",
+		"/v1beta/batches",
+		"/v1beta/operations/batch_1",
+	}
+	for _, path := range paths {
+		if got := detectRelayRequestType(path); got != requestTypeUnsupported {
+			t.Fatalf("detectRelayRequestType(%q) = %q, want %q", path, got, requestTypeUnsupported)
+		}
+	}
+}
+
+func TestHandleRelayRejectsUnsupportedRoutesBeforeAuthOrAdaptor(t *testing.T) {
+	paths := []string{
+		"/v1/responses/input_tokens",
+		"/v1/messages/count_tokens",
+		"/v1beta/models/gemini:countTokens",
+		"/v1/files",
+	}
+	for _, path := range paths {
+		var req fasthttp.Request
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.SetRequestURI(path)
+		var ctx fasthttp.RequestCtx
+		ctx.Init(&req, nil, nil)
+
+		(&Relayer{}).HandleRelay(&ctx)
+
+		if ctx.Response.StatusCode() != fasthttp.StatusBadRequest {
+			t.Fatalf("HandleRelay(%q) status = %d, want 400", path, ctx.Response.StatusCode())
+		}
+		if got := string(ctx.Response.Body()); got != `{"error":"unsupported route"}` {
+			t.Fatalf("HandleRelay(%q) body = %q", path, got)
 		}
 	}
 }

@@ -41,6 +41,40 @@ func TestSetupRequestHeaderUsesQueryKeyForAPIKey(t *testing.T) {
 	}
 }
 
+func TestGeminiCodeAssistSetupRequestHeaderUsesNativeContract(t *testing.T) {
+	adaptor := &GeminiAdaptor{}
+	adaptor.Init(&db.Channel{Type: "gemini", APIFormat: "gemini_code", Endpoint: "https://generativelanguage.googleapis.com"}, &db.Account{CredType: "oauth_token"})
+	adaptor.SetRequestParams("gemini-2.5-pro", true)
+
+	gotURL, err := adaptor.GetRequestURL("/v1beta/models/gemini-2.5-pro:streamGenerateContent")
+	if err != nil {
+		t.Fatalf("GetRequestURL: %v", err)
+	}
+	if gotURL != CodeAssistEndpoint+"/v1internal:generateContent" {
+		t.Fatalf("GetRequestURL = %q", gotURL)
+	}
+
+	var req fasthttp.Request
+	if err := adaptor.SetupRequestHeader(&req, "ya29.code-assist"); err != nil {
+		t.Fatalf("SetupRequestHeader returned error: %v", err)
+	}
+	if got := string(req.URI().FullURI()); got != CodeAssistEndpoint+"/v1internal:streamGenerateContent?alt=sse" {
+		t.Fatalf("request URI = %q", got)
+	}
+	if got := string(req.Header.Peek("Authorization")); got != "Bearer ya29.code-assist" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := string(req.Header.Peek("User-Agent")); got != GeminiCLIUserAgent("gemini-2.5-pro") {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := string(req.Header.Peek("Content-Type")); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := string(req.URI().QueryArgs().Peek("key")); got != "" {
+		t.Fatalf("key query parameter = %q, want empty for Code Assist OAuth", got)
+	}
+}
+
 func TestParseUsageFullCapturesCodeAssistEnvelopeCachedContent(t *testing.T) {
 	adaptor := &GeminiAdaptor{}
 	usage, err := adaptor.ParseUsageFull([]byte(`{"response":{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"cachedContentTokenCount":7}}}`))

@@ -202,8 +202,6 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 		data["api_format"] = ch.APIFormat
 	}
 	if acc.CredType == "oauth_token" {
-		data["type"] = "oauth_token"
-		data["access_token"] = credential
 		refreshToken := ""
 		if acc.RefreshToken != "" {
 			refreshToken, err = crypto.Decrypt(acc.RefreshToken)
@@ -220,6 +218,22 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 				return
 			}
 		}
+		if ch.APIFormat == "codex" {
+			if refreshToken == "" {
+				h.jsonError(ctx, fasthttp.StatusInternalServerError, "codex account has no refresh token")
+				return
+			}
+			authJSON, err := exportCodexAuthJSON(&acc, credential, refreshToken)
+			if err != nil {
+				h.jsonError(ctx, fasthttp.StatusInternalServerError, err.Error())
+				return
+			}
+			auditCreateCtx(h.db, "account_export", acc.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"account_id": acc.ID, "name": acc.Name})
+			h.jsonResponse(ctx, 200, authJSON)
+			return
+		}
+		data["type"] = "oauth_token"
+		data["access_token"] = credential
 		if refreshToken != "" {
 			data["refresh_token"] = refreshToken
 		}
@@ -241,6 +255,44 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 	}
 	auditCreateCtx(h.db, "account_export", acc.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"account_id": acc.ID, "name": acc.Name})
 	h.jsonResponse(ctx, 200, data)
+}
+
+func exportCodexAuthJSON(acc *db.Account, accessToken, refreshToken string) (map[string]interface{}, error) {
+	metadata := normalizeCodexAccountMetadata(acc.Metadata)
+	accountID := openAIAccountID(metadata)
+	if accountID == "" {
+		return nil, errCodexExport("codex account metadata missing account_id")
+	}
+	idToken := metadataStringFromMap(metadata, "raw_id_token")
+	if idToken == "" {
+		return nil, errCodexExport("codex account metadata missing id_token")
+	}
+	return map[string]interface{}{
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"tokens": map[string]interface{}{
+			"id_token":      idToken,
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+			"account_id":    accountID,
+		},
+	}, nil
+}
+
+type codexExportError string
+
+func (e codexExportError) Error() string { return string(e) }
+
+func errCodexExport(message string) error { return codexExportError(message) }
+
+func metadataStringFromMap(metadata map[string]interface{}, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	if value, ok := metadata[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {

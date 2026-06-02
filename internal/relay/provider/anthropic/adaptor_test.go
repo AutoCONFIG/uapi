@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/valyala/fasthttp"
 )
 
 func TestParseUsageFullTotalsNestedCacheCreation(t *testing.T) {
@@ -40,5 +41,32 @@ func TestGetRequestURLAlwaysUsesMessagesEndpoint(t *testing.T) {
 		if got != "https://api.anthropic.com/v1/messages" {
 			t.Fatalf("GetRequestURL(%q) = %q", path, got)
 		}
+	}
+}
+
+func TestClaudeCodeOAuthSetupRequestHeaderUsesNativeContract(t *testing.T) {
+	a := &AnthropicAdaptor{}
+	a.Init(&db.Channel{Type: "anthropic", APIFormat: "claude_code", Endpoint: "https://api.anthropic.com/v1"}, &db.Account{CredType: "oauth_token"})
+
+	var req fasthttp.Request
+	if err := a.SetupRequestHeader(&req, "oauth-access-token"); err != nil {
+		t.Fatalf("SetupRequestHeader: %v", err)
+	}
+	wants := map[string]string{
+		"Authorization":            "Bearer oauth-access-token",
+		"anthropic-beta":           OAuthBetaHeader,
+		"x-app":                    "cli",
+		"User-Agent":               ClaudeCLIUserAgent,
+		"X-Claude-Code-Session-Id": ClaudeCodeSessionID,
+		"anthropic-version":        "2023-06-01",
+		"Content-Type":             "application/json",
+	}
+	for header, want := range wants {
+		if got := string(req.Header.Peek(header)); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+	if got := string(req.Header.Peek("x-api-key")); got != "" {
+		t.Fatalf("x-api-key = %q, want empty for OAuth", got)
 	}
 }
