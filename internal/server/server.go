@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/admin"
+	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -57,6 +58,9 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
 		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies), relay.WithStreamIdleTimeout(time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second))
 		s.relayer.SetQuotaScheduler(s.quotaScheduler)
+		// Load large payload threshold from database settings
+		largePayloadThresholdMB := appsettings.GetInt(database, appsettings.LargePayloadThresholdMB, 256)
+		s.relayer.SetLargePayloadThreshold(largePayloadThresholdMB)
 		s.relayer.StartConfigPuller(cfg.Gateway.RelayNodeID, pullInterval)
 	}
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "gateway" {

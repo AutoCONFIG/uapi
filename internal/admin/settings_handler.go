@@ -23,6 +23,7 @@ type AdminSettingsResponse struct {
 	Background              string `json:"background"`
 	PublicBaseURL           string `json:"public_base_url,omitempty"`
 	WallpaperURL            string `json:"wallpaper_url,omitempty"`
+	LargePayloadThresholdMB int    `json:"large_payload_threshold_mb"`
 }
 
 type UpdateAdminSettingsRequest struct {
@@ -34,6 +35,7 @@ type UpdateAdminSettingsRequest struct {
 	MaxKeysPerUser          *int    `json:"max_keys_per_user"`
 	Background              *string `json:"background"`
 	PublicBaseURL           *string `json:"public_base_url"`
+	LargePayloadThresholdMB *int    `json:"large_payload_threshold_mb"`
 }
 
 type PublicSettingsResponse struct {
@@ -121,6 +123,13 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 			}
 			changes["public_base_url"] = publicBaseURL
 		}
+		if req.LargePayloadThresholdMB != nil {
+			if *req.LargePayloadThresholdMB < 1 || *req.LargePayloadThresholdMB > 1024 {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "large_payload_threshold_mb must be between 1 and 1024")
+				return
+			}
+			changes["large_payload_threshold_mb"] = *req.LargePayloadThresholdMB
+		}
 		if len(changes) == 0 {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "no fields to update")
 			return
@@ -154,6 +163,7 @@ func (h *Handler) settingsResponse() AdminSettingsResponse {
 		Background:              background,
 		PublicBaseURL:           appsettings.Get(h.db, appsettings.UIPublicBaseURL, ""),
 		WallpaperURL:            h.wallpaperURL(),
+		LargePayloadThresholdMB: appsettings.GetInt(h.db, appsettings.LargePayloadThresholdMB, 256),
 	}
 }
 
@@ -189,6 +199,8 @@ func (h *Handler) saveSettings(changes map[string]interface{}) error {
 			values[appsettings.UIBackground] = value.(string)
 		case "public_base_url":
 			values[appsettings.UIPublicBaseURL] = value.(string)
+		case "large_payload_threshold_mb":
+			values[appsettings.LargePayloadThresholdMB] = strconv.Itoa(value.(int))
 		}
 	}
 	return appsettings.SetMany(h.db, values)

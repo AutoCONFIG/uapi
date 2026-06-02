@@ -1405,6 +1405,16 @@ UAPI-specific behavior:
 - Force-stream buffers upstream SSE, converts to OpenAI Chat non-stream first, then converts to downstream format if needed.
 - Codex response/request conversion is currently OpenAI Responses-compatible, not a separate Codex-native schema beyond headers/base URL/normalization.
 
+**Stream Converter Analysis**:
+
+- Codex upstream uses standard OpenAI Responses streaming format (`/v1/responses`), confirmed in `upstream/codex/codex-rs/responses-api-proxy/README.md`: `wire_api='responses'`.
+- `FormatOpenAIResponses` and `FormatCodexResponses` share the same stream parser/emitter (`newResponsesIRParser`/`newResponsesIREmitter`) in `internal/relay/provider/stream/ir_openai.go:1194-1197`.
+- However, `stream.NewConverter` only checks `upstream != client`, not whether they share the same parser/emitter, resulting in unnecessary IR conversion.
+- **Force-stream path requirement**: When client sends non-streaming request to Codex channel, `handleForceStream` executes `Codex Responses → OpenAI Chat SSE → non-stream JSON → clientFormat` conversion chain.
+  - First conversion (`handler.go:767`): `newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions)`.
+  - This conversion is unnecessary because Codex Responses and OpenAI Responses formats are identical.
+- **Specification requirement**: Codex's Responses streaming interface is 100% compatible with OpenAI Responses. The conversion chain MUST be optimized to either pass-through directly or perform only OpenAI Responses → clientFormat conversion.
+
 ### 9.2 Claude Code
 
 Channel:
@@ -1473,6 +1483,13 @@ UAPI-specific boundary:
 - For reference: Bifrost's Claude Code gate checks User-Agent and model, then sets `UseRawRequestBody` but still sanitizes in `requestbuilder.go:82-104`, `174-196`.
 - UAPI equivalent would require adding explicit Claude Code request detection, safe header passthrough, and raw-body sanitizers if Bifrost parity is desired.
 - Current UAPI behavior is: `anthropic` + `api_format=claude_code` → `FormatClaudeCode` → parse/emit through Anthropic family.
+
+**Stream Converter Analysis**:
+
+- `FormatAnthropic` and `FormatClaudeCode` share the same stream parser/emitter (`newAnthropicIRParser`/`newAnthropicIREmitter`) in `internal/relay/provider/stream/ir_anthropic_gemini.go:690-695`.
+- This means when `clientFormat=Anthropic, upstreamFormat=ClaudeCode`, an unnecessary IR conversion is created.
+- However, because they use the same parser/emitter, the actual conversion is pass-through with no data loss.
+- **Specification requirement**: Claude Code's streaming interface is 100% compatible with standard Anthropic Messages. No special handling required beyond current implementation.
 
 ### 9.3 Gemini Code Assist / Gemini CLI
 
@@ -1573,6 +1590,13 @@ Protocol family:
 - Native body is a v1internal Cloud Code style envelope around Gemini inner request.
 - Parser uses Gemini CLI parser and changes protocol to `antigravity`.
 - Emitter starts from Gemini IR output and wraps it with Antigravity-specific fields.
+
+**Stream Converter Analysis**:
+
+- `FormatGemini`, `FormatGeminiCode`, `FormatGeminiCLI`, and `FormatAntigravity` share the same stream parser/emitter (`newGeminiIRParser`/`newGeminiIREmitter`) in `internal/relay/provider/stream/ir_anthropic_gemini.go:692-701`.
+- This means streaming conversions between these formats are effectively pass-through with no data loss.
+- **Potential difference**: Although they share the same parser/emitter, the request/response conversion layer (`native_protocols.go`) has special handling for Antigravity (v1internal envelope wrapping).
+- **Specification requirement**: Gemini/CLI/Code Assist/Antigravity family streaming interfaces are compatible at IR layer, but request/response conversion requires special envelope handling.
 
 URL:
 
@@ -1881,9 +1905,23 @@ Current large body behavior:
 
 - Relay request bodies are materialized through `ctx.PostBody()` before request classification/conversion.
 - UAPI has no Bifrost-style `LargePayloadHook`, `LargeResponseHook`, large payload context metadata, or large payload request reader path in the conversion layer.
+- UAPI performs full JSON deserialization and re-serialization in `cleanJSONUndefinedPlaceholders` before protocol conversion, which can alter request body encoding/size for large payloads containing base64 data.
 - Buffered upstream responses are capped by `maxResponseSize = 100 * 1024 * 1024`; force-stream buffering reads one byte past that cap and returns 502 `upstream response too large` when exceeded.
 - Streaming upstream error bodies are read with `io.LimitReader(stream, maxResponseSize)`.
 - Upstream HTTP 413 bodies are normalized by client protocol family and generic provider messages are rewritten to `upstream returned HTTP 413: request body too large`.
+
+Bifrost large payload standard approach:
+
+- Bifrost uses a 10MB threshold (`DefaultLargePayloadRequestThresholdBytes = 10 * 1024 * 1024`) at `upstream/bifrost/core/schemas/bifrost.go:338-340`.
+- When request body exceeds threshold, Bifrost enters "large payload mode" and uses streaming body reader instead of materializing the full body.
+- Large payload mode preserves the original request body encoding without JSON parse→re-serialize cycle.
+- Bifrost context keys for large payload: `BifrostContextKeyLargePayloadMode`, `BifrostContextKeyLargePayloadReader`, `BifrostContextKeyLargePayloadContentLength`, `BifrostContextKeyLargePayloadContentType`, `BifrostContextKeyLargePayloadMetadata`.
+- Provider utilities apply large payload body via `ApplyLargePayloadRequestBodyWithModelNormalization` at `upstream/bifrost/core/providers/utils/utils.go:700-740`, which uses `req.SetBodyStream()` instead of `req.SetBody()`.
+- Middleware at `upstream/bifrost/transports/bifrost-http/handlers/middlewares.go:557-576` skips body copy when large payload mode is active.
+
+**Required repair**: UAPI should avoid JSON parse→re-serialize cycle for large payloads. Consider:
+1. Skip `cleanJSONUndefinedPlaceholders` for requests exceeding a size threshold.
+2. Or implement Bifrost-style large payload streaming path.
 
 Unsupported route contract:
 
@@ -1899,9 +1937,14 @@ Source facts:
 
 - Bifrost async headers: `upstream/bifrost/core/schemas/async.go:16-21`.
 - Bifrost async routes and retrieval: `upstream/bifrost/transports/bifrost-http/handlers/asyncinference.go:65-90`, `492-520`.
-- Bifrost large payload hooks: `upstream/bifrost/transports/bifrost-http/integrations/router.go:523-560`.
+- Bifrost large payload threshold constant: `upstream/bifrost/core/schemas/bifrost.go:338-340` (`DefaultLargePayloadRequestThresholdBytes = 10MB`).
+- Bifrost large payload middleware skip: `upstream/bifrost/transports/bifrost-http/handlers/middlewares.go:557-576`.
+- Bifrost large payload body streaming: `upstream/bifrost/core/providers/utils/utils.go:675-740` (`ApplyLargePayloadRequestBodyWithModelNormalization`).
+- Bifrost large payload context keys: defined in `upstream/bifrost/core/schemas/bifrost.go` (search for `BifrostContextKeyLargePayload*`).
+- Bifrost large payload router hooks: `upstream/bifrost/transports/bifrost-http/integrations/router.go:523-560`.
 - Bifrost route type split for batch/file/container/cached content: `upstream/bifrost/transports/bifrost-http/integrations/router.go:601-607`, `823-864`, `2288-2406`.
 - Bifrost Gemini batch/file/cached content/large-payload examples: `upstream/bifrost/transports/bifrost-http/integrations/genai.go:177-190`, `420-430`, `931-990`, `1236-1248`, `1420-1426`.
+- UAPI JSON cleanup function: `internal/relay/provider/convert/sanitize.go:9-25` (`cleanJSONUndefinedPlaceholders` parses JSON, removes `[undefined]` sentinels, then re-marshals).
 - UAPI unsupported route detection: `internal/relay/request_type.go:32-51`, `78-96`.
 - UAPI early unsupported response: `internal/relay/handler.go:227-231`.
 - UAPI request body materialization: `internal/relay/handler.go:328`.

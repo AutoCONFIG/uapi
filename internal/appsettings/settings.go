@@ -18,6 +18,7 @@ const (
 	UIPublicBaseURL         = "ui.public_base_url"
 	UIWallpaperPath         = "ui.wallpaper_path"
 	UserMaxKeysPerUser      = "user.max_keys_per_user"
+	LargePayloadThresholdMB = "server.large_payload_threshold_mb"
 )
 
 func Bootstrap(database *gorm.DB) error {
@@ -28,6 +29,7 @@ func Bootstrap(database *gorm.DB) error {
 		ModelRatios:             "{}",
 		UIBackground:            "mesh",
 		UserMaxKeysPerUser:      "1",
+		LargePayloadThresholdMB: "256",
 	}
 	return database.Transaction(func(tx *gorm.DB) error {
 		for key, value := range defaults {
