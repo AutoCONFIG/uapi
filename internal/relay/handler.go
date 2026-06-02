@@ -53,24 +53,24 @@ const largePayloadThresholdBytesDefault = 256 * 1024 * 1024
 const defaultStreamIdleTimeout = 300 * time.Second
 
 type Relayer struct {
-	db                 *gorm.DB
-	pools              *PoolManager
-	billing            *BillingService
-	affinity           *AffinityCache
-	concLimiter        *ConcurrencyLimiter
-	chCache            *channelCache
-	internalSecret     string
-	requireInternal    bool
-	controlURL         string
-	trustedProxies     []string
-	streamIdleTimeout  time.Duration
-	largePayloadBytes  int64 // threshold in bytes, defaults to 256MB
-	runtimeMu          sync.RWMutex
-	runtimeVersion     int64
-	runtimeChannels    map[uuid.UUID]db.Channel
-	runtimeAccounts    map[uuid.UUID]db.Account
-	quotaScheduler     *quota.Scheduler
-	oauthRefreshHook   func(uuid.UUID)
+	db                *gorm.DB
+	pools             *PoolManager
+	billing           *BillingService
+	affinity          *AffinityCache
+	concLimiter       *ConcurrencyLimiter
+	chCache           *channelCache
+	internalSecret    string
+	requireInternal   bool
+	controlURL        string
+	trustedProxies    []string
+	streamIdleTimeout time.Duration
+	largePayloadBytes int64 // threshold in bytes, defaults to 256MB
+	runtimeMu         sync.RWMutex
+	runtimeVersion    int64
+	runtimeChannels   map[uuid.UUID]db.Channel
+	runtimeAccounts   map[uuid.UUID]db.Account
+	quotaScheduler    *quota.Scheduler
+	oauthRefreshHook  func(uuid.UUID)
 }
 
 type RelayerOption func(*Relayer)
@@ -110,19 +110,19 @@ func WithLargePayloadThreshold(thresholdBytes int64) RelayerOption {
 
 func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int, internalSecret string, requireInternal bool, controlURL string, opts ...RelayerOption) *Relayer {
 	r := &Relayer{
-		db:                 database,
-		pools:              pools,
-		billing:            billing,
-		affinity:           affinity,
-		concLimiter:        NewConcurrencyLimiter(concLimit),
-		chCache:            newChannelCache(database, 30*time.Second),
-		internalSecret:     internalSecret,
-		requireInternal:    requireInternal,
-		controlURL:         strings.TrimRight(controlURL, "/"),
-		streamIdleTimeout:  defaultStreamIdleTimeout,
-		largePayloadBytes:  largePayloadThresholdBytesDefault,
-		runtimeChannels:    make(map[uuid.UUID]db.Channel),
-		runtimeAccounts:    make(map[uuid.UUID]db.Account),
+		db:                database,
+		pools:             pools,
+		billing:           billing,
+		affinity:          affinity,
+		concLimiter:       NewConcurrencyLimiter(concLimit),
+		chCache:           newChannelCache(database, 30*time.Second),
+		internalSecret:    internalSecret,
+		requireInternal:   requireInternal,
+		controlURL:        strings.TrimRight(controlURL, "/"),
+		streamIdleTimeout: defaultStreamIdleTimeout,
+		largePayloadBytes: largePayloadThresholdBytesDefault,
+		runtimeChannels:   make(map[uuid.UUID]db.Channel),
+		runtimeAccounts:   make(map[uuid.UUID]db.Account),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -349,6 +349,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 5. Parse request
 	var req relayRequest
 	body := ctx.PostBody()
+	var originalBody []byte
+	if relayDebugDumpEnabled() {
+		originalBody = append([]byte(nil), body...)
+	}
 	isMediaRequest := requestType.isMedia()
 	// Skip JSON cleanup for large payloads to avoid request body size changes
 	// from JSON parse→re-serialize cycle (matches Bifrost's large payload handling).
@@ -559,7 +563,13 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		convertedBody = normalizeCodexResponsesRequest(convertedBody)
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
+	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) {
+		convertedBody = injectStreamTrue(convertedBody)
+	}
 	adaptor.SetRequestParams(routedModel, effectiveStream)
+	if relayDebugDumpEnabled() {
+		dumpRelayRequestDebug(originalBody, convertedBody, token, targetChannel, account, claims, clientFormat, upstreamFormat, requestType, req.Model, routedModel, effectiveStream)
+	}
 
 	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
@@ -590,6 +600,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 	upReq.SetRequestURI(url)
 	upReq.Header.SetMethodBytes([]byte("POST"))
+	upReq.Header.Set("Connection", "close")
 	upReq.SetBody(body)
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
 		fasthttp.ReleaseRequest(upReq)
@@ -651,14 +662,13 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			}
 		}()
 		defer fasthttp.ReleaseRequest(upReq)
-		defer fasthttp.ReleaseResponse(upResp)
+		defer releaseStreamingResponse(upResp)
 		defer r.releaseLocalConcurrency(token.ID.String(), claims)
 
 		bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(upResp.BodyStream(), upResp.BodyStream(), r.streamIdleTimeout)
 		defer stopIdleTimeout()
 		result := streamAndForward(bodyStream, reader, tracker, inputConvert, outputConvert, sendDone)
 		if result.err != nil {
-			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
 			if errors.Is(result.err, io.ErrClosedPipe) {
 				pt, ct, _ := tracker.Result()
 				cacheCreationTokens := tracker.CacheCreationTokens()
@@ -671,6 +681,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				return
 			}
+			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			return
 		}
@@ -2719,6 +2730,15 @@ func shouldInjectStreamField(clientFormat provider.Format, sameFormat bool, forc
 	return !sameFormat || forceStreamActive
 }
 
+func shouldInjectConvertedStreamField(upstreamFormat provider.Format) bool {
+	switch upstreamFormat {
+	case provider.FormatOpenAIChatCompletions, provider.FormatOpenAIResponses, provider.FormatAnthropic, provider.FormatClaudeCode, provider.FormatCodexResponses:
+		return true
+	default:
+		return false
+	}
+}
+
 func doStreamingRequest(req *fasthttp.Request, resp *fasthttp.Response) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -2746,6 +2766,13 @@ func doStreamingRequestOnce(req *fasthttp.Request, resp *fasthttp.Response) (err
 		}
 	}()
 	return streamingClient.Do(req, resp)
+}
+
+func releaseStreamingResponse(resp *fasthttp.Response) {
+	defer func() {
+		_ = recover()
+	}()
+	fasthttp.ReleaseResponse(resp)
 }
 
 func toUUID(v interface{}) uuid.UUID {

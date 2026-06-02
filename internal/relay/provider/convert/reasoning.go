@@ -29,9 +29,11 @@ func reasoningPartWithExtra(text string, extra map[string]json.RawMessage) schem
 }
 
 func reasoningTextFromExtra(extra map[string]json.RawMessage) string {
-	if raw, ok := extra["reasoning_content"]; ok {
-		if text := rawString(raw); text != "" {
-			return text
+	for _, key := range []string{"reasoning_content", "reasoning"} {
+		if raw, ok := extra[key]; ok {
+			if text := rawString(raw); text != "" {
+				return text
+			}
 		}
 	}
 	return ""

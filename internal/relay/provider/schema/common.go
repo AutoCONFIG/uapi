@@ -1,6 +1,10 @@
 package schema
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"sort"
+)
 
 // MessageContent handles polymorphic content (bare string vs array of ContentPart).
 type MessageContent struct {
@@ -118,69 +122,127 @@ func (p *ContentPart) UnmarshalJSON(data []byte) error {
 }
 
 func (p ContentPart) MarshalJSON() ([]byte, error) {
-	out := make(map[string]interface{})
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	first := true
+	addField := func(key string, value interface{}) error {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+		keyRaw, _ := json.Marshal(key)
+		buf.Write(keyRaw)
+		buf.WriteByte(':')
+		buf.Write(raw)
+		return nil
+	}
+	addRawField := func(key string, raw json.RawMessage) {
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+		keyRaw, _ := json.Marshal(key)
+		buf.Write(keyRaw)
+		buf.WriteByte(':')
+		buf.Write(raw)
+	}
+
 	if p.Type != "" {
-		out["type"] = p.Type
+		if err := addField("type", p.Type); err != nil {
+			return nil, err
+		}
 	}
 	if p.Text != "" || p.Type == "text" || p.Type == "input_text" || p.Type == "output_text" {
-		out["text"] = p.Text
+		if err := addField("text", p.Text); err != nil {
+			return nil, err
+		}
 	}
 	if p.ImageURL != nil {
-		out["image_url"] = *p.ImageURL
+		image := struct {
+			URL    string `json:"url"`
+			Detail string `json:"detail,omitempty"`
+		}{URL: *p.ImageURL, Detail: p.ImageDetail}
+		if err := addField("image_url", image); err != nil {
+			return nil, err
+		}
 	}
-	if p.ImageDetail != "" {
-		out["detail"] = p.ImageDetail
+	if p.ImageDetail != "" && p.ImageURL == nil {
+		if err := addField("detail", p.ImageDetail); err != nil {
+			return nil, err
+		}
 	}
 	if p.Type == "file" {
-		file := make(map[string]interface{})
-		if p.FileData != "" {
-			file["file_data"] = p.FileData
-		}
-		if p.FileURL != "" {
-			file["file_url"] = p.FileURL
-		}
-		if p.FileID != "" {
-			file["file_id"] = p.FileID
-		}
-		if p.Filename != "" {
-			file["filename"] = p.Filename
-		}
-		if p.FileType != "" {
-			file["file_type"] = p.FileType
-		}
-		if len(file) > 0 {
-			out["file"] = file
+		file := struct {
+			FileData string `json:"file_data,omitempty"`
+			FileURL  string `json:"file_url,omitempty"`
+			FileID   string `json:"file_id,omitempty"`
+			Filename string `json:"filename,omitempty"`
+			FileType string `json:"file_type,omitempty"`
+		}{FileData: p.FileData, FileURL: p.FileURL, FileID: p.FileID, Filename: p.Filename, FileType: p.FileType}
+		if p.FileData != "" || p.FileURL != "" || p.FileID != "" || p.Filename != "" || p.FileType != "" {
+			if err := addField("file", file); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		if p.FileData != "" {
-			out["file_data"] = p.FileData
+			if err := addField("file_data", p.FileData); err != nil {
+				return nil, err
+			}
 		}
 		if p.FileURL != "" {
-			out["file_url"] = p.FileURL
+			if err := addField("file_url", p.FileURL); err != nil {
+				return nil, err
+			}
 		}
 		if p.FileID != "" {
-			out["file_id"] = p.FileID
+			if err := addField("file_id", p.FileID); err != nil {
+				return nil, err
+			}
 		}
 		if p.Filename != "" {
-			out["filename"] = p.Filename
+			if err := addField("filename", p.Filename); err != nil {
+				return nil, err
+			}
 		}
 		if p.FileType != "" {
-			out["file_type"] = p.FileType
+			if err := addField("file_type", p.FileType); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if p.Data != "" {
-		out["data"] = p.Data
+		if err := addField("data", p.Data); err != nil {
+			return nil, err
+		}
 	}
 	if p.MimeType != "" {
-		out["mime_type"] = p.MimeType
+		if err := addField("mime_type", p.MimeType); err != nil {
+			return nil, err
+		}
 	}
 	if p.Refusal != "" {
-		out["refusal"] = p.Refusal
+		if err := addField("refusal", p.Refusal); err != nil {
+			return nil, err
+		}
 	}
-	for k, v := range p.Extra {
-		out[k] = v
+	extraKeys := make([]string, 0, len(p.Extra))
+	for k := range p.Extra {
+		if k == "image_url" && p.ImageURL != nil {
+			continue
+		}
+		extraKeys = append(extraKeys, k)
 	}
-	return json.Marshal(out)
+	sort.Strings(extraKeys)
+	for _, k := range extraKeys {
+		addRawField(k, p.Extra[k])
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
 }
 
 func firstNonEmpty(values ...string) string {

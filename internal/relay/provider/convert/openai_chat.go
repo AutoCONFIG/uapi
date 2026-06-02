@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
@@ -396,12 +397,30 @@ func openAIChatContentParts(parts []schema.ContentPart) []schema.ContentPart {
 }
 
 func openAIChatFilePart(part schema.ContentPart) schema.ContentPart {
+	if openAIChatFilePartIsPDF(part) && (part.FileData != "" || part.FileURL != "") {
+		imageURL := firstNonEmptyString(part.FileData, part.FileURL)
+		return schema.ContentPart{
+			Type:     "image_url",
+			ImageURL: &imageURL,
+		}
+	}
 	return schema.ContentPart{
 		Type:     "file",
 		FileData: part.FileData,
 		FileID:   part.FileID,
 		Filename: part.Filename,
 	}
+}
+
+func openAIChatFilePartIsPDF(part schema.ContentPart) bool {
+	mimeType := strings.ToLower(firstNonEmptyString(part.FileType, part.MimeType))
+	if mimeType == "application/pdf" {
+		return true
+	}
+	if parsedMime, _, ok := splitDataURI(part.FileData); ok && strings.EqualFold(parsedMime, "application/pdf") {
+		return true
+	}
+	return strings.HasSuffix(strings.ToLower(part.Filename), ".pdf")
 }
 
 // joinNonEmpty joins non-empty strings with the given separator.

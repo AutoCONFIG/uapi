@@ -130,6 +130,21 @@ func TestOpenAIChatResponseEmitsOnlyReasoningContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatResponseParsesReasoningAlias(t *testing.T) {
+	out, err := provider.ConvertResponse(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIChatCompletions, []byte(`{
+		"id":"chatcmpl-test",
+		"model":"gpt-test",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning":"thinking"},"finish_reason":"stop"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ConvertResponse: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `"content":"answer"`) || !strings.Contains(got, `"reasoning_content":"thinking"`) || strings.Contains(got, `"reasoning":"thinking"`) {
+		t.Fatalf("OpenAI Chat reasoning alias was not canonicalized: %s", got)
+	}
+}
+
 func TestAnthropicToolUseWithoutNameDoesNotEmitInvalidResponsesInput(t *testing.T) {
 	_, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIResponses, []byte(`{
 		"model":"claude-test",

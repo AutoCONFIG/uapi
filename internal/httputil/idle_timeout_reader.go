@@ -2,13 +2,16 @@ package httputil
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 var ErrStreamIdleTimeout = errors.New("stream idle timeout")
+var ErrStreamClosed = errors.New("stream closed")
 
 type closeWithError interface {
 	CloseWithError(error) error
@@ -20,6 +23,7 @@ type IdleTimeoutReader struct {
 	timeout    time.Duration
 	timer      *time.Timer
 	fired      atomic.Bool
+	closed     atomic.Bool
 	closeOnce  sync.Once
 	timerOnce  sync.Once
 	timerDone  chan struct{}
@@ -51,9 +55,22 @@ func (r *IdleTimeoutReader) Read(p []byte) (n int, err error) {
 				err = ErrStreamIdleTimeout
 				return
 			}
+			if r.closed.Load() {
+				n = 0
+				err = ErrStreamClosed
+				return
+			}
+			if isClosedStreamPanic(recovered) {
+				n = 0
+				err = ErrStreamClosed
+				return
+			}
 			panic(recovered)
 		}
 	}()
+	if r.closed.Load() {
+		return 0, ErrStreamClosed
+	}
 	n, err = r.reader.Read(p)
 	if n > 0 && r.timer != nil {
 		r.timer.Reset(r.timeout)
@@ -61,7 +78,17 @@ func (r *IdleTimeoutReader) Read(p []byte) (n int, err error) {
 	if err != nil && err != io.EOF && r.fired.Load() {
 		return n, ErrStreamIdleTimeout
 	}
+	if err != nil && err != io.EOF && r.closed.Load() {
+		return n, ErrStreamClosed
+	}
 	return n, err
+}
+
+func isClosedStreamPanic(recovered interface{}) bool {
+	msg := fmt.Sprint(recovered)
+	return strings.Contains(msg, "slice bounds out of range") ||
+		strings.Contains(msg, "body closed") ||
+		strings.Contains(msg, "use of closed network connection")
 }
 
 func (r *IdleTimeoutReader) Close() error {
@@ -83,12 +110,13 @@ func (r *IdleTimeoutReader) cleanup() {
 
 func (r *IdleTimeoutReader) closeBody(err error) {
 	r.closeOnce.Do(func() {
-		if closer, ok := r.bodyStream.(io.Closer); ok {
-			_ = closer.Close()
-			return
-		}
+		r.closed.Store(true)
 		if closer, ok := r.bodyStream.(closeWithError); ok {
 			_ = closer.CloseWithError(err)
+			return
+		}
+		if closer, ok := r.bodyStream.(io.Closer); ok {
+			_ = closer.Close()
 		}
 	})
 }

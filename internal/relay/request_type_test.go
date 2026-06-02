@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/valyala/fasthttp"
 )
 
@@ -236,5 +237,20 @@ func TestRelayBodyRewriteHelpersPreserveLargeIntegers(t *testing.T) {
 		if !strings.Contains(string(got), `9007199254740993`) {
 			t.Fatalf("%s lost integer precision: %s", name, got)
 		}
+	}
+}
+
+func TestConvertedStreamFieldInjectionTargetsUpstreamProtocol(t *testing.T) {
+	if shouldInjectStreamField(provider.FormatGemini, false, false, false) {
+		t.Fatalf("Gemini client request body must not receive raw stream field before conversion")
+	}
+	if !shouldInjectConvertedStreamField(provider.FormatOpenAIChatCompletions) {
+		t.Fatalf("OpenAI Chat upstream body must receive stream field after conversion")
+	}
+	if !shouldInjectConvertedStreamField(provider.FormatAnthropic) {
+		t.Fatalf("Anthropic upstream body must receive stream field after conversion")
+	}
+	if shouldInjectConvertedStreamField(provider.FormatGemini) {
+		t.Fatalf("Gemini upstream body must not receive OpenAI-style stream field after conversion")
 	}
 }

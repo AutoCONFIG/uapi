@@ -476,6 +476,15 @@ func TestChatToResponsesUsesDistinctOutputIndexesForReasoningAndText(t *testing.
 	}
 }
 
+func TestChatReasoningAliasStreamsToResponsesReasoning(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+	got := string(converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"glm-5.1","choices":[{"index":0,"delta":{"reasoning":"think"},"finish_reason":null}]}` + "\n\n")))
+	if !strings.Contains(got, `"type":"response.reasoning_summary_text.delta"`) || !strings.Contains(got, `"delta":"think"`) {
+		t.Fatalf("Chat reasoning alias did not stream as Responses reasoning:\n%s", got)
+	}
+}
+
 func firstSSEPayload(t *testing.T, event []byte) string {
 	t.Helper()
 	for _, line := range strings.Split(string(event), "\n") {

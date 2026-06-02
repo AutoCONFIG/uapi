@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -139,6 +140,32 @@ func TestUnmarshalArrayOfParts(t *testing.T) {
 
 	if mc.Parts[1].Type != "image_url" || mc.Parts[1].Text != "" || mc.Parts[1].ImageURL == nil || *mc.Parts[1].ImageURL != "http://img" {
 		t.Fatalf("unexpected second part: %+v", mc.Parts[1])
+	}
+}
+
+func TestMarshalImageURLPartUsesObjectShape(t *testing.T) {
+	url := "data:application/pdf;base64,AA=="
+	mc := MessageContent{Parts: []ContentPart{{
+		Type:        "image_url",
+		ImageURL:    &url,
+		ImageDetail: "high",
+	}}}
+
+	raw, err := json.Marshal(mc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parts []map[string]interface{}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		t.Fatalf("unmarshal marshaled content: %v\n%s", err, raw)
+	}
+	image := parts[0]["image_url"].(map[string]interface{})
+	if image["url"] != url || image["detail"] != "high" {
+		t.Fatalf("image_url object not preserved: %s", raw)
+	}
+	if !strings.Contains(string(raw), `{"type":"image_url","image_url":{"url":"data:application/pdf;base64,AA==","detail":"high"}}`) {
+		t.Fatalf("image_url part must marshal type before image_url for compatible upstream parsers: %s", raw)
 	}
 }
 

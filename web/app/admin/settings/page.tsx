@@ -33,6 +33,7 @@ export default function AdminSettingsPage() {
   const [background, setBackground] = useState<AdminSettings["background"]>("mesh");
   const [publicBaseURL, setPublicBaseURL] = useState("");
   const [wallpaperURL, setWallpaperURL] = useState("");
+  const [largePayloadThreshold, setLargePayloadThreshold] = useState(256);
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -52,6 +53,7 @@ export default function AdminSettingsPage() {
       setBackground("mesh");
       setPublicBaseURL(settings.public_base_url || "");
       setWallpaperURL(settings.wallpaper_url || "");
+      setLargePayloadThreshold(settings.large_payload_threshold_mb ?? 256);
       applyBackground(settings);
     }).catch(() => undefined);
   }, []);
@@ -71,6 +73,7 @@ export default function AdminSettingsPage() {
         max_keys_per_user: maxKeysPerUser,
         background: "mesh",
         public_base_url: publicBaseURL.trim(),
+        large_payload_threshold_mb: largePayloadThreshold,
       });
       setLogRetention(updated.log_retention_days);
       setRedeemRetention(updated.redeem_code_retention_days);
@@ -81,6 +84,7 @@ export default function AdminSettingsPage() {
       setBackground("mesh");
       setPublicBaseURL(updated.public_base_url || "");
       setWallpaperURL(updated.wallpaper_url || "");
+      setLargePayloadThreshold(updated.large_payload_threshold_mb ?? 256);
       applyBackground(updated);
       setMessage("设置已保存");
     } catch (err) {
@@ -198,6 +202,11 @@ export default function AdminSettingsPage() {
               <label>公开访问地址</label>
               <input className="input" value={publicBaseURL} onChange={(e) => setPublicBaseURL(e.target.value)} />
               <span className="muted" style={{ fontSize: 12 }}>用于用户侧快速接入等需要展示真实域名的地方，留空则使用当前浏览器地址。</span>
+            </div>
+            <div className="field">
+              <label>大请求体阈值 (MB)</label>
+              <input className="input" type="number" min={1} max={1024} value={largePayloadThreshold} onChange={(e) => setLargePayloadThreshold(Number(e.target.value))} />
+              <span className="muted" style={{ fontSize: 12 }}>超过此大小的请求将跳过JSON清理，避免请求体大小变化。默认256MB，支持PDF(64MB)和视频(256MB)等大文件。</span>
             </div>
             <div className="grid grid-2">
               <div className="field">

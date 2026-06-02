@@ -38,6 +38,7 @@ export type AdminSettings = {
   background: "mesh";
   public_base_url?: string;
   wallpaper_url?: string;
+  large_payload_threshold_mb?: number;
 };
 
 export type PublicSettings = {

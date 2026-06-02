@@ -397,6 +397,9 @@ func streamAndForward(
 			pt, ct, parseFailed := tracker.Result()
 			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, parseFailed: parseFailed}
 		}
+		if isBenignStreamCloseError(err) {
+			return streamResult{err: io.ErrClosedPipe}
+		}
 		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
 		return streamResult{err: err}
 	}
@@ -427,7 +430,8 @@ func isBenignStreamCloseError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "response body closed") ||
-		strings.Contains(msg, "body closed")
+		strings.Contains(msg, "body closed") ||
+		strings.Contains(msg, "stream closed")
 }
 
 func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([]byte) []byte {
