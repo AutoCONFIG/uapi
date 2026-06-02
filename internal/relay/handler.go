@@ -45,26 +45,32 @@ var bufferedClient = &fasthttp.Client{
 // maxResponseSize limits how much data we buffer from upstream (100 MB).
 const maxResponseSize = 100 * 1024 * 1024
 
+// largePayloadThresholdBytes is the threshold above which JSON cleanup is skipped
+// to avoid request body size changes from JSON parse→re-serialize cycle.
+// Set to 256MB to support large files (PDFs up to 64MB, videos up to 256MB).
+const largePayloadThresholdBytesDefault = 256 * 1024 * 1024
+
 const defaultStreamIdleTimeout = 300 * time.Second
 
 type Relayer struct {
-	db                *gorm.DB
-	pools             *PoolManager
-	billing           *BillingService
-	affinity          *AffinityCache
-	concLimiter       *ConcurrencyLimiter
-	chCache           *channelCache
-	internalSecret    string
-	requireInternal   bool
-	controlURL        string
-	trustedProxies    []string
-	streamIdleTimeout time.Duration
-	runtimeMu         sync.RWMutex
-	runtimeVersion    int64
-	runtimeChannels   map[uuid.UUID]db.Channel
-	runtimeAccounts   map[uuid.UUID]db.Account
-	quotaScheduler    *quota.Scheduler
-	oauthRefreshHook  func(uuid.UUID)
+	db                 *gorm.DB
+	pools              *PoolManager
+	billing            *BillingService
+	affinity           *AffinityCache
+	concLimiter        *ConcurrencyLimiter
+	chCache            *channelCache
+	internalSecret     string
+	requireInternal    bool
+	controlURL         string
+	trustedProxies     []string
+	streamIdleTimeout  time.Duration
+	largePayloadBytes  int64 // threshold in bytes, defaults to 256MB
+	runtimeMu          sync.RWMutex
+	runtimeVersion     int64
+	runtimeChannels    map[uuid.UUID]db.Channel
+	runtimeAccounts    map[uuid.UUID]db.Account
+	quotaScheduler     *quota.Scheduler
+	oauthRefreshHook   func(uuid.UUID)
 }
 
 type RelayerOption func(*Relayer)
@@ -93,20 +99,30 @@ func WithStreamIdleTimeout(timeout time.Duration) RelayerOption {
 	}
 }
 
+// WithLargePayloadThreshold sets the threshold in bytes above which JSON cleanup is skipped.
+func WithLargePayloadThreshold(thresholdBytes int64) RelayerOption {
+	return func(r *Relayer) {
+		if thresholdBytes > 0 {
+			r.largePayloadBytes = thresholdBytes
+		}
+	}
+}
+
 func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, affinity *AffinityCache, concLimit int, internalSecret string, requireInternal bool, controlURL string, opts ...RelayerOption) *Relayer {
 	r := &Relayer{
-		db:                database,
-		pools:             pools,
-		billing:           billing,
-		affinity:          affinity,
-		concLimiter:       NewConcurrencyLimiter(concLimit),
-		chCache:           newChannelCache(database, 30*time.Second),
-		internalSecret:    internalSecret,
-		requireInternal:   requireInternal,
-		controlURL:        strings.TrimRight(controlURL, "/"),
-		streamIdleTimeout: defaultStreamIdleTimeout,
-		runtimeChannels:   make(map[uuid.UUID]db.Channel),
-		runtimeAccounts:   make(map[uuid.UUID]db.Account),
+		db:                 database,
+		pools:              pools,
+		billing:            billing,
+		affinity:           affinity,
+		concLimiter:        NewConcurrencyLimiter(concLimit),
+		chCache:            newChannelCache(database, 30*time.Second),
+		internalSecret:     internalSecret,
+		requireInternal:    requireInternal,
+		controlURL:         strings.TrimRight(controlURL, "/"),
+		streamIdleTimeout:  defaultStreamIdleTimeout,
+		largePayloadBytes:  largePayloadThresholdBytesDefault,
+		runtimeChannels:    make(map[uuid.UUID]db.Channel),
+		runtimeAccounts:    make(map[uuid.UUID]db.Account),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -116,6 +132,13 @@ func NewRelayer(database *gorm.DB, pools *PoolManager, billing *BillingService, 
 
 func (r *Relayer) SetQuotaScheduler(s *quota.Scheduler) {
 	r.quotaScheduler = s
+}
+
+// SetLargePayloadThreshold updates the large payload threshold at runtime.
+func (r *Relayer) SetLargePayloadThreshold(thresholdMB int) {
+	if thresholdMB > 0 {
+		r.largePayloadBytes = int64(thresholdMB) * 1024 * 1024
+	}
 }
 
 func (r *Relayer) SetOAuthRefreshHook(hook func(uuid.UUID)) {
@@ -327,7 +350,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var req relayRequest
 	body := ctx.PostBody()
 	isMediaRequest := requestType.isMedia()
-	if !isMediaRequest {
+	// Skip JSON cleanup for large payloads to avoid request body size changes
+	// from JSON parse→re-serialize cycle (matches Bifrost's large payload handling).
+	if !isMediaRequest && int64(len(body)) <= r.largePayloadBytes {
 		body = cleanJSONUndefinedPlaceholders(body)
 	}
 	if isMediaRequest {
@@ -764,6 +789,11 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		return
 	}
 
+	// Force-stream: convert upstream SSE to OpenAI Chat SSE, then to non-stream JSON
+	// NOTE: For Responses family (Codex/OpenAI Responses), the stream converter
+	// correctly uses passthrough since they share same parser/emitter.
+	// However, StreamToNonStreamChecked currently expects Chat SSE format.
+	// TODO: Create dedicated Responses SSE -> non-stream converter to skip Chat intermediate step
 	if convert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions); convert != nil {
 		respBody = convertSSEBufferWithConverter(respBody, convert)
 	}
