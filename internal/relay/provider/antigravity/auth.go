@@ -48,6 +48,7 @@ var (
 	antigravityVersionMu     sync.RWMutex
 	antigravityVersionExpiry time.Time
 	antigravityUpdaterOnce   sync.Once
+	fetchAntigravityVersion  = fetchAntigravityLatestVersion
 )
 
 func StartVersionUpdater(ctx context.Context) {
@@ -74,7 +75,7 @@ func runVersionUpdater(ctx context.Context) {
 }
 
 func refreshAntigravityVersion(ctx context.Context) {
-	version, err := fetchAntigravityLatestVersion(ctx)
+	version, err := fetchAntigravityVersion(ctx)
 	antigravityVersionMu.Lock()
 	defer antigravityVersionMu.Unlock()
 	now := time.Now()

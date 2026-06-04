@@ -1886,6 +1886,123 @@ func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
 	r.db.Model(acc).Update("metadata", acc.Metadata)
 }
 
+func (r *Relayer) disableAccountOnTerminalUpstreamError(ch *db.Channel, acc *db.Account, statusCode int, body []byte) {
+	if r == nil || r.db == nil || acc == nil || acc.ID == uuid.Nil {
+		return
+	}
+	reason, ok := terminalAccountDisableReason(statusCode, body)
+	if !ok {
+		return
+	}
+	if acc.Metadata == nil {
+		acc.Metadata = make(map[string]interface{})
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	acc.Enabled = false
+	acc.Metadata["disabled_reason"] = reason
+	acc.Metadata["disabled_at"] = now
+	acc.Metadata["auto_disable_reason"] = reason
+	acc.Metadata["auto_disable_time"] = now
+	if statusCode > 0 {
+		acc.Metadata["disabled_status_code"] = statusCode
+	}
+	if ch != nil {
+		acc.Metadata["disabled_channel_id"] = ch.ID.String()
+	}
+	err := r.db.Model(&db.Account{}).
+		Where("id = ? AND deleted_at IS NULL", acc.ID).
+		Updates(map[string]interface{}{
+			"enabled":  false,
+			"metadata": acc.Metadata,
+		}).Error
+	if err != nil {
+		logger.Warnf("relay.account", "auto-disable account failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
+		return
+	}
+	if ch != nil && r.pools != nil {
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+			pool.Disable(acc.ID.String())
+		}
+	}
+	if ch != nil && r.affinity != nil {
+		r.affinity.EvictChannel(ch.ID.String())
+	}
+	if ch != nil {
+		r.disableChannelIfNoEnabledAccounts(ch, reason, statusCode)
+	}
+	logger.Warnf("relay.account", "account auto-disabled after terminal upstream error",
+		logger.F("channel_id", channelIDForLog(ch)),
+		logger.F("account_id", acc.ID.String()),
+		logger.F("status", statusCode),
+		logger.F("reason", reason),
+		logger.F("response", compactLogBody(body)),
+	)
+}
+
+func (r *Relayer) disableChannelIfNoEnabledAccounts(ch *db.Channel, reason string, statusCode int) {
+	var enabledCount int64
+	if err := r.db.Model(&db.Account{}).
+		Where("channel_id = ? AND enabled = true AND deleted_at IS NULL", ch.ID).
+		Count(&enabledCount).Error; err != nil {
+		logger.Warnf("relay.channel", "count enabled accounts failed", logger.F("channel_id", ch.ID.String()), logger.Err(err))
+		return
+	}
+	if enabledCount > 0 {
+		return
+	}
+	settings := channelSettingsMap(ch.Settings)
+	now := time.Now().UTC().Format(time.RFC3339)
+	settings["disabled_reason"] = reason
+	settings["disabled_at"] = now
+	settings["auto_disable_reason"] = reason
+	settings["auto_disable_time"] = now
+	if statusCode > 0 {
+		settings["disabled_status_code"] = statusCode
+	}
+	rawSettings, err := json.Marshal(settings)
+	if err != nil {
+		logger.Warnf("relay.channel", "marshal auto-disable settings failed", logger.F("channel_id", ch.ID.String()), logger.Err(err))
+		return
+	}
+	ch.Enabled = false
+	ch.Settings = string(rawSettings)
+	if err := r.db.Model(&db.Channel{}).
+		Where("id = ? AND deleted_at IS NULL", ch.ID).
+		Updates(map[string]interface{}{
+			"enabled":  false,
+			"settings": ch.Settings,
+		}).Error; err != nil {
+		logger.Warnf("relay.channel", "auto-disable channel failed", logger.F("channel_id", ch.ID.String()), logger.Err(err))
+		return
+	}
+	if r.pools != nil {
+		r.pools.RemovePool(ch.ID.String())
+	}
+	logger.Warnf("relay.channel", "channel auto-disabled because no enabled accounts remain",
+		logger.F("channel_id", ch.ID.String()),
+		logger.F("reason", reason),
+		logger.F("status", statusCode),
+	)
+}
+
+func channelSettingsMap(raw string) map[string]interface{} {
+	settings := make(map[string]interface{})
+	if strings.TrimSpace(raw) == "" {
+		return settings
+	}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return make(map[string]interface{})
+	}
+	return settings
+}
+
+func channelIDForLog(ch *db.Channel) string {
+	if ch == nil {
+		return ""
+	}
+	return ch.ID.String()
+}
+
 func (r *Relayer) clearAutoDisable(acc *db.Account) {
 	if acc == nil || acc.Metadata == nil {
 		return
@@ -2061,6 +2178,7 @@ func geminiStatusForHTTP(statusCode int) string {
 
 func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format, claims *internalauth.Claims, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
+	r.disableAccountOnTerminalUpstreamError(ch, acc, statusCode, respBody)
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.SetBody(normalizedBody)

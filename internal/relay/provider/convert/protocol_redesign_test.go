@@ -174,6 +174,37 @@ func TestOpenAIChatSameFormatPreservesExplicitFalseAndNativeFields(t *testing.T)
 	}
 }
 
+func TestOpenAIChatSameProtocolNormalizePreservesUnknownTopLevel(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hello"}],
+		"metadata":{"trace":"abc"},
+		"prediction":{"type":"content","content":"draft"},
+		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"},"strict":true}}],
+		"reasoning":"[undefined]",
+		"temperature":"[undefined]"
+	}`)
+	normalized, err := convert.NormalizeRequestSameProtocol(convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("NormalizeRequestSameProtocol: %v", err)
+	}
+	got := string(normalized)
+	for _, want := range []string{
+		`"metadata":{"trace":"abc"}`,
+		`"prediction":`,
+		`"type":"content"`,
+		`"content":"draft"`,
+		`"strict":true`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("same-protocol normalize dropped %s:\n%s", want, normalized)
+		}
+	}
+	if strings.Contains(got, "[undefined]") || strings.Contains(got, `"temperature"`) || strings.Contains(got, `"reasoning"`) {
+		t.Fatalf("undefined placeholders were not cleaned precisely:\n%s", normalized)
+	}
+}
+
 func TestOpenAIChatLogitBiasSurvivesIRConversionAndRecordsTargetLoss(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",
@@ -402,6 +433,43 @@ func TestOpenAIChatEmitterRejectsMissingToolIdentifiers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := convert.FromIR(tt.req, convert.FormatOpenAIChatCompletions)
+			if err == nil {
+				t.Fatalf("FromIR returned nil error, want %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want containing %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestCoreEmittersRejectToolResultWithoutCallID(t *testing.T) {
+	req := &relayir.Request{
+		Model: "model-test",
+		Turns: []relayir.Turn{{
+			Role: relayir.RoleTool,
+			Items: []relayir.Item{{
+				Kind:          relayir.ItemToolResult,
+				OriginalIndex: 19,
+				ToolResult: &relayir.ToolResult{
+					OutputText: "ok",
+				},
+			}},
+		}},
+	}
+	tests := []struct {
+		name   string
+		format convert.Format
+		want   string
+	}{
+		{name: "chat", format: convert.FormatOpenAIChatCompletions, want: "missing required tool_call_id"},
+		{name: "responses", format: convert.FormatOpenAIResponses, want: "missing required call_id"},
+		{name: "anthropic", format: convert.FormatAnthropic, want: "missing required tool_use_id"},
+		{name: "gemini", format: convert.FormatGemini, want: "missing required name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := convert.FromIR(req, tt.format)
 			if err == nil {
 				t.Fatalf("FromIR returned nil error, want %q", tt.want)
 			}

@@ -42,12 +42,35 @@ func RegisterIREmitter(format convert.Format, factory func() streamIREmitter) {
 // NewConverter creates a StreamConverter for the given direction.
 // Returns nil when no protocol conversion is required.
 func NewConverter(upstream, client convert.Format) StreamConverter {
+	if sameStreamFamily(upstream, client) {
+		return nil
+	}
 	if parserFactory, ok := streamIRParsers[upstream]; ok {
 		if emitterFactory, ok := streamIREmitters[client]; ok && upstream != client {
 			return &irStreamConverter{parser: parserFactory(), emitter: emitterFactory()}
 		}
 	}
 	return nil
+}
+
+func sameStreamFamily(a, b convert.Format) bool {
+	if a == b {
+		return true
+	}
+	return streamFamily(a) != "" && streamFamily(a) == streamFamily(b)
+}
+
+func streamFamily(format convert.Format) string {
+	switch format {
+	case convert.FormatOpenAIResponses, convert.FormatCodexResponses:
+		return "responses"
+	case convert.FormatAnthropic, convert.FormatClaudeCode:
+		return "anthropic"
+	case convert.FormatGemini, convert.FormatGeminiCode, convert.FormatGeminiCLI, convert.FormatAntigravity:
+		return "gemini"
+	default:
+		return string(format)
+	}
 }
 
 type irStreamConverter struct {

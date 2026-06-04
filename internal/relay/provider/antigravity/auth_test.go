@@ -1,9 +1,12 @@
 package antigravity
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
@@ -18,6 +21,57 @@ func TestAntigravityUserAgentUsesCurrentFallback(t *testing.T) {
 	if got := LoadCodeAssistUserAgent(); !strings.HasPrefix(got, ua+" ") || !strings.Contains(got, NodeAPIClientUA) {
 		t.Fatalf("LoadCodeAssistUserAgent() = %q, want %q plus node client", got, ua)
 	}
+}
+
+func TestAntigravityVersionRefreshCachesLatestAndUserAgent(t *testing.T) {
+	restoreAntigravityVersionTestState(t)
+	fetchAntigravityVersion = func(context.Context) (string, error) {
+		return "2.1.0", nil
+	}
+
+	refreshAntigravityVersion(context.Background())
+
+	if got := LatestVersion(); got != "2.1.0" {
+		t.Fatalf("LatestVersion() = %q, want 2.1.0", got)
+	}
+	if got := AntigravityUserAgent(); got != "antigravity/2.1.0 darwin/arm64" {
+		t.Fatalf("AntigravityUserAgent() = %q", got)
+	}
+}
+
+func TestAntigravityVersionExpiredFetchFailureFallsBack(t *testing.T) {
+	restoreAntigravityVersionTestState(t)
+	antigravityVersionMu.Lock()
+	cachedAntigravityVersion = "2.1.0"
+	antigravityVersionExpiry = time.Now().Add(-time.Second)
+	antigravityVersionMu.Unlock()
+	fetchAntigravityVersion = func(context.Context) (string, error) {
+		return "", errors.New("network down")
+	}
+
+	refreshAntigravityVersion(context.Background())
+
+	if got := LatestVersion(); got != FallbackVersion {
+		t.Fatalf("LatestVersion() = %q, want fallback %q", got, FallbackVersion)
+	}
+}
+
+func restoreAntigravityVersionTestState(t *testing.T) {
+	t.Helper()
+	oldFetch := fetchAntigravityVersion
+	antigravityVersionMu.Lock()
+	oldVersion := cachedAntigravityVersion
+	oldExpiry := antigravityVersionExpiry
+	cachedAntigravityVersion = FallbackVersion
+	antigravityVersionExpiry = time.Time{}
+	antigravityVersionMu.Unlock()
+	t.Cleanup(func() {
+		fetchAntigravityVersion = oldFetch
+		antigravityVersionMu.Lock()
+		cachedAntigravityVersion = oldVersion
+		antigravityVersionExpiry = oldExpiry
+		antigravityVersionMu.Unlock()
+	})
 }
 
 func TestAntigravityAdaptorUsesNativeURLAndHeaders(t *testing.T) {

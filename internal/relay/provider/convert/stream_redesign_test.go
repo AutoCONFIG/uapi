@@ -371,6 +371,31 @@ func TestDirectGeminiToAnthropicStreamPreservesThoughtSignature(t *testing.T) {
 	}
 }
 
+func TestDirectGeminiToResponsesStreamCoversTextThinkingUsageAndTerminal(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatGemini, convert.FormatOpenAIResponses)
+	if converter == nil {
+		t.Fatalf("missing IR gemini -> responses converter")
+	}
+	out := converter.Convert([]byte(`data: {"modelVersion":"gemini-2.5-pro","candidates":[{"content":{"parts":[{"text":"think","thought":true,"thoughtSignature":"sig_1"},{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10,"cachedContentTokenCount":2}}` + "\n\n"))
+	got := string(out)
+	for _, want := range []string{
+		`event: response.created`,
+		`event: response.reasoning_summary_text.delta`,
+		`"delta":"think"`,
+		`event: response.output_text.delta`,
+		`"delta":"answer"`,
+		`event: response.completed`,
+		`"input_tokens":7`,
+		`"output_tokens":3`,
+		`"cached_tokens":2`,
+		`"cached_read_tokens":2`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Gemini -> Responses stream missing %s:\n%s", want, got)
+		}
+	}
+}
+
 func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatGemini)
 	if converter == nil {

@@ -21,10 +21,12 @@ type DisplayKey = {
 const permissionOptions = [
   { value: "chat", label: "Chat" },
   { value: "responses", label: "响应" },
-  { value: "messages", label: "消息" },
+  { value: "messages", label: "Claude" },
   { value: "gemini", label: "Gemini" },
   { value: "images", label: "Images" },
 ];
+
+const defaultPermissions = ["chat", "responses", "messages", "gemini"];
 
 function fromApiKey(key: ApiKey): DisplayKey {
   return {
@@ -47,7 +49,7 @@ export default function KeysPage() {
   const [ipWhitelist, setIPWhitelist] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [models, setModels] = useState("");
-  const [permissions, setPermissions] = useState<string[]>(["chat", "responses"]);
+  const [permissions, setPermissions] = useState<string[]>(defaultPermissions);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -86,7 +88,7 @@ export default function KeysPage() {
       setIPWhitelist("");
       setExpiresAt("");
       setModels("");
-      setPermissions(["chat", "responses"]);
+      setPermissions(defaultPermissions);
       setAdvancedOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建密钥失败");
@@ -102,7 +104,7 @@ export default function KeysPage() {
     setIPWhitelist("");
     setExpiresAt("");
     setModels("");
-    setPermissions(["chat", "responses"]);
+    setPermissions(defaultPermissions);
     setAdvancedOpen(false);
     setError("");
   }

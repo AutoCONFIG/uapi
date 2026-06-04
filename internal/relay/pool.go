@@ -104,6 +104,23 @@ func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
 	}
 }
 
+func (p *AccountPool) Disable(accountID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account.ID.String() != accountID {
+			continue
+		}
+		if p.accounts[i].Weight > 0 {
+			p.totalWeight -= p.accounts[i].Weight
+		}
+		p.accounts[i].Weight = 0
+		p.accounts[i].CurrentWeight = 0
+		p.accounts[i].Account.Enabled = false
+		return
+	}
+}
+
 // PoolManager manages all channel pools.
 type PoolManager struct {
 	mu    sync.RWMutex

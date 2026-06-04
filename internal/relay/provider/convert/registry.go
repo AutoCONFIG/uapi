@@ -184,7 +184,10 @@ func sameNativeRequestFamily(a, b Format) bool {
 	if a == b {
 		return true
 	}
-	return isAnthropicFamily(a) && isAnthropicFamily(b)
+	if isAnthropicFamily(a) && isAnthropicFamily(b) {
+		return true
+	}
+	return isResponsesFamily(a) && isResponsesFamily(b)
 }
 
 func irloss(source, target Format, path, field string, raw []byte, reason string) ir.Loss {

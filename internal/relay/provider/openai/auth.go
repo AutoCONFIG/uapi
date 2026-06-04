@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/AutoCONFIG/uapi/internal/logger"
 )
 
 // httpClient is shared across OAuth operations with a reasonable timeout.
@@ -276,6 +278,12 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return nil, fmt.Errorf("parse codex usage response: %w", err)
 	}
+	// Debug: log codex usage response
+	logger.Debugf("relay.codex_usage", "codex usage response",
+		logger.F("status", resp.StatusCode),
+		logger.F("body_length", len(body)),
+		logger.F("body_preview", string(body[:min(500, len(body))])),
+	)
 	return usage, nil
 }
 

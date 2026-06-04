@@ -139,7 +139,7 @@ func Load(path string) (*Config, error) {
 		cfg.Server.MaxBodySizeMB = 256
 	}
 	// LargePayloadThresholdMB: skip JSON cleanup for requests above this size.
-// Default 256MB supports large files (PDFs up to 64MB, videos up to 256MB).
+	// Default 256MB supports large files (PDFs up to 64MB, videos up to 256MB).
 	if cfg.Server.LargePayloadThresholdMB <= 0 {
 		cfg.Server.LargePayloadThresholdMB = 256
 	}

@@ -131,6 +131,32 @@ func TestCodexSameProtocolPreservesOpaqueResponsesInputItem(t *testing.T) {
 	}
 }
 
+func TestResponsesFamilyCrossProtocolPreservesNativeTopLevelFields(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"previous_response_id":"resp_1",
+		"prompt_cache_key":"cache",
+		"custom_source_only":true
+	}`)
+
+	converted, audit, err := convert.ConvertRequestDetailed(convert.FormatOpenAIResponses, convert.FormatCodexResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequestDetailed: %v", err)
+	}
+	if audit.SourceProtocol != ir.ProtocolOpenAIResponses || audit.TargetProtocol != ir.ProtocolCodex {
+		t.Fatalf("protocols = %q -> %q", audit.SourceProtocol, audit.TargetProtocol)
+	}
+	for _, field := range []string{"previous_response_id", "prompt_cache_key", "custom_source_only"} {
+		if hasLossField(audit.Losses, field) {
+			t.Fatalf("responses-family field %q should not be recorded as dropped loss: %#v", field, audit.Losses)
+		}
+		if !strings.Contains(string(converted), `"`+field+`"`) {
+			t.Fatalf("responses-family field %q was not preserved:\n%s", field, converted)
+		}
+	}
+}
+
 func TestGeminiUnknownPartPreservedAndAudited(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[
