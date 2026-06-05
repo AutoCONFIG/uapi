@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 )
 
 type reasoningDetailAccum struct {
@@ -150,6 +152,8 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 			}
 		} else if reasoning, ok := delta["reasoning_content"].(string); ok {
 			reasoningBuilder.WriteString(reasoning)
+		} else if reasoning, ok := delta["reasoning"].(string); ok {
+			reasoningBuilder.WriteString(reasoning)
 		}
 
 		// Tool calls delta
@@ -268,6 +272,250 @@ func StreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
 
 	b, _ := json.Marshal(resp)
 	return b, complete
+}
+
+func StreamToNonStreamForFormat(upstreamFormat provider.Format, sseBody []byte) ([]byte, bool, provider.Format) {
+	switch upstreamFormat {
+	case provider.FormatOpenAIResponses, provider.FormatCodexResponses:
+		body, complete := ResponsesStreamToNonStreamChecked(sseBody)
+		return body, complete, upstreamFormat
+	default:
+		body, complete := StreamToNonStreamChecked(sseBody)
+		return body, complete, provider.FormatOpenAIChatCompletions
+	}
+}
+
+type responsesStreamAccum struct {
+	id        string
+	model     string
+	createdAt int64
+	status    string
+	output    map[int]map[string]interface{}
+	order     []int
+	text      map[int]string
+	toolArgs  map[int]string
+	usage     map[string]interface{}
+	err       map[string]interface{}
+	complete  bool
+}
+
+func ResponsesStreamToNonStreamChecked(sseBody []byte) ([]byte, bool) {
+	acc := responsesStreamAccum{
+		output:   map[int]map[string]interface{}{},
+		text:     map[int]string{},
+		toolArgs: map[int]string{},
+	}
+	sseBody = normalizeSSEBufferForConversion(sseBody)
+	for _, event := range splitSSEEvents(sseBody) {
+		for _, data := range sseDataPayloads(event) {
+			var raw map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &raw); err != nil {
+				continue
+			}
+			acc.applyResponsesStreamEvent(raw)
+		}
+	}
+	if acc.err != nil {
+		body, _ := json.Marshal(map[string]interface{}{"object": "error", "error": acc.err})
+		return body, true
+	}
+	body, _ := json.Marshal(acc.responsesBody())
+	return body, acc.complete
+}
+
+func (a *responsesStreamAccum) applyResponsesStreamEvent(raw map[string]interface{}) {
+	typ, _ := raw["type"].(string)
+	switch typ {
+	case "error":
+		a.err = responseErrorMap(raw["error"])
+	case "response.failed":
+		if response, _ := raw["response"].(map[string]interface{}); response != nil {
+			a.applyResponseMeta(response)
+			a.err = responseErrorMap(response["error"])
+			return
+		}
+		a.err = responseErrorMap(raw["error"])
+	case "response.created", "response.in_progress":
+		if response, _ := raw["response"].(map[string]interface{}); response != nil {
+			a.applyResponseMeta(response)
+		}
+	case "response.output_item.added", "response.output_item.done":
+		idx := intField(raw, "output_index")
+		if item, _ := raw["item"].(map[string]interface{}); item != nil {
+			a.rememberOutputItem(idx, cloneMap(item))
+		}
+	case "response.output_text.delta":
+		idx := intField(raw, "output_index")
+		if delta, _ := raw["delta"].(string); delta != "" {
+			a.text[idx] += delta
+		}
+	case "response.output_text.done":
+		idx := intField(raw, "output_index")
+		if text, _ := raw["text"].(string); text != "" {
+			a.text[idx] = text
+		}
+	case "response.content_part.done":
+		idx := intField(raw, "output_index")
+		if part, _ := raw["part"].(map[string]interface{}); part != nil {
+			if text, _ := part["text"].(string); text != "" {
+				a.text[idx] = text
+			}
+		}
+	case "response.function_call_arguments.delta":
+		idx := intField(raw, "output_index")
+		if args, _ := raw["arguments"].(string); args != "" {
+			a.toolArgs[idx] += args
+		} else if delta, _ := raw["delta"].(string); delta != "" {
+			a.toolArgs[idx] += delta
+		} else if deltaMap, _ := raw["delta"].(map[string]interface{}); deltaMap != nil {
+			if args, _ := deltaMap["arguments"].(string); args != "" {
+				a.toolArgs[idx] += args
+			}
+		}
+	case "response.function_call_arguments.done":
+		idx := intField(raw, "output_index")
+		if args, _ := raw["arguments"].(string); args != "" {
+			a.toolArgs[idx] = args
+		}
+	case "response.completed":
+		a.complete = true
+		if response, _ := raw["response"].(map[string]interface{}); response != nil {
+			a.applyResponseMeta(response)
+			if output, _ := response["output"].([]interface{}); len(output) > 0 {
+				a.output = map[int]map[string]interface{}{}
+				a.order = nil
+				for idx, itemRaw := range output {
+					if item, _ := itemRaw.(map[string]interface{}); item != nil {
+						a.rememberOutputItem(idx, cloneMap(item))
+					}
+				}
+			}
+		}
+	case "response.incomplete":
+		a.complete = true
+		a.status = "incomplete"
+		if response, _ := raw["response"].(map[string]interface{}); response != nil {
+			a.applyResponseMeta(response)
+		}
+	}
+	if usage, _ := raw["usage"].(map[string]interface{}); usage != nil {
+		a.usage = cloneMap(usage)
+	}
+}
+
+func (a *responsesStreamAccum) applyResponseMeta(response map[string]interface{}) {
+	if id, _ := response["id"].(string); id != "" {
+		a.id = id
+	}
+	if model, _ := response["model"].(string); model != "" {
+		a.model = model
+	}
+	if status, _ := response["status"].(string); status != "" {
+		a.status = status
+	}
+	if created := int64Field(response, "created_at"); created > 0 {
+		a.createdAt = created
+	}
+	if usage, _ := response["usage"].(map[string]interface{}); usage != nil {
+		a.usage = cloneMap(usage)
+	}
+}
+
+func (a *responsesStreamAccum) rememberOutputItem(index int, item map[string]interface{}) {
+	if _, ok := a.output[index]; !ok {
+		a.order = append(a.order, index)
+	}
+	a.output[index] = item
+}
+
+func (a *responsesStreamAccum) responsesBody() map[string]interface{} {
+	sort.Ints(a.order)
+	output := make([]interface{}, 0, len(a.order))
+	for _, idx := range a.order {
+		item := cloneMap(a.output[idx])
+		if typ, _ := item["type"].(string); typ == "message" {
+			a.fillResponsesMessageText(item, idx)
+		}
+		if typ, _ := item["type"].(string); typ == "function_call" {
+			if args := a.toolArgs[idx]; args != "" {
+				item["arguments"] = args
+			}
+		}
+		output = append(output, item)
+	}
+	status := a.status
+	if status == "" {
+		status = "completed"
+	}
+	if a.createdAt == 0 {
+		a.createdAt = time.Now().Unix()
+	}
+	body := map[string]interface{}{
+		"id":         a.id,
+		"object":     "response",
+		"created_at": a.createdAt,
+		"model":      a.model,
+		"status":     status,
+		"output":     output,
+	}
+	if a.usage != nil {
+		body["usage"] = a.usage
+	}
+	return body
+}
+
+func (a *responsesStreamAccum) fillResponsesMessageText(item map[string]interface{}, index int) {
+	text := a.text[index]
+	if text == "" {
+		return
+	}
+	content, _ := item["content"].([]interface{})
+	if len(content) == 0 {
+		item["content"] = []interface{}{map[string]interface{}{"type": "output_text", "text": text, "annotations": []interface{}{}}}
+		return
+	}
+	first, _ := content[0].(map[string]interface{})
+	if first != nil {
+		first["text"] = text
+	}
+}
+
+func responseErrorMap(raw interface{}) map[string]interface{} {
+	if errMap, _ := raw.(map[string]interface{}); errMap != nil {
+		return cloneMap(errMap)
+	}
+	return map[string]interface{}{"type": "upstream_error", "message": "upstream stream failed"}
+}
+
+func cloneMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func intField(obj map[string]interface{}, key string) int {
+	return int(int64Field(obj, key))
+}
+
+func int64Field(obj map[string]interface{}, key string) int64 {
+	switch v := obj[key].(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return n
+	default:
+		return 0
+	}
 }
 
 func finalizeStreamReasoningDetails(accums map[int]*reasoningDetailAccum) ([]interface{}, string) {

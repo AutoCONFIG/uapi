@@ -216,6 +216,7 @@ func emitOpenAIResponsesRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		if isResponsesFamily(protocolFormat(req.SourceProtocol)) && len(turn.Native.Raw) > 0 {
 			var raw map[string]interface{}
 			if err := decodeJSONUseNumber(turn.Native.Raw, &raw); err == nil {
+				normalizeResponsesRawInputItemForUpstream(raw)
 				input = append(input, raw)
 				continue
 			}
@@ -255,6 +256,12 @@ func emitOpenAIResponsesRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		}
 		raw, _ := json.Marshal(openAIResponsesTools(tools))
 		resp["tools"] = json.RawMessage(raw)
+		if req.ToolChoice == nil {
+			resp["tool_choice"] = "auto"
+		}
+		if req.Generation.ParallelToolCalls == nil {
+			resp["parallel_tool_calls"] = true
+		}
 	}
 	if req.ToolChoice != nil {
 		resp["tool_choice"] = relayir.CloneRaw(req.ToolChoice.Raw)
@@ -437,12 +444,88 @@ func responsesRole(role string) string {
 
 func responsesToolResultOutput(result schema.ToolResult) interface{} {
 	if len(result.ContentRaw) > 0 {
+		if text, ok := textOnlyContentBlocksString(result.ContentRaw); ok {
+			return text
+		}
 		var value interface{}
 		if err := json.Unmarshal(result.ContentRaw, &value); err == nil {
 			return value
 		}
 	}
 	return result.Content
+}
+
+func normalizeResponsesRawInputItemForUpstream(item map[string]interface{}) {
+	itemType, _ := item["type"].(string)
+	switch itemType {
+	case "message":
+		normalizeResponsesRawMessageContent(item)
+	case "function_call_output":
+		normalizeResponsesRawFunctionCallOutput(item)
+	}
+}
+
+func normalizeResponsesRawMessageContent(item map[string]interface{}) {
+	role, _ := item["role"].(string)
+	role = responsesRole(role)
+	content, ok := item["content"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, rawPart := range content {
+		part, ok := rawPart.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		partType, _ := part["type"].(string)
+		if partType != "text" {
+			continue
+		}
+		if role == "assistant" {
+			part["type"] = "output_text"
+		} else {
+			part["type"] = "input_text"
+		}
+	}
+}
+
+func normalizeResponsesRawFunctionCallOutput(item map[string]interface{}) {
+	rawOutput, ok := item["output"]
+	if !ok {
+		return
+	}
+	if text, ok := textOnlyInterfaceContentBlocksString(rawOutput); ok {
+		item["output"] = text
+	}
+}
+
+func textOnlyContentBlocksString(raw json.RawMessage) (string, bool) {
+	var blocks []interface{}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", false
+	}
+	return textOnlyInterfaceContentBlocksString(blocks)
+}
+
+func textOnlyInterfaceContentBlocksString(value interface{}) (string, bool) {
+	blocks, ok := value.([]interface{})
+	if !ok || len(blocks) == 0 {
+		return "", false
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, rawBlock := range blocks {
+		block, ok := rawBlock.(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		blockType, _ := block["type"].(string)
+		if blockType != "text" && blockType != "input_text" && blockType != "output_text" {
+			return "", false
+		}
+		text, _ := block["text"].(string)
+		texts = append(texts, text)
+	}
+	return joinNonEmpty(texts, "\n"), true
 }
 
 func generateResponsesReasoningID() string {

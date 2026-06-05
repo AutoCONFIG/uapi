@@ -9,6 +9,9 @@ import (
 func DefaultEndpoint(providerType, apiFormat string) string {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case "openai":
+		if apiFormat == "chatgpt_reverse" {
+			return "https://chatgpt.com"
+		}
 		if apiFormat == "codex" {
 			return "https://chatgpt.com/backend-api/codex"
 		}

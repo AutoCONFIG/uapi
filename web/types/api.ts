@@ -189,7 +189,7 @@ export type ChannelPresetDTO = {
   label: string;
   type: string;
   api_format: string;
-  auth: "oauth" | "apikey";
+  auth: "oauth" | "apikey" | "reverse";
   endpoint: string;
   models: string;
   model_aliases?: string;
@@ -201,6 +201,7 @@ export type ChannelPresetDTO = {
 
 export type ChannelCatalog = {
   oauth: ChannelPresetDTO[];
+  reverse: ChannelPresetDTO[];
   api_key: ChannelPresetDTO[];
 };
 
@@ -214,6 +215,7 @@ export type Channel = {
   models: string;
   model_aliases: string;
   priority: number;
+  weight: number;
   api_format: string;
   force_stream: boolean;
   affinity_ttl: number;
@@ -226,7 +228,7 @@ export type Account = {
   id: string;
   channel_id: string;
   name: string;
-  cred_type: "api_key" | "oauth_token";
+  cred_type: "api_key" | "oauth_token" | "chatgpt_reverse";
   endpoint?: string;
   weight: number;
   enabled: boolean;

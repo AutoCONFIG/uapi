@@ -2,7 +2,10 @@ package relay
 
 import (
 	"io"
+	"runtime/debug"
 	"sync"
+
+	"github.com/AutoCONFIG/uapi/internal/logger"
 )
 
 // SSEStreamReader is an io.ReadCloser that delivers one SSE event per Read call,
@@ -11,15 +14,27 @@ type SSEStreamReader struct {
 	eventCh   chan []byte
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	doneOnce  sync.Once
 	closed    bool
+	done      bool
+	aborted   bool
+	abortErr  error
 	mu        sync.Mutex
 	current   []byte
+	trace     *relayDebugTrace
+	readCount int
+	sentCount int
 }
 
 func NewSSEStreamReader() *SSEStreamReader {
+	return NewSSEStreamReaderWithTrace(nil)
+}
+
+func NewSSEStreamReaderWithTrace(trace *relayDebugTrace) *SSEStreamReader {
 	return &SSEStreamReader{
 		eventCh: make(chan []byte, 1),
 		closeCh: make(chan struct{}),
+		trace:   trace,
 	}
 }
 
@@ -28,15 +43,30 @@ func (r *SSEStreamReader) Read(p []byte) (int, error) {
 		select {
 		case event, ok := <-r.eventCh:
 			if !ok {
+				r.trace.Event("downstream_read_eof",
+					loggerReaderStateFields(r, "event_channel_closed")...,
+				)
 				return 0, io.EOF
 			}
 			r.current = event
 		case <-r.closeCh:
+			if err := r.abortError(); err != nil {
+				r.trace.Event("downstream_read_abort",
+					loggerReaderStateFields(r, "abort_channel_closed")...,
+				)
+				return 0, err
+			}
+			r.trace.Event("downstream_read_eof",
+				loggerReaderStateFields(r, "close_channel_closed")...,
+			)
 			return 0, io.EOF
 		}
 	}
 	n := copy(p, r.current)
 	r.current = r.current[n:]
+	r.mu.Lock()
+	r.readCount++
+	r.mu.Unlock()
 	return n, nil
 }
 
@@ -44,10 +74,32 @@ func (r *SSEStreamReader) Close() error {
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
+		fields := loggerReaderStateFieldsLocked(r, "close_called")
 		close(r.closeCh)
 		r.mu.Unlock()
+		fields = append(fields, logger.F("stack", string(debug.Stack())))
+		r.trace.Event("downstream_reader_close_called", fields...)
 	})
 	return nil
+}
+
+// Abort closes the downstream body with an error, so partial upstream failures
+// are visible to the client as a broken stream instead of a clean EOF.
+func (r *SSEStreamReader) Abort(err error) {
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		r.aborted = true
+		r.abortErr = err
+		fields := loggerReaderStateFieldsLocked(r, "abort_called")
+		close(r.closeCh)
+		r.mu.Unlock()
+		fields = append(fields, logger.Err(err))
+		r.trace.Event("downstream_reader_abort_called", fields...)
+	})
 }
 
 // Send delivers a pre-formatted SSE event. Returns false if reader is closed (client disconnected).
@@ -62,8 +114,14 @@ func (r *SSEStreamReader) Send(event []byte) bool {
 
 	select {
 	case r.eventCh <- event:
+		r.mu.Lock()
+		r.sentCount++
+		r.mu.Unlock()
 		return true
 	case <-closeCh:
+		r.trace.Event("downstream_send_closed",
+			loggerReaderStateFields(r, "send_select_close")...,
+		)
 		return false
 	}
 }
@@ -79,5 +137,36 @@ func (r *SSEStreamReader) Closed() <-chan struct{} {
 
 // Done closes the event channel, signaling Read that the stream is finished.
 func (r *SSEStreamReader) Done() {
-	close(r.eventCh)
+	r.doneOnce.Do(func() {
+		r.mu.Lock()
+		r.done = true
+		fields := loggerReaderStateFieldsLocked(r, "done_called")
+		close(r.eventCh)
+		r.mu.Unlock()
+		r.trace.Event("downstream_reader_done_called", fields...)
+	})
+}
+
+func loggerReaderStateFields(r *SSEStreamReader, reason string) []logger.Field {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return loggerReaderStateFieldsLocked(r, reason)
+}
+
+func (r *SSEStreamReader) abortError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.abortErr
+}
+
+func loggerReaderStateFieldsLocked(r *SSEStreamReader, reason string) []logger.Field {
+	return []logger.Field{
+		logger.F("reason", reason),
+		logger.F("closed", r.closed),
+		logger.F("done", r.done),
+		logger.F("aborted", r.aborted),
+		logger.F("read_count", r.readCount),
+		logger.F("sent_count", r.sentCount),
+		logger.F("current_bytes", len(r.current)),
+	}
 }

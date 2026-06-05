@@ -254,6 +254,84 @@ func TestResponsesFunctionCallArgumentsDoneEmitsOnlyMissingSuffix(t *testing.T) 
 	}
 }
 
+func TestResponsesFunctionCallArgumentsDoneBeforeOutputItemDoneUsesItemID(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	doneArgs := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.done","output_index":2,"item_id":"fc_1","arguments":"{\"command\":\"git status --short\"}"}` + "\n\n"))
+	doneItem := converter.Convert([]byte(`data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Bash","arguments":"{\"command\":\"git status --short\"}"}}` + "\n\n"))
+	got := string(doneArgs) + string(doneItem)
+	for _, want := range []string{`"id":"call_1"`, `"name":"Bash"`, `"arguments":"{\"command\":\"git status --short\"}"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses arguments.done before output_item.done did not emit valid Chat tool_call, missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `conversion_error`) || strings.Contains(got, `"name":""`) {
+		t.Fatalf("Responses item_id/call_id merge emitted invalid tool call:\n%s", got)
+	}
+}
+
+func TestResponsesFunctionCallArgumentsDeltaBeforeOutputItemAddedIsBuffered(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
+	delta := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_1","delta":"{\"command\":\"git status --short\"}"}` + "\n\n"))
+	added := converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Bash"}}` + "\n\n"))
+	got := string(delta) + string(added)
+	if string(delta) != "" {
+		t.Fatalf("arguments delta before tool metadata should be buffered, got:\n%s", delta)
+	}
+	for _, want := range []string{`"id":"call_1"`, `"name":"Bash"`, `"arguments":"{\"command\":\"git status --short\"}"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("buffered arguments delta missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `conversion_error`) || strings.Contains(got, `"name":""`) {
+		t.Fatalf("buffered arguments delta emitted invalid tool call:\n%s", got)
+	}
+}
+
+func TestResponsesFunctionCallArgumentsDoneAfterAddedMayUseItemID(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
+	_ = converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":3,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"TaskList"}}` + "\n\n"))
+	done := converter.Convert([]byte(`data: {"type":"response.function_call_arguments.done","output_index":3,"item_id":"fc_1","arguments":"{}"}` + "\n\n"))
+	got := string(done)
+	for _, want := range []string{`"type":"input_json_delta"`, `"partial_json":"{}"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses arguments.done using item_id after output_item.added missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `conversion_error`) {
+		t.Fatalf("Responses arguments.done using item_id should not fail:\n%s", got)
+	}
+}
+
+func TestResponsesFamilyFunctionCallDoneStopsAnthropicToolBlock(t *testing.T) {
+	for _, upstream := range []convert.Format{convert.FormatOpenAIResponses, convert.FormatCodexResponses} {
+		t.Run(string(upstream), func(t *testing.T) {
+			converter := stream.NewConverter(upstream, convert.FormatAnthropic)
+			_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+			added := converter.Convert([]byte(`data: {"type":"response.output_item.added","output_index":3,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"TaskList"}}` + "\n\n"))
+			done := converter.Convert([]byte(`data: {"type":"response.output_item.done","output_index":3,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"TaskList","arguments":"{}"}}` + "\n\n"))
+			got := string(added) + string(done)
+			if !strings.Contains(got, `"type":"tool_use"`) || !strings.Contains(got, `"name":"TaskList"`) {
+				t.Fatalf("Responses-family function call did not start Anthropic tool block:\n%s", got)
+			}
+			if !strings.Contains(got, `"type":"content_block_stop"`) {
+				t.Fatalf("Responses-family function call done did not stop Anthropic tool block:\n%s", got)
+			}
+			if strings.Contains(got, `"type":"message_stop"`) {
+				t.Fatalf("output_item.done should close the tool block but not synthesize message_stop:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestChatToolCallNameAndArgumentsInSameDeltaStartsToolFirst(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic)
+	out := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"gpt-5","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"git status --short\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+	got := string(out)
+	if !strings.Contains(got, `"type":"tool_use"`) || !strings.Contains(got, `"name":"Bash"`) || !strings.Contains(got, `"partial_json":"{\"command\":\"git status --short\"}"`) {
+		t.Fatalf("Chat same-delta tool name+arguments should emit start then args:\n%s", got)
+	}
+}
+
 func TestResponsesCompletedFunctionCallBackfillsAnthropicToolInput(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatAnthropic)
 	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))

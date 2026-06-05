@@ -10,5 +10,6 @@ config.relay.yaml
 *.db
 *.db-wal
 *.db-shm
+debug-dumps/
 AGENTS.md
 .vscode/

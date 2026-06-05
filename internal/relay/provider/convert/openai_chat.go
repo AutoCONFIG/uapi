@@ -129,20 +129,23 @@ func openAIChatMessageToIRTurn(msg schema.ChatMessage, rawMsg json.RawMessage) r
 }
 
 func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
+	preserveNative := req.SourceProtocol == relayir.ProtocolOpenAIChat
 	out := schema.OpenAIChatRequest{
 		Model:  req.Model,
 		Stream: req.Stream,
-		Extra:  relayir.CloneRawMap(req.Metadata),
+	}
+	if preserveNative {
+		out.Extra = relayir.CloneRawMap(req.Metadata)
 	}
 	for _, inst := range req.Instructions {
 		out.Messages = append(out.Messages, openAIChatInstructionMessage(inst))
 	}
 	for _, turn := range req.Turns {
-		msg, err := openAIChatTurnMessage(turn)
+		msgs, err := openAIChatTurnMessages(turn)
 		if err != nil {
 			return nil, err
 		}
-		out.Messages = append(out.Messages, msg)
+		out.Messages = append(out.Messages, msgs...)
 	}
 	if req.Generation.MaxTokens != nil {
 		if req.Generation.MaxTokensField == "max_completion_tokens" {
@@ -186,19 +189,63 @@ func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		for _, tool := range req.Tools {
 			tools = append(tools, schemaToolFromIR(tool))
 		}
-		out.Tools = openAIChatTools(tools, req.SourceProtocol == relayir.ProtocolOpenAIChat)
+		out.Tools = openAIChatTools(tools, preserveNative)
+		if req.ToolChoice == nil {
+			out.ToolChoice = json.RawMessage(`"auto"`)
+		}
+		if out.ParallelToolCalls == nil {
+			parallel := true
+			out.ParallelToolCalls = &parallel
+		}
 	}
 	if req.ToolChoice != nil {
-		if req.SourceProtocol == relayir.ProtocolOpenAIChat {
+		if preserveNative {
 			out.ToolChoice = relayir.CloneRaw(req.ToolChoice.Raw)
 		} else {
 			out.ToolChoice = projectFunctionToolChoice(relayir.CloneRaw(req.ToolChoice.Raw))
 		}
 	}
-	for k, v := range req.Native.Fields {
-		out.Extra[k] = relayir.CloneRaw(v)
+	if preserveNative {
+		if out.Extra == nil {
+			out.Extra = map[string]json.RawMessage{}
+		}
+		for k, v := range req.Native.Fields {
+			out.Extra[k] = relayir.CloneRaw(v)
+		}
+	} else {
+		sanitizeOpenAIChatCrossProtocolRequest(&out)
 	}
 	return json.Marshal(out)
+}
+
+func sanitizeOpenAIChatCrossProtocolRequest(req *schema.OpenAIChatRequest) {
+	req.Extra = nil
+	for i := range req.Messages {
+		req.Messages[i].Extra = nil
+		for j := range req.Messages[i].Content.Parts {
+			req.Messages[i].Content.Parts[j].Extra = nil
+		}
+	}
+	for i := range req.Tools {
+		req.Tools[i].Extra = nil
+		if req.Tools[i].Function != nil {
+			req.Tools[i].Function.Extra = openAIChatAllowedFunctionExtra(req.Tools[i].Function.Extra)
+		}
+	}
+}
+
+func openAIChatAllowedFunctionExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(extra) == 0 {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	if strict, ok := extra["strict"]; ok {
+		out["strict"] = relayir.CloneRaw(strict)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func openAIChatInstructionMessage(inst relayir.Instruction) schema.ChatMessage {
@@ -217,6 +264,20 @@ func openAIChatInstructionMessage(inst relayir.Instruction) schema.ChatMessage {
 }
 
 func openAIChatTurnMessage(turn relayir.Turn) (schema.ChatMessage, error) {
+	msgs, err := openAIChatTurnMessages(turn)
+	if err != nil {
+		return schema.ChatMessage{}, err
+	}
+	if len(msgs) == 0 {
+		return schema.ChatMessage{Role: openAIChatRole(string(turn.Role)), Name: turn.Name, Extra: relayir.CloneRawMap(turn.Metadata)}, nil
+	}
+	return msgs[0], nil
+}
+
+func openAIChatTurnMessages(turn relayir.Turn) ([]schema.ChatMessage, error) {
+	if openAIChatTurnHasToolResults(turn) {
+		return openAIChatTurnMessagesWithToolResults(turn)
+	}
 	role := openAIChatRole(string(turn.Role))
 	msg := schema.ChatMessage{Role: role, Name: turn.Name, Extra: relayir.CloneRawMap(turn.Metadata)}
 	var content []schema.ContentPart
@@ -228,17 +289,18 @@ func openAIChatTurnMessage(turn relayir.Turn) (schema.ChatMessage, error) {
 		case relayir.ItemToolUse, relayir.ItemFunctionCall:
 			call := schemaToolCallFromIR(item)
 			if firstNonEmptyString(call.Name, call.Function.Name) == "" {
-				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required function name", item.OriginalIndex)
+				return nil, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required function name", item.OriginalIndex)
 			}
 			if firstNonEmptyString(call.ID, item.CallID, item.ID) == "" {
-				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required id", item.OriginalIndex)
+				return nil, fmt.Errorf("cannot emit OpenAI Chat tool_call for IR item %d: missing required id", item.OriginalIndex)
 			}
 			msg.ToolCalls = append(msg.ToolCalls, call)
 		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 			result := schemaToolResultFromIR(item)
 			if result.ToolCallID == "" {
-				return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool result for IR item %d: missing required tool_call_id", item.OriginalIndex)
+				return nil, fmt.Errorf("cannot emit OpenAI Chat tool result for IR item %d: missing required tool_call_id", item.OriginalIndex)
 			}
+			msg.Role = "tool"
 			msg.ToolCallID = result.ToolCallID
 			if len(result.ContentRaw) > 0 {
 				var mc schema.MessageContent
@@ -273,6 +335,80 @@ func openAIChatTurnMessage(turn relayir.Turn) (schema.ChatMessage, error) {
 			msg.Extra["reasoning_details"] = rawJSON(details)
 		}
 	}
+	return []schema.ChatMessage{msg}, nil
+}
+
+func openAIChatTurnHasToolResults(turn relayir.Turn) bool {
+	for _, item := range turn.Items {
+		switch item.Kind {
+		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
+			return true
+		}
+	}
+	return false
+}
+
+func openAIChatTurnMessagesWithToolResults(turn relayir.Turn) ([]schema.ChatMessage, error) {
+	role := openAIChatRole(string(turn.Role))
+	var messages []schema.ChatMessage
+	var content []schema.ContentPart
+	var reasoning []schema.ContentPart
+
+	for _, item := range turn.Items {
+		switch item.Kind {
+		case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
+			reasoning = append(reasoning, schemaReasoningFromIR(item))
+		case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
+			msg, err := openAIChatToolResultMessage(item)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, msg)
+		default:
+			if part, ok := schemaContentFromIR(item); ok {
+				content = append(content, part)
+			}
+		}
+	}
+
+	if len(content) > 0 || len(reasoning) > 0 {
+		msg := schema.ChatMessage{Role: role, Name: turn.Name, Extra: relayir.CloneRawMap(turn.Metadata)}
+		parts := openAIChatContentParts(content)
+		if len(parts) == 1 && parts[0].Type == "text" && parts[0].Text != "" && len(parts[0].Extra) == 0 {
+			msg.Content = schema.NewTextContent(parts[0].Text)
+		} else if len(parts) > 0 {
+			msg.Content = schema.NewPartsContent(parts...)
+		}
+		if len(reasoning) > 0 {
+			if msg.Extra == nil {
+				msg.Extra = map[string]json.RawMessage{}
+			}
+			if text := contentPartsText(reasoning); text != "" {
+				msg.Extra["reasoning_content"] = rawJSON(text)
+			}
+			if details := reasoningDetailsFromParts(reasoning); len(details) > 0 {
+				msg.Extra["reasoning_details"] = rawJSON(details)
+			}
+		}
+		messages = append(messages, msg)
+	}
+	return messages, nil
+}
+
+func openAIChatToolResultMessage(item relayir.Item) (schema.ChatMessage, error) {
+	result := schemaToolResultFromIR(item)
+	if result.ToolCallID == "" {
+		return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool result for IR item %d: missing required tool_call_id", item.OriginalIndex)
+	}
+	msg := schema.ChatMessage{Role: "tool", ToolCallID: result.ToolCallID}
+	if len(result.ContentRaw) > 0 {
+		var mc schema.MessageContent
+		if json.Unmarshal(result.ContentRaw, &mc) == nil && !mc.IsEmpty() {
+			msg.Content = mc
+			return msg, nil
+		}
+	}
+	msg.Content = schema.NewTextContent(result.Content)
 	return msg, nil
 }
 

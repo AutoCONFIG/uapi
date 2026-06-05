@@ -31,6 +31,7 @@ var refreshGroup singleflight.Group
 const (
 	requestAccessTokenRefreshWindow = 5 * time.Minute
 	codexRefreshInterval            = 8 * 24 * time.Hour
+	chatGPTReverseClientID          = "app_2SKx67EdpoN0G6j64rFvigXD"
 )
 
 // EnsureValidCredentials checks if account credentials are valid, refreshes OAuth tokens if needed.
@@ -42,6 +43,17 @@ func EnsureValidCredentials(account *db.Account, database *gorm.DB) (string, err
 func EnsureValidCredentialsForChannel(account *db.Account, ch *db.Channel, database *gorm.DB) (string, error) {
 	if account.CredType == "api_key" || account.CredType == "" {
 		return crypto.Decrypt(account.Credentials)
+	}
+
+	if account.CredType == "chatgpt_reverse" && shouldRefreshOAuthCredentialsForChannel(account, ch) {
+		accountID := account.ID.String()
+		v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
+			return refreshOAuthTokenForChannel(account, ch, database)
+		})
+		if err != nil {
+			return "", err
+		}
+		return v.(string), nil
 	}
 
 	if shouldRefreshOAuthCredentialsForChannel(account, ch) {
@@ -83,8 +95,8 @@ func RefreshOAuthCredentials(account *db.Account, database *gorm.DB) (string, er
 }
 
 func RefreshOAuthCredentialsForChannel(account *db.Account, ch *db.Channel, database *gorm.DB) (string, error) {
-	if account.CredType != "oauth_token" {
-		return "", fmt.Errorf("account %s is not an oauth account", account.ID)
+	if account.CredType != "oauth_token" && account.CredType != "chatgpt_reverse" {
+		return "", fmt.Errorf("account %s is not a refreshable account", account.ID)
 	}
 	accountID := account.ID.String()
 	v, err, _ := refreshGroup.Do(accountID, func() (interface{}, error) {
@@ -154,6 +166,9 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		return refreshAntigravityOAuthToken(account, database, refreshToken, tokenURL)
 	}
 	clientID := oauthClientIDForProvider(account.ClientID, providerKey)
+	if ch != nil && strings.EqualFold(strings.TrimSpace(ch.APIFormat), "chatgpt_reverse") && strings.TrimSpace(account.ClientID) == "" {
+		clientID = chatGPTReverseClientID
+	}
 	clientSecret, err := oauthClientSecretForProvider(account, providerKey)
 	if err != nil {
 		return "", err
@@ -183,7 +198,7 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthHTTPClient.Do(req)
-	} else if providerKey == "openai" {
+	} else if providerKey == "openai" && (ch == nil || !strings.EqualFold(strings.TrimSpace(ch.APIFormat), "chatgpt_reverse")) {
 		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
@@ -399,6 +414,8 @@ func oauthClientSecretForProvider(account *db.Account, providerKey string) (stri
 func oauthProviderKeyForChannel(account *db.Account, ch *db.Channel) string {
 	if ch != nil {
 		switch strings.ToLower(strings.TrimSpace(ch.APIFormat)) {
+		case "chatgpt_reverse":
+			return "openai"
 		case "codex":
 			return "openai"
 		case "claude_code":
@@ -445,6 +462,8 @@ func oauthTokenURLForChannel(account *db.Account, ch *db.Channel) string {
 	}
 	if ch != nil {
 		switch strings.ToLower(strings.TrimSpace(ch.APIFormat)) {
+		case "chatgpt_reverse":
+			return openai.DefaultTokenURL
 		case "codex":
 			return openai.DefaultTokenURL
 		case "claude_code":

@@ -189,9 +189,11 @@ func (item ResponsesOutputItem) MarshalJSON() ([]byte, error) {
 
 // ResponsesUsage represents token usage in the Responses API.
 type ResponsesUsage struct {
-	InputTokens          int                    `json:"input_tokens"`
-	OutputTokens         int                    `json:"output_tokens"`
-	TotalTokens          int                    `json:"total_tokens"`
-	PromptCacheHitTokens int                    `json:"prompt_cache_hit_tokens,omitempty"`
-	InputTokensDetails   map[string]interface{} `json:"input_tokens_details,omitempty"`
+	InputTokens              int                    `json:"input_tokens"`
+	OutputTokens             int                    `json:"output_tokens"`
+	TotalTokens              int                    `json:"total_tokens"`
+	CacheCreationInputTokens int                    `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int                    `json:"cache_read_input_tokens,omitempty"`
+	PromptCacheHitTokens     int                    `json:"prompt_cache_hit_tokens,omitempty"`
+	InputTokensDetails       map[string]interface{} `json:"input_tokens_details,omitempty"`
 }

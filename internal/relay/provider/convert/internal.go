@@ -14,6 +14,7 @@ const (
 	FormatOpenAIChatCompletions Format = "openai_chat"
 	FormatOpenAIResponses       Format = "openai_responses"
 	FormatCodexResponses        Format = "codex"
+	FormatChatGPTReverse        Format = "chatgpt_reverse"
 	FormatAnthropic             Format = "anthropic"
 	FormatClaudeCode            Format = "claude_code"
 	FormatGemini                Format = "gemini"

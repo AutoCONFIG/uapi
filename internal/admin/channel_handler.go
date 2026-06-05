@@ -42,7 +42,7 @@ func (h *Handler) listChannels(ctx *fasthttp.RequestCtx) {
 	var total int64
 	var items []db.Channel
 	h.db.Model(&db.Channel{}).Where("deleted_at IS NULL").Count(&total)
-	h.db.Where("deleted_at IS NULL").Order("created_at desc").Limit(limit).Offset(offset).Find(&items)
+	h.db.Where("deleted_at IS NULL").Order("priority DESC, weight DESC, created_at DESC").Limit(limit).Offset(offset).Find(&items)
 	h.jsonResponse(ctx, 200, PaginatedResponse{
 		Total: total,
 		Page:  page,
@@ -73,6 +73,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		Models:       req.Models,
 		ModelAliases: req.ModelAliases,
 		Priority:     req.Priority,
+		Weight:       normalizeChannelWeight(req.Weight),
 		APIFormat:    req.APIFormat,
 		ForceStream:  req.ForceStream,
 		AffinityTTL:  req.AffinityTTL,
@@ -143,6 +144,9 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.Priority != nil {
 		updates["priority"] = *req.Priority
 	}
+	if req.Weight != nil {
+		updates["weight"] = normalizeChannelWeight(*req.Weight)
+	}
 	if req.APIFormat != nil {
 		if ok, msg := h.channelAccountsCompatibleWithAPIFormat(existing.ID, *req.APIFormat); !ok {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
@@ -178,6 +182,16 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	h.jsonResponse(ctx, 200, existing)
 }
 
+func normalizeChannelWeight(value int) int {
+	if value <= 0 {
+		return 100
+	}
+	if value > 10000 {
+		return 10000
+	}
+	return value
+}
+
 func normalizeChannelSettings(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -199,10 +213,21 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
 		return false, "load accounts failed"
 	}
-	if !isOAuthAPIFormat(apiFormat) {
+	if !isOAuthAPIFormat(apiFormat) && !isReverseAPIFormat(apiFormat) {
 		for _, acc := range accounts {
 			if oauthAccountRequiresOAuthChannel(acc) {
 				return false, "OAuth credentials can only be assigned to OAuth channels"
+			}
+			if reverseAccountRequiresReverseChannel(acc) {
+				return false, "Reverse credentials can only be assigned to reverse channels"
+			}
+		}
+		return true, ""
+	}
+	if isReverseAPIFormat(apiFormat) {
+		for _, acc := range accounts {
+			if acc.CredType != "chatgpt_reverse" {
+				return false, "Reverse channels require reverse credentials"
 			}
 		}
 		return true, ""
@@ -222,7 +247,7 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 func validChannelFormatForType(channelType, apiFormat string) bool {
 	switch channelType {
 	case "openai":
-		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex"
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex" || apiFormat == "chatgpt_reverse"
 	case "gemini":
 		return apiFormat == "" || apiFormat == "standard" || apiFormat == "gemini_code"
 	case "anthropic":

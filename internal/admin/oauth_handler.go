@@ -338,11 +338,17 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 }
 
 func channelAllowsOAuthProvider(channel db.Channel, provider string) bool {
+	if provider == reverseAuthProvider {
+		return isReverseAPIFormat(channel.APIFormat)
+	}
 	oauthProv, ok := oauthprovider.Get(provider)
 	return ok && oauthProv.ChannelAllowed(channel)
 }
 
 func oauthTokenURLMatchesProvider(provider, tokenURL string) bool {
+	if provider == reverseAuthProvider {
+		return isOpenAIReverseTokenURL(tokenURL)
+	}
 	oauthProv, ok := oauthprovider.Get(provider)
 	return ok && oauthProv.TokenURLAllowed(tokenURL)
 }
@@ -729,7 +735,7 @@ func (h *Handler) BindOAuthAccount(ctx *fasthttp.RequestCtx) {
 
 	account := db.Account{
 		ChannelID: session.ChannelID, Name: name, Credentials: encryptedCredential,
-		CredType: "oauth_token", Endpoint: upstreamconfig.DefaultEndpoint(channel.Type, channel.APIFormat), Weight: weight, Enabled: enabled,
+		CredType: reverseAuthAccountType(session), Endpoint: upstreamconfig.DefaultEndpoint(channel.Type, channel.APIFormat), Weight: weight, Enabled: enabled,
 		RefreshToken: encryptedRefresh, TokenExpiry: session.Expiry,
 		ClientID: session.ClientID, ClientSecret: encryptedClientSecret,
 		TokenURL: session.TokenURL,

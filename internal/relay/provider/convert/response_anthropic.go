@@ -71,8 +71,11 @@ func emitAnthropicResponseDirectIR(resp *relayir.Response) ([]byte, error) {
 	out["type"] = "message"
 	out["role"] = "assistant"
 	out["model"] = resp.Model
-	for k, v := range resp.Metadata {
-		out[k] = v
+	preserveNativeFields := resp.SourceProtocol == relayir.ProtocolAnthropic || resp.SourceProtocol == relayir.ProtocolClaudeCode
+	if preserveNativeFields {
+		for k, v := range resp.Metadata {
+			out[k] = v
+		}
 	}
 	var content []map[string]interface{}
 	if len(resp.Choices) > 0 {
@@ -93,15 +96,17 @@ func emitAnthropicResponseDirectIR(resp *relayir.Response) ([]byte, error) {
 				content = append(content, block)
 			}
 		}
-		out["stop_reason"] = anthropicFinishFromIR(choice.Finish)
+		out["stop_reason"] = anthropicFinishFromIR(resp.SourceProtocol, choice.Finish)
 		if choice.Finish != nil && choice.Finish.StopSequence != "" {
 			out["stop_sequence"] = choice.Finish.StopSequence
 		}
 	}
 	out["content"] = content
 	out["usage"] = anthropicUsageFromIR(resp.Usage)
-	for k, v := range resp.Native.Fields {
-		out[k] = relayir.CloneRaw(v)
+	if preserveNativeFields {
+		for k, v := range resp.Native.Fields {
+			out[k] = relayir.CloneRaw(v)
+		}
 	}
 	return json.Marshal(out)
 }
@@ -128,11 +133,11 @@ func anthropicUsageFromIR(usage *relayir.Usage) map[string]interface{} {
 	return out
 }
 
-func anthropicFinishFromIR(finish *relayir.Finish) string {
+func anthropicFinishFromIR(source relayir.Protocol, finish *relayir.Finish) string {
 	if finish == nil {
 		return "end_turn"
 	}
-	if finish.NativeReason != "" {
+	if finish.NativeReason != "" && (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) {
 		return finish.NativeReason
 	}
 	return mapAnthropicResponseFinishReason(internalFinishReasonFromIR(finish.Reason))

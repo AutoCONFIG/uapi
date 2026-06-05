@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/channelcap"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
@@ -75,6 +76,7 @@ type routeCandidate struct {
 	AccountID        uuid.UUID
 	AccountWeight    int
 	ChannelAPIFormat string
+	ChannelType      string
 	ChannelModels    string
 	ChannelAliases   string
 	ChannelSettings  string
@@ -291,7 +293,8 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 	defer g.limiter.Release(limitKey)
 
-	route, releaseNode, ok := g.pickRoute(req.Model)
+	routeReq := channelcap.AnalyzeJSON(gatewayCapabilityKind(path), body)
+	route, releaseNode, ok := g.pickRoute(req.Model, routeReq)
 	if !ok {
 		g.fallback(ctx)
 		return
@@ -620,6 +623,41 @@ func isGeminiModelsPath(path string) bool {
 	return path == "/v1beta/models" || path == "/v1beta/models/"
 }
 
+func gatewayCapabilityKind(path string) string {
+	switch {
+	case path == "/v1/chat/completions" || path == "/v1/chat/completions/":
+		return channelcap.KindChatCompletion
+	case strings.HasPrefix(path, "/v1/responses"):
+		return channelcap.KindResponses
+	case strings.HasPrefix(path, "/v1/messages"):
+		return channelcap.KindMessages
+	case strings.HasPrefix(path, "/v1beta/"):
+		return channelcap.KindGeminiGenerate
+	case strings.HasPrefix(path, "/v1/images/generations"):
+		return channelcap.KindImageGeneration
+	case strings.HasPrefix(path, "/v1/images/edits"):
+		return channelcap.KindImageEdit
+	case strings.HasPrefix(path, "/v1/images/variations"):
+		return channelcap.KindImageVariation
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		return channelcap.KindSpeech
+	case strings.HasPrefix(path, "/v1/audio/transcriptions"):
+		return channelcap.KindTranscription
+	case strings.HasPrefix(path, "/v1/audio/translations"):
+		return channelcap.KindTranslation
+	case strings.HasPrefix(path, "/v1/embeddings"):
+		return channelcap.KindEmbedding
+	case strings.HasPrefix(path, "/v1/moderations"):
+		return channelcap.KindModeration
+	case strings.HasPrefix(path, "/v1/realtime/"):
+		return channelcap.KindRealtime
+	case strings.HasPrefix(path, "/v1/videos"), strings.HasPrefix(path, "/v1/video/"):
+		return channelcap.KindVideoGeneration
+	default:
+		return ""
+	}
+}
+
 func (g *Gateway) getToken(key string) (db.Token, error) {
 	now := time.Now()
 	g.tokenMu.Lock()
@@ -640,7 +678,7 @@ func (g *Gateway) getToken(key string) (db.Token, error) {
 	return token, nil
 }
 
-func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
+func (g *Gateway) pickRoute(model string, capabilityReq channelcap.Request) (*routeCandidate, func(bool), bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -653,6 +691,9 @@ func (g *Gateway) pickRoute(model string) (*routeCandidate, func(bool), bool) {
 	for _, route := range g.routes {
 		node := route.Node
 		if !channelSupportsGatewayModel(model, route.ChannelAPIFormat, route.ChannelModels, route.ChannelAliases, route.ChannelSettings) {
+			continue
+		}
+		if !channelcap.Supports(db.Channel{Type: route.ChannelType, APIFormat: route.ChannelAPIFormat}, capabilityReq) {
 			continue
 		}
 		if now.Before(node.FailUntil) {
@@ -713,6 +754,7 @@ func (g *Gateway) reloadLocked() {
 		AccountID        uuid.UUID
 		AccountWeight    int
 		ChannelAPIFormat string
+		ChannelType      string
 		ChannelModels    string
 		ChannelAliases   string
 		ChannelSettings  string
@@ -721,7 +763,7 @@ func (g *Gateway) reloadLocked() {
 		Select(`relay_nodes.id AS node_id, relay_nodes.name AS node_name, relay_nodes.base_url,
 			relay_nodes.weight AS node_weight, relay_nodes.max_concurrency,
 			node_channels.channel_id, accounts.id AS account_id, node_channels.weight AS account_weight,
-			channels.api_format AS channel_api_format, channels.models AS channel_models, channels.model_aliases AS channel_aliases,
+			channels.api_format AS channel_api_format, channels.type AS channel_type, channels.models AS channel_models, channels.model_aliases AS channel_aliases,
 			channels.settings AS channel_settings`).
 		Joins("JOIN node_channels ON node_channels.relay_node_id = relay_nodes.id AND node_channels.enabled = true AND node_channels.deleted_at IS NULL").
 		Joins("JOIN channels ON channels.id = node_channels.channel_id AND channels.enabled = true AND channels.deleted_at IS NULL").
@@ -768,6 +810,7 @@ func (g *Gateway) reloadLocked() {
 			AccountID:        row.AccountID,
 			AccountWeight:    row.AccountWeight,
 			ChannelAPIFormat: row.ChannelAPIFormat,
+			ChannelType:      row.ChannelType,
 			ChannelModels:    row.ChannelModels,
 			ChannelAliases:   row.ChannelAliases,
 			ChannelSettings:  row.ChannelSettings,

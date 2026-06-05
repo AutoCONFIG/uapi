@@ -24,9 +24,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      UAPI_RELAY_DEBUG_DUMP_DIR: /app/debug-dumps
     volumes:
       - ./config.yaml:/app/config.yaml
       - ./assets:/app/assets
+      - ./debug-dumps:/app/debug-dumps
     expose:
       - "8080"
 

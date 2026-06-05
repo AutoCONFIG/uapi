@@ -3,6 +3,8 @@ package relay
 import (
 	"strings"
 
+	"github.com/AutoCONFIG/uapi/internal/channelcap"
+	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 )
 
@@ -165,16 +167,12 @@ func (rt relayRequestType) isImage() bool {
 }
 
 func supportsRelayRequestType(channelType string, rt relayRequestType) bool {
-	switch rt {
-	case requestTypeImageGeneration:
-		return channelType == "openai" || channelType == "antigravity"
-	case requestTypeImageEdit, requestTypeImageVariation:
-		return channelType == "openai" || channelType == "antigravity"
-	case requestTypeSpeech, requestTypeTranscription, requestTypeTranslation:
-		return channelType == "openai"
-	case requestTypeEmbedding, requestTypeModeration, requestTypeRealtime, requestTypeVideoGeneration:
-		return channelType == "openai"
-	default:
-		return true
+	return channelcap.Supports(db.Channel{Type: channelType}, channelcap.Request{Kind: string(rt)})
+}
+
+func supportsRelayChannelRequest(ch *db.Channel, req channelcap.Request) bool {
+	if ch == nil {
+		return false
 	}
+	return channelcap.Supports(*ch, req)
 }

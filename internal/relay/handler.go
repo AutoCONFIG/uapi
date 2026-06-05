@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/channelcap"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
@@ -18,6 +20,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider/chatgptreverse"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/google/uuid"
@@ -417,9 +420,18 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	if gatewayAuthenticated && internalClaims.ChannelID != "" && internalClaims.AccountID != "" {
 		targetChannel, account, adaptor, creds, err = r.resolveSelectedChannelAndAccount(internalClaims.ChannelID, internalClaims.AccountID, req.Model)
 	} else {
-		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccount(token.ID.String(), req.Model)
+		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccount(token.ID.String(), req.Model, channelcap.AnalyzeJSON(string(requestType), body))
 	}
 	if err != nil {
+		if relayDebugDumpEnabled() {
+			trace := startRelayRequestDebugDump(originalBody, body, token, nil, nil, claims, clientFormat, "", requestType, req.Model, req.Model, req.Stream)
+			trace.Event("route_failed",
+				logger.F("status", fasthttp.StatusNotFound),
+				logger.Err(err),
+				logger.F("model", req.Model),
+				logger.F("request_type", string(requestType)),
+			)
+		}
 		finishGatewayEarlyFailure(req.Model, fasthttp.StatusNotFound)
 		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
 		return
@@ -447,7 +459,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		estimatedTokens = internalClaims.EstimatedTokens
 	}
 	tokenPlanID := toUUID(internalClaims.TokenPlanID)
-	if !supportsRelayRequestType(targetChannel.Type, requestType) {
+	if !supportsRelayChannelRequest(targetChannel, channelcap.AnalyzeJSON(string(requestType), body)) {
 		go r.finishFailureUsageWithErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, false, start, fasthttp.StatusBadRequest, estimatedTokens, fmt.Sprintf("%s is not supported by %s channels", requestType, targetChannel.Type), r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 		ctx.Error(`{"error":"request type not supported by selected channel"}`, fasthttp.StatusBadRequest)
 		return
@@ -469,7 +481,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var upstreamFormat provider.Format
 	switch targetChannel.Type {
 	case "openai":
-		if targetChannel.APIFormat == "codex" {
+		if targetChannel.APIFormat == "chatgpt_reverse" {
+			upstreamFormat = provider.FormatChatGPTReverse
+		} else if targetChannel.APIFormat == "codex" {
 			upstreamFormat = provider.FormatCodexResponses
 		} else if targetChannel.APIFormat == "responses" {
 			upstreamFormat = provider.FormatOpenAIResponses
@@ -504,7 +518,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	forceStreamActive := (targetChannel.ForceStream || targetChannel.APIFormat == "codex") && !req.Stream
+	forceStreamActive := channelForceStreamForModel(targetChannel, req.Model, upstreamModel) && !req.Stream
 	effectiveStream := req.Stream || forceStreamActive
 	if !isMediaRequest && effectiveStream && shouldInjectStreamField(clientFormat, sameFormat, forceStreamActive, rawGeminiSameFormat) {
 		body = injectStreamTrue(body)
@@ -560,27 +574,45 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}
 	routedModel = routedModelFromBody(convertedBody, routedModel)
 	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses {
-		convertedBody = normalizeCodexResponsesRequest(convertedBody)
+		convertedBody = normalizeCodexResponsesRequest(convertedBody, effectiveStream)
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
 	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) {
 		convertedBody = injectStreamTrue(convertedBody)
 	}
 	adaptor.SetRequestParams(routedModel, effectiveStream)
+	var debugTrace *relayDebugTrace
 	if relayDebugDumpEnabled() {
-		dumpRelayRequestDebug(originalBody, convertedBody, token, targetChannel, account, claims, clientFormat, upstreamFormat, requestType, req.Model, routedModel, effectiveStream)
+		debugTrace = startRelayRequestDebugDump(originalBody, convertedBody, token, targetChannel, account, claims, clientFormat, upstreamFormat, requestType, req.Model, routedModel, effectiveStream)
+		debugTrace.Event("route_selected",
+			logger.F("token_id", token.ID.String()),
+			logger.F("model", req.Model),
+			logger.F("routed_model", routedModel),
+			logger.F("stream", req.Stream),
+			logger.F("effective_stream", effectiveStream),
+			logger.F("force_stream", forceStreamActive),
+			logger.F("client_format", string(clientFormat)),
+			logger.F("upstream_format", string(upstreamFormat)),
+			logger.F("channel_id", targetChannel.ID.String()),
+			logger.F("channel_type", targetChannel.Type),
+			logger.F("api_format", targetChannel.APIFormat),
+			logger.F("account_id", account.ID.String()),
+			logger.F("account_cred_type", account.CredType),
+			logger.F("gateway_authenticated", gatewayAuthenticated),
+			logger.F("upstream_url", upstreamURL),
+		)
 	}
 
 	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
-		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace)
 	} else if forceStreamActive {
 		streaming = true
-		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace)
 	} else {
 		streaming = true // handleBuffered manages its own concurrency release
-		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims)
+		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace)
 	}
 
 	// 10. Record affinity for non-streaming paths (handleBuffered + handleForceStream are synchronous)
@@ -590,27 +622,34 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
-func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
-	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false)
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace) {
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, trace)
 }
 
-func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool) {
+func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, trace *relayDebugTrace) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
 	upReq.SetRequestURI(url)
 	upReq.Header.SetMethodBytes([]byte("POST"))
-	upReq.Header.Set("Connection", "close")
 	upReq.SetBody(body)
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		trace.Event("setup_headers_failed", logger.Err(err))
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
+	trace.Event("upstream_request_started",
+		logger.F("mode", "stream"),
+		logger.F("auth_retried", authRetried),
+		logger.F("headers", relayDebugRequestHeaders(upReq)),
+		logger.F("body_stream", requestJSONBool(body, "stream")),
+	)
 	// streamingClient returns after receiving headers, body streamed via BodyStream
 	if err := doStreamingRequest(upReq, upResp); err != nil {
+		trace.Event("upstream_request_failed", logger.Err(err), logger.F("auth_retried", authRetried))
 		logger.Warnf("relay.upstream", "streaming request failed", logger.Err(err))
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
@@ -619,19 +658,31 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 	}
 
 	statusCode := upResp.StatusCode()
+	trace.Event("upstream_headers_received",
+		logger.F("status", statusCode),
+		logger.F("auth_retried", authRetried),
+		logger.F("content_type", string(upResp.Header.Peek("Content-Type"))),
+		logger.F("transfer_encoding", string(upResp.Header.Peek("Transfer-Encoding"))),
+	)
 	if statusCode >= 400 {
 		bodyCopy := readUpstreamErrorBody(upResp)
+		trace.Event("upstream_error_body",
+			logger.F("status", statusCode),
+			logger.F("body_bytes", len(bodyCopy)),
+			logger.F("body_preview", compactLogBody(bodyCopy)),
+		)
 		if !authRetried {
 			if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, bodyCopy); ok {
+				trace.Event("oauth_refreshed_after_upstream_error", logger.F("status", statusCode))
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, trace)
 				return
 			}
 		}
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
-		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 		return
 	}
 
@@ -642,13 +693,12 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 	ctx.Response.Header.Set("Connection", "keep-alive")
 	ctx.Response.Header.Set("X-Accel-Buffering", "no")
 
-	reader := NewSSEStreamReader()
+	reader := NewSSEStreamReaderWithTrace(trace)
 	ctx.Response.SetBodyStream(reader, -1)
 
 	tracker := newStreamTracker(adaptor)
 
-	var inputConvert func([]byte) []byte
-	outputConvert := newStreamConverterFunc(upstreamFormat, clientFormat)
+	inputConvert, outputConvert := chatGPTReverseOutputConverter(upstreamFormat, clientFormat, routedModel)
 	sendDone := clientFormat == provider.FormatOpenAIChatCompletions
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
@@ -667,13 +717,21 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 		bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(upResp.BodyStream(), upResp.BodyStream(), r.streamIdleTimeout)
 		defer stopIdleTimeout()
-		result := streamAndForward(bodyStream, reader, tracker, inputConvert, outputConvert, sendDone)
+		result := streamAndForwardWithTrace(bodyStream, reader, tracker, inputConvert, outputConvert, sendDone, trace)
 		if result.err != nil {
 			if errors.Is(result.err, io.ErrClosedPipe) {
 				pt, ct, _ := tracker.Result()
 				cacheCreationTokens := tracker.CacheCreationTokens()
 				cacheReadTokens := tracker.CacheReadTokens()
 				estimateMissingUsage(&pt, &ct, body, nil, tracker.EstimatedOutputTokens())
+				trace.Event("stream_result_client_closed",
+					logger.F("status", 499),
+					logger.F("prompt_tokens", pt),
+					logger.F("completion_tokens", ct),
+					logger.F("cache_creation_tokens", cacheCreationTokens),
+					logger.F("cache_read_tokens", cacheReadTokens),
+					logger.F("estimated_output_tokens", tracker.EstimatedOutputTokens()),
+				)
 				if pt > 0 || ct > 0 {
 					go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, 499, estTokens, r.clientIPForDirectRequest(ctx, claims))
 				} else {
@@ -681,16 +739,22 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				return
 			}
+			trace.Event("stream_result_error",
+				logger.F("status", fasthttp.StatusBadGateway),
+				logger.Err(result.err),
+			)
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			return
 		}
 		if result.failed {
+			trace.Event("stream_result_upstream_failure", logger.F("status", fasthttp.StatusBadGateway))
 			logger.Warnf("relay.stream", "upstream stream reported failure")
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			return
 		}
 		if !result.finalized {
+			trace.Event("stream_result_missing_terminal", logger.F("status", fasthttp.StatusBadGateway))
 			logger.Warnf("relay.stream", "stream ended without terminal event")
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			return
@@ -713,6 +777,15 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				logger.F("completion_tokens", ct),
 			)
 		}
+		trace.Event("stream_result_success",
+			logger.F("status", statusCode),
+			logger.F("prompt_tokens", pt),
+			logger.F("completion_tokens", ct),
+			logger.F("cache_creation_tokens", cacheCreationTokens),
+			logger.F("cache_read_tokens", cacheReadTokens),
+			logger.F("parse_failed", parseFailed),
+			logger.F("latency_ms", time.Since(start).Milliseconds()),
+		)
 		logger.Debugf("relay.stream", "stream request completed",
 			logger.F("token_id", token.ID.String()),
 			logger.F("channel_id", ch.ID.String()),
@@ -728,7 +801,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			logger.Default().Panic("relay.stream", "force stream panic", rec)
@@ -745,41 +818,78 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	upReq.Header.SetMethodBytes([]byte("POST"))
 	upReq.SetBody(body)
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		trace.Event("setup_headers_failed", logger.Err(err), logger.F("mode", "force_stream"))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 
+	trace.Event("upstream_request_started",
+		logger.F("mode", "force_stream"),
+		logger.F("headers", relayDebugRequestHeaders(upReq)),
+		logger.F("body_stream", requestJSONBool(body, "stream")),
+	)
 	if err := doStreamingRequest(upReq, upResp); err != nil {
+		trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream"))
 		logger.Warnf("relay.upstream", "force stream request failed", logger.Err(err))
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
 
 	statusCode := upResp.StatusCode()
+	trace.Event("upstream_headers_received",
+		logger.F("mode", "force_stream"),
+		logger.F("status", statusCode),
+		logger.F("content_type", string(upResp.Header.Peek("Content-Type"))),
+		logger.F("transfer_encoding", string(upResp.Header.Peek("Transfer-Encoding"))),
+	)
 	if statusCode >= 400 {
 		bodyCopy := readUpstreamErrorBody(upResp)
+		trace.Event("upstream_error_body",
+			logger.F("mode", "force_stream"),
+			logger.F("status", statusCode),
+			logger.F("body_bytes", len(bodyCopy)),
+			logger.F("body_preview", compactLogBody(bodyCopy)),
+		)
 		if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, bodyCopy); ok {
+			trace.Event("oauth_refreshed_after_upstream_error", logger.F("mode", "force_stream"), logger.F("status", statusCode))
 			upReq.Reset()
 			upResp.Reset()
 			upReq.SetRequestURI(url)
 			upReq.Header.SetMethodBytes([]byte("POST"))
 			upReq.SetBody(body)
 			if err := adaptor.SetupRequestHeader(upReq, refreshedCreds); err != nil {
+				trace.Event("setup_headers_failed", logger.Err(err), logger.F("mode", "force_stream_retry"))
 				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 				return
 			}
+			trace.Event("upstream_request_started",
+				logger.F("mode", "force_stream_retry"),
+			)
 			if err := doStreamingRequest(upReq, upResp); err != nil {
+				trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream_retry"))
 				logger.Warnf("relay.upstream", "force stream request failed after oauth refresh", logger.Err(err))
 				r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 				return
 			}
 			statusCode = upResp.StatusCode()
+			trace.Event("upstream_headers_received",
+				logger.F("mode", "force_stream_retry"),
+				logger.F("status", statusCode),
+				logger.F("content_type", string(upResp.Header.Peek("Content-Type"))),
+				logger.F("transfer_encoding", string(upResp.Header.Peek("Transfer-Encoding"))),
+			)
 			if statusCode >= 400 {
 				bodyCopy = readUpstreamErrorBody(upResp)
+				trace.Event("upstream_error_body",
+					logger.F("mode", "force_stream_retry"),
+					logger.F("status", statusCode),
+					logger.F("body_bytes", len(bodyCopy)),
+					logger.F("body_preview", compactLogBody(bodyCopy)),
+				)
 			}
 		}
 		if statusCode >= 400 {
-			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
+			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 		}
 	}
@@ -790,44 +900,56 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	defer stopIdleTimeout()
 	respBody, err := io.ReadAll(io.LimitReader(bodyStream, int64(maxResponseSize)+1))
 	if err != nil {
+		trace.Event("force_stream_read_failed", logger.Err(err))
 		logger.Warnf("relay.upstream", "force stream read failed", logger.Err(err))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 	if len(respBody) > maxResponseSize {
+		trace.Event("force_stream_response_too_large", logger.F("limit", maxResponseSize), logger.F("body_bytes", len(respBody)))
 		logger.Warnf("relay.upstream", "force stream response too large", logger.F("limit", maxResponseSize))
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream response too large", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
+	trace.StreamChunk("stream.upstream.sse", respBody)
 
-	// Force-stream: convert upstream SSE to OpenAI Chat SSE, then to non-stream JSON
-	// NOTE: For Responses family (Codex/OpenAI Responses), the stream converter
-	// correctly uses passthrough since they share same parser/emitter.
-	// However, StreamToNonStreamChecked currently expects Chat SSE format.
-	// TODO: Create dedicated Responses SSE -> non-stream converter to skip Chat intermediate step
-	if convert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions); convert != nil {
+	// Force-stream: aggregate upstream SSE into the upstream protocol's own
+	// non-stream response, then convert once into the client protocol.
+	if upstreamFormat == provider.FormatChatGPTReverse {
+		respBody = convertSSEBufferWithConverter(respBody, newChatGPTReverseInputConverter(routedModel))
+		upstreamFormat = provider.FormatOpenAIChatCompletions
+	} else if forceStreamAggregationFormat(upstreamFormat) == provider.FormatOpenAIChatCompletions {
+		if convert := newStreamConverterFunc(upstreamFormat, provider.FormatOpenAIChatCompletions); convert != nil {
+			respBody = convertSSEBufferWithConverter(respBody, convert)
+		}
+		upstreamFormat = provider.FormatOpenAIChatCompletions
+	} else if convert := forceStreamPreAggregationConverter(upstreamFormat); convert != nil {
 		respBody = convertSSEBufferWithConverter(respBody, convert)
 	}
+	trace.StreamChunk("stream.normalized.sse", respBody)
 
-	// SSE -> non-stream JSON (produces OpenAI Chat Completions API format)
 	var complete bool
-	respBody, complete = StreamToNonStreamChecked(respBody)
+	var responseFormat provider.Format
+	respBody, complete, responseFormat = StreamToNonStreamForFormat(upstreamFormat, respBody)
 	if isOpenAIErrorResponse(respBody) {
-		r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, respBody, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
+		trace.Event("force_stream_openai_error_response", logger.F("body_preview", compactLogBody(respBody)))
+		r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, respBody, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 		return
 	}
 	if !complete {
+		trace.Event("force_stream_missing_terminal")
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "stream ended without terminal event", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
 
-	// Parse usage from OpenAI JSON BEFORE client-format conversion
-	pt, ct := parseNonStreamUsage(respBody)
+	// Parse usage from upstream JSON BEFORE client-format conversion.
+	pt, ct, cacheCreationTokens, cacheReadTokens := parseNonStreamUsageFull(respBody)
 	estimateMissingUsage(&pt, &ct, body, respBody, 0)
 
 	// Convert from OpenAI JSON to client format if needed
-	if clientFormat != provider.FormatOpenAIChatCompletions {
-		if converted, err := provider.ConvertResponse(provider.FormatOpenAIChatCompletions, clientFormat, respBody); err != nil {
+	if clientFormat != responseFormat {
+		if converted, err := provider.ConvertResponse(responseFormat, clientFormat, respBody); err != nil {
+			trace.Event("response_conversion_failed", logger.Err(err), logger.F("mode", "force_stream"))
 			logger.Warnf("relay.convert", "response conversion failed", logger.Err(err))
 			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 			return
@@ -839,6 +961,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	ctx.SetStatusCode(statusCode)
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
+	trace.StreamChunk("response.downstream.json", respBody)
 
 	logger.Debugf("relay.stream", "force stream request completed",
 		logger.F("token_id", token.ID.String()),
@@ -850,7 +973,16 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		logger.F("completion_tokens", ct),
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
-	go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
+	trace.Event("force_stream_result_success",
+		logger.F("status", statusCode),
+		logger.F("prompt_tokens", pt),
+		logger.F("completion_tokens", ct),
+		logger.F("cache_creation_tokens", cacheCreationTokens),
+		logger.F("cache_read_tokens", cacheReadTokens),
+		logger.F("response_bytes", len(respBody)),
+		logger.F("latency_ms", time.Since(start).Milliseconds()),
+	)
+	go r.finishUsageWithRoutedModelFormatsAndCache(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 }
 
@@ -869,11 +1001,15 @@ func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
 }
 
 func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, start time.Time, estTokens int, claims *internalauth.Claims) {
-	if !supportsRelayRequestType(ch.Type, requestType) {
+	if !supportsRelayChannelRequest(ch, channelcap.AnalyzeJSON(string(requestType), body)) {
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 		return
 	}
 	responseFormat := imageResponseFormat(ctx, body)
+	if ch.APIFormat == "chatgpt_reverse" {
+		r.handleChatGPTReverseImageGeneration(ctx, token, tokenPlanID, ch, acc, adaptor, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, requestType)
+		return
+	}
 	if ch.Type == "antigravity" {
 		converted, err := antigravityImageBody(ctx, body, acc, model, requestType)
 		if err != nil {
@@ -962,6 +1098,34 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, 0, estTokens, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
 }
 
+type chatGPTReverseImageGenerator interface {
+	GenerateImage(body []byte, credentials string) ([]byte, int, error)
+}
+
+func (r *Relayer) handleChatGPTReverseImageGeneration(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, requestType relayRequestType) {
+	if requestType != requestTypeImageGeneration {
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
+		return
+	}
+	generator, ok := adaptor.(chatGPTReverseImageGenerator)
+	if !ok {
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "chatgpt reverse image adaptor unavailable", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+		return
+	}
+	respBody, statusCode, err := generator.GenerateImage(body, creds)
+	if err != nil {
+		logger.Warnf("relay.chatgpt_reverse", "image generation failed", logger.Err(err))
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, err.Error(), claims, ch, acc, model, start, statusCode, tokenPlanID)
+		return
+	}
+	ctx.SetStatusCode(statusCode)
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetBody(respBody)
+	r.releaseLocalConcurrency(token.ID.String(), claims)
+	logger.Debugf("relay.media", "chatgpt reverse image generation completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
+	go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, 0, estimatedImageTokens, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
+}
+
 func antigravityImageBody(ctx *fasthttp.RequestCtx, body []byte, acc *db.Account, model string, requestType relayRequestType) ([]byte, error) {
 	switch requestType {
 	case requestTypeImageGeneration:
@@ -1014,8 +1178,25 @@ func (c *channelCache) get() []db.Channel {
 	return channels
 }
 
+func (c *channelCache) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.channels = nil
+	c.expiry = time.Time{}
+}
+
+func (r *Relayer) InvalidateChannelCache() {
+	if r == nil || r.chCache == nil {
+		return
+	}
+	r.chCache.invalidate()
+}
+
 // handleBuffered: standard buffered request with retry.
-func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims) {
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace) {
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
@@ -1032,6 +1213,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		upReq.Header.SetMethodBytes(ctx.Method())
 		upReq.SetBody(body)
 		if err := adaptor.SetupRequestHeader(upReq, currentCreds); err != nil {
+			trace.Event("setup_headers_failed", logger.Err(err), logger.F("mode", "buffered"), logger.F("retry", retry))
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, currentAccount, model, start, tokenPlanID)
@@ -1043,9 +1225,11 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 
 		shouldRetry := false
 		if err != nil {
+			trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "buffered"), logger.F("retry", retry))
 			logger.Warnf("relay.upstream", "buffered request failed", logger.F("retry", retry), logger.Err(err))
 			shouldRetry = true
 		} else if upResp.StatusCode() == 429 {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 			// Trigger quota refresh on 429 so admin can see updated usage
 			if r.quotaScheduler != nil && currentAccount != nil && ch != nil {
 				r.quotaScheduler.On429(currentAccount.ID, ch.ID)
@@ -1054,6 +1238,13 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			statusCode = 429
 			copyHeaders(upResp, &respHeaders)
 			retryDelay := parseRetryDelay(respBody429, upstreamFormat)
+			trace.Event("upstream_429",
+				logger.F("mode", "buffered"),
+				logger.F("retry", retry),
+				logger.F("retry_delay_ms", retryDelay.Milliseconds()),
+				logger.F("body_bytes", len(respBody429)),
+				logger.F("body_preview", compactLogBody(respBody429)),
+			)
 			if retryDelay >= 0 && retryDelay <= 3*time.Second && retry < 2 {
 				// Short delay: wait and retry same account
 				logger.Infof("relay.429", "short retry delay, retrying same account", logger.F("delay", retryDelay), logger.F("retry", retry))
@@ -1065,21 +1256,39 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			shouldRetry = true
 			r.markAutoDisable(currentAccount, "quota_exhausted")
 		} else if currentAccount != nil && !refreshedAuthAccounts[currentAccount.ID] && isOAuthAuthFailure(currentAccount, upResp.StatusCode(), upResp.Body()) {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 			respBody = copyBody(upResp)
 			statusCode = upResp.StatusCode()
 			copyHeaders(upResp, &respHeaders)
 			if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, currentAccount, statusCode, respBody); ok {
+				trace.Event("oauth_refreshed_after_upstream_error",
+					logger.F("mode", "buffered"),
+					logger.F("retry", retry),
+					logger.F("status", statusCode),
+					logger.F("body_bytes", len(respBody)),
+					logger.F("body_preview", compactLogBody(respBody)),
+				)
 				refreshedAuthAccounts[currentAccount.ID] = true
 				currentCreds = refreshedCreds
 				fasthttp.ReleaseResponse(upResp)
 				continue
 			}
 		} else if upResp.StatusCode() >= 500 {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
 			respBody = copyBody(upResp)
 			statusCode = upResp.StatusCode()
 			copyHeaders(upResp, &respHeaders)
+			trace.Event("retryable_upstream_status",
+				logger.F("mode", "buffered"),
+				logger.F("retry", retry),
+				logger.F("status", statusCode),
+				logger.F("body_bytes", len(respBody)),
+				logger.F("body_preview", compactLogBody(respBody)),
+			)
 			shouldRetry = true
+		} else {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 		}
 
 		if shouldRetry {
@@ -1087,21 +1296,35 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			r.cooldownAndEvict(ch, currentAccount)
 			currentAccount = r.pickNext(ch, poolFromChannel(r.pools, ch))
 			if currentAccount == nil {
+				trace.Event("retry_account_unavailable", logger.F("mode", "buffered"), logger.F("retry", retry))
 				break
 			}
+			trace.Event("retry_switch_account",
+				logger.F("mode", "buffered"),
+				logger.F("retry", retry),
+				logger.F("account_id", currentAccount.ID.String()),
+			)
 			respAccount = currentAccount
 			adaptor.Init(ch, currentAccount)
 			currentCreds, err = r.ensureCredentials(ch, currentAccount)
 			if err != nil {
+				trace.Event("retry_credentials_failed", logger.Err(err), logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("account_id", currentAccount.ID.String()))
 				logger.Warnf("relay.credentials", "credential error on retry", logger.F("retry", retry), logger.Err(err))
 				currentAccount = r.retryNext(ch, currentAccount)
 				if currentAccount == nil {
+					trace.Event("replacement_account_unavailable", logger.F("mode", "buffered"), logger.F("retry", retry))
 					break
 				}
+				trace.Event("retry_replacement_account",
+					logger.F("mode", "buffered"),
+					logger.F("retry", retry),
+					logger.F("account_id", currentAccount.ID.String()),
+				)
 				respAccount = currentAccount
 				adaptor.Init(ch, currentAccount)
 				currentCreds, err = r.ensureCredentials(ch, currentAccount)
 				if err != nil {
+					trace.Event("replacement_credentials_failed", logger.Err(err), logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("account_id", currentAccount.ID.String()))
 					logger.Warnf("relay.credentials", "credential error on replacement retry", logger.F("retry", retry), logger.Err(err))
 					break
 				}
@@ -1120,6 +1343,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 
 	if respBody == nil {
+		trace.Event("buffered_result_all_retries_exhausted", logger.F("status", fasthttp.StatusServiceUnavailable))
 		r.releaseLocalConcurrency(token.ID.String(), claims)
 		go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, start, fasthttp.StatusServiceUnavailable, estTokens, "all retries exhausted", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 		ctx.Error(`{"error":"all retries exhausted"}`, fasthttp.StatusServiceUnavailable)
@@ -1147,18 +1371,25 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			}
 		}
 		if statusCode >= 400 {
+			trace.Event("buffered_result_upstream_error",
+				logger.F("status", statusCode),
+				logger.F("body_bytes", len(respBody)),
+				logger.F("body_preview", compactLogBody(respBody)),
+			)
 			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, respAccount, model, false, start, clientFormat, claims, tokenPlanID)
 			return
 		}
 	}
 
 	upstreamRespBody := respBody
+	trace.StreamChunk("response.upstream.json", upstreamRespBody)
 
 	// Response format normalization/conversion. Same-format buffered responses
 	// keep the upstream standard JSON intact to preserve provider-native fields.
 	responseConverted := upstreamFormat != clientFormat
 	if responseConverted {
 		if converted, err := provider.ConvertResponse(upstreamFormat, clientFormat, respBody); err != nil {
+			trace.Event("response_conversion_failed", logger.Err(err), logger.F("mode", "buffered"))
 			logger.Warnf("relay.convert", "response conversion failed", logger.Err(err))
 			r.finishFailedBuffered(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, respAccount, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 			ctx.Error(`{"error":"response conversion failed"}`, fasthttp.StatusBadGateway)
@@ -1194,6 +1425,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		sanitizeConvertedResponseHeaders(&ctx.Response.Header)
 	}
 	ctx.SetBody(respBody)
+	trace.StreamChunk("response.downstream.json", respBody)
 
 	logger.Debugf("relay.buffered", "buffered request completed",
 		logger.F("token_id", token.ID.String()),
@@ -1203,6 +1435,15 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		logger.F("status", statusCode),
 		logger.F("prompt_tokens", pt),
 		logger.F("completion_tokens", ct),
+		logger.F("latency_ms", time.Since(start).Milliseconds()),
+	)
+	trace.Event("buffered_result_success",
+		logger.F("status", statusCode),
+		logger.F("prompt_tokens", pt),
+		logger.F("completion_tokens", ct),
+		logger.F("cache_creation_tokens", cacheCreationTokens),
+		logger.F("cache_read_tokens", cacheReadTokens),
+		logger.F("response_bytes", len(respBody)),
 		logger.F("latency_ms", time.Since(start).Milliseconds()),
 	)
 	if claims != nil && claims.RequestID != "" {
@@ -1345,6 +1586,23 @@ func convertSSEBufferWithConverter(sseBody []byte, convert func([]byte) []byte) 
 		out = append(out, []byte("data: [DONE]\n\n")...)
 	}
 	return out
+}
+
+func forceStreamAggregationFormat(upstreamFormat provider.Format) provider.Format {
+	switch upstreamFormat {
+	case provider.FormatOpenAIResponses, provider.FormatCodexResponses:
+		return upstreamFormat
+	default:
+		return provider.FormatOpenAIChatCompletions
+	}
+}
+
+func forceStreamPreAggregationConverter(upstreamFormat provider.Format) func([]byte) []byte {
+	aggregationFormat := forceStreamAggregationFormat(upstreamFormat)
+	if aggregationFormat == upstreamFormat {
+		return nil
+	}
+	return newStreamConverterFunc(upstreamFormat, aggregationFormat)
 }
 
 func (r *Relayer) retryGeminiCodeFallback(ctx *fasthttp.RequestCtx, adaptor provider.Adaptor, url string, body []byte, creds string, headers *fasthttp.ResponseHeader) ([]byte, int, bool) {
@@ -1496,13 +1754,13 @@ func geminiCodeFallbackBody(model string, body []byte) (string, []byte, bool) {
 
 // --- Helpers ---
 
-func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
+func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	// Try affinity cache first
 	if r.db != nil {
 		if chID := r.affinity.Get(tokenID, model); chID != "" {
 			var ch db.Channel
 			if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
-				if channelSupportsModel(ch, model) {
+				if channelSupportsModel(ch, model) && channelSupportsCapability(ch, capabilityReq...) {
 					if acc, adaptor, creds, err := r.pickAccount(ch); err == nil {
 						return &ch, acc, adaptor, creds, nil
 					}
@@ -1519,7 +1777,7 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 		}
 		r.runtimeMu.RUnlock()
 		for i := range channels {
-			if channelSupportsModel(channels[i], model) {
+			if channelSupportsModel(channels[i], model) && channelSupportsCapability(channels[i], capabilityReq...) {
 				if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
 					return &channels[i], acc, adaptor, creds, nil
 				}
@@ -1529,18 +1787,71 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string) (*db.Channel, 
 	}
 
 	// Priority-based selection (with caching)
-	channels := r.chCache.get()
+	channels := channelCandidatesForModelAndCapability(r.chCache.get(), model, capabilityReq, rand.Intn)
 	for i := range channels {
-		if channelSupportsModel(channels[i], model) {
-			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
-				return &channels[i], acc, adaptor, creds, nil
-			}
+		if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+			return &channels[i], acc, adaptor, creds, nil
 		}
 	}
 	return nil, nil, nil, "", errNoChannel
 }
 
 var errNoChannel = fmt.Errorf("no available channel for model")
+
+func channelCandidatesForModel(channels []db.Channel, model string, randomInt func(int) int) []db.Channel {
+	return channelCandidatesForModelAndCapability(channels, model, nil, randomInt)
+}
+
+func channelCandidatesForModelAndCapability(channels []db.Channel, model string, capabilityReq []channelcap.Request, randomInt func(int) int) []db.Channel {
+	candidates := make([]db.Channel, 0, len(channels))
+	for i := range channels {
+		if channelSupportsModel(channels[i], model) && channelSupportsCapability(channels[i], capabilityReq...) {
+			candidates = append(candidates, channels[i])
+		}
+	}
+	if len(candidates) < 2 || randomInt == nil {
+		return candidates
+	}
+	start := 0
+	for start < len(candidates) {
+		end := start + 1
+		for end < len(candidates) && candidates[end].Priority == candidates[start].Priority {
+			end++
+		}
+		if end-start > 1 {
+			weightedShuffleChannels(candidates[start:end], randomInt)
+		}
+		start = end
+	}
+	return candidates
+}
+
+func weightedShuffleChannels(channels []db.Channel, randomInt func(int) int) {
+	for i := 0; i < len(channels)-1; i++ {
+		total := 0
+		for j := i; j < len(channels); j++ {
+			total += effectiveChannelWeight(channels[j])
+		}
+		if total <= 0 {
+			continue
+		}
+		pick := randomInt(total)
+		for j := i; j < len(channels); j++ {
+			pick -= effectiveChannelWeight(channels[j])
+			if pick < 0 {
+				channels[i], channels[j] = channels[j], channels[i]
+				break
+			}
+		}
+	}
+}
+
+func effectiveChannelWeight(ch db.Channel) int {
+	if ch.Weight <= 0 {
+		return 100
+	}
+	return ch.Weight
+}
 
 func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model string) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	chUUID, err := uuid.Parse(channelID)
@@ -1555,7 +1866,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 		if !channelSupportsModel(*ch, model) {
 			return nil, nil, nil, "", fmt.Errorf("selected channel does not support model")
 		}
-		adaptor := getAdaptor(ch.Type)
+		adaptor := getAdaptorForChannel(ch)
 		if adaptor == nil {
 			return nil, nil, nil, "", fmt.Errorf("unsupported channel type")
 		}
@@ -1579,7 +1890,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 	if err := r.db.Where("id = ? AND channel_id = ? AND enabled = true AND deleted_at IS NULL", accUUID, chUUID).First(&acc).Error; err != nil {
 		return nil, nil, nil, "", fmt.Errorf("selected account not available")
 	}
-	adaptor := getAdaptor(ch.Type)
+	adaptor := getAdaptorForChannel(&ch)
 	if adaptor == nil {
 		return nil, nil, nil, "", fmt.Errorf("unsupported channel type")
 	}
@@ -1681,7 +1992,7 @@ func preserveFresherRuntimeOAuth(incoming, existing db.Account) db.Account {
 }
 
 func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, string, error) {
-	adaptor := getAdaptor(ch.Type)
+	adaptor := getAdaptorForChannel(&ch)
 	if adaptor == nil {
 		return nil, nil, "", fmt.Errorf("unsupported channel type")
 	}
@@ -1751,7 +2062,7 @@ func (r *Relayer) notifyOAuthAccountRefreshed(accountID uuid.UUID) {
 }
 
 func isOAuthAuthFailure(account *db.Account, statusCode int, body []byte) bool {
-	if account == nil || account.CredType != "oauth_token" || strings.TrimSpace(account.RefreshToken) == "" {
+	if account == nil || (account.CredType != "oauth_token" && account.CredType != "chatgpt_reverse") || strings.TrimSpace(account.RefreshToken) == "" {
 		return false
 	}
 	if statusCode == fasthttp.StatusUnauthorized {
@@ -1978,6 +2289,7 @@ func (r *Relayer) disableChannelIfNoEnabledAccounts(ch *db.Channel, reason strin
 	if r.pools != nil {
 		r.pools.RemovePool(ch.ID.String())
 	}
+	r.InvalidateChannelCache()
 	logger.Warnf("relay.channel", "channel auto-disabled because no enabled accounts remain",
 		logger.F("channel_id", ch.ID.String()),
 		logger.F("reason", reason),
@@ -2181,6 +2493,7 @@ func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTok
 	r.disableAccountOnTerminalUpstreamError(ch, acc, statusCode, respBody)
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
+	ctx.Response.Header.SetContentType("application/json")
 	ctx.SetBody(normalizedBody)
 	go r.finishFailureUsageWithErrorAndClientIP(claims, tokenID, ch.ID, acc.ID, model, isStream, start, statusCode, estTokens, errorMessageFromResponse(respBody), r.clientIPForDirectRequest(ctx, claims), tokenPlanIDs...)
 }
@@ -2279,7 +2592,68 @@ func routedModelFromBody(body []byte, fallback string) string {
 	return fallback
 }
 
-func normalizeCodexResponsesRequest(body []byte) []byte {
+func channelForceStreamForModel(ch *db.Channel, model, upstreamModel string) bool {
+	if ch == nil {
+		return false
+	}
+	models := channelForceStreamModels(ch.Settings)
+	if len(models) == 0 {
+		return false
+	}
+	candidates := []string{model, upstreamModel}
+	for _, candidate := range candidates {
+		normalized := strings.ToLower(strings.TrimSpace(candidate))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := models[normalized]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func channelForceStreamModels(settings string) map[string]struct{} {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(settings), &raw); err != nil {
+		return nil
+	}
+	values, ok := raw["force_stream_models"]
+	if !ok {
+		return nil
+	}
+	out := map[string]struct{}{}
+	add := func(value string) {
+		for _, item := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+		}) {
+			item = strings.ToLower(strings.TrimSpace(item))
+			if item != "" {
+				out[item] = struct{}{}
+			}
+		}
+	}
+	switch typed := values.(type) {
+	case []interface{}:
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	case []string:
+		for _, item := range typed {
+			add(item)
+		}
+	case string:
+		add(typed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
 	var bodyMap map[string]interface{}
 	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
@@ -2288,7 +2662,7 @@ func normalizeCodexResponsesRequest(body []byte) []byte {
 		bodyMap["instructions"] = ""
 	}
 	bodyMap["store"] = false
-	bodyMap["stream"] = true
+	bodyMap["stream"] = stream
 	if _, ok := bodyMap["parallel_tool_calls"]; !ok {
 		bodyMap["parallel_tool_calls"] = true
 	}
@@ -2498,14 +2872,68 @@ func sanitizeConvertedResponseHeaders(h *fasthttp.ResponseHeader) {
 }
 
 func parseNonStreamUsage(respBody []byte) (int, int) {
+	pt, ct, _, _ := parseNonStreamUsageFull(respBody)
+	return pt, ct
+}
+
+func parseNonStreamUsageFull(respBody []byte) (int, int, int, int) {
 	var resp struct {
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(respBody, &resp) == nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
-		return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+		creation, read := nonStreamCacheTokens(respBody)
+		return resp.Usage.PromptTokens, resp.Usage.CompletionTokens, creation, read
+	}
+	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+		creation, read := nonStreamCacheTokens(respBody)
+		return resp.Usage.InputTokens, resp.Usage.OutputTokens, creation, read
+	}
+	creation, read := nonStreamCacheTokens(respBody)
+	return 0, 0, creation, read
+}
+
+func requestJSONBool(body []byte, key string) interface{} {
+	var root map[string]interface{}
+	if json.Unmarshal(body, &root) != nil {
+		return nil
+	}
+	value, ok := root[key].(bool)
+	if !ok {
+		return nil
+	}
+	return value
+}
+
+func relayDebugRequestHeaders(req *fasthttp.Request) map[string]string {
+	if req == nil {
+		return nil
+	}
+	headers := make(map[string]string)
+	req.Header.VisitAll(func(k, v []byte) {
+		key := string(k)
+		lower := strings.ToLower(key)
+		switch lower {
+		case "authorization", "x-api-key", "api-key", "anthropic-api-key", "x-goog-api-key", "cookie", "set-cookie":
+			headers[key] = "[redacted]"
+		default:
+			headers[key] = string(v)
+		}
+	})
+	return headers
+}
+
+func nonStreamCacheTokens(respBody []byte) (int, int) {
+	var root map[string]interface{}
+	if json.Unmarshal(respBody, &root) != nil {
+		return 0, 0
+	}
+	if usage, _ := root["usage"].(map[string]interface{}); usage != nil {
+		return usageCacheTokens(usage)
 	}
 	return 0, 0
 }
@@ -2535,6 +2963,31 @@ func getAdaptor(channelType string) provider.Adaptor {
 	default:
 		return nil
 	}
+}
+
+func getAdaptorForChannel(ch *db.Channel) provider.Adaptor {
+	if ch != nil && ch.APIFormat == "chatgpt_reverse" {
+		return &chatgptreverse.Adaptor{}
+	}
+	if ch == nil {
+		return nil
+	}
+	return getAdaptor(ch.Type)
+}
+
+func channelSupportsCapability(ch db.Channel, reqs ...channelcap.Request) bool {
+	if len(reqs) == 0 {
+		return true
+	}
+	for _, req := range reqs {
+		if req.Kind == "" {
+			continue
+		}
+		if !channelcap.Supports(ch, req) {
+			return false
+		}
+	}
+	return true
 }
 
 func reverseStreamConverterForClient(clientFormat, upstreamFormat provider.Format) func([]byte) []byte {

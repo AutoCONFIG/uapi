@@ -189,6 +189,84 @@ func TestResponsesSameProtocolPreservesMCPAndNamespaceTools(t *testing.T) {
 	}
 }
 
+func TestResponsesSameProtocolNormalizesRawTextContentPartsForOpenAIWire(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{`"type":"input_text"`, `"type":"output_text"`} {
+		if indexOf(text, want) < 0 {
+			t.Fatalf("same-protocol Responses conversion missing %s:\n%s", want, converted)
+		}
+	}
+	if indexOf(text, `"type":"text"`) >= 0 {
+		t.Fatalf("same-protocol Responses conversion leaked invalid text content part:\n%s", converted)
+	}
+}
+
+func TestResponsesSameProtocolFlattensRawFunctionCallOutputTextBlocksForOpenAIWire(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"function_call_output","call_id":"call_1","output":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	output := input[0].(map[string]interface{})
+	if output["output"] != "line1\nline2" {
+		t.Fatalf("function_call_output.output = %#v, want flattened string; body=%s", output["output"], converted)
+	}
+}
+
+func TestResponsesToolResultTextBlocksFlattenToStringForOpenAIWire(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":1024,
+		"messages":[{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}]}
+		]}]
+	}`)
+	converted, err := ConvertRequest(FormatAnthropic, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	var output map[string]interface{}
+	for _, raw := range input {
+		item, ok := raw.(map[string]interface{})
+		if ok && item["type"] == "function_call_output" {
+			output = item
+			break
+		}
+	}
+	if output == nil {
+		t.Fatalf("function_call_output missing: %s", converted)
+	}
+	if output["output"] != "line1\nline2" {
+		t.Fatalf("function_call_output.output = %#v, want flattened string; body=%s", output["output"], converted)
+	}
+}
+
 func TestResponsesFunctionCallNamespaceProjectsToAnthropicToolUseName(t *testing.T) {
 	body := []byte(`{
 		"id":"resp_1",
@@ -205,6 +283,36 @@ func TestResponsesFunctionCallNamespaceProjectsToAnthropicToolUseName(t *testing
 	text := string(converted)
 	if indexOf(text, `"name":"plugin:claude-mem:mcp-search__smart_search"`) < 0 {
 		t.Fatalf("Responses namespace tool call not qualified for Anthropic:\n%s", converted)
+	}
+}
+
+func TestResponsesTextResponseProjectsToCleanAnthropicMessage(t *testing.T) {
+	body := []byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"created_at":1780638631,
+		"model":"gpt-5.5",
+		"status":"completed",
+		"output":[
+			{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}
+		],
+		"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}
+	}`)
+	converted, err := ConvertResponse(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertResponse: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	for _, forbidden := range []string{"object", "created_at", "status", "output"} {
+		if _, exists := got[forbidden]; exists {
+			t.Fatalf("Anthropic response leaked OpenAI Responses field %q: %s", forbidden, converted)
+		}
+	}
+	if got["type"] != "message" || got["role"] != "assistant" || got["stop_reason"] != "end_turn" {
+		t.Fatalf("not a valid Anthropic message shape: %s", converted)
 	}
 }
 

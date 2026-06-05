@@ -65,7 +65,17 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channels require OAuth credentials")
 		return
 	}
-	encrypted, err := crypto.Encrypt(req.Credentials)
+	credType := "api_key"
+	if isReverseAPIFormat(ch.APIFormat) {
+		credType = "chatgpt_reverse"
+	}
+	credentialValue := req.Credentials
+	var refreshToken string
+	var tokenExpiry *time.Time
+	if credType == "chatgpt_reverse" {
+		credentialValue, refreshToken, tokenExpiry = parseReverseCredentialInput(req.Credentials)
+	}
+	encrypted, err := crypto.Encrypt(credentialValue)
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt failed")
 		return
@@ -74,9 +84,20 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 		ChannelID:   req.ChannelID,
 		Name:        req.Name,
 		Credentials: encrypted,
+		CredType:    credType,
 		Endpoint:    accountEndpointOrDefault(ch, req.Endpoint),
 		Weight:      req.Weight,
 		Enabled:     true,
+	}
+	if refreshToken != "" {
+		encryptedRefresh, err := crypto.Encrypt(refreshToken)
+		if err != nil {
+			h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt refresh token failed")
+			return
+		}
+		acc.RefreshToken = encryptedRefresh
+		acc.TokenURL = "https://auth.openai.com/oauth/token"
+		acc.TokenExpiry = tokenExpiry
 	}
 	acc.ID = uuid.New()
 	if err := h.db.Create(&acc).Error; err != nil {
@@ -95,6 +116,56 @@ func (h *Handler) createAccount(ctx *fasthttp.RequestCtx) {
 
 func isOAuthAPIFormat(format string) bool {
 	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
+}
+
+func isReverseAPIFormat(format string) bool {
+	return format == "chatgpt_reverse"
+}
+
+func reverseAccountRequiresReverseChannel(acc db.Account) bool {
+	return acc.CredType == "chatgpt_reverse"
+}
+
+func parseReverseCredentialInput(raw string) (accessToken string, refreshToken string, expiry *time.Time) {
+	raw = strings.TrimSpace(raw)
+	accessToken = raw
+	if !strings.HasPrefix(raw, "{") {
+		return accessToken, "", nil
+	}
+	var payload struct {
+		AccessToken  string      `json:"access_token"`
+		RefreshToken string      `json:"refresh_token"`
+		Expiry       interface{} `json:"expiry"`
+		ExpiresAt    interface{} `json:"expires_at"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return accessToken, "", nil
+	}
+	if strings.TrimSpace(payload.AccessToken) != "" {
+		accessToken = strings.TrimSpace(payload.AccessToken)
+	}
+	refreshToken = strings.TrimSpace(payload.RefreshToken)
+	if parsed := parseCredentialExpiry(payload.Expiry); parsed != nil {
+		expiry = parsed
+	} else if parsed := parseCredentialExpiry(payload.ExpiresAt); parsed != nil {
+		expiry = parsed
+	}
+	return accessToken, refreshToken, expiry
+}
+
+func parseCredentialExpiry(value interface{}) *time.Time {
+	switch v := value.(type) {
+	case string:
+		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(v)); err == nil {
+			return &parsed
+		}
+	case float64:
+		if v > 0 {
+			parsed := time.Unix(int64(v), 0)
+			return &parsed
+		}
+	}
+	return nil
 }
 
 func oauthAccountMatchesOAuthChannel(acc db.Account, ch db.Channel) bool {
@@ -249,6 +320,23 @@ func (h *Handler) exportAccountCredential(ctx *fasthttp.RequestCtx) {
 		if acc.TokenURL != "" {
 			data["token_url"] = acc.TokenURL
 		}
+	} else if acc.CredType == "chatgpt_reverse" {
+		refreshToken := ""
+		if acc.RefreshToken != "" {
+			refreshToken, err = crypto.Decrypt(acc.RefreshToken)
+			if err != nil {
+				h.jsonError(ctx, fasthttp.StatusInternalServerError, "decrypt refresh token failed")
+				return
+			}
+		}
+		data["type"] = "chatgpt_reverse"
+		data["access_token"] = credential
+		if refreshToken != "" {
+			data["refresh_token"] = refreshToken
+		}
+		if acc.TokenExpiry != nil {
+			data["expiry"] = acc.TokenExpiry
+		}
 	} else {
 		data["type"] = "api_key"
 		data["api_key"] = credential
@@ -327,8 +415,16 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channels require OAuth credentials")
 			return
 		}
+		if isReverseAPIFormat(target.APIFormat) && existing.CredType != "chatgpt_reverse" {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "Reverse channels require reverse credentials")
+			return
+		}
 		if oauthAccountRequiresOAuthChannel(existing) && !isOAuthAPIFormat(target.APIFormat) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth credentials can only be assigned to OAuth channels")
+			return
+		}
+		if reverseAccountRequiresReverseChannel(existing) && !isReverseAPIFormat(target.APIFormat) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "Reverse credentials can only be assigned to reverse channels")
 			return
 		}
 		if isOAuthAPIFormat(target.APIFormat) {
@@ -353,12 +449,32 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, "OAuth channel credentials must be updated through OAuth")
 			return
 		}
-		encrypted, err := crypto.Encrypt(req.Credentials)
+		credentialValue := req.Credentials
+		refreshToken := ""
+		var tokenExpiry *time.Time
+		if isReverseAPIFormat(target.APIFormat) {
+			credentialValue, refreshToken, tokenExpiry = parseReverseCredentialInput(req.Credentials)
+		}
+		encrypted, err := crypto.Encrypt(credentialValue)
 		if err != nil {
 			h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt failed")
 			return
 		}
 		updates["credentials"] = encrypted
+		if isReverseAPIFormat(target.APIFormat) {
+			if refreshToken != "" {
+				encryptedRefresh, err := crypto.Encrypt(refreshToken)
+				if err != nil {
+					h.jsonError(ctx, fasthttp.StatusInternalServerError, "encrypt refresh token failed")
+					return
+				}
+				updates["refresh_token"] = encryptedRefresh
+				updates["token_url"] = "https://auth.openai.com/oauth/token"
+			}
+			if tokenExpiry != nil {
+				updates["token_expiry"] = tokenExpiry
+			}
+		}
 	}
 	if req.Endpoint != nil {
 		endpoint := strings.TrimSpace(*req.Endpoint)

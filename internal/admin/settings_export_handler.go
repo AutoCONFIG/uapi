@@ -53,6 +53,7 @@ type channelExport struct {
 	Models       string      `yaml:"models,omitempty"`
 	ModelAliases string      `yaml:"model_aliases,omitempty"`
 	Priority     int         `yaml:"priority"`
+	Weight       int         `yaml:"weight,omitempty"`
 	APIFormat    string      `yaml:"api_format"`
 	ForceStream  bool        `yaml:"force_stream"`
 	AffinityTTL  int         `yaml:"affinity_ttl"`
@@ -298,6 +299,7 @@ func (h *Handler) restoreSettingsSnapshot(snapshot settingsExportSnapshot) (map[
 				Models:       item.Models,
 				ModelAliases: item.ModelAliases,
 				Priority:     item.Priority,
+				Weight:       normalizeChannelWeight(item.Weight),
 				APIFormat:    item.APIFormat,
 				ForceStream:  item.ForceStream,
 				AffinityTTL:  item.AffinityTTL,
@@ -492,6 +494,7 @@ func (h *Handler) buildSettingsExportSnapshot() (settingsExportSnapshot, error) 
 			Models:       ch.Models,
 			ModelAliases: ch.ModelAliases,
 			Priority:     ch.Priority,
+			Weight:       ch.Weight,
 			APIFormat:    ch.APIFormat,
 			ForceStream:  ch.ForceStream,
 			AffinityTTL:  ch.AffinityTTL,

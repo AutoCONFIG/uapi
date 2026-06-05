@@ -86,6 +86,8 @@ func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 		"POST /api/admin/channels/oauth/auth-url",
 		"POST /api/admin/channels/oauth/bind",
 		"POST /api/admin/channels/oauth/complete",
+		"POST /api/admin/channels/reverse/auth-url",
+		"POST /api/admin/channels/reverse/complete",
 		"POST /api/admin/login",
 		"POST /api/admin/node-channels",
 		"POST /api/admin/plans",

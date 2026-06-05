@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -220,13 +221,21 @@ func TestAnthropicSkillToolToOpenAIChatUsesFunctionParameters(t *testing.T) {
 		t.Fatalf("ClaudeCode -> OpenAI Chat: %v", err)
 	}
 	var got struct {
-		Tools []map[string]interface{} `json:"tools"`
+		Tools             []map[string]interface{} `json:"tools"`
+		ToolChoice        string                   `json:"tool_choice"`
+		ParallelToolCalls *bool                    `json:"parallel_tool_calls"`
 	}
 	if err := json.Unmarshal(converted, &got); err != nil {
 		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
 	}
 	if len(got.Tools) != 1 {
 		t.Fatalf("tools = %#v; body=%s", got.Tools, converted)
+	}
+	if got.ToolChoice != "auto" {
+		t.Fatalf("tool_choice = %q, want auto; body=%s", got.ToolChoice, converted)
+	}
+	if got.ParallelToolCalls == nil || !*got.ParallelToolCalls {
+		t.Fatalf("parallel_tool_calls = %#v, want true; body=%s", got.ParallelToolCalls, converted)
 	}
 	tool := got.Tools[0]
 	if tool["type"] != "function" {
@@ -246,6 +255,147 @@ func TestAnthropicSkillToolToOpenAIChatUsesFunctionParameters(t *testing.T) {
 	required, ok := params["required"].([]interface{})
 	if !ok || len(required) != 1 || required[0] != "skill" {
 		t.Fatalf("required skill not preserved: %#v; body=%s", params, converted)
+	}
+}
+
+func TestAnthropicSkillToolToOpenAIResponsesUsesExplicitToolDefaults(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"name":"Skill","description":"Execute skill","input_schema":{"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"]}}]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Responses: %v", err)
+	}
+	var got struct {
+		Tools             []map[string]interface{} `json:"tools"`
+		ToolChoice        string                   `json:"tool_choice"`
+		ParallelToolCalls *bool                    `json:"parallel_tool_calls"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %#v; body=%s", got.Tools, converted)
+	}
+	if got.ToolChoice != "auto" {
+		t.Fatalf("tool_choice = %q, want auto; body=%s", got.ToolChoice, converted)
+	}
+	if got.ParallelToolCalls == nil || !*got.ParallelToolCalls {
+		t.Fatalf("parallel_tool_calls = %#v, want true; body=%s", got.ParallelToolCalls, converted)
+	}
+}
+
+func TestClaudeCodeToolResultToOpenAIChatUsesToolRole(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Skill","input":{"skill":"brainstorming"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"Launching skill: brainstorming"}]}
+		],
+		"tools":[{"name":"Skill","description":"Execute skill","input_schema":{"type":"object","properties":{"skill":{"type":"string"}},"required":["skill"]}}]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Chat: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("messages = %#v; body=%s", got.Messages, converted)
+	}
+	if got.Messages[0].Role != "assistant" || len(got.Messages[0].ToolCalls) != 1 || got.Messages[0].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("assistant tool call not preserved: %#v; body=%s", got.Messages[0], converted)
+	}
+	if got.Messages[1].Role != "tool" || got.Messages[1].ToolCallID != "call_1" {
+		t.Fatalf("tool result must be OpenAI Chat tool message: %#v; body=%s", got.Messages[1], converted)
+	}
+}
+
+func TestClaudeCodeMultipleToolResultsToOpenAIChatUseSeparateToolMessages(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"git status --short"}},
+				{"type":"tool_use","id":"call_2","name":"TaskList","input":{}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_2","content":"No tasks found"},
+				{"type":"tool_result","tool_use_id":"call_1","content":" M file.go"}
+			]}
+		],
+		"tools":[
+			{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}},
+			{"name":"TaskList","input_schema":{"type":"object","properties":{}}}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Chat: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("messages = %#v; body=%s", got.Messages, converted)
+	}
+	if got.Messages[1].Role != "tool" || got.Messages[1].ToolCallID != "call_2" {
+		t.Fatalf("first tool result not emitted separately: %#v; body=%s", got.Messages[1], converted)
+	}
+	if got.Messages[2].Role != "tool" || got.Messages[2].ToolCallID != "call_1" {
+		t.Fatalf("second tool result not emitted separately: %#v; body=%s", got.Messages[2], converted)
+	}
+}
+
+func TestClaudeCodeToOpenAIChatDropsNativeAnthropicFields(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":8,
+		"system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],
+		"thinking":{"type":"adaptive"},
+		"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},
+		"output_config":{"effort":"medium"},
+		"metadata":{"trace":"abc"}
+	}`)
+	converted, err := ConvertRequest(FormatClaudeCode, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ClaudeCode -> OpenAI Chat: %v", err)
+	}
+	for _, forbidden := range []string{
+		`"thinking"`,
+		`"context_management"`,
+		`"output_config"`,
+		`"metadata"`,
+		`"cache_control"`,
+	} {
+		if strings.Contains(string(converted), forbidden) {
+			t.Fatalf("converted Chat request leaked %s:\n%s", forbidden, converted)
+		}
 	}
 }
 

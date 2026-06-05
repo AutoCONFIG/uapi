@@ -20,6 +20,7 @@ const (
 	FormatOpenAIChatCompletions = convert.FormatOpenAIChatCompletions
 	FormatOpenAIResponses       = convert.FormatOpenAIResponses
 	FormatCodexResponses        = convert.FormatCodexResponses
+	FormatChatGPTReverse        = convert.FormatChatGPTReverse
 	FormatAnthropic             = convert.FormatAnthropic
 	FormatClaudeCode            = convert.FormatClaudeCode
 	FormatGemini                = convert.FormatGemini

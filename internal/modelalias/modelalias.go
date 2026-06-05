@@ -55,8 +55,10 @@ func Supports(public, models, aliases string) bool {
 		return true
 	}
 	public = strings.TrimSpace(public)
+	upstream := UpstreamName(public, aliases)
 	for _, model := range strings.Split(models, ",") {
-		if strings.TrimSpace(model) == public {
+		model = strings.TrimSpace(model)
+		if model == public || model == upstream {
 			return true
 		}
 	}

@@ -618,7 +618,7 @@ func TestCrossProtocolResponseConversions(t *testing.T) {
 		target convert.Format
 		want   []string
 	}{
-		{name: "chat response to anthropic", target: convert.FormatAnthropic, want: []string{`"type":"message"`, `"content"`, `"usage"`}},
+		{name: "chat response to anthropic", target: convert.FormatAnthropic, want: []string{`"type":"message"`, `"content"`, `"usage"`, `"stop_reason":"end_turn"`}},
 		{name: "chat response to gemini", target: convert.FormatGemini, want: []string{`"candidates"`, `"usageMetadata"`}},
 		{name: "chat response to responses", target: convert.FormatOpenAIResponses, want: []string{`"object":"response"`, `"output"`, `"usage"`}},
 	}

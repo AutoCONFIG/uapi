@@ -112,7 +112,7 @@ func TestSupportsRelayRequestTypeMakesNonTextCapabilitiesExplicit(t *testing.T) 
 }
 
 func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","prompt_cache_key":"thread-1","tools":[{"type":"web_search_preview"}]}`))
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","prompt_cache_key":"thread-1","tools":[{"type":"web_search_preview"}]}`), true)
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -169,8 +169,19 @@ func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexResponsesRequestHonorsConfiguredStreamMode(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), false)
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	if body["stream"] != false {
+		t.Fatalf("stream = %#v, want false", body["stream"])
+	}
+}
+
 func TestNormalizeCodexResponsesRequestIncludesEncryptedReasoningOnlyWithReasoning(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"high"}}`))
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"high"}}`), true)
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -182,7 +193,7 @@ func TestNormalizeCodexResponsesRequestIncludesEncryptedReasoningOnlyWithReasoni
 }
 
 func TestNormalizeCodexResponsesRequestConvertsSystemInputRole(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"system","content":"rules"}],"service_tier":"priority"}`))
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"system","content":"rules"}],"service_tier":"priority"}`), true)
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)

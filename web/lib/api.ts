@@ -266,12 +266,13 @@ export const adminApi = {
     models?: string;
     model_aliases?: string;
     priority?: number;
+    weight?: number;
     api_format?: string;
     force_stream?: boolean;
     affinity_ttl?: number;
     settings?: string;
   }) => request<Channel>("/api/admin/channels", { method: "POST", token, body }),
-  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "models" | "model_aliases" | "priority" | "api_format" | "force_stream" | "affinity_ttl" | "settings" | "enabled">>) =>
+  updateChannel: (token: string, id: string, body: Partial<Pick<Channel, "name" | "type" | "group" | "models" | "model_aliases" | "priority" | "weight" | "api_format" | "force_stream" | "affinity_ttl" | "settings" | "enabled">>) =>
     request<Channel>(`/api/admin/channels?id=${id}`, { method: "PUT", token, body }),
   deleteChannel: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/channels?id=${id}`, { method: "DELETE", token }),
@@ -288,6 +289,10 @@ export const adminApi = {
   }) => request<OAuthAuthURL>("/api/admin/channels/oauth/auth-url", { method: "POST", token, body }),
   completeChannelOAuth: (token: string, body: { state?: string; callback_url?: string; code?: string; oauth_json?: string; channel_id?: string; provider?: string }) =>
     request<OAuthStatus>("/api/admin/channels/oauth/complete", { method: "POST", token, body }),
+  startChannelReverseAuth: (token: string, body: { channel_id: string; account_name?: string; client_id?: string; token_url?: string }) =>
+    request<OAuthAuthURL>("/api/admin/channels/reverse/auth-url", { method: "POST", token, body }),
+  completeChannelReverseAuth: (token: string, body: { state?: string; callback_url?: string; code?: string; channel_id?: string }) =>
+    request<OAuthStatus>("/api/admin/channels/reverse/complete", { method: "POST", token, body }),
   channelOAuthStatus: (token: string, state: string) =>
     request<OAuthStatus>(`/api/admin/channels/oauth/status?state=${encodeURIComponent(state)}`, { token }),
   bindChannelOAuth: (token: string, body: { state: string; account_name?: string; weight?: number; enabled?: boolean }) =>

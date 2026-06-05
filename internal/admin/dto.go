@@ -16,6 +16,7 @@ type CreateChannelRequest struct {
 	Models       string `json:"models"`
 	ModelAliases string `json:"model_aliases"`
 	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
 	APIFormat    string `json:"api_format"`
 	ForceStream  bool   `json:"force_stream"`
 	AffinityTTL  int    `json:"affinity_ttl"`
@@ -30,6 +31,7 @@ type UpdateChannelRequest struct {
 	Models       *string `json:"models,omitempty"`
 	ModelAliases *string `json:"model_aliases,omitempty"`
 	Priority     *int    `json:"priority,omitempty"`
+	Weight       *int    `json:"weight,omitempty"`
 	APIFormat    *string `json:"api_format,omitempty"`
 	ForceStream  *bool   `json:"force_stream,omitempty"`
 	AffinityTTL  *int    `json:"affinity_ttl,omitempty"`
@@ -85,8 +87,9 @@ type OAuthStatusResponse struct {
 }
 
 type ChannelCatalogResponse struct {
-	OAuth  []ChannelPresetDTO `json:"oauth"`
-	APIKey []ChannelPresetDTO `json:"api_key"`
+	OAuth   []ChannelPresetDTO `json:"oauth"`
+	Reverse []ChannelPresetDTO `json:"reverse"`
+	APIKey  []ChannelPresetDTO `json:"api_key"`
 }
 
 type ChannelPresetDTO struct {

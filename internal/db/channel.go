@@ -10,6 +10,7 @@ type Channel struct {
 	Models       string `gorm:"type:text" json:"models"`
 	ModelAliases string `gorm:"type:text" json:"model_aliases"`
 	Priority     int    `gorm:"default:0" json:"priority"`
+	Weight       int    `gorm:"default:100" json:"weight"`
 	APIFormat    string `gorm:"size:20;default:'standard'" json:"api_format"`
 	ForceStream  bool   `gorm:"default:false" json:"force_stream"`
 	AffinityTTL  int    `gorm:"default:0" json:"affinity_ttl"`

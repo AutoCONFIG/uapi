@@ -11,14 +11,15 @@ import (
 )
 
 type chatIRParser struct {
-	id       string
-	model    string
-	created  int64
-	started  bool
-	finished bool
+	id            string
+	model         string
+	created       int64
+	started       bool
+	finished      bool
+	toolCallStart map[int]bool
 }
 
-func newChatIRParser() streamIRParser { return &chatIRParser{} }
+func newChatIRParser() streamIRParser { return &chatIRParser{toolCallStart: map[int]bool{}} }
 
 func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 	data, ok := sseData(line)
@@ -100,7 +101,8 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 		if tc.Type != "" {
 			meta["type"] = rawStringValue(tc.Type)
 		}
-		if tc.Function.Name != "" && tc.Function.Arguments == "" {
+		if tc.Function.Name != "" && !p.toolCallStart[tc.Index] {
+			p.toolCallStart[tc.Index] = true
 			out = append(out, relayir.StreamEvent{
 				Type:        relayir.EventToolCallStart,
 				ResponseID:  p.id,
@@ -172,22 +174,29 @@ func (p *chatIRParser) Done() []relayir.StreamEvent {
 	return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: relayir.FinishStop, NativeReason: "stop"}}}
 }
 
-func (p *chatIRParser) Reset() { *p = chatIRParser{} }
+func (p *chatIRParser) Reset() { *p = chatIRParser{toolCallStart: map[int]bool{}} }
 
 type responsesIRParser struct {
-	id            string
-	model         string
-	finished      bool
-	toolArgText   map[string]string
-	toolCallMeta  map[string]map[string]json.RawMessage
-	toolCallStart map[string]bool
+	id             string
+	model          string
+	finished       bool
+	toolArgText    map[string]string
+	toolArgDone    map[string]string
+	toolArgPending map[string]string
+	toolCallMeta   map[string]map[string]json.RawMessage
+	toolCallStart  map[string]bool
+	toolCallEnd    map[string]bool
+	sawToolCallEnd bool
 }
 
 func newResponsesIRParser() streamIRParser {
 	return &responsesIRParser{
-		toolArgText:   map[string]string{},
-		toolCallMeta:  map[string]map[string]json.RawMessage{},
-		toolCallStart: map[string]bool{},
+		toolArgText:    map[string]string{},
+		toolArgDone:    map[string]string{},
+		toolArgPending: map[string]string{},
+		toolCallMeta:   map[string]map[string]json.RawMessage{},
+		toolCallStart:  map[string]bool{},
+		toolCallEnd:    map[string]bool{},
 	}
 }
 
@@ -277,6 +286,10 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 			delta.CallID = event.ItemID
 		}
 		key := p.toolKey(event.OutputIndex, delta.CallID)
+		if !p.toolCallStart[key] && rawMetaString(p.toolCallMeta[key], "name") == "" {
+			p.toolArgPending[key] += delta.Arguments
+			return nil
+		}
 		p.toolArgText[key] += delta.Arguments
 		return []relayir.StreamEvent{{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: event.OutputIndex, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: delta.Arguments}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: p.toolMeta(key, delta.CallID, "")}}}
 	case "response.function_call_arguments.done":
@@ -293,6 +306,11 @@ func (p *responsesIRParser) Parse(line []byte) []relayir.StreamEvent {
 		}
 		if done.CallID == "" {
 			done.CallID = event.ItemID
+		}
+		key := p.toolKey(event.OutputIndex, done.CallID)
+		if !p.toolCallStart[key] && rawMetaString(p.toolCallMeta[key], "name") == "" {
+			p.toolArgDone[key] = done.Arguments
+			return nil
 		}
 		return p.outputFunctionCallDone(event.OutputIndex, done.CallID, "", done.Arguments)
 	case "error", "response.failed":
@@ -321,11 +339,18 @@ func (p *responsesIRParser) outputItemAdded(raw json.RawMessage, index int) []re
 	}
 	switch item.Type {
 	case "function_call":
-		key := p.toolKey(index, firstNonEmpty(item.CallID, item.ID))
+		key := p.rememberToolItem(index, item.ID, item.CallID, item.Name)
 		meta := rawMeta("call_id", firstNonEmpty(item.CallID, item.ID), "name", item.Name)
 		p.toolCallMeta[key] = meta
 		p.toolCallStart[key] = true
-		return []relayir.StreamEvent{{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}}}
+		if item.ID != "" {
+			p.toolCallStart[p.toolKey(index, item.ID)] = true
+		}
+		if item.CallID != "" {
+			p.toolCallStart[p.toolKey(index, item.CallID)] = true
+		}
+		out := []relayir.StreamEvent{{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}}}
+		return append(out, p.flushPendingToolArgs(index, key, meta)...)
 	case "reasoning":
 		if item.EncryptedContent != "" {
 			return []relayir.StreamEvent{{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemEncryptedReasoning, Signature: item.EncryptedContent}}}
@@ -348,6 +373,7 @@ func (p *responsesIRParser) outputItemDone(raw json.RawMessage, index int) []rel
 	}
 	switch item.Type {
 	case "function_call":
+		p.rememberToolItem(index, item.ID, item.CallID, item.Name)
 		return p.outputFunctionCallDone(index, firstNonEmpty(item.CallID, item.ID), item.Name, item.Arguments)
 	case "reasoning":
 		if item.EncryptedContent == "" {
@@ -362,17 +388,93 @@ func (p *responsesIRParser) outputItemDone(raw json.RawMessage, index int) []rel
 func (p *responsesIRParser) outputFunctionCallDone(index int, callID, name, arguments string) []relayir.StreamEvent {
 	key := p.toolKey(index, callID)
 	meta := p.toolMeta(key, callID, name)
+	if arguments == "" {
+		arguments = p.toolArgDone[key]
+	}
 	var out []relayir.StreamEvent
 	if !p.toolCallStart[key] {
 		p.toolCallStart[key] = true
 		out = append(out, relayir.StreamEvent{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}})
 	}
+	out = append(out, p.flushPendingToolArgs(index, key, meta)...)
 	missing := missingSuffix(p.toolArgText[key], arguments)
 	if missing != "" {
 		p.toolArgText[key] += missing
 		out = append(out, relayir.StreamEvent{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: missing}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}})
 	}
+	if !p.toolCallEnd[key] {
+		p.toolCallEnd[key] = true
+		p.sawToolCallEnd = true
+		out = append(out, relayir.StreamEvent{Type: relayir.EventToolCallEnd, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}})
+	}
 	return out
+}
+
+func (p *responsesIRParser) flushPendingToolArgs(index int, key string, meta map[string]json.RawMessage) []relayir.StreamEvent {
+	pending := p.toolArgPending[key]
+	if pending == "" {
+		return nil
+	}
+	delete(p.toolArgPending, key)
+	p.toolArgText[key] += pending
+	return []relayir.StreamEvent{{Type: relayir.EventToolArgDelta, ResponseID: p.id, Model: p.model, ItemIndex: index, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse, Arguments: pending}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIResponses, Meta: meta}}}
+}
+
+func (p *responsesIRParser) rememberToolItem(index int, itemID, callID, name string) string {
+	canonicalID := firstNonEmpty(callID, itemID)
+	canonicalKey := p.toolKey(index, canonicalID)
+	meta := p.toolMeta(canonicalKey, canonicalID, name)
+	if itemID != "" {
+		itemKey := p.toolKey(index, itemID)
+		p.toolCallMeta[itemKey] = meta
+		p.mergeToolAliasState(canonicalKey, itemKey)
+		if p.toolCallStart[canonicalKey] {
+			p.toolCallStart[itemKey] = true
+		}
+		if p.toolCallEnd[canonicalKey] {
+			p.toolCallEnd[itemKey] = true
+		}
+	}
+	if callID != "" {
+		callKey := p.toolKey(index, callID)
+		p.toolCallMeta[callKey] = meta
+		p.mergeToolAliasState(canonicalKey, callKey)
+		if p.toolCallStart[canonicalKey] {
+			p.toolCallStart[callKey] = true
+		}
+		if p.toolCallEnd[canonicalKey] {
+			p.toolCallEnd[callKey] = true
+		}
+	}
+	return canonicalKey
+}
+
+func (p *responsesIRParser) mergeToolAliasState(canonicalKey, aliasKey string) {
+	if canonicalKey == aliasKey {
+		return
+	}
+	if p.toolArgDone[canonicalKey] == "" {
+		p.toolArgDone[canonicalKey] = p.toolArgDone[aliasKey]
+	}
+	if p.toolArgDone[aliasKey] == "" {
+		p.toolArgDone[aliasKey] = p.toolArgDone[canonicalKey]
+	}
+	if p.toolArgPending[canonicalKey] == "" {
+		p.toolArgPending[canonicalKey] = p.toolArgPending[aliasKey]
+	}
+	if p.toolArgPending[aliasKey] == "" {
+		p.toolArgPending[aliasKey] = p.toolArgPending[canonicalKey]
+	}
+	if p.toolArgText[canonicalKey] == "" {
+		p.toolArgText[canonicalKey] = p.toolArgText[aliasKey]
+	}
+	if p.toolArgText[aliasKey] == "" {
+		p.toolArgText[aliasKey] = p.toolArgText[canonicalKey]
+	}
+	if p.toolCallEnd[canonicalKey] || p.toolCallEnd[aliasKey] {
+		p.toolCallEnd[canonicalKey] = true
+		p.toolCallEnd[aliasKey] = true
+	}
 }
 
 func (p *responsesIRParser) toolKey(index int, callID string) string {
@@ -462,7 +564,13 @@ func (p *responsesIRParser) Done() []relayir.StreamEvent {
 		return nil
 	}
 	p.finished = true
-	return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: relayir.FinishStop, NativeReason: "stop"}}}
+	reason := relayir.FinishStop
+	nativeReason := "stop"
+	if p.sawToolCallEnd {
+		reason = relayir.FinishToolCall
+		nativeReason = "tool_use"
+	}
+	return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: reason, NativeReason: nativeReason}}}
 }
 
 func (p *responsesIRParser) Reset() { *p = *newResponsesIRParser().(*responsesIRParser) }

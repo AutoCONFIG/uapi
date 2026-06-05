@@ -5,10 +5,11 @@ export type ChannelPreset = {
   label: string;
   type: string;
   apiFormat: string;
-  auth: "oauth" | "apikey";
+  auth: "oauth" | "apikey" | "reverse";
   endpoint: string;
   models: string;
   modelAliases?: string;
+  forceStreamModels?: string;
   note: string;
 };
 
@@ -38,10 +39,11 @@ const geminiCodeModelAliases = [
 ].join("\n");
 const claudeCodeModels = "sonnet,opus,haiku,best,sonnet[1m],opus[1m],opusplan,claude-opus-4-6,claude-sonnet-4-6,claude-haiku-4-5-20251001,claude-opus-4-5-20251101,claude-sonnet-4-5-20250929,claude-opus-4-1-20250805,claude-opus-4-20250514,claude-sonnet-4-20250514,claude-3-7-sonnet-20250219,claude-3-5-sonnet-20241022,claude-3-5-haiku-20241022";
 const antigravityModels = "claude-opus-4-6,claude-opus-4-6-thinking,claude-sonnet-4-6,claude-sonnet-4-6-thinking,gemini-3-flash,gemini-3-pro-high,gemini-3-pro-image,gemini-3-pro-image-preview,gemini-3-pro-low,gemini-3.1-flash-image,gemini-3.1-pro,gemini-3.1-pro-high,gemini-3.1-pro-low,gemini-3.5-flash,gemini-3.5-flash-high,gemini-3.5-flash-low,gemini-3.5-flash-medium,gemini-pro-agent,gpt-oss-120b,gpt-oss-120b-medium,nano-banana-2,gemini-3-pro";
+const chatgptReverseModels = "auto,gpt-5.5,gpt-5.5-thinking,gpt-5.4,gpt-5.4-mini,gpt-5.3,gpt-5.3-mini,gpt-5-mini";
 
 export const oauthChannelPresets: ChannelPreset[] = [
   { id: "antigravity", label: "Antigravity", type: "antigravity", apiFormat: "antigravity", auth: "oauth", endpoint: oauthChannelDefaults.antigravity, models: antigravityModels, note: "Google Antigravity OAuth" },
-  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: oauthChannelDefaults.codex, models: codexModels, note: "Codex OAuth / ChatGPT backend" },
+  { id: "codex", label: "Codex", type: "openai", apiFormat: "codex", auth: "oauth", endpoint: oauthChannelDefaults.codex, models: codexModels, forceStreamModels: codexModels, note: "Codex OAuth / ChatGPT backend" },
   { id: "gemini_code", label: "Gemini Code", type: "gemini", apiFormat: "gemini_code", auth: "oauth", endpoint: oauthChannelDefaults.gemini, models: geminiCodeModels, modelAliases: geminiCodeModelAliases, note: "Gemini API / OAuth" },
   { id: "claude_code", label: "Claude Code", type: "anthropic", apiFormat: "claude_code", auth: "oauth", endpoint: oauthChannelDefaults.anthropic, models: claudeCodeModels, note: "Claude Code OAuth / Anthropic Messages API" },
 ];
@@ -53,11 +55,19 @@ export const apiKeyChannelPresets: ChannelPreset[] = [
   { id: "anthropic_messages", label: "Anthropic Messages API", type: "anthropic", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.anthropic, models: "", note: "Anthropic Messages API" },
 ];
 
-export const channelPresets = [...oauthChannelPresets, ...apiKeyChannelPresets];
+export const reverseChannelPresets: ChannelPreset[] = [
+  { id: "chatgpt_reverse", label: "ChatGPT Reverse", type: "openai", apiFormat: "chatgpt_reverse", auth: "reverse", endpoint: "https://chatgpt.com", models: chatgptReverseModels, note: "ChatGPT web reverse" },
+];
+
+export const channelPresets = [...oauthChannelPresets, ...reverseChannelPresets, ...apiKeyChannelPresets];
 export const defaultChannelPreset = oauthChannelPresets[0];
 
 export function isOAuthAPIFormat(apiFormat: string): boolean {
   return oauthChannelPresets.some((preset) => preset.apiFormat === apiFormat);
+}
+
+export function isReverseAPIFormat(apiFormat: string): boolean {
+  return reverseChannelPresets.some((preset) => preset.apiFormat === apiFormat);
 }
 
 export function oauthProviderForChannel(channel: Pick<Channel, "type" | "api_format">): OAuthStatus["provider"] {
@@ -71,7 +81,7 @@ export function oauthProviderForChannel(channel: Pick<Channel, "type" | "api_for
 
 export function presetForChannel(channel: Channel): ChannelPreset {
   return channelPresets.find((preset) => preset.type === channel.type && preset.apiFormat === channel.api_format) ||
-    channelPresets.find((preset) => preset.type === channel.type && !isOAuthAPIFormat(channel.api_format)) ||
+    channelPresets.find((preset) => preset.type === channel.type && !isOAuthAPIFormat(channel.api_format) && !isReverseAPIFormat(channel.api_format)) ||
     { id: channel.type, label: channel.type.toUpperCase(), type: channel.type, apiFormat: channel.api_format || "standard", auth: "apikey", endpoint: channel.endpoint, models: "", note: channel.type };
 }
 
@@ -81,6 +91,7 @@ export function presetTitleLines(preset: ChannelPreset): [string, string] {
     codex: ["OpenAI", "Codex"],
     gemini_code: ["Google", "Gemini Code"],
     claude_code: ["Anthropic", "Claude Code"],
+    chatgpt_reverse: ["OpenAI", "ChatGPT Reverse"],
     openai_responses_api: ["OpenAI", "Responses API"],
     openai_chat_completions: ["OpenAI", "Chat Completions"],
     gemini_api: ["Google", "Gemini API"],

@@ -353,6 +353,14 @@ func (e *anthropicIREmitter) Emit(event relayir.StreamEvent) []byte {
 	case relayir.EventToolArgDelta:
 		callID := rawMetaString(event.Native.Meta, "call_id")
 		return sseEventJSON("content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": e.toolBlockIndexByCall[callID], "delta": map[string]interface{}{"type": "input_json_delta", "partial_json": event.Delta.Arguments}})
+	case relayir.EventToolCallEnd:
+		callID := rawMetaString(event.Native.Meta, "call_id")
+		idx, ok := e.toolBlockIndexByCall[callID]
+		if !ok || e.toolBlockStoppedByCall[callID] {
+			return nil
+		}
+		e.toolBlockStoppedByCall[callID] = true
+		return sseEventJSON("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": idx})
 	case relayir.EventResponseDone:
 		out := e.stopThinking()
 		out = append(out, e.stopText()...)

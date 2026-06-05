@@ -4,11 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Clipboard, Eye, EyeOff, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
-import { apiKeyChannelPresets, channelDefaults, channelPresets, defaultChannelPreset, isOAuthAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
+import { apiKeyChannelPresets, channelDefaults, channelPresets, defaultChannelPreset, isOAuthAPIFormat, isReverseAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, reverseChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
 
 function createInitialDraft(preset: ChannelPreset = defaultChannelPreset) {
-  return { name: "", preset: preset.id, type: preset.type, models: preset.models, modelAliases: preset.modelAliases || "", apiFormat: preset.apiFormat };
+  return { name: "", preset: preset.id, type: preset.type, models: preset.models, modelAliases: preset.modelAliases || "", apiFormat: preset.apiFormat, priority: 100, weight: 100, forceStreamModels: preset.forceStreamModels || "" };
 }
 
 function defaultEndpointForChannel(channel: Pick<Channel, "type" | "api_format" | "endpoint">): string {
@@ -39,6 +39,10 @@ function composeEndpoint(baseURL: string, path: string, defaultPath: string): st
 
 function isOAuthChannel(channel: Pick<Channel, "api_format">): boolean {
   return isOAuthAPIFormat(channel.api_format);
+}
+
+function isReverseChannel(channel: Pick<Channel, "api_format">): boolean {
+  return isReverseAPIFormat(channel.api_format);
 }
 
 function supportsModelSync(channel: Pick<Channel, "api_format">): boolean {
@@ -204,6 +208,32 @@ function antigravitySettingsJSON(settings: AntigravitySettings): string {
   });
 }
 
+function channelSettingsRecord(raw?: string): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function forceStreamModelsText(raw?: string): string {
+  const value = channelSettingsRecord(raw).force_stream_models;
+  return modelValues(Array.isArray(value) ? value.map(stringValue).join(",") : stringValue(value)).join("\n");
+}
+
+function channelSettingsWithForceStreamModels(raw: string | undefined, models: string): string {
+  const settings = channelSettingsRecord(raw);
+  const values = modelValues(models);
+  if (values.length > 0) {
+    settings.force_stream_models = values;
+  } else {
+    delete settings.force_stream_models;
+  }
+  return JSON.stringify(settings);
+}
+
 function antigravityRouteModelIDs(settings: AntigravitySettings): string[] {
   return modelValues(settings.tier_groups.flatMap((group) => [
     group.public_model,
@@ -268,9 +298,14 @@ export function AdminChannelConsole() {
   const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
   const [quotaSyncing, setQuotaSyncing] = useState(false);
-  const [createKind, setCreateKind] = useState<"oauth" | "apikey">("oauth");
+  const [createKind, setCreateKind] = useState<"oauth" | "reverse" | "apikey">("oauth");
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
+  const sortedChannels = useMemo(() => channels.slice().sort((left, right) => {
+    if ((right.priority || 0) !== (left.priority || 0)) return (right.priority || 0) - (left.priority || 0);
+    if ((right.weight || 100) !== (left.weight || 100)) return (right.weight || 100) - (left.weight || 100);
+    return Date.parse(right.created_at || "") - Date.parse(left.created_at || "");
+  }), [channels]);
   const selected = channels.find((item) => item.id === selectedID) || null;
   const selectedAccount = accounts.find((item) => item.id === selectedAccountID) || null;
 
@@ -333,7 +368,7 @@ export function AdminChannelConsole() {
   }, [selected?.id]);
 
   useEffect(() => {
-    const group = createKind === "oauth" ? oauthChannelPresets : apiKeyChannelPresets;
+    const group = createKind === "oauth" ? oauthChannelPresets : createKind === "reverse" ? reverseChannelPresets : apiKeyChannelPresets;
     if (!group.some((preset) => preset.id === draft.preset)) {
       applyPreset(group[0]);
     }
@@ -412,6 +447,7 @@ export function AdminChannelConsole() {
       models: preset.models,
       modelAliases: preset.modelAliases || "",
       apiFormat: preset.apiFormat,
+      forceStreamModels: preset.forceStreamModels || "",
       name: cur.name,
     }));
     setCredentialMode(preset.auth === "oauth" ? "oauth" : "apikey");
@@ -429,17 +465,18 @@ export function AdminChannelConsole() {
     setError("");
     const channelDraft = { ...draft, ...overrides };
     try {
+      const presetLabel = channelPresets.find((item) => item.id === channelDraft.preset)?.label || channelDraft.type.toUpperCase();
       const created = await adminApi.createChannel(token, {
-        name: channelDraft.name.trim() || `${channelDraft.type.toUpperCase()} 渠道`,
+        name: channelDraft.name.trim() || `${presetLabel} 渠道`,
         type: channelDraft.type,
-        group: channelDraft.name.trim() || `${channelDraft.type.toUpperCase()} 渠道`,
+        group: channelDraft.name.trim() || `${presetLabel} 渠道`,
         models: channelDraft.models.trim(),
         model_aliases: channelDraft.modelAliases.trim(),
-        priority: 100,
+        priority: channelDraft.priority,
+        weight: channelDraft.weight,
         api_format: channelDraft.apiFormat,
-        force_stream: false,
         affinity_ttl: 0,
-        settings: channelDraft.apiFormat === "antigravity" ? antigravitySettingsJSON(defaultAntigravitySettings(true)) : "{}",
+        settings: channelSettingsWithForceStreamModels(channelDraft.apiFormat === "antigravity" ? antigravitySettingsJSON(defaultAntigravitySettings(true)) : "{}", channelDraft.forceStreamModels),
       });
       setChannels((cur) => [created, ...cur]);
       if (selectAfterCreate) {
@@ -487,6 +524,13 @@ export function AdminChannelConsole() {
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "更新渠道失败");
     }
+  }
+
+  function patchChannelNumber(channel: Channel, field: "priority" | "weight", value: string) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return;
+    const next = field === "weight" ? Math.max(1, Math.min(10000, parsed)) : Math.max(0, Math.min(10000, parsed));
+    if (next !== channel[field]) patchChannel(channel.id, { [field]: next } as Partial<Channel>);
   }
 
   async function syncChannelModels(channel: Channel) {
@@ -558,15 +602,18 @@ export function AdminChannelConsole() {
     setCredError("");
     setCredNotice("");
     try {
-      const provider = oauthProviderForChannel(selected);
-      const started = await adminApi.startChannelOAuth(token, { channel_id: selected.id, provider });
+      const reverse = isReverseChannel(selected);
+      const provider = reverse ? "chatgpt_reverse" : oauthProviderForChannel(selected);
+      const started = reverse
+        ? await adminApi.startChannelReverseAuth(token, { channel_id: selected.id })
+        : await adminApi.startChannelOAuth(token, { channel_id: selected.id, provider });
       setOauthChannel(selected);
       setOauthState(started.state);
       setOauthMode(started.mode);
       setOauthUserCode(started.user_code || "");
       setOauthAuthURL(started.auth_url);
       setOauthStatus({ state: started.state, provider, channel_id: selected.id, status: "pending", ready_to_bind: false, created_at: new Date().toISOString() });
-      setCredNotice(started.mode === "manual_callback" ? "登录页已打开，完成后把本地回调 URL 或认证 JSON 粘贴回来。" : "认证页面已打开，完成后会自动绑定。");
+      setCredNotice(started.mode === "manual_callback" ? "登录页已打开，完成后把本地回调 URL 粘贴回来。" : "认证页面已打开，完成后会自动绑定。");
       window.open(started.auth_url, "_blank", "noopener,noreferrer");
     } catch (err) {
       setCredError(err instanceof Error ? err.message : "发起认证失败");
@@ -592,13 +639,19 @@ export function AdminChannelConsole() {
     setCredLoading(true);
     setCredError("");
     try {
-      const status = await adminApi.completeChannelOAuth(token, {
-        state: oauthState,
-        callback_url: oauthCallbackURL.trim() || undefined,
-        oauth_json: oauthJSON.trim() || undefined,
-        channel_id: channel?.id,
-        provider: channel?.type,
-      });
+      const status = channel && isReverseChannel(channel)
+        ? await adminApi.completeChannelReverseAuth(token, {
+          state: oauthState,
+          callback_url: oauthCallbackURL.trim() || undefined,
+          channel_id: channel.id,
+        })
+        : await adminApi.completeChannelOAuth(token, {
+          state: oauthState,
+          callback_url: oauthCallbackURL.trim() || undefined,
+          oauth_json: oauthJSON.trim() || undefined,
+          channel_id: channel?.id,
+          provider: channel?.type,
+        });
       setOauthStatus(status);
       if (status.status === "completed") {
         await autoBind(token, status.state);
@@ -732,9 +785,10 @@ export function AdminChannelConsole() {
             </div>
           </div>
           <div className="channel-list-items">
-            {channels.map((channel) => {
+            {sortedChannels.map((channel) => {
               const related = channelAccounts(channel.id);
               const health = channelHealth(channel);
+              const preset = presetForChannel(channel);
               return (
                 <div
                   className={`channel-item${selected?.id === channel.id ? " active" : ""}`}
@@ -748,13 +802,22 @@ export function AdminChannelConsole() {
                   role="button"
                   tabIndex={0}
                 >
-                  <span>
+                  <span className="channel-item-info">
                     <strong>{channel.name}</strong>
-                    <small>{related.length} 个账号</small>
+                    <small>{preset.label} · {related.length} 个账号</small>
                   </span>
+                  <div className="channel-route-controls" onClick={(event) => event.stopPropagation()}>
+                    <label title="渠道优先级">
+                      <span>P</span>
+                      <input defaultValue={channel.priority ?? 0} key={`priority-${channel.id}-${channel.priority}`} min={0} max={10000} onBlur={(event) => patchChannelNumber(channel, "priority", event.target.value)} type="number" />
+                    </label>
+                    <label title="同优先级渠道权重">
+                      <span>W</span>
+                      <input defaultValue={channel.weight ?? 100} key={`weight-${channel.id}-${channel.weight}`} min={1} max={10000} onBlur={(event) => patchChannelNumber(channel, "weight", event.target.value)} type="number" />
+                    </label>
+                  </div>
                   <div className="channel-item-actions" onClick={(event) => event.stopPropagation()}>
-                    <span className={`health-dot ${health}`} />
-                    <button className="btn subtle icon-only" onClick={() => patchChannel(channel.id, { enabled: !channel.enabled })} title={channel.enabled ? "停用渠道" : "启用渠道"} type="button"><Power /></button>
+                    <button className={`btn subtle icon-only channel-toggle ${health}`} onClick={() => patchChannel(channel.id, { enabled: !channel.enabled })} title={channel.enabled ? "停用渠道" : "启用渠道"} type="button"><Power /></button>
                     <button className="btn subtle icon-only danger-icon" onClick={() => deleteChannel(channel.id)} title="删除渠道" type="button"><Trash2 /></button>
                   </div>
                 </div>
@@ -985,17 +1048,32 @@ export function AdminChannelConsole() {
                 <StatusBadge value={selected.enabled ? "enabled" : "disabled"} />
                 <span className="badge">{presetForChannel(selected).label}</span>
                 <span className="badge">{selected.api_format || "standard"}</span>
+                {forceStreamModelsText(selected.settings) ? <span className="badge">模拟非流</span> : null}
               </div>
               <div className="channel-edit-grid drawer-channel-edit">
                 <input className="input" defaultValue={selected.name} key={`drawer-name-${selected.id}`} onBlur={(e) => {
                   const value = e.target.value.trim();
                   if (value && value !== selected.name) patchChannel(selected.id, { name: value });
                 }} placeholder="渠道名称" />
+                <div className="channel-route-edit">
+                  <label>
+                    <span>优先级</span>
+                    <input className="input" defaultValue={selected.priority ?? 0} key={`drawer-priority-${selected.id}-${selected.priority}`} min={0} max={10000} onBlur={(event) => patchChannelNumber(selected, "priority", event.target.value)} type="number" />
+                  </label>
+                  <label>
+                    <span>权重</span>
+                    <input className="input" defaultValue={selected.weight ?? 100} key={`drawer-weight-${selected.id}-${selected.weight}`} min={1} max={10000} onBlur={(event) => patchChannelNumber(selected, "weight", event.target.value)} type="number" />
+                  </label>
+                </div>
+                <div className="field channel-force-stream-models">
+                  <label>模拟非流模型</label>
+                  <textarea className="input wide model-editor-textarea" defaultValue={forceStreamModelsText(selected.settings)} key={`force-stream-models-${selected.id}-${selected.settings}`} onBlur={(event) => patchChannel(selected.id, { settings: channelSettingsWithForceStreamModels(selected.settings, event.target.value) })} placeholder={"gpt-5.5\ngpt-5.4"} rows={3} />
+                </div>
                 <ModelListEditor
                   channel={selected}
                   modelSyncing={modelSyncing}
                   onAliasesChange={(model_aliases) => patchChannel(selected.id, { model_aliases })}
-                  onSettingsChange={(settings) => patchChannel(selected.id, { settings: antigravitySettingsJSON(settings) })}
+                  onSettingsChange={(settings) => patchChannel(selected.id, { settings: channelSettingsWithForceStreamModels(antigravitySettingsJSON(settings), forceStreamModelsText(selected.settings)) })}
                   selectedAccountCount={selectedAccounts.length}
                   onChange={(models) => patchChannel(selected.id, { models })}
                   onSync={() => syncChannelModels(selected)}
@@ -1004,9 +1082,9 @@ export function AdminChannelConsole() {
                   <AntigravitySettingsPanel
                     channel={selected}
                     saving={saving}
-                    onChange={(settings) => patchChannel(selected.id, { settings: antigravitySettingsJSON(settings) })}
-                    onClear={() => patchChannel(selected.id, { settings: antigravitySettingsJSON(defaultAntigravitySettings(false)) })}
-                    onReset={() => patchChannel(selected.id, { settings: antigravitySettingsJSON(defaultAntigravitySettings(true)), model_aliases: "" })}
+                    onChange={(settings) => patchChannel(selected.id, { settings: channelSettingsWithForceStreamModels(antigravitySettingsJSON(settings), forceStreamModelsText(selected.settings)) })}
+                    onClear={() => patchChannel(selected.id, { settings: channelSettingsWithForceStreamModels(antigravitySettingsJSON(defaultAntigravitySettings(false)), forceStreamModelsText(selected.settings)) })}
+                    onReset={() => patchChannel(selected.id, { settings: channelSettingsWithForceStreamModels(antigravitySettingsJSON(defaultAntigravitySettings(true)), forceStreamModelsText(selected.settings)), model_aliases: "" })}
                     onModelsChange={(models) => patchChannel(selected.id, { models })}
                   />
                 ) : null}
@@ -1037,14 +1115,14 @@ export function AdminChannelConsole() {
               <div className="credential-editor account-create-panel">
                 <div className="section-head">
                   <div><h2>新增账号</h2><p className="muted">账号添加后归入当前渠道，由 Gateway 统一调度。</p></div>
-                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isOAuthChannel(selected) ? (
+                  {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isOAuthChannel(selected) && !isReverseChannel(selected) ? (
                     <div className="segmented">
-                      <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> 密钥</button>
+                      <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> {isReverseChannel(selected) ? "Access Token" : "密钥"}</button>
                     </div>
                   ) : null}
                 </div>
 
-                {isOAuthChannel(selected) ? (
+                {isOAuthChannel(selected) || isReverseChannel(selected) ? (
                   <OAuthPanel
                     channel={selected}
                     loading={credLoading}
@@ -1066,7 +1144,7 @@ export function AdminChannelConsole() {
                     <input className="input" value={apiKeyBaseURL} onChange={(e) => setApiKeyBaseURL(e.target.value)} placeholder="https://api.example.com" />
                     <input className="input" value={apiKeyPath} onChange={(e) => setApiKeyPath(e.target.value)} placeholder={defaultEndpointPath(selected)} />
                     <div className="api-key-secret-row">
-                      <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="密钥 / 令牌" type="password" />
+                      <input className="input" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder={isReverseChannel(selected) ? "ChatGPT 网页 token JSON / access_token" : "密钥 / 令牌"} type="password" />
                       <button className="btn primary" disabled={credLoading || !apiKeyValue.trim()} onClick={addApiKey} type="button"><Plus /> 添加</button>
                     </div>
                   </div>
@@ -1093,16 +1171,17 @@ export function AdminChannelConsole() {
             <div className="drawer-body">
               <div className="channel-create-tabs segmented">
                 <button className={createKind === "oauth" ? "active" : ""} onClick={() => setCreateKind("oauth")} type="button">OAuth 渠道</button>
+                <button className={createKind === "reverse" ? "active" : ""} onClick={() => setCreateKind("reverse")} type="button">逆向渠道</button>
                 <button className={createKind === "apikey" ? "active" : ""} onClick={() => setCreateKind("apikey")} type="button">API Key 渠道</button>
               </div>
 
               <div className="preset-grid provider-pick-grid">
-                {(createKind === "oauth" ? oauthChannelPresets : apiKeyChannelPresets).map((preset) => (
+                {(createKind === "oauth" ? oauthChannelPresets : createKind === "reverse" ? reverseChannelPresets : apiKeyChannelPresets).map((preset) => (
                   <button className={draft.preset === preset.id ? "active" : ""} key={preset.id} onClick={() => applyPreset(preset)} type="button">
                     <strong className="preset-title">
                       {presetTitleLines(preset).map((line) => <span key={`${preset.id}-${line}`}>{line}</span>)}
                     </strong>
-                    <span className={`preset-auth ${preset.auth}`}>{preset.auth === "oauth" ? "OAuth 认证" : "密钥认证"}</span>
+                    <span className={`preset-auth ${preset.auth}`}>{preset.auth === "oauth" ? "OAuth 认证" : preset.auth === "reverse" ? "网页逆向" : "密钥认证"}</span>
                   </button>
                 ))}
               </div>
@@ -1112,8 +1191,23 @@ export function AdminChannelConsole() {
                 <input className="input" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`${channelPresets.find((item) => item.id === draft.preset)?.label || draft.type} 渠道`} />
               </div>
 
+              <div className="channel-route-edit">
+                <label>
+                  <span>优先级</span>
+                  <input className="input" min={0} max={10000} onChange={(event) => setDraft((d) => ({ ...d, priority: Number.parseInt(event.target.value, 10) || 0 }))} type="number" value={draft.priority} />
+                </label>
+                <label>
+                  <span>权重</span>
+                  <input className="input" min={1} max={10000} onChange={(event) => setDraft((d) => ({ ...d, weight: Math.max(1, Number.parseInt(event.target.value, 10) || 1) }))} type="number" value={draft.weight} />
+                </label>
+              </div>
 
-              {draft.type === "openai" && !isOAuthChannel({ api_format: draft.apiFormat } as Channel) ? (
+              <div className="field channel-force-stream-models">
+                <label>模拟非流模型</label>
+                <textarea className="input wide model-editor-textarea" onChange={(event) => setDraft((d) => ({ ...d, forceStreamModels: event.target.value }))} placeholder={"gpt-5.5\ngpt-5.4"} rows={3} value={draft.forceStreamModels} />
+              </div>
+
+              {draft.type === "openai" && !isOAuthChannel({ api_format: draft.apiFormat } as Channel) && !isReverseAPIFormat(draft.apiFormat) ? (
                 <div className="field">
                   <label>API 类型</label>
                   <div className="segmented">
@@ -1743,6 +1837,8 @@ function OAuthPanel({
   const oauthFormat = channel.api_format || channel.type;
   const callbackPlaceholder = oauthFormat === "codex"
     ? "http://localhost:1455/auth/callback?code=...&state=..."
+    : oauthFormat === "chatgpt_reverse"
+      ? "http://localhost:1455/auth/callback?code=...&state=..."
     : oauthFormat === "gemini_code"
       ? "http://127.0.0.1:1456/oauth2callback?code=...&state=..."
       : oauthFormat === "antigravity"
@@ -1750,6 +1846,8 @@ function OAuthPanel({
         : "https://platform.claude.com/oauth/code/callback?code=...&state=...";
   const jsonPlaceholder = oauthFormat === "codex"
     ? "{\"callback_url\":\"http://localhost:1455/auth/callback?code=...&state=...\"}"
+    : oauthFormat === "chatgpt_reverse"
+      ? ""
     : oauthFormat === "gemini_code"
       ? "{\"access_token\":\"ya29...\",\"refresh_token\":\"1//...\",\"expiry_date\":1710000000000}"
       : oauthFormat === "antigravity"
@@ -1757,6 +1855,8 @@ function OAuthPanel({
         : "{\"callback_url\":\"https://platform.claude.com/oauth/code/callback?code=...&state=...\"}";
   const providerHint = oauthFormat === "codex"
     ? "按 Codex OAuth 方式认证。"
+    : oauthFormat === "chatgpt_reverse"
+      ? "按 ChatGPT 网页登录方式认证，完成后粘贴本地回调链接。"
     : oauthFormat === "gemini_code"
       ? "按 Gemini Code OAuth 方式认证。"
       : oauthFormat === "antigravity"
@@ -1767,7 +1867,7 @@ function OAuthPanel({
     return (
       <div className="oauth-inline">
         <p className="muted">{providerHint}</p>
-        <button className="btn primary" disabled={loading} onClick={onStart} type="button">{loading ? "正在生成" : "开始 OAuth"}</button>
+        <button className="btn primary" disabled={loading} onClick={onStart} type="button">{loading ? "正在生成" : oauthFormat === "chatgpt_reverse" ? "开始网页登录" : "开始 OAuth"}</button>
       </div>
     );
   }
@@ -1789,9 +1889,9 @@ function OAuthPanel({
             <button className="btn" onClick={() => navigator.clipboard?.writeText(authURL)} type="button"><Clipboard /> 复制链接</button>
           </div>
           <textarea className="input" onChange={(e) => onCallbackChange(e.target.value)} placeholder={callbackPlaceholder} rows={3} value={callbackURL} />
-          <textarea className="input" onChange={(e) => onJSONChange(e.target.value)} placeholder={jsonPlaceholder} rows={4} value={jsonValue} />
+          {oauthFormat !== "chatgpt_reverse" ? <textarea className="input" onChange={(e) => onJSONChange(e.target.value)} placeholder={jsonPlaceholder} rows={4} value={jsonValue} /> : null}
           <button className="btn primary" disabled={loading || (!callbackURL.trim() && !jsonValue.trim())} onClick={onComplete} type="button">{loading ? "处理中" : "完成并绑定"}</button>
-          <p className="muted">可粘贴本地回调 URL，也可粘贴包含认证参数的 JSON。</p>
+          <p className="muted">{oauthFormat === "chatgpt_reverse" ? "粘贴网页登录完成后的本地回调 URL。" : "可粘贴本地回调 URL，也可粘贴包含认证参数的 JSON。"}</p>
         </>
       ) : (
         <>

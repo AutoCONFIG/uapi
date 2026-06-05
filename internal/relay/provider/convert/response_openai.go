@@ -393,16 +393,28 @@ func responsesResponseUsageToIR(usage *schema.ResponsesUsage) *relayir.Usage {
 	}
 	cachedTokens := usageDetailInt(usage.InputTokensDetails, "cached_tokens")
 	if cachedTokens == 0 {
+		cachedTokens = usage.CacheReadInputTokens
+	}
+	if cachedTokens == 0 {
 		cachedTokens = usage.PromptCacheHitTokens
 	}
+	creationTokens := usage.CacheCreationInputTokens
+	if creationTokens == 0 {
+		creationTokens = usageDetailInt(usage.InputTokensDetails, "cache_creation_input_tokens")
+	}
+	if creationTokens == 0 {
+		creationTokens = usageDetailInt(usage.InputTokensDetails, "cached_write_tokens")
+	}
 	return &relayir.Usage{
-		InputTokens:       usage.InputTokens,
-		OutputTokens:      usage.OutputTokens,
-		TotalTokens:       usage.TotalTokens,
-		PromptTokens:      usage.InputTokens,
-		CompletionTokens:  usage.OutputTokens,
-		CacheReadTokens:   cachedTokens,
-		InputTokenDetails: rawDetails(usage.InputTokensDetails),
+		InputTokens:         usage.InputTokens,
+		OutputTokens:        usage.OutputTokens,
+		TotalTokens:         usage.TotalTokens,
+		PromptTokens:        usage.InputTokens,
+		CompletionTokens:    usage.OutputTokens,
+		CacheReadTokens:     cachedTokens,
+		CacheCreationTokens: creationTokens,
+		CacheWriteTokens:    creationTokens,
+		InputTokenDetails:   rawDetails(usage.InputTokensDetails),
 	}
 }
 

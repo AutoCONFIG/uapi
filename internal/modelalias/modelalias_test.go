@@ -20,6 +20,9 @@ func TestSupportsAndUpstreamNameUsePublicAlias(t *testing.T) {
 	if !Supports("gemini-3.1-pro", "gemini-3.1-pro", aliases) {
 		t.Fatal("Supports rejected public alias")
 	}
+	if !Supports("gemini-3.1-pro", "gemini-pro-agent", aliases) {
+		t.Fatal("Supports rejected public alias backed by upstream model")
+	}
 	if !Supports("gemini-pro-agent", "gemini-pro-agent", aliases) {
 		t.Fatal("Supports rejected direct upstream name")
 	}

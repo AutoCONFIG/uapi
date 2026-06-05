@@ -16,7 +16,7 @@ export default function RelayNodesPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState({ name: "local-relay", base_url: "http://relay:8081", region: "local", egress_ip: "", weight: "0", max_concurrency: "0" });
-  const [quickBind, setQuickBind] = useState<Record<string, { channel_id: string; weight: string }>>({});
+  const [quickBind, setQuickBind] = useState<Record<string, { channel_id: string }>>({});
 
   useEffect(() => { loadAll(); }, []);
 
@@ -40,7 +40,7 @@ export default function RelayNodesPage() {
         setQuickBind((current) => {
           const next = { ...current };
           for (const node of nodeItems) {
-            if (!next[node.id]) next[node.id] = { channel_id: channelItems[0]?.id || "", weight: "0" };
+            if (!next[node.id]) next[node.id] = { channel_id: channelItems[0]?.id || "" };
           }
           return next;
         });
@@ -74,7 +74,7 @@ export default function RelayNodesPage() {
         health_status: "healthy",
       });
       setNodes((cur) => [created, ...cur]);
-      setQuickBind((cur) => ({ ...cur, [created.id]: { channel_id: "", weight: "0" } }));
+      setQuickBind((cur) => ({ ...cur, [created.id]: { channel_id: "" } }));
       setForm({ name: "", base_url: "", region: "", egress_ip: "", weight: "0", max_concurrency: "0" });
       setCreateOpen(false);
       setNotice(`节点 ${created.name} 已创建。`);
@@ -130,11 +130,11 @@ export default function RelayNodesPage() {
       const created = await adminApi.createNodeChannel(adminToken, {
         relay_node_id: nodeID,
         channel_id: draft.channel_id,
-        weight: Number(draft.weight || 0),
+        weight: 0,
         enabled: true,
       });
       setBindings((cur) => [created, ...cur]);
-      setQuickBind((cur) => ({ ...cur, [nodeID]: { channel_id: "", weight: "0" } }));
+      setQuickBind((cur) => ({ ...cur, [nodeID]: { channel_id: "" } }));
       setNotice(`${channelName(created.channel_id)} 已绑定到节点。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "新增绑定失败");
@@ -165,25 +165,10 @@ export default function RelayNodesPage() {
     }
   }
 
-  async function patchBinding(id: string, body: Partial<NodeChannel>) {
-    const adminToken = token();
-    if (!adminToken) return;
-    setError("");
-    setNotice("");
-    try {
-      const updated = await adminApi.updateNodeChannel(adminToken, id, body);
-      setBindings((cur) => cur.map((item) => item.id === id ? updated : item));
-      setNotice(`${channelName(updated.channel_id)} 绑定已更新。`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "更新绑定失败");
-    }
-  }
-
   const channelName = (id: string) => channels.find((channel) => channel.id === id)?.name || id.slice(0, 8);
   const nodeBindings = (nodeID: string) => bindings.filter((binding) => binding.relay_node_id === nodeID);
   const nodeChannelGroups = (nodeID: string) => nodeBindings(nodeID).map((binding) => ({
     channelID: binding.channel_id,
-    weight: binding.weight,
     bindingID: binding.id,
   }));
   const unboundChannels = (nodeID: string) => {
@@ -255,7 +240,7 @@ export default function RelayNodesPage() {
 
       <section className="resource-list node-grid">
         {nodes.map((node) => {
-          const draft = quickBind[node.id] || { channel_id: "", weight: "0" };
+          const draft = quickBind[node.id] || { channel_id: "" };
           const bindableChannels = unboundChannels(node.id);
           const draftChannelID = bindableChannels.some((channel) => channel.id === draft.channel_id) ? draft.channel_id : "";
           return (
@@ -281,7 +266,6 @@ export default function RelayNodesPage() {
               <div className="node-quick-drawer">
                 <div className="node-bind-row">
                   <div className="field wide"><label>绑定渠道</label><select className="input" value={draftChannelID} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, channel_id: e.target.value } }))}><option value="">选择渠道</option>{bindableChannels.map((channel) => <option value={channel.id} key={channel.id}>{channel.name}</option>)}</select></div>
-                  <div className="field compact"><label>权重</label><input className="input" type="number" value={draft.weight} onChange={(e) => setQuickBind((cur) => ({ ...cur, [node.id]: { ...draft, weight: e.target.value } }))} /></div>
                   <button className="btn primary form-row-action" disabled={!draftChannelID || bindableChannels.length === 0} onClick={() => createBinding(node.id)} type="button"><Link2 /> 新增绑定</button>
                 </div>
 
@@ -291,7 +275,6 @@ export default function RelayNodesPage() {
                     <Link2 />
                     <span>{channelName(group.channelID)}</span>
                     <small>渠道</small>
-                    <input className="mini-input" defaultValue={group.weight} onBlur={(e) => { const value = Number(e.currentTarget.value || 0); if (value !== group.weight) patchBinding(group.bindingID, { weight: value }); }} type="number" />
                     <button onClick={() => deleteChannelBinding([group.bindingID])} type="button">删除</button>
                   </div>
                   )) : (

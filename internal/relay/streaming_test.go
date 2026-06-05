@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/valyala/fasthttp"
 )
 
 type testUsageParser struct{}
@@ -189,6 +190,32 @@ func TestStreamAndForwardRawGeminiTerminalThenClosedNetworkCompletes(t *testing.
 	result := <-done
 	if result.err != nil || !result.finalized || result.failed {
 		t.Fatalf("terminal Gemini close should complete successfully: %+v", result)
+	}
+}
+
+func TestStreamAndForwardUpstreamResetAbortsDownstream(t *testing.T) {
+	body := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n" +
+		"event: response.output_item.added\n" +
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"Skill\"}}\n\n"
+	resetErr := errors.New("read tcp 127.0.0.1:1234->127.0.0.1:443: read: connection reset by peer")
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(&errAfterReader{
+			data: []byte(body),
+			err:  resetErr,
+		}, reader, newStreamTracker(testUsageParser{}), nil, newStreamConverterFunc(provider.FormatOpenAIResponses, provider.FormatAnthropic), false)
+	}()
+
+	_, readErr := io.ReadAll(reader)
+	if readErr == nil || !strings.Contains(readErr.Error(), "connection reset by peer") {
+		t.Fatalf("downstream should see upstream reset error, got %v", readErr)
+	}
+	result := <-done
+	if result.err == nil || !strings.Contains(result.err.Error(), "connection reset by peer") {
+		t.Fatalf("stream result should preserve upstream reset error: %+v", result)
 	}
 }
 
@@ -672,6 +699,134 @@ func TestStreamToNonStreamPreservesReasoningDetails(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stream-to-non-stream lost reasoning detail %s: %s", want, got)
 		}
+	}
+}
+
+func TestStreamToNonStreamPreservesReasoningAlias(t *testing.T) {
+	body := []byte(`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"reasoning":"think"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-test","model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]}` + "\n\n")
+	out := StreamToNonStream(body)
+	got := string(out)
+	for _, want := range []string{`"reasoning_content":"think"`, `"reasoning_details"`, `"text":"think"`, `"content":"answer"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream-to-non-stream lost reasoning alias %s: %s", want, got)
+		}
+	}
+}
+
+func TestResponsesStreamToNonStreamAggregatesNativeFunctionCall(t *testing.T) {
+	body := []byte(`event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","created_at":1780633286,"status":"in_progress"}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":2,"item_id":"fc_1","arguments":"{\"command\":\"git status --short\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"Bash","arguments":"{\"command\":\"git status --short\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}
+
+`)
+	out, complete := ResponsesStreamToNonStreamChecked(body)
+	got := string(out)
+	if !complete {
+		t.Fatalf("Responses completed event should mark stream complete: %s", got)
+	}
+	for _, want := range []string{`"object":"response"`, `"type":"function_call"`, `"call_id":"call_1"`, `"name":"Bash"`, `"arguments":"{\"command\":\"git status --short\"}"`, `"input_tokens":10`, `"output_tokens":2`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Responses native aggregation missing %s:\n%s", want, got)
+		}
+	}
+}
+
+func TestStreamToNonStreamForFormatKeepsResponsesFormat(t *testing.T) {
+	body := []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed"}}` + "\n\n")
+	out, complete, format := StreamToNonStreamForFormat(provider.FormatOpenAIResponses, body)
+	got := string(out)
+	if !complete || format != provider.FormatOpenAIResponses {
+		t.Fatalf("Responses force-stream aggregation = complete %v format %s body %s", complete, format, got)
+	}
+	if !strings.Contains(got, `"object":"response"`) || strings.Contains(got, `"chat.completion"`) {
+		t.Fatalf("Responses force-stream must not aggregate through Chat format: %s", got)
+	}
+}
+
+func TestParseNonStreamUsageAcceptsResponsesUsage(t *testing.T) {
+	prompt, completion := parseNonStreamUsage([]byte(`{"object":"response","usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}`))
+	if prompt != 11 || completion != 3 {
+		t.Fatalf("Responses usage parsed as prompt=%d completion=%d", prompt, completion)
+	}
+}
+
+func TestParseNonStreamUsageFullAcceptsCacheUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantPrompt   int
+		wantComplete int
+		wantCreation int
+		wantRead     int
+	}{
+		{
+			name:         "responses cached tokens detail",
+			body:         `{"object":"response","usage":{"input_tokens":11,"output_tokens":3,"input_tokens_details":{"cached_tokens":7}}}`,
+			wantPrompt:   11,
+			wantComplete: 3,
+			wantRead:     7,
+		},
+		{
+			name:         "responses top level cache aliases",
+			body:         `{"object":"response","usage":{"input_tokens":20,"output_tokens":5,"cache_creation_input_tokens":6,"cache_read_input_tokens":8}}`,
+			wantPrompt:   20,
+			wantComplete: 5,
+			wantCreation: 6,
+			wantRead:     8,
+		},
+		{
+			name:         "anthropic nested cache creation",
+			body:         `{"usage":{"input_tokens":30,"output_tokens":9,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":4},"cache_read_input_tokens":10}}`,
+			wantPrompt:   30,
+			wantComplete: 9,
+			wantCreation: 6,
+			wantRead:     10,
+		},
+		{
+			name:         "chat completions details aliases",
+			body:         `{"usage":{"prompt_tokens":40,"completion_tokens":12,"prompt_tokens_details":{"cached_write_tokens":3,"cached_read_tokens":13}}}`,
+			wantPrompt:   40,
+			wantComplete: 12,
+			wantCreation: 3,
+			wantRead:     13,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt, completion, creation, read := parseNonStreamUsageFull([]byte(tt.body))
+			if prompt != tt.wantPrompt || completion != tt.wantComplete || creation != tt.wantCreation || read != tt.wantRead {
+				t.Fatalf("usage = prompt %d completion %d creation %d read %d, want prompt %d completion %d creation %d read %d",
+					prompt, completion, creation, read, tt.wantPrompt, tt.wantComplete, tt.wantCreation, tt.wantRead)
+			}
+		})
+	}
+}
+
+func TestRelayDebugRequestHeadersRedactsCredentials(t *testing.T) {
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("X-Api-Key", "secret")
+	req.Header.Set("Content-Type", "application/json")
+
+	headers := relayDebugRequestHeaders(req)
+	if headers["Authorization"] != "[redacted]" || headers["X-Api-Key"] != "[redacted]" {
+		t.Fatalf("credential headers were not redacted: %#v", headers)
+	}
+	if headers["Content-Type"] != "application/json" {
+		t.Fatalf("content type missing from debug headers: %#v", headers)
 	}
 }
 

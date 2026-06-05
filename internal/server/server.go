@@ -69,8 +69,16 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 			fallback = s.relayer.HandleRelay
 		}
 		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second, gateway.WithLocalFirst(cfg.Server.Mode == "all"))
-		refreshPool := makeRefreshPool(database, pools)
-		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools))
+		refreshPool := makeRefreshPool(database, pools, func() {
+			if s.relayer != nil {
+				s.relayer.InvalidateChannelCache()
+			}
+		})
+		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools, func() {
+			if s.relayer != nil {
+				s.relayer.InvalidateChannelCache()
+			}
+		}))
 		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
@@ -209,6 +217,8 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/admin/channels/oauth/complete", s.handleAdminAuth(s.adminHandler.CompleteOAuth))
 	r.GET("/api/admin/channels/oauth/status", s.handleAdminAuth(s.adminHandler.OAuthStatus))
 	r.POST("/api/admin/channels/oauth/bind", s.handleAdminAuth(s.adminHandler.BindOAuthAccount))
+	r.POST("/api/admin/channels/reverse/auth-url", s.handleAdminAuth(s.adminHandler.StartReverseAuth))
+	r.POST("/api/admin/channels/reverse/complete", s.handleAdminAuth(s.adminHandler.CompleteReverseAuth))
 	r.GET("/api/admin/channels/catalog", s.handleAdminAuth(s.adminHandler.HandleChannelCatalog))
 	r.POST("/api/admin/channels/models/sync", s.handleAdminAuth(s.adminHandler.HandleChannelModelSync))
 	r.GET("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
@@ -338,8 +348,11 @@ func (s *Server) originAllowed(origin string) bool {
 // Helper functions
 
 // makeRefreshPool returns a callback that reloads accounts for a channel from DB and updates the pool.
-func makeRefreshPool(database *gorm.DB, pools *relay.PoolManager) func(channelID string) {
+func makeRefreshPool(database *gorm.DB, pools *relay.PoolManager, invalidateChannels func()) func(channelID string) {
 	return func(channelID string) {
+		if invalidateChannels != nil {
+			invalidateChannels()
+		}
 		if old, ok := pools.GetPool(channelID); ok {
 			old.Close()
 		}
@@ -350,8 +363,11 @@ func makeRefreshPool(database *gorm.DB, pools *relay.PoolManager) func(channelID
 }
 
 // makeRemovePool returns a callback that removes a channel's pool.
-func makeRemovePool(pools *relay.PoolManager) func(channelID string) {
+func makeRemovePool(pools *relay.PoolManager, invalidateChannels func()) func(channelID string) {
 	return func(channelID string) {
+		if invalidateChannels != nil {
+			invalidateChannels()
+		}
 		pools.RemovePool(channelID)
 	}
 }
