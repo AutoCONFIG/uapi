@@ -1084,6 +1084,97 @@ func TestGeminiCLIEnvelopeExtraFieldsStayInsideCLIEnvelope(t *testing.T) {
 	}
 }
 
+func TestResponsesToOpenAIChatReordersToolOutputsAfterMatchingCalls(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":[
+			{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"find .\"}","call_id":"call_1"},
+			{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg oauth\"}","call_id":"call_2"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我先看一下。"}]},
+			{"type":"function_call_output","call_id":"call_1","output":"find output"},
+			{"type":"function_call_output","call_id":"call_2","output":"rg output"},
+			{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat file\"}","call_id":"call_3"},
+			{"type":"function_call_output","call_id":"call_3","output":"cat output"}
+		],
+		"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}],
+		"stream":true
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			Content    any    `json:"content"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	seenCalls := map[string]bool{}
+	for i, msg := range got.Messages {
+		if msg.Role == "assistant" && msg.Content == nil && len(msg.ToolCalls) == 0 {
+			t.Fatalf("empty assistant message leaked at %d: %s", i, converted)
+		}
+		if msg.Role == "assistant" {
+			for _, call := range msg.ToolCalls {
+				seenCalls[call.ID] = true
+			}
+			continue
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		if !seenCalls[msg.ToolCallID] {
+			t.Fatalf("tool result %q appeared before matching tool call: %s", msg.ToolCallID, converted)
+		}
+		if i == 0 || got.Messages[i-1].Role != "assistant" && got.Messages[i-1].Role != "tool" {
+			t.Fatalf("tool result %q is not grouped after tool calls: %s", msg.ToolCallID, converted)
+		}
+	}
+	text := string(converted)
+	if !(indexOrFatal(t, text, `"tool_call_id":"call_1"`) < indexOrFatal(t, text, `"我先看一下。"`)) {
+		t.Fatalf("tool outputs should be moved before assistant text that originally separated them:\n%s", converted)
+	}
+}
+
+func TestResponsesToOpenAIChatPreservesCachePassthroughFields(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"prompt_cache_key":"019e9842-920e-70f1-8313-f2d2f848cd5a",
+		"client_metadata":{"x-codex-installation-id":"0520e5f6-fd3f-4731-b006-465bf209ce33"},
+		"safety_identifier":"safe_1",
+		"conversation":"conv_should_not_leak",
+		"stream":true
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var request map[string]interface{}
+	if err := json.Unmarshal(converted, &request); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	for _, key := range []string{"prompt_cache_key", "client_metadata", "safety_identifier"} {
+		if _, ok := request[key]; !ok {
+			t.Fatalf("cache passthrough field %q missing: %s", key, converted)
+		}
+	}
+	if streamOptions, _ := request["stream_options"].(map[string]interface{}); streamOptions["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage should be added for streamed Chat cache reporting: %s", converted)
+	}
+	if _, ok := request["conversation"]; ok {
+		t.Fatalf("Responses-only field conversation leaked into Chat request: %s", converted)
+	}
+}
+
 func TestAdaptorCrossProtocolConversionDropsSourceExtraFields(t *testing.T) {
 	adaptor := &antigravity.AntigravityAdaptor{}
 	adaptor.Init(&db.Channel{Type: "antigravity", APIFormat: "antigravity"}, &db.Account{})

@@ -126,8 +126,8 @@ func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
 	if body["stream"] != true {
 		t.Fatalf("stream = %#v, want true", body["stream"])
 	}
-	if body["parallel_tool_calls"] != true {
-		t.Fatalf("parallel_tool_calls = %#v, want true", body["parallel_tool_calls"])
+	if body["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v, want false", body["parallel_tool_calls"])
 	}
 	if body["tool_choice"] != "auto" {
 		t.Fatalf("tool_choice = %#v, want auto", body["tool_choice"])
@@ -189,6 +189,56 @@ func TestNormalizeCodexResponsesRequestIncludesEncryptedReasoningOnlyWithReasoni
 	include, ok := body["include"].([]interface{})
 	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
 		t.Fatalf("include = %#v, want reasoning.encrypted_content", body["include"])
+	}
+}
+
+func TestNormalizeCodexResponsesRequestMergesReasoningIncludeAndTextControls(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":"hi",
+		"reasoning":{"effort":"high"},
+		"include":["message.output_text.logprobs"],
+		"verbosity":"low",
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"answer",
+				"strict":true,
+				"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
+			}
+		}
+	}`), true)
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	include, ok := body["include"].([]interface{})
+	if !ok || len(include) != 2 || include[0] != "message.output_text.logprobs" || include[1] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v, want existing include plus reasoning.encrypted_content", body["include"])
+	}
+	if _, ok := body["response_format"]; ok {
+		t.Fatalf("response_format should be converted to text.format: %#v", body)
+	}
+	if _, ok := body["verbosity"]; ok {
+		t.Fatalf("verbosity should be converted to text.verbosity: %#v", body)
+	}
+	text, ok := body["text"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("text missing: %#v", body)
+	}
+	if text["verbosity"] != "low" {
+		t.Fatalf("text.verbosity = %#v, want low", text["verbosity"])
+	}
+	format, ok := text["format"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("text.format missing: %#v", text)
+	}
+	if format["type"] != "json_schema" || format["name"] != "answer" || format["strict"] != true {
+		t.Fatalf("text.format metadata = %#v", format)
+	}
+	schema, ok := format["schema"].(map[string]interface{})
+	if !ok || schema["type"] != "object" {
+		t.Fatalf("text.format.schema = %#v", format["schema"])
 	}
 }
 

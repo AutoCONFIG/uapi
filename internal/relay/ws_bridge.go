@@ -87,7 +87,7 @@ func (h *WSHandler) httpBridgeFallback(
 	}
 
 	// 5. Execute streaming request
-	if err := streamingClient.Do(upReq, upResp); err != nil {
+	if err := doStreamingRequest(upReq, upResp); err != nil {
 		fasthttp.ReleaseRequest(upReq)
 		fasthttp.ReleaseResponse(upResp)
 		WriteWSErrorSession(sess, 502, "upstream_error", "upstream request failed")
@@ -290,8 +290,18 @@ func (h *WSHandler) bridgeSSEToWS(
 		return
 	}
 	if interrupted || !completed {
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 499)
+		pt, ct, _ := tracker.Result()
+		cacheCreationTokens := tracker.CacheCreationTokens()
+		cacheReadTokens := tracker.CacheReadTokens()
+		estimatedOutputTokens := tracker.EstimatedOutputTokens()
+		if pt > 0 || ct > 0 || cacheCreationTokens > 0 || cacheReadTokens > 0 || estimatedOutputTokens > 0 {
+			estimateMissingUsage(&pt, &ct, requestBody, nil, estimatedOutputTokens)
+			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model, cacheCreationTokens, cacheReadTokens)
+			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 499, cacheCreationTokens, cacheReadTokens)
+		} else {
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 499)
+		}
 		turnFinalized = true
 		return
 	}

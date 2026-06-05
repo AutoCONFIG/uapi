@@ -181,6 +181,9 @@ func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
 	if raw := req.Generation.Extra["stream_options"]; len(raw) > 0 {
 		out.StreamOptions = relayir.CloneRaw(raw)
 	}
+	if !preserveNative && out.Stream && len(out.StreamOptions) == 0 {
+		out.StreamOptions = json.RawMessage(`{"include_usage":true}`)
+	}
 	if effort := rawStringFromObject(req.Generation.Reasoning, "effort"); effort != "" {
 		out.ReasoningEffort = effort
 	}
@@ -213,25 +216,87 @@ func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
 			out.Extra[k] = relayir.CloneRaw(v)
 		}
 	} else {
+		out.Extra = openAIChatCrossProtocolRequestExtra(req.Metadata)
 		sanitizeOpenAIChatCrossProtocolRequest(&out)
 	}
 	return json.Marshal(out)
 }
 
 func sanitizeOpenAIChatCrossProtocolRequest(req *schema.OpenAIChatRequest) {
-	req.Extra = nil
+	req.Extra = openAIChatCrossProtocolRequestExtra(req.Extra)
 	for i := range req.Messages {
 		req.Messages[i].Extra = nil
 		for j := range req.Messages[i].Content.Parts {
 			req.Messages[i].Content.Parts[j].Extra = nil
 		}
 	}
+	req.Messages = reorderOpenAIChatToolResults(req.Messages)
+	req.Messages = dropEmptyOpenAIChatMessages(req.Messages)
 	for i := range req.Tools {
 		req.Tools[i].Extra = nil
 		if req.Tools[i].Function != nil {
 			req.Tools[i].Function.Extra = openAIChatAllowedFunctionExtra(req.Tools[i].Function.Extra)
 		}
 	}
+}
+
+func openAIChatCrossProtocolRequestExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	allowed := []string{"prompt_cache_key", "client_metadata", "safety_identifier"}
+	out := map[string]json.RawMessage{}
+	for _, key := range allowed {
+		if raw := extra[key]; len(raw) > 0 {
+			out[key] = relayir.CloneRaw(raw)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func reorderOpenAIChatToolResults(messages []schema.ChatMessage) []schema.ChatMessage {
+	out := make([]schema.ChatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role != "tool" || msg.ToolCallID == "" {
+			out = append(out, msg)
+			continue
+		}
+		callIdx := lastOpenAIChatToolCallMessageIndex(out, msg.ToolCallID)
+		if callIdx < 0 {
+			out = append(out, msg)
+			continue
+		}
+		insertAt := callIdx + 1
+		for insertAt < len(out) && out[insertAt].Role == "tool" {
+			insertAt++
+		}
+		out = append(out, schema.ChatMessage{})
+		copy(out[insertAt+1:], out[insertAt:])
+		out[insertAt] = msg
+	}
+	return out
+}
+
+func lastOpenAIChatToolCallMessageIndex(messages []schema.ChatMessage, callID string) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, call := range messages[i].ToolCalls {
+			if call.ID == callID {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func dropEmptyOpenAIChatMessages(messages []schema.ChatMessage) []schema.ChatMessage {
+	out := messages[:0]
+	for _, msg := range messages {
+		if msg.Role != "tool" && msg.Content.IsEmpty() && len(msg.ToolCalls) == 0 && msg.Refusal == "" {
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
 }
 
 func openAIChatAllowedFunctionExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {

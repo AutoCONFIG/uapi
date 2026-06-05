@@ -144,7 +144,10 @@ func schemaToolCallFromIR(item relayir.Item) schema.ToolCall {
 			call.Function.Arguments = item.ToolUse.ArgumentsText
 		}
 	}
-	call.Function.Name = call.Name
+	// Only set Function.Name if it's empty, to preserve value from ToolUse or item.Name
+	if call.Function.Name == "" {
+		call.Function.Name = call.Name
+	}
 	return call
 }
 

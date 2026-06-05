@@ -110,6 +110,30 @@ func TestResponsesStreamConverterHandlesStandardTextDelta(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesSuppressesLeadingWhitespaceBeforeToolCall(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"))
+	blank := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"content":"\n\n\n"}}]}` + "\n\n"))
+	if strings.Contains(string(blank), "response.output_item.added") || strings.Contains(string(blank), "response.output_text.delta") {
+		t.Fatalf("leading whitespace should not create a Responses message before tool call:\n%s", blank)
+	}
+	tool := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"rg oauth\"}"}}]}}]}` + "\n\n"))
+	got := string(tool)
+	if strings.Contains(got, "response.output_text.delta") || !strings.Contains(got, "response.output_item.added") || !strings.Contains(got, `"type":"function_call"`) {
+		t.Fatalf("tool call should be emitted without blank output message:\n%s", got)
+	}
+}
+
+func TestChatToResponsesFlushesLeadingWhitespaceBeforeText(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"))
+	_ = converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"content":"\n\n"}}]}` + "\n\n"))
+	text := converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"content":"hello"}}]}` + "\n\n"))
+	if !strings.Contains(string(text), `"delta":"\n\nhello"`) {
+		t.Fatalf("leading whitespace before real text should be preserved:\n%s", text)
+	}
+}
+
 func TestResponsesStreamConverterEmitsCompletedOutputText(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions)
 	_ = converter.Convert([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}` + "\n\n"))
@@ -329,6 +353,38 @@ func TestChatToolCallNameAndArgumentsInSameDeltaStartsToolFirst(t *testing.T) {
 	got := string(out)
 	if !strings.Contains(got, `"type":"tool_use"`) || !strings.Contains(got, `"name":"Bash"`) || !strings.Contains(got, `"partial_json":"{\"command\":\"git status --short\"}"`) {
 		t.Fatalf("Chat same-delta tool name+arguments should emit start then args:\n%s", got)
+	}
+}
+
+func TestChatToResponsesToolCallsEmitCompleteResponsesFunctionCallEvents(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses)
+	var out []byte
+	out = append(out, converter.Convert([]byte(`data: {"id":"chatcmpl_1","created":1773896263,"model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"content":"先看一下。"},"finish_reason":null}]}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"pwd\"}"}}]},"finish_reason":null}]}`+"\n\n"))...)
+	out = append(out, converter.Convert([]byte(`data: {"id":"chatcmpl_1","model":"glm-5.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"rg oauth\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n"))...)
+	got := string(out)
+	for _, want := range []string{
+		`event: response.output_item.added`,
+		`"type":"function_call"`,
+		`"call_id":"call_a"`,
+		`"call_id":"call_b"`,
+		`event: response.function_call_arguments.delta`,
+		`"item_id":"call_a"`,
+		`"delta":"{\"cmd\":\"pwd\"}"`,
+		`event: response.function_call_arguments.done`,
+		`event: response.output_item.done`,
+		`"arguments":"{\"cmd\":\"pwd\"}"`,
+		`"arguments":"{\"cmd\":\"rg oauth\"}"`,
+		`event: response.completed`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Chat -> Responses tool call stream missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"call_id":""`) || strings.Contains(got, `"delta":{"arguments"`) {
+		t.Fatalf("Responses function_call_arguments.delta must use item_id/output_index and string delta:\n%s", got)
 	}
 }
 

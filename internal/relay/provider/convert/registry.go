@@ -3,6 +3,7 @@ package convert
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
@@ -40,6 +41,7 @@ func NormalizeRequestSameProtocol(format Format, body []byte) ([]byte, error) {
 	if _, err := toIR(body); err != nil {
 		return nil, fmt.Errorf("parse request %s: %w", format, err)
 	}
+	body = normalizeOpenAIResponsesSameProtocolWire(format, body)
 	return body, nil
 }
 
@@ -162,10 +164,22 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 	if req == nil || sameNativeRequestFamily(clientFormat, upstreamFormat) {
 		return
 	}
+	preservedMetadata := map[string]json.RawMessage{}
+	if upstreamFormat == FormatOpenAIChatCompletions {
+		for key, raw := range openAIChatCrossProtocolRequestExtra(req.Metadata) {
+			preservedMetadata[key] = append([]byte(nil), raw...)
+		}
+	}
 	for key, raw := range req.Native.Fields {
+		if _, preserved := preservedMetadata[key]; preserved {
+			continue
+		}
 		req.Losses = append(req.Losses, irloss(clientFormat, upstreamFormat, "$."+key, key, raw, "top-level native field is not emitted across protocols"))
 	}
 	for key, raw := range req.Metadata {
+		if _, preserved := preservedMetadata[key]; preserved {
+			continue
+		}
 		if _, exists := req.Native.Fields[key]; exists {
 			continue
 		}
@@ -177,6 +191,12 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 	req.Native.Fields = nil
 	req.Native.Unknown = nil
 	req.Metadata = nil
+	if len(preservedMetadata) > 0 {
+		req.Metadata = map[string]json.RawMessage{}
+		for key, raw := range preservedMetadata {
+			req.Metadata[key] = append([]byte(nil), raw...)
+		}
+	}
 	req.Generation.Extra = nil
 }
 

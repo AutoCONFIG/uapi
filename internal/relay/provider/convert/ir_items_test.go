@@ -234,6 +234,30 @@ func TestResponsesSameProtocolFlattensRawFunctionCallOutputTextBlocksForOpenAIWi
 	}
 }
 
+func TestResponsesSameProtocolNormalizeRequestUsesStandardOpenAIWire(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]},
+			{"type":"function_call_output","call_id":"call_1","output":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}]}
+		]
+	}`)
+	normalized, err := NormalizeRequestSameProtocol(FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("NormalizeRequestSameProtocol: %v", err)
+	}
+	text := string(normalized)
+	for _, want := range []string{`"type":"input_text"`, `"type":"output_text"`, `"output":"line1\nline2"`} {
+		if indexOf(text, want) < 0 {
+			t.Fatalf("same-protocol normalize missing %s:\n%s", want, normalized)
+		}
+	}
+	if indexOf(text, `"type":"text"`) >= 0 {
+		t.Fatalf("same-protocol normalize leaked invalid text content part:\n%s", normalized)
+	}
+}
+
 func TestResponsesToolResultTextBlocksFlattenToStringForOpenAIWire(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-test",

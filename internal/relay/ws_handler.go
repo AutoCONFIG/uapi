@@ -439,6 +439,7 @@ type turnState struct {
 	mu               sync.Mutex
 	promptTokens     int
 	completionTokens int
+	estimatedOutput  int
 	done             bool
 }
 
@@ -451,6 +452,15 @@ func (ts *turnState) setUsage(pt, ct int) {
 	defer ts.mu.Unlock()
 	ts.promptTokens = pt
 	ts.completionTokens = ct
+}
+
+func (ts *turnState) addEstimatedOutputTokens(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.estimatedOutput += tokens
 }
 
 func (ts *turnState) markDone() {
@@ -469,4 +479,10 @@ func (ts *turnState) usage() (int, int) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.promptTokens, ts.completionTokens
+}
+
+func (ts *turnState) estimatedOutputTokens() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.estimatedOutput
 }

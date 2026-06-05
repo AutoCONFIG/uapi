@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
@@ -281,11 +282,13 @@ func streamAndForwardWithTrace(
 		}
 	}()
 	closer, needClose := bodyStream.(io.Closer)
+	var closedByDownstream atomic.Bool
 	if needClose {
 		done := make(chan struct{})
 		go func() {
 			select {
 			case <-reader.Closed():
+				closedByDownstream.Store(true)
 				trace.Event("downstream_reader_closed_before_upstream_close")
 				_ = closer.Close()
 			case <-done:
@@ -299,7 +302,7 @@ func streamAndForwardWithTrace(
 	scanner.Buffer(make([]byte, 0, sseInitialBufSize), sseMaxBufSize)
 
 	if inputConvert == nil && outputConvert == nil {
-		result := streamRawAndForward(scanner, reader, tracker, sendDone, trace)
+		result := streamRawAndForward(scanner, reader, tracker, sendDone, trace, closedByDownstream.Load)
 		if result.err != nil && !errors.Is(result.err, io.ErrClosedPipe) {
 			aborted = true
 		}
@@ -339,6 +342,12 @@ func streamAndForwardWithTrace(
 		if inputConvert != nil {
 			converted := inputConvert(normalized)
 			if converted == nil {
+				trace.Event("stream_event_filtered",
+					logger.F("mode", "converted"),
+					logger.F("stage", "input_convert"),
+					logger.F("normalized_bytes", len(normalized)),
+					logger.F("sse", relayDebugSSEEventSummary(normalized)),
+				)
 				return true, nil // skip events the converter filters out
 			}
 			forwardLine = converted
@@ -374,9 +383,21 @@ func streamAndForwardWithTrace(
 				converted := outputConvert(seg)
 				if converted != nil {
 					out = append(out, converted...)
+				} else {
+					trace.Event("stream_event_filtered",
+						logger.F("mode", "converted"),
+						logger.F("stage", "output_convert"),
+						logger.F("segment_bytes", len(seg)),
+						logger.F("sse", relayDebugSSEEventSummary(seg)),
+					)
 				}
 			}
 			if len(out) == 0 {
+				trace.Event("stream_event_filtered",
+					logger.F("mode", "converted"),
+					logger.F("stage", "output_convert_all"),
+					logger.F("segments", len(segments)),
+				)
 				return true, nil
 			}
 			forwardLine = out
@@ -426,6 +447,16 @@ func streamAndForwardWithTrace(
 	}
 
 	if err := scanner.Err(); err != nil {
+		if closedByDownstream.Load() {
+			trace.Event("scanner_closed_by_downstream",
+				logger.F("mode", "converted"),
+				logger.Err(err),
+				logger.F("saw_done", sawDone),
+				logger.F("saw_terminal", sawTerminal),
+				logger.F("saw_chat_finish", sawChatFinish),
+			)
+			return streamResult{err: io.ErrClosedPipe}
+		}
 		if (sawDone || sawTerminal || sawChatFinish) && isBenignStreamCloseError(err) {
 			trace.Event("scanner_benign_close_after_terminal",
 				logger.F("mode", "converted"),
@@ -459,6 +490,9 @@ func streamAndForwardWithTrace(
 		reader.Abort(err)
 		return streamResult{err: err}
 	}
+	trace.Event("scanner_eof",
+		streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, len(event))...,
+	)
 	if ok, err := flush(); err != nil {
 		return streamResult{err: err}
 	} else if !ok {
@@ -466,11 +500,17 @@ func streamAndForwardWithTrace(
 	}
 
 	if sendDone && !sawDone {
-		reader.SendDone()
+		ok := reader.SendDone()
+		trace.Event("stream_done_injected",
+			streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok))...,
+		)
 		sawDone = sawChatFinish || sawTerminal
 	} else if !sendDone && !sawDone && outputConvert != nil {
 		if converted := outputConvert([]byte("data: [DONE]\n\n")); converted != nil {
-			_ = reader.Send(converted)
+			ok := reader.Send(converted)
+			trace.Event("stream_done_converted_from_eof",
+				streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok), logger.F("converted_bytes", len(converted)))...,
+			)
 			sawDone = true
 		}
 	}
@@ -478,17 +518,28 @@ func streamAndForwardWithTrace(
 	pt, ct, parseFailed := tracker.Result()
 	result := streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, parseFailed: parseFailed}
 	trace.Event("stream_forward_finished",
-		logger.F("mode", "converted"),
-		logger.F("finalized", result.finalized),
-		logger.F("failed", result.failed),
-		logger.F("prompt_tokens", pt),
-		logger.F("completion_tokens", ct),
-		logger.F("parse_failed", parseFailed),
+		streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0,
+			logger.F("finalized", result.finalized),
+			logger.F("prompt_tokens", pt),
+			logger.F("completion_tokens", ct),
+			logger.F("parse_failed", parseFailed),
+		)...,
+	)
+	return result
+}
+
+func streamDebugStateFields(trace *relayDebugTrace, mode string, sawDone, sawTerminal, sawChatFinish, failed bool, openEventBytes int, extra ...logger.Field) []logger.Field {
+	fields := []logger.Field{
+		logger.F("mode", mode),
 		logger.F("saw_done", sawDone),
 		logger.F("saw_terminal", sawTerminal),
 		logger.F("saw_chat_finish", sawChatFinish),
-	)
-	return result
+		logger.F("failed", failed),
+		logger.F("open_event_bytes", openEventBytes),
+		logger.F("streams", trace.StreamStates("stream.upstream.sse", "stream.normalized.sse", "stream.downstream.sse")),
+	}
+	fields = append(fields, extra...)
+	return fields
 }
 
 func isBenignStreamCloseError(err error) bool {
@@ -614,7 +665,7 @@ func splitSSEEvents(buf []byte) [][]byte {
 	return out
 }
 
-func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracker *streamTracker, sendDone bool, trace *relayDebugTrace) streamResult {
+func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracker *streamTracker, sendDone bool, trace *relayDebugTrace, closedByDownstream func() bool) streamResult {
 	var event []byte
 	sawDone := false
 	sawTerminal := false
@@ -675,6 +726,16 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 	}
 
 	if err := scanner.Err(); err != nil {
+		if closedByDownstream != nil && closedByDownstream() {
+			trace.Event("scanner_closed_by_downstream",
+				logger.F("mode", "raw"),
+				logger.Err(err),
+				logger.F("saw_done", sawDone),
+				logger.F("saw_terminal", sawTerminal),
+				logger.F("saw_chat_finish", sawChatFinish),
+			)
+			return streamResult{err: io.ErrClosedPipe}
+		}
 		if (sawDone || sawTerminal || sawChatFinish) && isBenignStreamCloseError(err) {
 			trace.Event("scanner_benign_close_after_terminal",
 				logger.F("mode", "raw"),
@@ -697,31 +758,31 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 		reader.Abort(err)
 		return streamResult{err: err}
 	}
+	trace.Event("scanner_eof",
+		streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, len(event))...,
+	)
 	if !flush() {
 		trace.Event("downstream_send_closed",
-			logger.F("mode", "raw"),
-			logger.F("saw_done", sawDone),
-			logger.F("saw_terminal", sawTerminal),
-			logger.F("saw_chat_finish", sawChatFinish),
+			streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, 0)...,
 		)
 		return streamResult{err: io.ErrClosedPipe}
 	}
 	if sendDone && !sawDone {
-		reader.SendDone()
+		ok := reader.SendDone()
+		trace.Event("stream_done_injected",
+			streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok))...,
+		)
 		sawDone = sawChatFinish || sawTerminal
 	}
 	pt, ct, parseFailed := tracker.Result()
 	finalized := sawDone || sawTerminal
 	trace.Event("stream_forward_finished",
-		logger.F("mode", "raw"),
-		logger.F("finalized", finalized),
-		logger.F("failed", failed),
-		logger.F("prompt_tokens", pt),
-		logger.F("completion_tokens", ct),
-		logger.F("parse_failed", parseFailed),
-		logger.F("saw_done", sawDone),
-		logger.F("saw_terminal", sawTerminal),
-		logger.F("saw_chat_finish", sawChatFinish),
+		streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, 0,
+			logger.F("finalized", finalized),
+			logger.F("prompt_tokens", pt),
+			logger.F("completion_tokens", ct),
+			logger.F("parse_failed", parseFailed),
+		)...,
 	)
 	return streamResult{promptTokens: pt, completionTokens: ct, finalized: finalized, failed: failed, parseFailed: parseFailed}
 }

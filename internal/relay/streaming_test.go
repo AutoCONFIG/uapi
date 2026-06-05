@@ -69,6 +69,42 @@ func TestStreamAndForwardRawPreservesMultiLineSSEEvent(t *testing.T) {
 	}
 }
 
+func TestRetryableStreamingRequestErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "dial timeout",
+			err:  errors.New("error when dialing 192.129.242.190:443: dialing to the given TCP address timed out"),
+			want: true,
+		},
+		{
+			name: "connection reset",
+			err:  errors.New("connection reset by peer"),
+			want: true,
+		},
+		{
+			name: "server closed before first byte",
+			err:  errors.New("the server closed connection before returning the first response byte. Make sure the server returns 'Connection: close' response header before closing the connection"),
+			want: true,
+		},
+		{
+			name: "schema error is not retryable",
+			err:  errors.New("Invalid value: 'text'. Supported values are: input_text"),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableStreamingRequestError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableStreamingRequestError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStreamAndForwardRawDoesNotDuplicateDone(t *testing.T) {
 	body := "data: {\"choices\":[]}\n\n" +
 		"data: [DONE]\n\n"
@@ -216,6 +252,38 @@ func TestStreamAndForwardUpstreamResetAbortsDownstream(t *testing.T) {
 	result := <-done
 	if result.err == nil || !strings.Contains(result.err.Error(), "connection reset by peer") {
 		t.Fatalf("stream result should preserve upstream reset error: %+v", result)
+	}
+}
+
+func TestStreamAndForwardRawDownstreamCloseIsClientClosed(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(pr, reader, newStreamTracker(testUsageParser{}), nil, nil, false)
+	}()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := pw.Write([]byte("event: response.created\n" +
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n"))
+		writeDone <- err
+	}()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write upstream event: %v", err)
+	}
+
+	buf := make([]byte, 4096)
+	if n, err := reader.Read(buf); err != nil || !strings.Contains(string(buf[:n]), "response.created") {
+		t.Fatalf("read first downstream event n=%d err=%v body=%s", n, err, string(buf[:n]))
+	}
+	_ = reader.Close()
+
+	result := <-done
+	if !errors.Is(result.err, io.ErrClosedPipe) {
+		t.Fatalf("downstream close should be treated as client closed, got %+v", result)
 	}
 }
 

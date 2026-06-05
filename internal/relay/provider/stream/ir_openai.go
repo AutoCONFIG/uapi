@@ -2,6 +2,7 @@ package stream
 
 import (
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,9 +18,12 @@ type chatIRParser struct {
 	started       bool
 	finished      bool
 	toolCallStart map[int]bool
+	toolCallMeta  map[int]map[string]json.RawMessage
 }
 
-func newChatIRParser() streamIRParser { return &chatIRParser{toolCallStart: map[int]bool{}} }
+func newChatIRParser() streamIRParser {
+	return &chatIRParser{toolCallStart: map[int]bool{}, toolCallMeta: map[int]map[string]json.RawMessage{}}
+}
 
 func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 	data, ok := sseData(line)
@@ -91,7 +95,10 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 	}
 	out = append(out, p.reasoningEvents(choice.Index, delta)...)
 	for _, tc := range delta.ToolCalls {
-		meta := map[string]json.RawMessage{}
+		meta := p.toolCallMeta[tc.Index]
+		if meta == nil {
+			meta = map[string]json.RawMessage{}
+		}
 		if tc.ID != "" {
 			meta["call_id"] = rawStringValue(tc.ID)
 		}
@@ -101,6 +108,7 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 		if tc.Type != "" {
 			meta["type"] = rawStringValue(tc.Type)
 		}
+		p.toolCallMeta[tc.Index] = meta
 		if tc.Function.Name != "" && !p.toolCallStart[tc.Index] {
 			p.toolCallStart[tc.Index] = true
 			out = append(out, relayir.StreamEvent{
@@ -127,9 +135,33 @@ func (p *chatIRParser) Parse(line []byte) []relayir.StreamEvent {
 	}
 	if choice.FinishReason != "" {
 		p.finished = true
+		if chatFinishToIR(choice.FinishReason) == relayir.FinishToolCall {
+			for _, idx := range p.startedToolCallIndexes() {
+				out = append(out, relayir.StreamEvent{
+					Type:        relayir.EventToolCallEnd,
+					ResponseID:  p.id,
+					Model:       p.model,
+					ChoiceIndex: choice.Index,
+					ItemIndex:   idx,
+					Delta:       relayir.ItemDelta{Kind: relayir.ItemToolUse},
+					Native:      relayir.NativeEnvelope{Protocol: relayir.ProtocolOpenAIChat, Meta: p.toolCallMeta[idx]},
+				})
+			}
+		}
 		out = append(out, relayir.StreamEvent{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, ChoiceIndex: choice.Index, Finish: &relayir.Finish{Reason: chatFinishToIR(choice.FinishReason), NativeReason: choice.FinishReason}, Usage: chatUsageToIR(event.Usage)})
 	}
 	return out
+}
+
+func (p *chatIRParser) startedToolCallIndexes() []int {
+	indexes := make([]int, 0, len(p.toolCallStart))
+	for idx, started := range p.toolCallStart {
+		if started {
+			indexes = append(indexes, idx)
+		}
+	}
+	sort.Ints(indexes)
+	return indexes
 }
 
 func (p *chatIRParser) reasoningEvents(choiceIndex int, delta struct {
@@ -174,7 +206,9 @@ func (p *chatIRParser) Done() []relayir.StreamEvent {
 	return []relayir.StreamEvent{{Type: relayir.EventResponseDone, ResponseID: p.id, Model: p.model, Finish: &relayir.Finish{Reason: relayir.FinishStop, NativeReason: "stop"}}}
 }
 
-func (p *chatIRParser) Reset() { *p = chatIRParser{toolCallStart: map[int]bool{}} }
+func (p *chatIRParser) Reset() {
+	*p = chatIRParser{toolCallStart: map[int]bool{}, toolCallMeta: map[int]map[string]json.RawMessage{}}
+}
 
 type responsesIRParser struct {
 	id             string
@@ -726,12 +760,26 @@ type responsesIREmitter struct {
 	hasReasoningPart  bool
 	reasoningText     strings.Builder
 	reasoningOpaque   string
+	pendingOutputText string
 	nextOutputIndex   int
 	toolCallIDToIndex map[string]int
+	toolIndexToCallID map[int]string
+	toolCallNames     map[string]string
+	toolCallArgs      map[string]string
+	toolCallDone      map[string]bool
+	toolCallOrder     []string
 }
 
 func newResponsesIREmitter() streamIREmitter {
-	return &responsesIREmitter{outputIndex: -1, reasoningIndex: -1, toolCallIDToIndex: map[string]int{}}
+	return &responsesIREmitter{
+		outputIndex:       -1,
+		reasoningIndex:    -1,
+		toolCallIDToIndex: map[string]int{},
+		toolIndexToCallID: map[int]string{},
+		toolCallNames:     map[string]string{},
+		toolCallArgs:      map[string]string{},
+		toolCallDone:      map[string]bool{},
+	}
 }
 
 func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
@@ -740,12 +788,7 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 	case relayir.EventResponseCreated, relayir.EventMessageStart:
 		return e.ensureStarted()
 	case relayir.EventContentDelta:
-		e.outputText.WriteString(event.Delta.Text)
-		out := e.ensureStarted()
-		out = append(out, e.ensureOutputTextPart()...)
-		return append(out, sseEventJSON("response.output_text.delta", map[string]interface{}{
-			"type": "response.output_text.delta", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "delta": event.Delta.Text,
-		})...)
+		return e.emitOutputTextDelta(event.Delta.Text)
 	case relayir.EventReasoningDelta:
 		out := e.ensureStarted()
 		if event.Delta.Kind == relayir.ItemEncryptedReasoning || event.Delta.Signature != "" && event.Delta.Text == "" {
@@ -768,16 +811,31 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 		if callID == "" {
 			callID = randomID("call_")
 		}
-		idx := len(e.toolCallIDToIndex)
+		idx, exists := e.toolCallIDToIndex[callID]
+		if !exists {
+			idx = e.nextOutputIndex
+			e.nextOutputIndex++
+			e.toolCallIDToIndex[callID] = idx
+			e.toolCallOrder = append(e.toolCallOrder, callID)
+		}
 		e.toolCallIDToIndex[callID] = idx
+		e.toolIndexToCallID[event.ItemIndex] = callID
+		e.toolCallNames[callID] = name
 		return append(out, sseEventJSON("response.output_item.added", map[string]interface{}{
 			"type": "response.output_item.added", "output_index": idx, "item": map[string]interface{}{"type": "function_call", "id": callID, "name": name, "call_id": callID},
 		})...)
 	case relayir.EventToolArgDelta:
 		callID := rawMetaString(event.Native.Meta, "call_id")
+		if callID == "" {
+			callID = e.toolIndexToCallID[event.ItemIndex]
+		}
+		idx := e.toolCallIDToIndex[callID]
+		e.toolCallArgs[callID] += event.Delta.Arguments
 		return sseEventJSON("response.function_call_arguments.delta", map[string]interface{}{
-			"type": "response.function_call_arguments.delta", "delta": map[string]interface{}{"call_id": callID, "arguments": event.Delta.Arguments},
+			"type": "response.function_call_arguments.delta", "item_id": callID, "output_index": idx, "delta": event.Delta.Arguments,
 		})
+	case relayir.EventToolCallEnd:
+		return e.finishToolCall(event)
 	case relayir.EventError:
 		e.finished = true
 		return sseEventJSON("response.failed", map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"id": e.id, "status": "failed", "model": e.model, "error": irErrorMap(event.Error)}})
@@ -785,6 +843,48 @@ func (e *responsesIREmitter) Emit(event relayir.StreamEvent) []byte {
 		return e.completedEvent(event.Usage)
 	}
 	return nil
+}
+
+func (e *responsesIREmitter) finishToolCall(event relayir.StreamEvent) []byte {
+	callID := rawMetaString(event.Native.Meta, "call_id")
+	if callID == "" {
+		callID = e.toolIndexToCallID[event.ItemIndex]
+	}
+	if callID == "" || e.toolCallDone[callID] {
+		return nil
+	}
+	e.toolCallDone[callID] = true
+	idx := e.toolCallIDToIndex[callID]
+	name := e.toolCallNames[callID]
+	args := e.toolCallArgs[callID]
+	var out []byte
+	out = append(out, sseEventJSON("response.function_call_arguments.done", map[string]interface{}{
+		"type": "response.function_call_arguments.done", "item_id": callID, "output_index": idx, "arguments": args,
+	})...)
+	out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{
+		"type": "response.output_item.done", "output_index": idx, "item": map[string]interface{}{"type": "function_call", "id": callID, "call_id": callID, "name": name, "arguments": args, "status": "completed"},
+	})...)
+	return out
+}
+
+func (e *responsesIREmitter) emitOutputTextDelta(text string) []byte {
+	if text == "" {
+		return nil
+	}
+	out := e.ensureStarted()
+	if !e.hasOutputItem && strings.TrimSpace(text) == "" {
+		e.pendingOutputText += text
+		return out
+	}
+	if e.pendingOutputText != "" {
+		text = e.pendingOutputText + text
+		e.pendingOutputText = ""
+	}
+	e.outputText.WriteString(text)
+	out = append(out, e.ensureOutputTextPart()...)
+	return append(out, sseEventJSON("response.output_text.delta", map[string]interface{}{
+		"type": "response.output_text.delta", "item_id": e.outputItemID, "output_index": e.outputIndex, "content_index": 0, "delta": text,
+	})...)
 }
 
 func (e *responsesIREmitter) setMeta(event relayir.StreamEvent) {
@@ -892,6 +992,13 @@ func (e *responsesIREmitter) completedEvent(usage *relayir.Usage) []byte {
 		out = append(out, sseEventJSON("response.output_item.done", map[string]interface{}{"type": "response.output_item.done", "output_index": e.outputIndex, "item": item})...)
 		output = append(output, item)
 	}
+	for _, callID := range e.toolCallOrder {
+		if !e.toolCallDone[callID] {
+			out = append(out, e.finishToolCall(relayir.StreamEvent{ItemIndex: e.toolCallIDToIndex[callID], Native: relayir.NativeEnvelope{Meta: rawMeta("call_id", callID)}})...)
+		}
+		item := map[string]interface{}{"id": callID, "type": "function_call", "call_id": callID, "name": e.toolCallNames[callID], "arguments": e.toolCallArgs[callID], "status": "completed"}
+		output = append(output, item)
+	}
 	response := map[string]interface{}{"id": e.id, "object": "response", "created_at": e.created, "status": "completed", "model": e.model, "output": output}
 	if usageOut := irUsageToResponses(usage); usageOut != nil {
 		response["usage"] = usageOut
@@ -903,7 +1010,7 @@ func (e *responsesIREmitter) completedEvent(usage *relayir.Usage) []byte {
 func (e *responsesIREmitter) Done() []byte { return e.completedEvent(nil) }
 
 func (e *responsesIREmitter) Reset() {
-	*e = responsesIREmitter{outputIndex: -1, reasoningIndex: -1, toolCallIDToIndex: map[string]int{}}
+	*e = *newResponsesIREmitter().(*responsesIREmitter)
 }
 
 func chatChunkFromIR(event relayir.StreamEvent) []byte {

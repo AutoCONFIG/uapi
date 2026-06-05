@@ -13,3 +13,5 @@ config.relay.yaml
 debug-dumps/
 AGENTS.md
 .vscode/
+.codex-home/
+.codex/

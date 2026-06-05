@@ -132,9 +132,18 @@ func (h *WSHandler) proxyUpstreamToClient(
 		h.upstream.Discard(upstreamConn)
 		sess.ReleaseTurn()
 
-		// If turn never completed (e.g., client disconnect), refund billing
+		// If the client disconnects after upstream has generated output, keep
+		// the turn billable even if the terminal usage event never arrives.
 		if !ts.isDone() {
-			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			pt, ct := ts.usage()
+			estimatedOutputTokens := ts.estimatedOutputTokens()
+			if pt > 0 || ct > 0 || estimatedOutputTokens > 0 {
+				estimateMissingUsage(&pt, &ct, requestBody, nil, estimatedOutputTokens)
+				h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model)
+				h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 499)
+			} else {
+				h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			}
 		}
 	}()
 
@@ -161,6 +170,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(msg, &envelope); err != nil {
+			ts.addEstimatedOutputTokens(estimateStreamOutputTokens(msg))
 			// Forward as-is if we can't parse
 			if writeErr := sess.WriteMessage(ws.TextMessage, msg); writeErr != nil {
 				return
@@ -170,6 +180,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 
 		// Forward ALL events to client as-is — the upstream sends valid
 		// Responses WS events that the client (Codex/Gemini-CLI) understands.
+		ts.addEstimatedOutputTokens(estimateStreamOutputTokens(msg))
 		if writeErr := sess.WriteMessage(ws.TextMessage, msg); writeErr != nil {
 			return
 		}

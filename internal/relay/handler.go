@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -27,15 +28,6 @@ import (
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
-
-// streamingClient is configured for real-time streaming:
-// no timeouts, streaming body response enabled.
-var streamingClient = &fasthttp.Client{
-	ReadTimeout:        0,
-	WriteTimeout:       0,
-	MaxConnDuration:    0,
-	StreamResponseBody: true,
-}
 
 // bufferedClient is for non-streaming upstream requests with reasonable timeouts.
 var bufferedClient = &fasthttp.Client{
@@ -508,6 +500,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		upstreamFormat = provider.FormatOpenAIChatCompletions
 	}
 
+	nativeCodexPassthrough := targetChannel.APIFormat == "codex" && isLikelyNativeCodexClientRequest(ctx)
+	if nativeCodexPassthrough {
+		clientFormat = provider.FormatCodexResponses
+	}
 	sameFormat := clientFormat == upstreamFormat
 	rawGeminiSameFormat := sameFormat && clientFormat == provider.FormatGemini
 	if !isMediaRequest && !rawGeminiSameFormat {
@@ -573,11 +569,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	routedModel = routedModelFromBody(convertedBody, routedModel)
-	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses {
+	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses && !nativeCodexPassthrough {
 		convertedBody = normalizeCodexResponsesRequest(convertedBody, effectiveStream)
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
-	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) {
+	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) && (!sameFormat || forceStreamActive) {
 		convertedBody = injectStreamTrue(convertedBody)
 	}
 	adaptor.SetRequestParams(routedModel, effectiveStream)
@@ -647,7 +643,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		logger.F("headers", relayDebugRequestHeaders(upReq)),
 		logger.F("body_stream", requestJSONBool(body, "stream")),
 	)
-	// streamingClient returns after receiving headers, body streamed via BodyStream
+	// The streaming request returns after receiving headers; the body is read from BodyStream.
 	if err := doStreamingRequest(upReq, upResp); err != nil {
 		trace.Event("upstream_request_failed", logger.Err(err), logger.F("auth_retried", authRetried))
 		logger.Warnf("relay.upstream", "streaming request failed", logger.Err(err))
@@ -900,9 +896,9 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	defer stopIdleTimeout()
 	respBody, err := io.ReadAll(io.LimitReader(bodyStream, int64(maxResponseSize)+1))
 	if err != nil {
-		trace.Event("force_stream_read_failed", logger.Err(err))
+		trace.Event("force_stream_read_failed", logger.Err(err), logger.F("status", fasthttp.StatusBadGateway))
 		logger.Warnf("relay.upstream", "force stream read failed", logger.Err(err))
-		r.refundAndError(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start, tokenPlanID)
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "read upstream error", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
 	if len(respBody) > maxResponseSize {
@@ -2664,13 +2660,14 @@ func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
 	bodyMap["store"] = false
 	bodyMap["stream"] = stream
 	if _, ok := bodyMap["parallel_tool_calls"]; !ok {
-		bodyMap["parallel_tool_calls"] = true
+		bodyMap["parallel_tool_calls"] = false
 	}
 	if _, ok := bodyMap["tool_choice"]; !ok {
 		bodyMap["tool_choice"] = "auto"
 	}
-	if _, ok := bodyMap["include"]; !ok && codexResponsesHasReasoning(bodyMap) {
-		bodyMap["include"] = []string{"reasoning.encrypted_content"}
+	normalizeCodexResponsesTextControls(bodyMap)
+	if codexResponsesHasReasoning(bodyMap) {
+		bodyMap["include"] = appendUniqueStringInclude(bodyMap["include"], "reasoning.encrypted_content")
 	}
 	for _, key := range []string{
 		"max_output_tokens",
@@ -2685,6 +2682,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
 		"metadata",
 		"previous_response_id",
 		"prompt_cache_retention",
+		"response_format",
 		"safety_identifier",
 		"top_logprobs",
 		"user",
@@ -2721,6 +2719,94 @@ func codexResponsesHasReasoning(bodyMap map[string]interface{}) bool {
 		return len(rawMap) > 0
 	}
 	return true
+}
+
+func appendUniqueStringInclude(raw interface{}, value string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	switch typed := raw.(type) {
+	case []interface{}:
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				add(s)
+			}
+		}
+	case []string:
+		for _, item := range typed {
+			add(item)
+		}
+	case string:
+		add(typed)
+	}
+	add(value)
+	return out
+}
+
+func normalizeCodexResponsesTextControls(bodyMap map[string]interface{}) {
+	text, _ := bodyMap["text"].(map[string]interface{})
+	if text == nil {
+		text = map[string]interface{}{}
+	}
+	if verbosity, ok := codexTextVerbosity(bodyMap); ok {
+		text["verbosity"] = verbosity
+	}
+	if _, hasFormat := text["format"]; !hasFormat {
+		if format, ok := codexTextFormatFromResponseFormat(bodyMap["response_format"]); ok {
+			text["format"] = format
+		}
+	}
+	if len(text) > 0 {
+		bodyMap["text"] = text
+	}
+}
+
+func codexTextVerbosity(bodyMap map[string]interface{}) (string, bool) {
+	for _, key := range []string{"verbosity", "text_verbosity"} {
+		if value, ok := bodyMap[key].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "low", "medium", "high":
+				delete(bodyMap, key)
+				return strings.ToLower(strings.TrimSpace(value)), true
+			}
+		}
+	}
+	return "", false
+}
+
+func codexTextFormatFromResponseFormat(raw interface{}) (map[string]interface{}, bool) {
+	format, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	if typ, _ := format["type"].(string); typ != "json_schema" {
+		return nil, false
+	}
+	jsonSchema, ok := format["json_schema"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	schema, ok := jsonSchema["schema"]
+	if !ok || schema == nil {
+		return nil, false
+	}
+	name, _ := jsonSchema["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		name = "codex_output_schema"
+	}
+	strict, _ := jsonSchema["strict"].(bool)
+	return map[string]interface{}{
+		"type":   "json_schema",
+		"strict": strict,
+		"schema": schema,
+		"name":   name,
+	}, true
 }
 
 func normalizeCodexResponsesInputRoles(bodyMap map[string]interface{}) {
@@ -3310,16 +3396,30 @@ func shouldInjectConvertedStreamField(upstreamFormat provider.Format) bool {
 	}
 }
 
+func isLikelyNativeCodexClientRequest(ctx *fasthttp.RequestCtx) bool {
+	originator := strings.ToLower(strings.TrimSpace(string(ctx.Request.Header.Peek("originator"))))
+	if originator == strings.ToLower(openai.CodexOriginator) {
+		return true
+	}
+	userAgent := strings.ToLower(string(ctx.Request.Header.UserAgent()))
+	return strings.Contains(userAgent, "codex")
+}
+
 func doStreamingRequest(req *fasthttp.Request, resp *fasthttp.Response) error {
 	var lastErr error
+	snapshot := fasthttp.AcquireRequest()
+	req.CopyTo(snapshot)
+	defer fasthttp.ReleaseRequest(snapshot)
+
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
+			req.Reset()
+			snapshot.CopyTo(req)
 			resp.Reset()
-			streamingClient.CloseIdleConnections()
 		}
 		if err := doStreamingRequestOnce(req, resp); err != nil {
 			lastErr = err
-			if strings.Contains(err.Error(), "streaming request panic") {
+			if strings.Contains(err.Error(), "streaming request panic") || isRetryableStreamingRequestError(err) {
 				continue
 			}
 			return err
@@ -3330,13 +3430,37 @@ func doStreamingRequest(req *fasthttp.Request, resp *fasthttp.Response) error {
 }
 
 func doStreamingRequestOnce(req *fasthttp.Request, resp *fasthttp.Response) (err error) {
+	client := newStreamingClient()
 	defer func() {
 		if rec := recover(); rec != nil {
-			streamingClient.CloseIdleConnections()
-			err = fmt.Errorf("streaming request panic: %v", rec)
+			client.CloseIdleConnections()
+			err = fmt.Errorf("streaming request panic: %v\n%s", rec, debug.Stack())
+		} else if err != nil {
+			client.CloseIdleConnections()
 		}
 	}()
-	return streamingClient.Do(req, resp)
+	return client.Do(req, resp)
+}
+
+func newStreamingClient() *fasthttp.Client {
+	return &fasthttp.Client{
+		ReadTimeout:        0,
+		WriteTimeout:       0,
+		MaxConnDuration:    0,
+		StreamResponseBody: true,
+	}
+}
+
+func isRetryableStreamingRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "dialing to the given tcp address timed out") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "server closed connection before returning the first response byte") ||
+		strings.Contains(msg, "no such host")
 }
 
 func releaseStreamingResponse(resp *fasthttp.Response) {

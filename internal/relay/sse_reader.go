@@ -49,6 +49,9 @@ func (r *SSEStreamReader) Read(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			r.current = event
+			r.trace.Event("downstream_read_event_dequeued",
+				append(loggerReaderStateFields(r, "event_dequeued"), logger.F("sse", relayDebugSSEEventSummary(event)))...,
+			)
 		case <-r.closeCh:
 			if err := r.abortError(); err != nil {
 				r.trace.Event("downstream_read_abort",
@@ -106,7 +109,9 @@ func (r *SSEStreamReader) Abort(err error) {
 func (r *SSEStreamReader) Send(event []byte) bool {
 	r.mu.Lock()
 	if r.closed {
+		fields := loggerReaderStateFieldsLocked(r, "send_closed_before_select")
 		r.mu.Unlock()
+		r.trace.Event("downstream_send_closed", append(fields, logger.F("sse", relayDebugSSEEventSummary(event)))...)
 		return false
 	}
 	closeCh := r.closeCh
@@ -116,11 +121,13 @@ func (r *SSEStreamReader) Send(event []byte) bool {
 	case r.eventCh <- event:
 		r.mu.Lock()
 		r.sentCount++
+		fields := loggerReaderStateFieldsLocked(r, "send_enqueued")
 		r.mu.Unlock()
+		r.trace.Event("downstream_send_enqueued", append(fields, logger.F("sse", relayDebugSSEEventSummary(event)))...)
 		return true
 	case <-closeCh:
 		r.trace.Event("downstream_send_closed",
-			loggerReaderStateFields(r, "send_select_close")...,
+			append(loggerReaderStateFields(r, "send_select_close"), logger.F("sse", relayDebugSSEEventSummary(event)))...,
 		)
 		return false
 	}

@@ -41,6 +41,7 @@ func parseOpenAIResponsesRequestDirectIR(body []byte) (*relayir.Request, error) 
 		"max_tool_calls",
 		"conversation",
 		"prompt_cache_key",
+		"client_metadata",
 		"safety_identifier",
 	)
 	out.Native.Fields = relayir.CloneRawMap(out.Metadata)
@@ -106,7 +107,8 @@ func parseOpenAIResponsesRequestDirectIR(body []byte) (*relayir.Request, error) 
 
 func knownResponsesInputItemType(typ string) bool {
 	switch typ {
-	case "message", "reasoning", "function_call", "function_call_output":
+	case "message", "reasoning", "function_call", "function_call_output",
+		"custom_tool_call", "custom_tool_call_output":
 		return true
 	default:
 		return false
@@ -177,6 +179,43 @@ func responsesInputItemToIRTurn(item schema.ResponsesInputItem) relayir.Turn {
 			ToolCallID: item.CallID,
 			Content:    item.Output,
 			ContentRaw: item.OutputRaw,
+		}, rawItem, FormatOpenAIResponses, 0))
+	case "custom_tool_call":
+		// Codex custom tool call: has call_id, name, input fields
+		turn.Role = relayir.RoleAssistant
+		callID := rawString(item.Extra["call_id"])
+		name := rawString(item.Extra["name"])
+		inputRaw := item.Extra["input"]
+		var arguments string
+		if inputRaw != nil {
+			arguments = string(inputRaw)
+		}
+		call := schema.ToolCall{
+			ID:   callID,
+			Type: "function",
+			Name: name,
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      name,
+				Arguments: arguments,
+			},
+		}
+		turn.Items = append(turn.Items, irToolUseItem(call, rawItem, FormatOpenAIResponses, 0))
+	case "custom_tool_call_output":
+		// Codex custom tool call output: has call_id, output fields
+		turn.Role = relayir.RoleTool
+		callID := rawString(item.Extra["call_id"])
+		outputRaw := item.Extra["output"]
+		var output string
+		if outputRaw != nil {
+			output = string(outputRaw)
+		}
+		turn.Items = append(turn.Items, irToolResultItem(schema.ToolResult{
+			ToolCallID: callID,
+			Content:    output,
+			ContentRaw: outputRaw,
 		}, rawItem, FormatOpenAIResponses, 0))
 	default:
 		turn.Role = relayir.RoleOpaque
@@ -460,8 +499,20 @@ func normalizeResponsesRawInputItemForUpstream(item map[string]interface{}) {
 	switch itemType {
 	case "message":
 		normalizeResponsesRawMessageContent(item)
-	case "function_call_output":
+	case "function_call_output", "custom_tool_call_output":
 		normalizeResponsesRawFunctionCallOutput(item)
+	case "custom_tool_call":
+		// Normalize custom_tool_call input field to string if it's an object
+		inputRaw, ok := item["input"]
+		if !ok {
+			return
+		}
+		if _, ok := inputRaw.(string); !ok {
+			// Convert object to JSON string
+			if inputBytes, err := json.Marshal(inputRaw); err == nil {
+				item["input"] = string(inputBytes)
+			}
+		}
 	}
 }
 

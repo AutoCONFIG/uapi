@@ -242,7 +242,7 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 			planID = existing.TokenPlanID
 		}
 		modelRatios := appsettings.Get(tx, appsettings.ModelRatios, "{}")
-		if req.StatusCode >= fasthttp.StatusBadRequest {
+		if usageEventShouldRefund(req) {
 			if err := relay.RefundPreConsumeTxForPlanWithRatios(tx, req.TokenID.String(), planID, req.EstimatedTokens, req.Model, modelRatios); err != nil {
 				return err
 			}
@@ -268,4 +268,18 @@ func (h *Handler) settleUsageEvent(req UsageEventRequest) error {
 			"settled":               true,
 		}).Error
 	})
+}
+
+func usageEventShouldRefund(req UsageEventRequest) bool {
+	if req.StatusCode < fasthttp.StatusBadRequest {
+		return false
+	}
+	return !usageEventHasBillableTokens(req)
+}
+
+func usageEventHasBillableTokens(req UsageEventRequest) bool {
+	return req.PromptTokens > 0 ||
+		req.CompletionTokens > 0 ||
+		req.CacheCreationTokens > 0 ||
+		req.CacheReadTokens > 0
 }
