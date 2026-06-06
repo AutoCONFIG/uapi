@@ -66,3 +66,18 @@ func TestChannelCandidatesForModelWeightsWithinPriorityBuckets(t *testing.T) {
 		t.Fatalf("priority order was not preserved: %#v", got)
 	}
 }
+
+func TestChannelCandidatesForModelSortsPriorityBeforeWeight(t *testing.T) {
+	channels := []db.Channel{
+		{Name: "low-heavy", Type: "openai", APIFormat: "standard", Models: "gpt-4", Priority: 5, Weight: 1000},
+		{Name: "high-light", Type: "openai", APIFormat: "standard", Models: "gpt-4", Priority: 10, Weight: 1},
+	}
+
+	got := channelCandidatesForModel(channels, "gpt-4", nil)
+	if len(got) != 2 {
+		t.Fatalf("candidate count = %d, want 2", len(got))
+	}
+	if got[0].Name != "high-light" || got[1].Name != "low-heavy" {
+		t.Fatalf("priority order = [%s %s], want [high-light low-heavy]", got[0].Name, got[1].Name)
+	}
+}

@@ -225,15 +225,15 @@ func emitOpenAIChatRequestDirectIR(req *relayir.Request) ([]byte, error) {
 func sanitizeOpenAIChatCrossProtocolRequest(req *schema.OpenAIChatRequest) {
 	req.Extra = openAIChatCrossProtocolRequestExtra(req.Extra)
 	for i := range req.Messages {
-		req.Messages[i].Extra = nil
+		req.Messages[i].Extra = openAIChatAllowedCacheExtra(req.Messages[i].Extra)
 		for j := range req.Messages[i].Content.Parts {
-			req.Messages[i].Content.Parts[j].Extra = nil
+			req.Messages[i].Content.Parts[j].Extra = openAIChatAllowedCacheExtra(req.Messages[i].Content.Parts[j].Extra)
 		}
 	}
 	req.Messages = reorderOpenAIChatToolResults(req.Messages)
 	req.Messages = dropEmptyOpenAIChatMessages(req.Messages)
 	for i := range req.Tools {
-		req.Tools[i].Extra = nil
+		req.Tools[i].Extra = openAIChatAllowedCacheExtra(req.Tools[i].Extra)
 		if req.Tools[i].Function != nil {
 			req.Tools[i].Function.Extra = openAIChatAllowedFunctionExtra(req.Tools[i].Function.Extra)
 		}
@@ -306,6 +306,20 @@ func openAIChatAllowedFunctionExtra(extra map[string]json.RawMessage) map[string
 	out := map[string]json.RawMessage{}
 	if strict, ok := extra["strict"]; ok {
 		out["strict"] = relayir.CloneRaw(strict)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func openAIChatAllowedCacheExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(extra) == 0 {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	if cacheControl, ok := extra["cache_control"]; ok {
+		out["cache_control"] = relayir.CloneRaw(cacheControl)
 	}
 	if len(out) == 0 {
 		return nil
@@ -465,7 +479,7 @@ func openAIChatToolResultMessage(item relayir.Item) (schema.ChatMessage, error) 
 	if result.ToolCallID == "" {
 		return schema.ChatMessage{}, fmt.Errorf("cannot emit OpenAI Chat tool result for IR item %d: missing required tool_call_id", item.OriginalIndex)
 	}
-	msg := schema.ChatMessage{Role: "tool", ToolCallID: result.ToolCallID}
+	msg := schema.ChatMessage{Role: "tool", ToolCallID: result.ToolCallID, Extra: openAIChatAllowedCacheExtra(item.Metadata)}
 	if len(result.ContentRaw) > 0 {
 		var mc schema.MessageContent
 		if json.Unmarshal(result.ContentRaw, &mc) == nil && !mc.IsEmpty() {
@@ -480,6 +494,9 @@ func openAIChatToolResultMessage(item relayir.Item) (schema.ChatMessage, error) 
 func contentPartsFromIRItems(items []relayir.Item) []schema.ContentPart {
 	var out []schema.ContentPart
 	for _, item := range items {
+		if isAnthropicTransportTextItem(item) {
+			continue
+		}
 		if part, ok := schemaContentFromIR(item); ok {
 			out = append(out, part)
 		}
@@ -554,7 +571,7 @@ func openAIChatTool(tool schema.Tool, preserveNative bool) (schema.Tool, bool) {
 				if preserveNative {
 					return tool.Extra
 				}
-				return nil
+				return openAIChatAllowedCacheExtra(tool.Extra)
 			}(),
 		}, true
 	}

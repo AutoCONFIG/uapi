@@ -74,6 +74,8 @@ type routeCandidate struct {
 	Node             *nodeState
 	ChannelID        uuid.UUID
 	AccountID        uuid.UUID
+	ChannelPriority  int
+	ChannelWeight    int
 	AccountWeight    int
 	ChannelAPIFormat string
 	ChannelType      string
@@ -687,6 +689,7 @@ func (g *Gateway) pickRoute(model string, capabilityReq channelcap.Request) (*ro
 	}
 	now := time.Now()
 	var best *routeCandidate
+	bestPriority := math.MinInt
 	bestScore := math.MaxFloat64
 	for _, route := range g.routes {
 		node := route.Node
@@ -706,14 +709,19 @@ func (g *Gateway) pickRoute(model string, capabilityReq channelcap.Request) (*ro
 		if nodeWeight <= 0 {
 			nodeWeight = 1
 		}
+		channelWeight := route.ChannelWeight
+		if channelWeight <= 0 {
+			channelWeight = 1
+		}
 		accountWeight := route.AccountWeight
 		if accountWeight <= 0 {
 			accountWeight = 1
 		}
-		effectiveWeight := nodeWeight * accountWeight
+		effectiveWeight := nodeWeight * channelWeight * accountWeight
 		score := float64(node.Current+1) / float64(effectiveWeight)
-		if score < bestScore {
+		if best == nil || route.ChannelPriority > bestPriority || (route.ChannelPriority == bestPriority && score < bestScore) {
 			best = route
+			bestPriority = route.ChannelPriority
 			bestScore = score
 		}
 	}
@@ -752,6 +760,8 @@ func (g *Gateway) reloadLocked() {
 		MaxConcurrency   int
 		ChannelID        uuid.UUID
 		AccountID        uuid.UUID
+		ChannelPriority  int
+		ChannelWeight    int
 		AccountWeight    int
 		ChannelAPIFormat string
 		ChannelType      string
@@ -762,7 +772,8 @@ func (g *Gateway) reloadLocked() {
 	err := g.db.Table("relay_nodes").
 		Select(`relay_nodes.id AS node_id, relay_nodes.name AS node_name, relay_nodes.base_url,
 			relay_nodes.weight AS node_weight, relay_nodes.max_concurrency,
-			node_channels.channel_id, accounts.id AS account_id, node_channels.weight AS account_weight,
+			node_channels.channel_id, accounts.id AS account_id,
+			channels.priority AS channel_priority, node_channels.weight AS channel_weight, accounts.weight AS account_weight,
 			channels.api_format AS channel_api_format, channels.type AS channel_type, channels.models AS channel_models, channels.model_aliases AS channel_aliases,
 			channels.settings AS channel_settings`).
 		Joins("JOIN node_channels ON node_channels.relay_node_id = relay_nodes.id AND node_channels.enabled = true AND node_channels.deleted_at IS NULL").
@@ -808,6 +819,8 @@ func (g *Gateway) reloadLocked() {
 			Node:             state,
 			ChannelID:        row.ChannelID,
 			AccountID:        row.AccountID,
+			ChannelPriority:  row.ChannelPriority,
+			ChannelWeight:    row.ChannelWeight,
 			AccountWeight:    row.AccountWeight,
 			ChannelAPIFormat: row.ChannelAPIFormat,
 			ChannelType:      row.ChannelType,

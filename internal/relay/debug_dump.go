@@ -2,6 +2,8 @@ package relay
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 )
 
@@ -27,7 +30,10 @@ const (
 	relayDebugStreamFileMaxSize     = 2 * 1024 * 1024
 )
 
-var relayDebugDumpDir = os.Getenv(relayDebugDumpDirEnv)
+var (
+	relayDebugDumpDir              = os.Getenv(relayDebugDumpDirEnv)
+	relayDebugDumpProcessStartedAt = time.Now().UTC()
+)
 
 func init() {
 	cleanupRelayDebugDumpDir()
@@ -144,31 +150,54 @@ func removeRelayDebugDumpEntry(dir, name string) bool {
 }
 
 type relayDebugDumpSummary struct {
-	Timestamp      string                 `json:"timestamp"`
-	RelayRequestID string                 `json:"relay_request_id"`
-	TokenID        string                 `json:"token_id,omitempty"`
-	AccountID      string                 `json:"account_id,omitempty"`
-	ChannelID      string                 `json:"channel_id,omitempty"`
-	GatewayRequest string                 `json:"gateway_request,omitempty"`
-	ClientFormat   provider.Format        `json:"client_format"`
-	UpstreamFormat provider.Format        `json:"upstream_format"`
-	RequestType    string                 `json:"request_type"`
-	Model          string                 `json:"model"`
-	RoutedModel    string                 `json:"routed_model"`
-	Stream         bool                   `json:"stream"`
-	OriginalBytes  int                    `json:"original_bytes"`
-	ConvertedBytes int                    `json:"converted_bytes"`
-	Original       relayDebugRequestStats `json:"original"`
-	Converted      relayDebugRequestStats `json:"converted"`
+	Timestamp        string                                `json:"timestamp"`
+	RelayRequestID   string                                `json:"relay_request_id"`
+	ProcessID        int                                   `json:"process_id"`
+	ProcessStartedAt string                                `json:"process_started_at"`
+	TokenID          string                                `json:"token_id,omitempty"`
+	AccountID        string                                `json:"account_id,omitempty"`
+	ChannelID        string                                `json:"channel_id,omitempty"`
+	GatewayRequest   string                                `json:"gateway_request,omitempty"`
+	ClientFormat     provider.Format                       `json:"client_format"`
+	UpstreamFormat   provider.Format                       `json:"upstream_format"`
+	RequestType      string                                `json:"request_type"`
+	Model            string                                `json:"model"`
+	RoutedModel      string                                `json:"routed_model"`
+	Stream           bool                                  `json:"stream"`
+	OriginalBytes    int                                   `json:"original_bytes"`
+	ConvertedBytes   int                                   `json:"converted_bytes"`
+	CachePassthrough upstreamconfig.CachePassthroughPolicy `json:"cache_passthrough"`
+	Original         relayDebugRequestStats                `json:"original"`
+	Converted        relayDebugRequestStats                `json:"converted"`
 }
 
 type relayDebugRequestStats struct {
-	ToolsLen          int             `json:"tools_len,omitempty"`
-	MessagesLen       int             `json:"messages_len,omitempty"`
-	InputLen          int             `json:"input_len,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls json.RawMessage `json:"parallel_tool_calls,omitempty"`
-	HasThinking       bool            `json:"has_thinking,omitempty"`
+	ToolsLen          int                     `json:"tools_len,omitempty"`
+	ToolsBytes        int                     `json:"tools_bytes,omitempty"`
+	ToolsHash         string                  `json:"tools_hash,omitempty"`
+	MessagesLen       int                     `json:"messages_len,omitempty"`
+	MessagePrefixes   []relayDebugPrefix      `json:"message_prefixes,omitempty"`
+	InputLen          int                     `json:"input_len,omitempty"`
+	PromptCacheKey    json.RawMessage         `json:"prompt_cache_key,omitempty"`
+	PromptCacheSource string                  `json:"prompt_cache_source,omitempty"`
+	CachedContent     string                  `json:"cached_content,omitempty"`
+	CacheControlCount int                     `json:"cache_control_count,omitempty"`
+	CacheMarkers      []relayDebugCacheMarker `json:"cache_markers,omitempty"`
+	ToolChoice        json.RawMessage         `json:"tool_choice,omitempty"`
+	ParallelToolCalls json.RawMessage         `json:"parallel_tool_calls,omitempty"`
+	HasThinking       bool                    `json:"has_thinking,omitempty"`
+}
+
+type relayDebugCacheMarker struct {
+	Path       string `json:"path"`
+	Role       string `json:"role,omitempty"`
+	Trailing   bool   `json:"trailing,omitempty"`
+	PrefixHash string `json:"prefix_hash,omitempty"`
+}
+
+type relayDebugPrefix struct {
+	Count int    `json:"count"`
+	Hash  string `json:"hash"`
 }
 
 type relayDebugTrace struct {
@@ -195,19 +224,22 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 	}
 
 	summary := relayDebugDumpSummary{
-		Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
-		RelayRequestID: traceID,
-		TokenID:        token.ID.String(),
-		ClientFormat:   clientFormat,
-		UpstreamFormat: upstreamFormat,
-		RequestType:    string(requestType),
-		Model:          model,
-		RoutedModel:    routedModel,
-		Stream:         stream,
-		OriginalBytes:  len(original),
-		ConvertedBytes: len(converted),
-		Original:       relayDebugRequestStatsFromBody(original),
-		Converted:      relayDebugRequestStatsFromBody(converted),
+		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+		RelayRequestID:   traceID,
+		ProcessID:        os.Getpid(),
+		ProcessStartedAt: relayDebugDumpProcessStartedAt.Format(time.RFC3339Nano),
+		TokenID:          token.ID.String(),
+		ClientFormat:     clientFormat,
+		UpstreamFormat:   upstreamFormat,
+		RequestType:      string(requestType),
+		Model:            model,
+		RoutedModel:      routedModel,
+		Stream:           stream,
+		OriginalBytes:    len(original),
+		ConvertedBytes:   len(converted),
+		CachePassthrough: upstreamconfig.CachePassthroughPolicyForChannel(ch, upstreamFormat),
+		Original:         relayDebugRequestStatsFromBody(original),
+		Converted:        relayDebugRequestStatsFromBody(converted),
 	}
 	if ch != nil {
 		summary.ChannelID = ch.ID.String()
@@ -244,10 +276,24 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		logger.F("converted_bytes", len(converted)),
 		logger.F("original_tools_len", summary.Original.ToolsLen),
 		logger.F("converted_tools_len", summary.Converted.ToolsLen),
+		logger.F("original_tools_hash", summary.Original.ToolsHash),
+		logger.F("converted_tools_hash", summary.Converted.ToolsHash),
 		logger.F("original_tool_choice", relayDebugRawString(summary.Original.ToolChoice)),
 		logger.F("converted_tool_choice", relayDebugRawString(summary.Converted.ToolChoice)),
 		logger.F("original_parallel_tool_calls", relayDebugRawString(summary.Original.ParallelToolCalls)),
 		logger.F("converted_parallel_tool_calls", relayDebugRawString(summary.Converted.ParallelToolCalls)),
+		logger.F("original_prompt_cache_key", relayDebugRawString(summary.Original.PromptCacheKey)),
+		logger.F("converted_prompt_cache_key", relayDebugRawString(summary.Converted.PromptCacheKey)),
+		logger.F("original_prompt_cache_source", summary.Original.PromptCacheSource),
+		logger.F("converted_prompt_cache_source", summary.Converted.PromptCacheSource),
+		logger.F("original_cached_content", summary.Original.CachedContent),
+		logger.F("converted_cached_content", summary.Converted.CachedContent),
+		logger.F("original_cache_control_count", summary.Original.CacheControlCount),
+		logger.F("converted_cache_control_count", summary.Converted.CacheControlCount),
+		logger.F("cache_passthrough_enabled", summary.CachePassthrough.Enabled),
+		logger.F("cache_passthrough_prompt_cache_key", summary.CachePassthrough.PromptCacheKey),
+		logger.F("cache_passthrough_cache_control", summary.CachePassthrough.CacheControl),
+		logger.F("cache_passthrough_cached_content", summary.CachePassthrough.CachedContent),
 	)
 	logger.Debugf("relay.debug_dump", "request dump written",
 		logger.F("relay_request_id", traceID),
@@ -270,12 +316,15 @@ func relayDebugRequestStatsFromBody(body []byte) relayDebugRequestStats {
 		var tools []json.RawMessage
 		if err := json.Unmarshal(raw, &tools); err == nil {
 			stats.ToolsLen = len(tools)
+			stats.ToolsBytes = len(raw)
+			stats.ToolsHash = relayDebugCanonicalHash(raw)
 		}
 	}
 	if raw := root["messages"]; len(raw) > 0 {
 		var messages []json.RawMessage
 		if err := json.Unmarshal(raw, &messages); err == nil {
 			stats.MessagesLen = len(messages)
+			stats.MessagePrefixes = relayDebugMessagePrefixes(root, len(messages))
 		}
 	}
 	if raw := root["input"]; len(raw) > 0 {
@@ -290,10 +339,248 @@ func relayDebugRequestStatsFromBody(body []byte) relayDebugRequestStats {
 	if raw := root["parallel_tool_calls"]; len(raw) > 0 {
 		stats.ParallelToolCalls = append(json.RawMessage(nil), raw...)
 	}
+	if raw := root["prompt_cache_key"]; len(raw) > 0 {
+		stats.PromptCacheKey = append(json.RawMessage(nil), raw...)
+		stats.PromptCacheSource = "prompt_cache_key"
+	} else if source := relayDebugPromptCacheSource(root); source != "" {
+		stats.PromptCacheSource = source
+	}
+	if raw := root["cachedContent"]; len(raw) > 0 {
+		stats.CachedContent = relayDebugRawJSONStr(raw)
+	}
+	var anyRoot interface{}
+	if err := relayDebugDecodeJSONUseNumber(body, &anyRoot); err == nil {
+		stats.CacheControlCount = relayDebugCountJSONKey(anyRoot, "cache_control")
+		stats.CacheMarkers = relayDebugCacheMarkers(root)
+	}
 	if raw := root["thinking"]; len(raw) > 0 && string(raw) != "null" {
 		stats.HasThinking = true
 	}
 	return stats
+}
+
+func relayDebugCacheMarkers(root map[string]json.RawMessage) []relayDebugCacheMarker {
+	var markers []relayDebugCacheMarker
+	if raw := root["messages"]; len(raw) > 0 {
+		var messages []map[string]interface{}
+		if err := json.Unmarshal(raw, &messages); err == nil {
+			for i, msg := range messages {
+				role, _ := msg["role"].(string)
+				trailing := i == len(messages)-1
+				if _, ok := msg["cache_control"]; ok {
+					markers = append(markers, relayDebugCacheMarker{
+						Path:       "messages." + strconv.Itoa(i),
+						Role:       role,
+						Trailing:   trailing,
+						PrefixHash: relayDebugPrefixHash(root, "messages", i, -1),
+					})
+				}
+				if content, ok := msg["content"].([]interface{}); ok {
+					for j, part := range content {
+						partMap, ok := part.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if _, ok := partMap["cache_control"]; ok {
+							markers = append(markers, relayDebugCacheMarker{
+								Path:       "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(j),
+								Role:       role,
+								Trailing:   trailing,
+								PrefixHash: relayDebugPrefixHash(root, "messages", i, j),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+	if raw := root["input"]; len(raw) > 0 {
+		var input []map[string]interface{}
+		if err := json.Unmarshal(raw, &input); err == nil {
+			for i, item := range input {
+				if _, ok := item["cache_control"]; ok {
+					markers = append(markers, relayDebugCacheMarker{
+						Path:       "input." + strconv.Itoa(i),
+						Trailing:   i == len(input)-1,
+						PrefixHash: relayDebugPrefixHash(root, "input", i, -1),
+					})
+				}
+			}
+		}
+	}
+	if raw := root["tools"]; len(raw) > 0 {
+		var tools []map[string]interface{}
+		if err := json.Unmarshal(raw, &tools); err == nil {
+			for i, tool := range tools {
+				if _, ok := tool["cache_control"]; ok {
+					markers = append(markers, relayDebugCacheMarker{
+						Path:       "tools." + strconv.Itoa(i),
+						PrefixHash: relayDebugPrefixHash(root, "tools", i, -1),
+					})
+				}
+			}
+		}
+	}
+	return markers
+}
+
+func relayDebugCanonicalHash(raw json.RawMessage) string {
+	var value interface{}
+	if err := relayDebugDecodeJSONUseNumber(raw, &value); err != nil {
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:8])
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:8])
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:8])
+}
+
+func relayDebugMessagePrefixes(root map[string]json.RawMessage, messagesLen int) []relayDebugPrefix {
+	if messagesLen <= 0 {
+		return nil
+	}
+	counts := []int{1, 2, 4, 8, 16, 32, 64}
+	prefixes := make([]relayDebugPrefix, 0, len(counts))
+	for _, count := range counts {
+		if count > messagesLen {
+			break
+		}
+		prefixes = append(prefixes, relayDebugPrefix{
+			Count: count,
+			Hash:  relayDebugPrefixHash(root, "messages", count-1, -1),
+		})
+	}
+	return prefixes
+}
+
+func relayDebugPromptCacheSource(root map[string]json.RawMessage) string {
+	for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId"} {
+		if relayDebugRawJSONStr(root[key]) != "" {
+			return key
+		}
+	}
+	if raw := root["metadata"]; len(raw) > 0 {
+		if source := relayDebugPromptCacheSourceFromObject(raw, "metadata"); source != "" {
+			return source
+		}
+	}
+	if raw := root["client_metadata"]; len(raw) > 0 {
+		if source := relayDebugPromptCacheSourceFromObject(raw, "client_metadata"); source != "" {
+			return source
+		}
+	}
+	return ""
+}
+
+func relayDebugPromptCacheSourceFromObject(raw json.RawMessage, prefix string) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation_id", "conversationId"} {
+		if relayDebugRawJSONStr(obj[key]) != "" {
+			return prefix + "." + key
+		}
+	}
+	for _, key := range []string{"user_id", "user"} {
+		if source := relayDebugPromptCacheSourceFromNestedString(obj[key], prefix+"."+key); source != "" {
+			return source
+		}
+	}
+	return ""
+}
+
+func relayDebugPromptCacheSourceFromNestedString(raw json.RawMessage, prefix string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if source := relayDebugPromptCacheSourceFromObject(raw, prefix); source != "" {
+		return source
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil || strings.TrimSpace(text) == "" || !strings.HasPrefix(strings.TrimSpace(text), "{") {
+		return ""
+	}
+	return relayDebugPromptCacheSourceFromObject(json.RawMessage(strings.TrimSpace(text)), prefix)
+}
+
+func relayDebugPrefixHash(root map[string]json.RawMessage, field string, itemIdx, partIdx int) string {
+	clone := map[string]json.RawMessage{}
+	for key, value := range root {
+		clone[key] = value
+	}
+	raw := root[field]
+	if len(raw) == 0 {
+		return ""
+	}
+	var items []interface{}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return ""
+	}
+	if itemIdx >= 0 && itemIdx < len(items) {
+		items = items[:itemIdx+1]
+		if partIdx >= 0 {
+			if msg, ok := items[itemIdx].(map[string]interface{}); ok {
+				if content, ok := msg["content"].([]interface{}); ok && partIdx < len(content) {
+					msg["content"] = content[:partIdx+1]
+				}
+			}
+		}
+	}
+	prefixRaw, err := json.Marshal(items)
+	if err != nil {
+		return ""
+	}
+	clone[field] = prefixRaw
+	rawPrefix, err := json.Marshal(clone)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(rawPrefix)
+	return hex.EncodeToString(sum[:8])
+}
+
+func relayDebugCountJSONKey(value interface{}, key string) int {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		count := 0
+		for k, child := range v {
+			if k == key {
+				count++
+			}
+			count += relayDebugCountJSONKey(child, key)
+		}
+		return count
+	case []interface{}:
+		count := 0
+		for _, child := range v {
+			count += relayDebugCountJSONKey(child, key)
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
+func relayDebugDecodeJSONUseNumber(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+func relayDebugRawJSONStr(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 func relayDebugRawString(raw json.RawMessage) string {
@@ -513,6 +800,18 @@ func relayDebugSSEEventSummary(event []byte) map[string]interface{} {
 		if response, ok := root["response"].(map[string]interface{}); ok {
 			copyIfPresent(record, response, "status", "response_status")
 			copyIfPresent(record, response, "id", "response_id")
+			if usage, ok := response["usage"].(map[string]interface{}); ok {
+				relayDebugAddUsageCacheTokens(record, usage)
+			}
+			if usageMetadata, ok := response["usageMetadata"].(map[string]interface{}); ok {
+				relayDebugAddUsageCacheTokens(record, usageMetadata)
+			}
+		}
+		if usage, ok := root["usage"].(map[string]interface{}); ok {
+			relayDebugAddUsageCacheTokens(record, usage)
+		}
+		if usageMetadata, ok := root["usageMetadata"].(map[string]interface{}); ok {
+			relayDebugAddUsageCacheTokens(record, usageMetadata)
 		}
 		if delta, ok := root["delta"].(string); ok && delta != "" {
 			record["delta_preview"] = relayDebugPreview([]byte(delta), 160)
@@ -523,6 +822,16 @@ func relayDebugSSEEventSummary(event []byte) map[string]interface{} {
 	}
 	record["preview"] = relayDebugPreview(payload, 240)
 	return record
+}
+
+func relayDebugAddUsageCacheTokens(record map[string]interface{}, usage map[string]interface{}) {
+	creation, read := usageCacheTokens(usage)
+	if creation > 0 {
+		record["cache_creation_tokens"] = creation
+	}
+	if read > 0 {
+		record["cache_read_tokens"] = read
+	}
 }
 
 func relayDebugSSEDataPayloads(event []byte) []string {

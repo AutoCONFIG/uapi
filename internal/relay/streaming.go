@@ -26,6 +26,7 @@ type streamResult struct {
 	err              error
 	finalized        bool
 	failed           bool
+	emptyStream      bool
 	parseFailed      bool // true if ParseStreamUsage had errors
 }
 
@@ -313,6 +314,7 @@ func streamAndForwardWithTrace(
 	sawTerminal := false
 	sawChatFinish := false
 	failed := false
+	nonDonePayloads := 0
 	var event []byte
 
 	flush := func() (bool, error) {
@@ -329,6 +331,11 @@ func streamAndForwardWithTrace(
 		normalized := normalizeSSEEventForConverterWithEvent(current)
 		if len(normalized) == 0 {
 			return true, nil
+		}
+		for _, payload := range sseDataPayloads(normalized) {
+			if strings.TrimSpace(payload) != "[DONE]" {
+				nonDonePayloads++
+			}
 		}
 		dataOnly := normalizeSSEEventForConverter(current)
 		if streamHasFailureEvent(normalized) {
@@ -466,7 +473,7 @@ func streamAndForwardWithTrace(
 				logger.F("saw_chat_finish", sawChatFinish),
 			)
 			pt, ct, parseFailed := tracker.Result()
-			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, parseFailed: parseFailed}
+			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, emptyStream: nonDonePayloads == 0, parseFailed: parseFailed}
 		}
 		if isBenignStreamCloseError(err) {
 			trace.Event("scanner_benign_close_before_terminal",
@@ -505,7 +512,7 @@ func streamAndForwardWithTrace(
 			streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok))...,
 		)
 		sawDone = sawChatFinish || sawTerminal
-	} else if !sendDone && !sawDone && outputConvert != nil {
+	} else if !sendDone && !sawDone && outputConvert != nil && (sawTerminal || sawChatFinish) {
 		if converted := outputConvert([]byte("data: [DONE]\n\n")); converted != nil {
 			ok := reader.Send(converted)
 			trace.Event("stream_done_converted_from_eof",
@@ -513,13 +520,22 @@ func streamAndForwardWithTrace(
 			)
 			sawDone = true
 		}
+	} else if !sendDone && !sawDone {
+		trace.Event("stream_eof_without_terminal",
+			streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0,
+				logger.F("non_done_payloads", nonDonePayloads),
+			)...,
+		)
 	}
 
 	pt, ct, parseFailed := tracker.Result()
-	result := streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, parseFailed: parseFailed}
+	emptyStream := nonDonePayloads == 0 && (sawDone || sawTerminal)
+	result := streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, emptyStream: emptyStream, parseFailed: parseFailed}
 	trace.Event("stream_forward_finished",
 		streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0,
 			logger.F("finalized", result.finalized),
+			logger.F("empty_stream", result.emptyStream),
+			logger.F("non_done_payloads", nonDonePayloads),
 			logger.F("prompt_tokens", pt),
 			logger.F("completion_tokens", ct),
 			logger.F("parse_failed", parseFailed),
@@ -671,6 +687,7 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 	sawTerminal := false
 	sawChatFinish := false
 	failed := false
+	nonDonePayloads := 0
 
 	flush := func() bool {
 		if len(event) == 0 {
@@ -681,6 +698,9 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 		}
 		trace.StreamChunk("stream.upstream.sse", event)
 		for _, payload := range sseDataPayloads(event) {
+			if strings.TrimSpace(payload) != "[DONE]" {
+				nonDonePayloads++
+			}
 			tracker.TrackChunk([]byte(payload))
 		}
 		trace.StreamChunk("stream.downstream.sse", event)
@@ -745,7 +765,7 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 				logger.F("saw_chat_finish", sawChatFinish),
 			)
 			pt, ct, parseFailed := tracker.Result()
-			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, parseFailed: parseFailed}
+			return streamResult{promptTokens: pt, completionTokens: ct, finalized: true, failed: failed, emptyStream: nonDonePayloads == 0, parseFailed: parseFailed}
 		}
 		trace.Event("scanner_error",
 			logger.F("mode", "raw"),
@@ -776,15 +796,18 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 	}
 	pt, ct, parseFailed := tracker.Result()
 	finalized := sawDone || sawTerminal
+	emptyStream := nonDonePayloads == 0 && finalized
 	trace.Event("stream_forward_finished",
 		streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, 0,
 			logger.F("finalized", finalized),
+			logger.F("empty_stream", emptyStream),
+			logger.F("non_done_payloads", nonDonePayloads),
 			logger.F("prompt_tokens", pt),
 			logger.F("completion_tokens", ct),
 			logger.F("parse_failed", parseFailed),
 		)...,
 	)
-	return streamResult{promptTokens: pt, completionTokens: ct, finalized: finalized, failed: failed, parseFailed: parseFailed}
+	return streamResult{promptTokens: pt, completionTokens: ct, finalized: finalized, failed: failed, emptyStream: emptyStream, parseFailed: parseFailed}
 }
 
 func streamHasTerminalEvent(event []byte) bool {

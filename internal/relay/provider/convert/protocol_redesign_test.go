@@ -1147,7 +1147,7 @@ func TestResponsesToOpenAIChatReordersToolOutputsAfterMatchingCalls(t *testing.T
 func TestResponsesToOpenAIChatPreservesCachePassthroughFields(t *testing.T) {
 	body := []byte(`{
 		"model":"glm-5.1",
-		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}],
 		"prompt_cache_key":"019e9842-920e-70f1-8313-f2d2f848cd5a",
 		"client_metadata":{"x-codex-installation-id":"0520e5f6-fd3f-4731-b006-465bf209ce33"},
 		"safety_identifier":"safe_1",
@@ -1172,6 +1172,225 @@ func TestResponsesToOpenAIChatPreservesCachePassthroughFields(t *testing.T) {
 	}
 	if _, ok := request["conversation"]; ok {
 		t.Fatalf("Responses-only field conversation leaked into Chat request: %s", converted)
+	}
+	if !strings.Contains(string(converted), `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("Responses content cache_control missing in Chat request: %s", converted)
+	}
+}
+
+func TestCrossProtocolToOpenAIChatPreservesCacheControlWithoutNativeLeak(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"system cache","cache_control":{"type":"ephemeral"},"anthropic_only":true}],
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"message cache","cache_control":{"type":"ephemeral"},"anthropic_only":true}
+		]}],
+		"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"},"anthropic_tool_only":true}],
+		"context_management":{"edits":[]}
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> OpenAI Chat: %v", err)
+	}
+	if got := strings.Count(string(converted), `"cache_control":{"type":"ephemeral"}`); got != 3 {
+		t.Fatalf("cache_control count = %d, want 3:\n%s", got, converted)
+	}
+	for _, forbidden := range []string{`"anthropic_only"`, `"anthropic_tool_only"`, `"context_management"`} {
+		if strings.Contains(string(converted), forbidden) {
+			t.Fatalf("source-only field leaked %s:\n%s", forbidden, converted)
+		}
+	}
+}
+
+func TestAnthropicTransportBillingHeaderDroppedAcrossProtocols(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"system":[
+			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.92.b1b; cc_entrypoint=sdk-cli; cch=abcde;"},
+			{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	for _, target := range []convert.Format{
+		convert.FormatOpenAIChatCompletions,
+		convert.FormatOpenAIResponses,
+		convert.FormatGemini,
+	} {
+		converted, err := convert.ConvertRequest(convert.FormatAnthropic, target, body)
+		if err != nil {
+			t.Fatalf("Anthropic -> %s: %v", target, err)
+		}
+		text := string(converted)
+		if strings.Contains(text, "x-anthropic-billing-header") || strings.Contains(text, "cch=abcde") {
+			t.Fatalf("Anthropic transport billing header leaked to %s:\n%s", target, converted)
+		}
+		if !strings.Contains(text, "stable system") {
+			t.Fatalf("stable system instruction missing for %s:\n%s", target, converted)
+		}
+		if target == convert.FormatOpenAIChatCompletions && !strings.Contains(text, `"cache_control":{"type":"ephemeral"}`) {
+			t.Fatalf("OpenAI Chat cache_control missing after billing header filter:\n%s", converted)
+		}
+	}
+}
+
+func TestCrossProtocolToolSchemaCanonicalizedForPromptCache(t *testing.T) {
+	bodyA := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"tools":[{"name":"lookup","description":"Lookup","input_schema":{"required":["q"],"properties":{"q":{"description":"query","type":"string"}},"type":"object"},"cache_control":{"type":"ephemeral"}}]
+	}`)
+	bodyB := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"tools":[{"name":"lookup","description":"Lookup","input_schema":{"type":"object","properties":{"q":{"type":"string","description":"query"}},"required":["q"]},"cache_control":{"type":"ephemeral"}}]
+	}`)
+	convertedA, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, bodyA)
+	if err != nil {
+		t.Fatalf("Anthropic A -> OpenAI Chat: %v", err)
+	}
+	convertedB, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, bodyB)
+	if err != nil {
+		t.Fatalf("Anthropic B -> OpenAI Chat: %v", err)
+	}
+	var reqA, reqB map[string]interface{}
+	if err := json.Unmarshal(convertedA, &reqA); err != nil {
+		t.Fatalf("unmarshal A: %v\n%s", err, convertedA)
+	}
+	if err := json.Unmarshal(convertedB, &reqB); err != nil {
+		t.Fatalf("unmarshal B: %v\n%s", err, convertedB)
+	}
+	toolsA, _ := json.Marshal(reqA["tools"])
+	toolsB, _ := json.Marshal(reqB["tools"])
+	if string(toolsA) != string(toolsB) {
+		t.Fatalf("equivalent tool schemas should canonicalize identically:\nA=%s\nB=%s", toolsA, toolsB)
+	}
+	if !strings.Contains(string(toolsA), `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("cache_control missing after schema canonicalization:\n%s", toolsA)
+	}
+}
+
+func TestToolSchemaCanonicalizationPreservesPropertyOrder(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"tools":[{"name":"answer","input_schema":{
+			"required":["chain_of_thought","answer"],
+			"properties":{
+				"chain_of_thought":{"title":"Chain of Thought","description":"Reasoning","type":"string"},
+				"answer":{"title":"Answer","description":"Final","type":"string"}
+			},
+			"type":"object"
+		}}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> OpenAI Chat: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{
+		`"parameters":{"type":"object","properties":{"chain_of_thought":{"type":"string","description":"Reasoning","title":"Chain of Thought"},"answer":{"type":"string","description":"Final","title":"Answer"}},"required":["chain_of_thought","answer"]}`,
+		`"chain_of_thought"`,
+		`"answer"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("normalized schema missing %s:\n%s", want, converted)
+		}
+	}
+	propsIndex := strings.Index(text, `"properties"`)
+	cotIndex := strings.Index(text[propsIndex:], `"chain_of_thought"`)
+	answerIndex := strings.Index(text[propsIndex:], `"answer"`)
+	if propsIndex < 0 || cotIndex < 0 || answerIndex < 0 || cotIndex > answerIndex {
+		t.Fatalf("property order was not preserved:\n%s", converted)
+	}
+}
+
+func TestAnthropicToolResultCacheControlToOpenAIChat(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-test",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"system cache","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok","cache_control":{"type":"ephemeral"},"anthropic_result_only":true}]}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> OpenAI Chat: %v", err)
+	}
+	if got := strings.Count(string(converted), `"cache_control":{"type":"ephemeral"}`); got != 2 {
+		t.Fatalf("cache_control count = %d, want 2:\n%s", got, converted)
+	}
+	if strings.Contains(string(converted), `"anthropic_result_only"`) {
+		t.Fatalf("Anthropic-only tool_result field leaked:\n%s", converted)
+	}
+}
+
+func TestResponsesToOpenAIChatPreservesProjectedToolCacheAndStrict(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"},"strict":true,"cache_control":{"type":"ephemeral"},"responses_tool_only":true}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Responses -> OpenAI Chat: %v", err)
+	}
+	for _, want := range []string{`"strict":true`, `"cache_control":{"type":"ephemeral"}`} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("projected tool field missing %s:\n%s", want, converted)
+		}
+	}
+	if strings.Contains(string(converted), `"responses_tool_only"`) {
+		t.Fatalf("Responses-only tool field leaked into Chat request:\n%s", converted)
+	}
+}
+
+func TestResponsesToAnthropicPreservesCacheControlOnSupportedBlocks(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]},
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}","cache_control":{"type":"ephemeral"}},
+			{"type":"function_call_output","call_id":"call_1","output":"ok","cache_control":{"type":"ephemeral"}}
+		],
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"},"cache_control":{"type":"ephemeral"}}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("Responses -> Anthropic: %v", err)
+	}
+	if got := strings.Count(string(converted), `"cache_control":{"type":"ephemeral"}`); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4:\n%s", got, converted)
+	}
+	for _, want := range []string{`"type":"tool_use"`, `"type":"tool_result"`, `"name":"lookup"`} {
+		if !strings.Contains(string(converted), want) {
+			t.Fatalf("Anthropic projection missing %s:\n%s", want, converted)
+		}
+	}
+}
+
+func TestOpenAIChatTopLevelCacheControlPreservedForAnthropicTarget(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet",
+		"messages":[{"role":"user","content":"hello"}],
+		"cache_control":{"type":"ephemeral"},
+		"openai_only":true
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("Chat -> Anthropic: %v", err)
+	}
+	if !strings.Contains(string(converted), `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("top-level cache_control missing for Anthropic target:\n%s", converted)
+	}
+	if strings.Contains(string(converted), `"openai_only"`) {
+		t.Fatalf("source-only field leaked into Anthropic target:\n%s", converted)
 	}
 }
 

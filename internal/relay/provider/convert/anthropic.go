@@ -263,6 +263,9 @@ func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instr
 	var blocks []map[string]interface{}
 	for _, inst := range instructions {
 		for _, item := range inst.Items {
+			if source != relayir.ProtocolAnthropic && isAnthropicTransportTextItem(item) {
+				continue
+			}
 			block, err := anthropicBlockFromIRItem(item)
 			if err != nil {
 				continue
@@ -421,6 +424,7 @@ func anthropicTool(tool schema.Tool, preserveNative bool) map[string]interface{}
 		} else {
 			out["input_schema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 		}
+		applyAnthropicCacheControl(out, tool.Extra)
 		if preserveNative {
 			for key, value := range tool.Extra {
 				out[key] = value
@@ -479,6 +483,15 @@ func anthropicWebSearchTool(tool schema.Tool) map[string]interface{} {
 		out[key] = value
 	}
 	return out
+}
+
+func applyAnthropicCacheControl(out map[string]interface{}, metadata map[string]json.RawMessage) {
+	if out == nil || len(metadata) == 0 {
+		return
+	}
+	if raw := metadata["cache_control"]; len(raw) > 0 && string(raw) != "null" {
+		out["cache_control"] = json.RawMessage(raw)
+	}
 }
 
 func rawBool(raw json.RawMessage) *bool {
@@ -547,6 +560,7 @@ func anthropicBlockFromIRItem(item relayir.Item) (map[string]interface{}, error)
 		return anthropicReasoningBlock(schemaReasoningFromIR(item)), nil
 	case relayir.ItemToolUse, relayir.ItemFunctionCall:
 		block := anthropicToolUseBlock(schemaToolCallFromIR(item))
+		applyAnthropicCacheControl(block, item.Metadata)
 		if block["name"] == "" {
 			return nil, fmt.Errorf("cannot emit Anthropic tool_use for IR item %d: missing required name", item.OriginalIndex)
 		}
@@ -556,6 +570,7 @@ func anthropicBlockFromIRItem(item relayir.Item) (map[string]interface{}, error)
 		return block, nil
 	case relayir.ItemToolResult, relayir.ItemFunctionCallOutput:
 		block := anthropicToolResultBlock(schemaToolResultFromIR(item))
+		applyAnthropicCacheControl(block, item.Metadata)
 		if block["tool_use_id"] == "" {
 			return nil, fmt.Errorf("cannot emit Anthropic tool_result for IR item %d: missing required tool_use_id", item.OriginalIndex)
 		}

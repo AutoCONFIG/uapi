@@ -188,6 +188,9 @@ func TestStreamAndForwardRawAcceptsCompactDoneField(t *testing.T) {
 	if !result.finalized || result.failed {
 		t.Fatalf("compact data:[DONE] must finalize successfully: %+v", result)
 	}
+	if !result.emptyStream {
+		t.Fatalf("compact data:[DONE] must be marked as empty stream: %+v", result)
+	}
 }
 
 func TestStreamAndForwardRawGeminiEOFCompletes(t *testing.T) {
@@ -526,6 +529,33 @@ func TestStreamAndForwardConvertedResponsesToChatSendsDone(t *testing.T) {
 	}
 }
 
+func TestStreamAndForwardConvertedDoneOnlyMarksEmptyStream(t *testing.T) {
+	body := "data: [DONE]\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := func([]byte) []byte {
+		return []byte(`event: message_delta` + "\n" +
+			`data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"output_tokens":0}}` + "\n\n" +
+			`event: message_stop` + "\n" +
+			`data: {"type":"message_stop"}` + "\n\n")
+	}
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed {
+		t.Fatalf("converted DONE-only stream must still be finalized: %+v", result)
+	}
+	if !result.emptyStream {
+		t.Fatalf("converted DONE-only stream must be marked as empty: %+v", result)
+	}
+}
+
 func TestStreamAndForwardChatToResponsesCompletesLifecycle(t *testing.T) {
 	body := `data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n" +
 		`data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
@@ -561,6 +591,29 @@ func TestStreamAndForwardChatToResponsesCompletesLifecycle(t *testing.T) {
 	}
 	if strings.Contains(got, "data: [DONE]") {
 		t.Fatalf("normal Responses downstream stream must not include OpenAI Chat [DONE]:\n%s", got)
+	}
+}
+
+func TestStreamAndForwardChatToResponsesDoesNotFinalizeTruncatedEOF(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{"}}]},"finish_reason":null}]}` + "\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatOpenAIResponses)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.finalized || result.failed {
+		t.Fatalf("truncated chat to responses stream must not finalize successfully: %+v", result)
+	}
+	if strings.Contains(string(out), "response.completed") {
+		t.Fatalf("truncated stream must not emit response.completed: %s", out)
 	}
 }
 

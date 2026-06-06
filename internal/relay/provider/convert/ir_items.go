@@ -77,12 +77,14 @@ func irToolUseItem(call schema.ToolCall, raw json.RawMessage, source Format, ind
 	if name == "" {
 		name = call.Function.Name
 	}
+	metadata := toolUseMetadata(raw)
 	item := ir.Item{
 		ID:            call.ID,
 		CallID:        call.ID,
 		Name:          name,
 		OriginalIndex: index,
 		Kind:          ir.ItemToolUse,
+		Metadata:      ir.CloneRawMap(metadata),
 		ToolUse: &ir.ToolUse{
 			ID:            call.ID,
 			CallID:        call.ID,
@@ -90,7 +92,7 @@ func irToolUseItem(call schema.ToolCall, raw json.RawMessage, source Format, ind
 			Arguments:     rawArgument(call.Function.Arguments),
 			ArgumentsText: call.Function.Arguments,
 		},
-		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_call", Raw: ir.CloneRaw(raw), Index: index},
+		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_call", Raw: ir.CloneRaw(raw), Fields: ir.CloneRawMap(metadata), Unknown: ir.CloneRawMap(metadata), Index: index},
 	}
 	if item.CallID == "" {
 		item.Losses = append(item.Losses, ir.NewLoss(irProtocol(source), "", "$.tool_call.id", "id", "source tool call is missing the id/call_id required by target protocols", ir.LossError))
@@ -101,24 +103,61 @@ func irToolUseItem(call schema.ToolCall, raw json.RawMessage, source Format, ind
 	return item
 }
 
+func toolUseMetadata(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	for _, key := range []string{"type", "id", "call_id", "name", "function", "input", "arguments", "status"} {
+		delete(obj, key)
+	}
+	if len(obj) == 0 {
+		return nil
+	}
+	return obj
+}
+
 func irToolResultItem(result schema.ToolResult, raw json.RawMessage, source Format, index int) ir.Item {
+	metadata := toolResultMetadata(raw)
 	item := ir.Item{
 		CallID:        result.ToolCallID,
 		OriginalIndex: index,
 		Kind:          ir.ItemToolResult,
+		Metadata:      ir.CloneRawMap(metadata),
 		ToolResult: &ir.ToolResult{
 			ToolUseID:  result.ToolCallID,
 			CallID:     result.ToolCallID,
 			OutputText: result.Content,
 			OutputRaw:  ir.CloneRaw(result.ContentRaw),
 			IsError:    result.IsError,
+			Metadata:   ir.CloneRawMap(metadata),
 		},
-		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_result", Raw: ir.CloneRaw(raw), Index: index},
+		Native: ir.NativeEnvelope{Protocol: irProtocol(source), Kind: "tool_result", Raw: ir.CloneRaw(raw), Fields: ir.CloneRawMap(metadata), Unknown: ir.CloneRawMap(metadata), Index: index},
 	}
 	if item.CallID == "" {
 		item.Losses = append(item.Losses, ir.NewLoss(irProtocol(source), "", "$.tool_result.tool_use_id", "tool_use_id", "source tool result is missing the tool/function call id required by target protocols", ir.LossError))
 	}
 	return item
+}
+
+func toolResultMetadata(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	for _, key := range []string{"type", "tool_use_id", "tool_call_id", "call_id", "content", "output", "is_error"} {
+		delete(obj, key)
+	}
+	if len(obj) == 0 {
+		return nil
+	}
+	return obj
 }
 
 func irTool(tool schema.Tool, source Format) ir.Tool {

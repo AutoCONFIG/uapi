@@ -98,6 +98,30 @@ func TestAnthropicMetadataPreserved(t *testing.T) {
 	}
 }
 
+func TestAnthropicMetadataSessionIDBecomesOpenAIPromptCacheKey(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"max_tokens":8,
+		"metadata":{"user_id":"{\"session_id\":\"sess_123\",\"account_id\":\"acct_1\"}"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],
+		"stream":true
+	}`)
+	converted, err := ConvertRequest(FormatAnthropic, FormatOpenAIChatCompletions, body)
+	if err != nil {
+		t.Fatalf("Anthropic -> OpenAI Chat: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if got["prompt_cache_key"] != "sess_123" {
+		t.Fatalf("prompt_cache_key = %#v, want sess_123; body=%s", got["prompt_cache_key"], converted)
+	}
+	if _, ok := got["metadata"]; ok {
+		t.Fatalf("Anthropic metadata must not leak to OpenAI Chat: %s", converted)
+	}
+}
+
 func TestAnthropicToolWithoutTypeDoesNotBecomeOpaqueForClaudeCode(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-test",
@@ -371,7 +395,7 @@ func TestClaudeCodeMultipleToolResultsToOpenAIChatUseSeparateToolMessages(t *tes
 	}
 }
 
-func TestClaudeCodeToOpenAIChatDropsNativeAnthropicFields(t *testing.T) {
+func TestClaudeCodeToOpenAIChatDropsNativeAnthropicFieldsButKeepsCacheControl(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-test",
 		"max_tokens":8,
@@ -391,11 +415,13 @@ func TestClaudeCodeToOpenAIChatDropsNativeAnthropicFields(t *testing.T) {
 		`"context_management"`,
 		`"output_config"`,
 		`"metadata"`,
-		`"cache_control"`,
 	} {
 		if strings.Contains(string(converted), forbidden) {
 			t.Fatalf("converted Chat request leaked %s:\n%s", forbidden, converted)
 		}
+	}
+	if got := strings.Count(string(converted), `"cache_control":{"type":"ephemeral"}`); got != 2 {
+		t.Fatalf("cache_control count = %d, want 2:\n%s", got, converted)
 	}
 }
 

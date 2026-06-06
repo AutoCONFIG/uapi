@@ -17,6 +17,7 @@ import (
 type AdminSettingsResponse struct {
 	LogRetentionDays        int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays int    `json:"redeem_code_retention_days"`
+	SoftDeleteRetentionDays int    `json:"soft_delete_retention_days"`
 	ModelRatios             string `json:"model_ratios"`
 	AdminUsername           string `json:"admin_username"`
 	MaxKeysPerUser          int    `json:"max_keys_per_user"`
@@ -29,6 +30,7 @@ type AdminSettingsResponse struct {
 type UpdateAdminSettingsRequest struct {
 	LogRetentionDays        *int    `json:"log_retention_days"`
 	RedeemCodeRetentionDays *int    `json:"redeem_code_retention_days"`
+	SoftDeleteRetentionDays *int    `json:"soft_delete_retention_days"`
 	ModelRatios             *string `json:"model_ratios"`
 	AdminUsername           *string `json:"admin_username"`
 	AdminPassword           *string `json:"admin_password"`
@@ -68,6 +70,13 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 				return
 			}
 			changes["redeem_code_retention_days"] = *req.RedeemCodeRetentionDays
+		}
+		if req.SoftDeleteRetentionDays != nil {
+			if *req.SoftDeleteRetentionDays <= 0 {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, "soft_delete_retention_days must be greater than 0")
+				return
+			}
+			changes["soft_delete_retention_days"] = *req.SoftDeleteRetentionDays
 		}
 		if req.ModelRatios != nil {
 			modelRatios, msg := normalizeModelRatios(*req.ModelRatios)
@@ -157,6 +166,7 @@ func (h *Handler) settingsResponse() AdminSettingsResponse {
 	return AdminSettingsResponse{
 		LogRetentionDays:        appsettings.GetInt(h.db, appsettings.LogRetentionDays, 180),
 		RedeemCodeRetentionDays: appsettings.GetInt(h.db, appsettings.RedeemCodeRetentionDays, 180),
+		SoftDeleteRetentionDays: appsettings.GetInt(h.db, appsettings.SoftDeleteRetentionDays, 30),
 		ModelRatios:             modelRatios,
 		AdminUsername:           appsettings.Get(h.db, appsettings.AdminUsername, "admin"),
 		MaxKeysPerUser:          appsettings.GetInt(h.db, appsettings.UserMaxKeysPerUser, 1),
@@ -187,6 +197,8 @@ func (h *Handler) saveSettings(changes map[string]interface{}) error {
 			values[appsettings.LogRetentionDays] = strconv.Itoa(value.(int))
 		case "redeem_code_retention_days":
 			values[appsettings.RedeemCodeRetentionDays] = strconv.Itoa(value.(int))
+		case "soft_delete_retention_days":
+			values[appsettings.SoftDeleteRetentionDays] = strconv.Itoa(value.(int))
 		case "model_ratios":
 			values[appsettings.ModelRatios] = value.(string)
 		case "admin_username":

@@ -22,6 +22,12 @@ type AccountPool struct {
 	closed      bool // set by Close to prevent cooldown goroutines from acting on removed pools
 }
 
+type AccountPoolStats struct {
+	Accounts    int  `json:"accounts"`
+	TotalWeight int  `json:"total_weight"`
+	Closed      bool `json:"closed"`
+}
+
 func NewAccountPool(accounts []*db.Account) *AccountPool {
 	p := &AccountPool{}
 	wa := make([]WeightedAccount, len(accounts))
@@ -68,6 +74,12 @@ func (p *AccountPool) Pick() (*db.Account, bool) {
 		return best.Account, true
 	}
 	return nil, false
+}
+
+func (p *AccountPool) Stats() AccountPoolStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return AccountPoolStats{Accounts: len(p.accounts), TotalWeight: p.totalWeight, Closed: p.closed}
 }
 
 func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/chatgptreverse"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
@@ -409,10 +411,12 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var adaptor provider.Adaptor
 	var creds string
 	var err error
+	var routeAttempts []map[string]interface{}
+	capabilityReq := channelcap.AnalyzeJSON(string(requestType), body)
 	if gatewayAuthenticated && internalClaims.ChannelID != "" && internalClaims.AccountID != "" {
 		targetChannel, account, adaptor, creds, err = r.resolveSelectedChannelAndAccount(internalClaims.ChannelID, internalClaims.AccountID, req.Model)
 	} else {
-		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccount(token.ID.String(), req.Model, channelcap.AnalyzeJSON(string(requestType), body))
+		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccountWithAttempts(token.ID.String(), req.Model, &routeAttempts, capabilityReq)
 	}
 	if err != nil {
 		if relayDebugDumpEnabled() {
@@ -422,6 +426,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 				logger.Err(err),
 				logger.F("model", req.Model),
 				logger.F("request_type", string(requestType)),
+				logger.F("route_attempts", routeAttempts),
+				logger.F("route_diagnostics", r.routeFailureDiagnostics(req.Model, capabilityReq)),
 			)
 		}
 		finishGatewayEarlyFailure(req.Model, fasthttp.StatusNotFound)
@@ -576,10 +582,20 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) && (!sameFormat || forceStreamActive) {
 		convertedBody = injectStreamTrue(convertedBody)
 	}
+	if bodyWithCachePolicy, changed, policyErr := upstreamconfig.ApplyCachePassthroughPolicy(targetChannel, upstreamFormat, convertedBody); policyErr != nil {
+		logger.Warnf("relay.cache", "apply upstream cache policy failed", logger.Err(policyErr), logger.F("channel_id", targetChannel.ID.String()), logger.F("upstream_format", string(upstreamFormat)))
+	} else if changed {
+		convertedBody = bodyWithCachePolicy
+	}
 	adaptor.SetRequestParams(routedModel, effectiveStream)
 	var debugTrace *relayDebugTrace
 	if relayDebugDumpEnabled() {
 		debugTrace = startRelayRequestDebugDump(originalBody, convertedBody, token, targetChannel, account, claims, clientFormat, upstreamFormat, requestType, req.Model, routedModel, effectiveStream)
+		debugTrace.Event("route_attempts",
+			logger.F("model", req.Model),
+			logger.F("request_type", string(requestType)),
+			logger.F("attempts", routeAttempts),
+		)
 		debugTrace.Event("route_selected",
 			logger.F("token_id", token.ID.String()),
 			logger.F("model", req.Model),
@@ -747,6 +763,16 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			trace.Event("stream_result_upstream_failure", logger.F("status", fasthttp.StatusBadGateway))
 			logger.Warnf("relay.stream", "upstream stream reported failure")
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+			return
+		}
+		if result.emptyStream {
+			trace.Event("stream_result_empty",
+				logger.F("status", fasthttp.StatusBadGateway),
+				logger.F("prompt_tokens", result.promptTokens),
+				logger.F("completion_tokens", result.completionTokens),
+			)
+			logger.Warnf("relay.stream", "upstream stream completed without payload events")
+			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream completed without payload events", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			return
 		}
 		if !result.finalized {
@@ -1751,16 +1777,34 @@ func geminiCodeFallbackBody(model string, body []byte) (string, []byte, bool) {
 // --- Helpers ---
 
 func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
+	return r.resolveChannelAndAccountWithAttempts(tokenID, model, nil, capabilityReq...)
+}
+
+func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model string, attempts *[]map[string]interface{}, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	// Try affinity cache first
 	if r.db != nil {
 		if chID := r.affinity.Get(tokenID, model); chID != "" {
 			var ch db.Channel
 			if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
-				if channelSupportsModel(ch, model) && channelSupportsCapability(ch, capabilityReq...) {
+				modelOK := channelSupportsModel(ch, model)
+				capabilityOK := channelSupportsCapability(ch, capabilityReq...)
+				attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
+				attempt["source"] = "affinity"
+				if modelOK && capabilityOK {
 					if acc, adaptor, creds, err := r.pickAccount(ch); err == nil {
+						attempt["selected"] = true
+						attempt["account_id"] = acc.ID.String()
+						appendRouteAttempt(attempts, attempt)
 						return &ch, acc, adaptor, creds, nil
+					} else {
+						attempt["skip_reason"] = err.Error()
 					}
+				} else if !modelOK {
+					attempt["skip_reason"] = "unsupported_model"
+				} else {
+					attempt["skip_reason"] = "unsupported_capability"
 				}
+				appendRouteAttempt(attempts, attempt)
 			}
 		}
 	}
@@ -1772,27 +1816,126 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq 
 			channels = append(channels, ch)
 		}
 		r.runtimeMu.RUnlock()
+		channels = channelCandidatesForModelAndCapability(channels, model, capabilityReq, rand.Intn)
 		for i := range channels {
-			if channelSupportsModel(channels[i], model) && channelSupportsCapability(channels[i], capabilityReq...) {
-				if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
-					return &channels[i], acc, adaptor, creds, nil
-				}
+			attempt := r.routeAttemptInfo(channels[i], true, true)
+			attempt["source"] = "runtime"
+			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+				attempt["selected"] = true
+				attempt["account_id"] = acc.ID.String()
+				appendRouteAttempt(attempts, attempt)
+				return &channels[i], acc, adaptor, creds, nil
+			} else {
+				attempt["skip_reason"] = err.Error()
 			}
+			appendRouteAttempt(attempts, attempt)
 		}
 		return nil, nil, nil, "", errNoChannel
 	}
 
 	// Priority-based selection (with caching)
-	channels := channelCandidatesForModelAndCapability(r.chCache.get(), model, capabilityReq, rand.Intn)
-	for i := range channels {
-		if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
-			return &channels[i], acc, adaptor, creds, nil
+	allChannels := r.chCache.get()
+	if attempts != nil {
+		for i := range allChannels {
+			modelOK := channelSupportsModel(allChannels[i], model)
+			capabilityOK := channelSupportsCapability(allChannels[i], capabilityReq...)
+			if modelOK && capabilityOK {
+				continue
+			}
+			attempt := r.routeAttemptInfo(allChannels[i], modelOK, capabilityOK)
+			attempt["source"] = "priority_filter"
+			if !modelOK {
+				attempt["skip_reason"] = "unsupported_model"
+			} else {
+				attempt["skip_reason"] = "unsupported_capability"
+			}
+			appendRouteAttempt(attempts, attempt)
 		}
+	}
+	channels := channelCandidatesForModelAndCapability(allChannels, model, capabilityReq, rand.Intn)
+	for i := range channels {
+		attempt := r.routeAttemptInfo(channels[i], true, true)
+		attempt["source"] = "priority"
+		if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+			attempt["selected"] = true
+			attempt["account_id"] = acc.ID.String()
+			appendRouteAttempt(attempts, attempt)
+			return &channels[i], acc, adaptor, creds, nil
+		} else {
+			attempt["skip_reason"] = err.Error()
+		}
+		appendRouteAttempt(attempts, attempt)
 	}
 	return nil, nil, nil, "", errNoChannel
 }
 
+func appendRouteAttempt(attempts *[]map[string]interface{}, attempt map[string]interface{}) {
+	if attempts == nil {
+		return
+	}
+	*attempts = append(*attempts, attempt)
+}
+
+func (r *Relayer) routeAttemptInfo(ch db.Channel, modelOK, capabilityOK bool) map[string]interface{} {
+	item := map[string]interface{}{
+		"channel_id":          ch.ID.String(),
+		"name":                ch.Name,
+		"type":                ch.Type,
+		"api_format":          ch.APIFormat,
+		"priority":            ch.Priority,
+		"weight":              effectiveChannelWeight(ch),
+		"supports_model":      modelOK,
+		"supports_capability": capabilityOK,
+	}
+	if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+		stats := pool.Stats()
+		item["pool_exists"] = true
+		item["pool_accounts"] = stats.Accounts
+		item["pool_total_weight"] = stats.TotalWeight
+		item["pool_closed"] = stats.Closed
+	} else {
+		item["pool_exists"] = false
+	}
+	return item
+}
+
 var errNoChannel = fmt.Errorf("no available channel for model")
+
+func (r *Relayer) routeFailureDiagnostics(model string, capabilityReq ...channelcap.Request) []map[string]interface{} {
+	channels := r.chCache.get()
+	out := make([]map[string]interface{}, 0, len(channels))
+	for i := range channels {
+		ch := channels[i]
+		modelOK := channelSupportsModel(ch, model)
+		capabilityOK := channelSupportsCapability(ch, capabilityReq...)
+		if !modelOK && !capabilityOK {
+			continue
+		}
+		item := map[string]interface{}{
+			"channel_id":          ch.ID.String(),
+			"name":                ch.Name,
+			"type":                ch.Type,
+			"api_format":          ch.APIFormat,
+			"priority":            ch.Priority,
+			"weight":              effectiveChannelWeight(ch),
+			"models":              ch.Models,
+			"model_aliases":       ch.ModelAliases,
+			"supports_model":      modelOK,
+			"supports_capability": capabilityOK,
+		}
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+			stats := pool.Stats()
+			item["pool_exists"] = true
+			item["pool_accounts"] = stats.Accounts
+			item["pool_total_weight"] = stats.TotalWeight
+			item["pool_closed"] = stats.Closed
+		} else {
+			item["pool_exists"] = false
+		}
+		out = append(out, item)
+	}
+	return out
+}
 
 func channelCandidatesForModel(channels []db.Channel, model string, randomInt func(int) int) []db.Channel {
 	return channelCandidatesForModelAndCapability(channels, model, nil, randomInt)
@@ -1806,8 +1949,14 @@ func channelCandidatesForModelAndCapability(channels []db.Channel, model string,
 		}
 	}
 	if len(candidates) < 2 || randomInt == nil {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].Priority > candidates[j].Priority
+		})
 		return candidates
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].Priority > candidates[j].Priority
+	})
 	start := 0
 	for start < len(candidates) {
 		end := start + 1

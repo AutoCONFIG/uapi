@@ -2,7 +2,10 @@ package relay
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/AutoCONFIG/uapi/internal/db"
 )
 
 func TestResponsesWSIncompleteIsSuccessfulTerminal(t *testing.T) {
@@ -65,6 +68,24 @@ func TestWSCreateToHTTPBodyCleansUndefinedPlaceholders(t *testing.T) {
 	part := content[0].(map[string]interface{})
 	if _, ok := part["cache_control"]; ok {
 		t.Fatalf("nested input placeholder should be cleaned: %s", body)
+	}
+}
+
+func TestWSHTTPBridgeAppliesCachePolicy(t *testing.T) {
+	body, err := convertWSHTTPBridgeRequestBody(
+		&db.Channel{Type: "openai", APIFormat: "responses"},
+		nil,
+		[]byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"stable","cache_control":{"type":"ephemeral"}}]}]}`),
+	)
+	if err != nil {
+		t.Fatalf("convertWSHTTPBridgeRequestBody: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, `"prompt_cache_key":"uapi-cache-`) {
+		t.Fatalf("bridge body missing synthesized prompt_cache_key: %s", body)
+	}
+	if strings.Contains(text, `"cache_control"`) {
+		t.Fatalf("Responses bridge body should not forward content cache_control: %s", body)
 	}
 }
 

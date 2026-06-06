@@ -242,11 +242,7 @@ func emitOpenAIResponsesRequestDirectIR(req *relayir.Request) ([]byte, error) {
 	resp["model"] = req.Model
 	resp["stream"] = req.Stream
 	if len(req.Instructions) > 0 {
-		text := req.Instructions[0].Text
-		if text == "" {
-			text = instructionText(req.Instructions[0])
-		}
-		resp["instructions"] = text
+		resp["instructions"] = instructionTextForTarget(req.Instructions[0])
 	} else {
 		resp["instructions"] = ""
 	}

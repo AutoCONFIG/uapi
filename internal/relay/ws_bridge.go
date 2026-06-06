@@ -10,6 +10,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	ws "github.com/fasthttp/websocket"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -29,23 +30,11 @@ func (h *WSHandler) httpBridgeFallback(
 	tokenPlanID uuid.UUID,
 	start time.Time,
 ) bool {
-	// 1. Convert WS response.create → HTTP request body
-	body := wsCreateToHTTPBody(msg)
-
-	// 2. Determine upstream format from channel config.
-	// Channel Type + APIFormat are admin-configured; no need to guess.
-	upstreamFormat := channelUpstreamFormat(ch)
-	clientFormat := provider.FormatOpenAIResponses
-
 	adaptor.Init(ch, acc)
 	adaptor.SetRequestParams(model, true) // always stream in bridge mode
-	var convertedBody []byte
-	var err error
-	if clientFormat == upstreamFormat {
-		convertedBody, err = provider.NormalizeRequestSameProtocol(upstreamFormat, body)
-	} else {
-		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
-	}
+
+	body := wsCreateToHTTPBody(msg)
+	convertedBody, err := convertWSHTTPBridgeRequestBody(ch, adaptor, msg)
 	if err != nil {
 		WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
 		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
@@ -110,6 +99,27 @@ func (h *WSHandler) httpBridgeFallback(
 	// 5. Bridge SSE response → WS messages in a goroutine
 	go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, acc, model, estTokens, tokenPlanID, start, body)
 	return true
+}
+
+func convertWSHTTPBridgeRequestBody(ch *db.Channel, adaptor provider.Adaptor, msg []byte) ([]byte, error) {
+	body := wsCreateToHTTPBody(msg)
+	upstreamFormat := channelUpstreamFormat(ch)
+	clientFormat := provider.FormatOpenAIResponses
+	var convertedBody []byte
+	var err error
+	if clientFormat == upstreamFormat {
+		convertedBody, err = provider.NormalizeRequestSameProtocol(upstreamFormat, body)
+	} else {
+		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
+	}
+	if err != nil {
+		return nil, err
+	}
+	bodyWithCachePolicy, _, policyErr := upstreamconfig.ApplyCachePassthroughPolicy(ch, upstreamFormat, convertedBody)
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	return bodyWithCachePolicy, nil
 }
 
 // bridgeSSEToWS reads SSE from upstream and forwards each event as a WS text message.

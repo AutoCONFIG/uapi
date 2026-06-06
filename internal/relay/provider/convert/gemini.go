@@ -194,6 +194,9 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 		var parts []map[string]interface{}
 		for _, inst := range reqIR.Instructions {
 			for _, item := range inst.Items {
+				if isAnthropicTransportTextItem(item) {
+					continue
+				}
 				part, err := geminiPartFromIRItem(item, nil)
 				if err != nil {
 					return nil, err
@@ -319,6 +322,9 @@ func isGeminiEnvelopeProtocol(protocol relayir.Protocol) bool {
 func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string) ([]map[string]interface{}, error) {
 	parts := make([]map[string]interface{}, 0, len(turn.Items))
 	for _, item := range turn.Items {
+		if isAnthropicTransportTextItem(item) {
+			continue
+		}
 		if (source == relayir.ProtocolGemini || isGeminiEnvelopeProtocol(source)) && len(item.Native.Raw) > 0 {
 			var raw map[string]interface{}
 			if json.Unmarshal(item.Native.Raw, &raw) == nil {

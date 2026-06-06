@@ -13,6 +13,7 @@ const (
 	AdminPasswordHash       = "admin.password_hash"
 	LogRetentionDays        = "logging.retention_days"
 	RedeemCodeRetentionDays = "logging.redeem_code_retention_days"
+	SoftDeleteRetentionDays = "database.soft_delete_retention_days"
 	ModelRatios             = "billing.model_ratios"
 	UIBackground            = "ui.background"
 	UIPublicBaseURL         = "ui.public_base_url"
@@ -26,6 +27,7 @@ func Bootstrap(database *gorm.DB) error {
 		AdminUsername:           "admin",
 		LogRetentionDays:        "180",
 		RedeemCodeRetentionDays: "180",
+		SoftDeleteRetentionDays: "30",
 		ModelRatios:             "{}",
 		UIBackground:            "mesh",
 		UserMaxKeysPerUser:      "1",

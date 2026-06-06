@@ -26,11 +26,36 @@ func CleanupOldRedeemCodes(database *gorm.DB, retentionDays int) error {
 	return database.Where("status = ? AND updated_at < ?", "used", cutoff).Delete(&db.RedeemCode{}).Error
 }
 
+// CleanupSoftDeletedRecords physically removes soft-deleted operational records
+// after a retention window. Logs and usage events are intentionally excluded;
+// they have separate retention policies and are useful for billing/debugging.
+func CleanupSoftDeletedRecords(database *gorm.DB, retentionDays int) error {
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	targets := []interface{}{
+		&db.NodeChannel{},
+		&db.Account{},
+		&db.TokenPlan{},
+		&db.Token{},
+		&db.Plan{},
+		&db.AccessPolicy{},
+		&db.RelayNode{},
+		&db.Channel{},
+		&db.User{},
+		&db.RedeemCode{},
+	}
+	return database.Transaction(func(tx *gorm.DB) error {
+		for _, target := range targets {
+			if err := tx.Unscoped().Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).Delete(target).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func StartLogCleanup(database *gorm.DB) {
 	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
+		runCleanup := func() {
 			retentionDays := appsettings.GetInt(database, appsettings.LogRetentionDays, 180)
 			if err := CleanupOldLogs(database, retentionDays); err != nil {
 				logger.Warnf("admin.scheduler", "log cleanup failed", logger.Err(err))
@@ -39,6 +64,16 @@ func StartLogCleanup(database *gorm.DB) {
 			if err := CleanupOldRedeemCodes(database, redeemRetentionDays); err != nil {
 				logger.Warnf("admin.scheduler", "redeem cleanup failed", logger.Err(err))
 			}
+			softDeleteRetentionDays := appsettings.GetInt(database, appsettings.SoftDeleteRetentionDays, 30)
+			if err := CleanupSoftDeletedRecords(database, softDeleteRetentionDays); err != nil {
+				logger.Warnf("admin.scheduler", "soft-delete cleanup failed", logger.Err(err))
+			}
+		}
+		runCleanup()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			runCleanup()
 		}
 	}()
 }

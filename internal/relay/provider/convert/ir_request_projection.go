@@ -2,6 +2,7 @@ package convert
 
 import (
 	"encoding/json"
+	"strings"
 
 	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/schema"
@@ -45,11 +46,46 @@ func (e *NoRequestEmitterError) Error() string {
 
 func instructionText(inst relayir.Instruction) string {
 	for _, item := range inst.Items {
+		if isAnthropicTransportTextItem(item) {
+			continue
+		}
 		if item.Text != nil && item.Text.Text != "" {
 			return item.Text.Text
 		}
 	}
 	return ""
+}
+
+func instructionTextForTarget(inst relayir.Instruction) string {
+	var texts []string
+	removedTransportText := false
+	for _, item := range inst.Items {
+		if isAnthropicTransportTextItem(item) {
+			removedTransportText = true
+			continue
+		}
+		if item.Text != nil && item.Text.Text != "" {
+			texts = append(texts, item.Text.Text)
+		}
+	}
+	if removedTransportText {
+		return joinNonEmpty(texts, "\n\n")
+	}
+	if inst.Text != "" {
+		return inst.Text
+	}
+	return joinNonEmpty(texts, "\n\n")
+}
+
+func isAnthropicTransportTextItem(item relayir.Item) bool {
+	if item.Native.Protocol != relayir.ProtocolAnthropic || item.Text == nil {
+		return false
+	}
+	return isAnthropicTransportText(item.Text.Text)
+}
+
+func isAnthropicTransportText(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "x-anthropic-billing-header:")
 }
 
 func schemaContentFromIR(item relayir.Item) (schema.ContentPart, bool) {
@@ -163,12 +199,14 @@ func schemaToolResultFromIR(item relayir.Item) schema.ToolResult {
 }
 
 func schemaToolFromIR(tool relayir.Tool) schema.Tool {
+	parameters := normalizeToolSchemaRaw(firstRawMessage(tool.Parameters, tool.InputSchema))
+	inputSchema := normalizeToolSchemaRaw(tool.InputSchema)
 	out := schema.Tool{
 		Type:        string(tool.Kind),
 		Name:        tool.Name,
 		Description: tool.Description,
-		Parameters:  firstRawMessage(tool.Parameters, tool.InputSchema),
-		InputSchema: relayir.CloneRaw(tool.InputSchema),
+		Parameters:  parameters,
+		InputSchema: inputSchema,
 		Extra:       relayir.CloneRawMap(tool.Metadata),
 	}
 	if out.Type == "" {
@@ -178,7 +216,7 @@ func schemaToolFromIR(tool relayir.Tool) schema.Tool {
 		out.Function = &schema.ToolFunction{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  firstRawMessage(tool.Parameters, tool.InputSchema),
+			Parameters:  parameters,
 			Extra:       relayir.CloneRawMap(tool.FunctionMetadata),
 		}
 	}

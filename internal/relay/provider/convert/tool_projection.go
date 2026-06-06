@@ -26,7 +26,13 @@ func functionToolProjectionsFromTool(tool schema.Tool) []schema.Tool {
 	if name == "" {
 		return nil
 	}
-	return []schema.Tool{projectedFunctionTool(name, description, parameters)}
+	projected := projectedFunctionTool(name, description, parameters)
+	projected.Extra = allowedProjectedToolExtra(tool.Extra)
+	projected.Function.Extra = allowedProjectedFunctionExtra(tool.Extra)
+	if tool.Function != nil {
+		projected.Function.Extra = mergeRawMaps(projected.Function.Extra, allowedProjectedFunctionExtra(tool.Function.Extra))
+	}
+	return []schema.Tool{projected}
 }
 
 func functionToolProjectionsFromNamespace(tool schema.Tool) []schema.Tool {
@@ -53,6 +59,7 @@ func functionToolProjectionsFromNamespace(tool schema.Tool) []schema.Tool {
 }
 
 func projectedFunctionTool(name, description string, parameters json.RawMessage) schema.Tool {
+	parameters = normalizeToolSchemaRaw(parameters)
 	return schema.Tool{
 		Type:        "function",
 		Name:        strings.TrimSpace(name),
@@ -64,6 +71,47 @@ func projectedFunctionTool(name, description string, parameters json.RawMessage)
 			Parameters:  parameters,
 		},
 	}
+}
+
+func allowedProjectedToolExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(extra) == 0 {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	if raw := extra["cache_control"]; len(raw) > 0 {
+		out["cache_control"] = append(json.RawMessage(nil), raw...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func allowedProjectedFunctionExtra(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(extra) == 0 {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	if raw := extra["strict"]; len(raw) > 0 {
+		out["strict"] = append(json.RawMessage(nil), raw...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeRawMaps(dst, src map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string]json.RawMessage{}
+	}
+	for key, raw := range src {
+		dst[key] = append(json.RawMessage(nil), raw...)
+	}
+	return dst
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {

@@ -75,6 +75,7 @@ func PrepareRequestForTarget(req *ir.Request, clientFormat, upstreamFormat Forma
 		return
 	}
 	req.TargetProtocol = irProtocol(upstreamFormat)
+	projectPromptCacheKeyForTarget(req, upstreamFormat)
 	completeLossProtocols(req, clientFormat, upstreamFormat)
 	recordTargetSpecificContentLosses(req, clientFormat, upstreamFormat)
 	dropExtraForCrossProtocol(req, clientFormat, upstreamFormat)
@@ -168,6 +169,18 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 	if upstreamFormat == FormatOpenAIChatCompletions {
 		for key, raw := range openAIChatCrossProtocolRequestExtra(req.Metadata) {
 			preservedMetadata[key] = append([]byte(nil), raw...)
+		}
+	}
+	if isResponsesFamily(upstreamFormat) {
+		for _, key := range []string{"prompt_cache_key", "client_metadata", "safety_identifier"} {
+			if raw := req.Metadata[key]; len(raw) > 0 {
+				preservedMetadata[key] = append([]byte(nil), raw...)
+			}
+		}
+	}
+	if isAnthropicFamily(upstreamFormat) || isResponsesFamily(upstreamFormat) {
+		if raw := req.Metadata["cache_control"]; len(raw) > 0 {
+			preservedMetadata["cache_control"] = append([]byte(nil), raw...)
 		}
 	}
 	for key, raw := range req.Native.Fields {
