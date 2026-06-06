@@ -80,6 +80,30 @@ func TestCodexSetupRequestHeaderUsesNativeContract(t *testing.T) {
 	}
 }
 
+func TestCodexAPIKeySetupRequestHeaderUsesNativeContract(t *testing.T) {
+	adaptor := &OpenAIAdaptor{}
+	adaptor.Init(&db.Channel{Type: "openai", APIFormat: "codex_apikey", Endpoint: "https://api.openai.com/v1"}, &db.Account{})
+
+	var req fasthttp.Request
+	if err := adaptor.SetupRequestHeader(&req, "sk-test"); err != nil {
+		t.Fatalf("SetupRequestHeader: %v", err)
+	}
+	wants := map[string]string{
+		"Authorization": "Bearer sk-test",
+		"originator":    CodexOriginator,
+		"User-Agent":    CodexUserAgent,
+		"Content-Type":  "application/json",
+	}
+	for header, want := range wants {
+		if got := string(req.Header.Peek(header)); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+	if got := string(req.Header.Peek("ChatGPT-Account-ID")); got != "" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want empty", got)
+	}
+}
+
 func TestParseUsageFullNormalizesCacheHitAliases(t *testing.T) {
 	tests := []struct {
 		name string

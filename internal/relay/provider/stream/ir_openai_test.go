@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/convert"
@@ -53,5 +54,30 @@ func TestWireCompatibleProtocolStreamsPassThrough(t *testing.T) {
 		if converter := NewConverter(tt.upstream, tt.client); converter != nil {
 			t.Fatalf("NewConverter(%s, %s) = %T, want nil passthrough", tt.upstream, tt.client, converter)
 		}
+	}
+}
+
+func TestResponsesToAnthropicStreamPreservesCacheUsage(t *testing.T) {
+	converter := NewConverter(convert.FormatCodexResponses, convert.FormatAnthropic)
+	if converter == nil {
+		t.Fatal("NewConverter returned nil")
+	}
+
+	created := []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","status":"in_progress"}}` + "\n\n")
+	completed := []byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":{"cached_tokens":64}}}}` + "\n\n")
+
+	var out []byte
+	out = append(out, converter.Convert(created)...)
+	out = append(out, converter.Convert(completed)...)
+
+	text := string(out)
+	if !strings.Contains(text, `"input_tokens":100`) {
+		t.Fatalf("Anthropic stream missing input_tokens: %s", text)
+	}
+	if !strings.Contains(text, `"output_tokens":7`) {
+		t.Fatalf("Anthropic stream missing output_tokens: %s", text)
+	}
+	if !strings.Contains(text, `"cache_read_input_tokens":64`) {
+		t.Fatalf("Anthropic stream missing cache_read_input_tokens: %s", text)
 	}
 }

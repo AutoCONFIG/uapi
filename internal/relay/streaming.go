@@ -553,6 +553,7 @@ func streamDebugStateFields(trace *relayDebugTrace, mode string, sawDone, sawTer
 		logger.F("failed", failed),
 		logger.F("open_event_bytes", openEventBytes),
 		logger.F("streams", trace.StreamStates("stream.upstream.sse", "stream.normalized.sse", "stream.downstream.sse")),
+		logger.F("stream_timing", trace.TimingState()),
 	}
 	fields = append(fields, extra...)
 	return fields

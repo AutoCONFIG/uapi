@@ -79,6 +79,7 @@ func (h *Handler) HandleChannelCatalog(ctx *fasthttp.RequestCtx) {
 			{ID: "chatgpt_reverse", Label: "ChatGPT Reverse", Type: "openai", APIFormat: "chatgpt_reverse", Auth: "reverse", Endpoint: "https://chatgpt.com", Models: "auto,gpt-5.5,gpt-5.5-thinking,gpt-5.4,gpt-5.4-mini,gpt-5.3,gpt-5.3-mini,gpt-5-mini", Note: "ChatGPT web reverse"},
 		},
 		APIKey: []ChannelPresetDTO{
+			{ID: "openai_codex_apikey", Label: "OpenAI Codex API Key", Type: "openai", APIFormat: "codex_apikey", Auth: "apikey", Endpoint: "https://api.openai.com/v1", Note: "Temporary API key channel using Codex Responses format"},
 			{ID: "openai_responses_api", Label: "OpenAI Responses API", Type: "openai", APIFormat: "responses", Auth: "apikey", Endpoint: "https://api.openai.com/v1", Note: "OpenAI Responses API"},
 			{ID: "openai_chat_completions", Label: "OpenAI Chat Completions API", Type: "openai", APIFormat: "standard", Auth: "apikey", Endpoint: "https://api.openai.com/v1", Note: "OpenAI Chat Completions API"},
 			{ID: "gemini_api", Label: "Gemini API", Type: "gemini", APIFormat: "standard", Auth: "apikey", Endpoint: "https://generativelanguage.googleapis.com/v1beta", Note: "Gemini generateContent API"},

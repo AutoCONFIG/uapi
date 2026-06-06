@@ -50,6 +50,43 @@ func TestCleanupRelayDebugDumpDirWithLimitsKeepsNewestEntries(t *testing.T) {
 	}
 }
 
+func TestRelayDebugTraceTimingStateTracksStreamLatency(t *testing.T) {
+	start := time.Date(2026, 6, 6, 16, 0, 0, 0, time.UTC)
+	trace := &relayDebugTrace{
+		ID:              "trace",
+		Dir:             t.TempDir(),
+		startedAt:       start,
+		upstreamStarted: start.Add(2 * time.Millisecond),
+		upstreamHeaders: start.Add(12 * time.Millisecond),
+		streamBytes:     map[string]int{},
+		streamTruncated: map[string]bool{},
+		streamEvents:    map[string]int{},
+		streamPayloads:  map[string]int{},
+		streamLast:      map[string]map[string]interface{}{},
+		streamFirstAt:   map[string]time.Time{},
+		streamLastAt:    map[string]time.Time{},
+		streamMaxGap:    map[string]time.Duration{},
+	}
+
+	trace.recordStreamChunkTimingLocked("stream.upstream.sse", start.Add(20*time.Millisecond))
+	trace.recordStreamChunkTimingLocked("stream.upstream.sse", start.Add(170*time.Millisecond))
+	trace.recordStreamChunkTimingLocked("stream.downstream.sse", start.Add(23*time.Millisecond))
+
+	timing := trace.TimingState()
+	if got := timing["upstream_request_to_headers_ms"]; got != int64(10) {
+		t.Fatalf("upstream_request_to_headers_ms = %#v, want 10", got)
+	}
+	if got := timing["headers_to_upstream_first_ms"]; got != int64(8) {
+		t.Fatalf("headers_to_upstream_first_ms = %#v, want 8", got)
+	}
+	if got := timing["first_upstream_to_first_downstream_ms"]; got != int64(3) {
+		t.Fatalf("first_upstream_to_first_downstream_ms = %#v, want 3", got)
+	}
+	if got := timing["upstream_max_idle_ms"]; got != int64(150) {
+		t.Fatalf("upstream_max_idle_ms = %#v, want 150", got)
+	}
+}
+
 func makeDumpEntry(t *testing.T, dir, name string, modTime time.Time) {
 	t.Helper()
 	path := filepath.Join(dir, name)

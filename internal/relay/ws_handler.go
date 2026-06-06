@@ -27,6 +27,7 @@ type WSHandler struct {
 	sessions    *SessionManager
 	relayer     *Relayer
 	upstream    *UpstreamPool
+	toolCalls   *wsToolCallCache
 	upgrader    ws.FastHTTPUpgrader
 	cfg         config.WSServerConfig
 }
@@ -71,6 +72,7 @@ func NewWSHandler(database *gorm.DB, billing *BillingService, relayer *Relayer, 
 		concLimiter: relayer.concLimiter,
 		sessions:    NewSessionManager(cfg.MaxConnections, 10*time.Second),
 		relayer:     relayer,
+		toolCalls:   newWSToolCallCache(30*time.Minute, 2048),
 		cfg:         cfg,
 		upgrader: ws.FastHTTPUpgrader{
 			ReadBufferSize:  4096,
@@ -236,6 +238,12 @@ func (h *WSHandler) planPolicyID(tokenID uuid.UUID) (*uuid.UUID, error) {
 // eventLoop reads messages from the client and dispatches them.
 func (h *WSHandler) eventLoop(sess *Session) {
 	defer func() {
+		if h.toolCalls != nil {
+			h.toolCalls.DeleteSession(sess.id)
+		}
+		if h.upstream != nil {
+			h.upstream.RemoveSession(sess.id)
+		}
 		sess.Close()
 		sess.clientConn.Close()
 		h.sessions.Remove(sess)
@@ -347,6 +355,9 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	}
 
 	start := time.Now()
+	if h.toolCalls != nil {
+		msg = h.toolCalls.RepairCreate(sess.id, msg)
+	}
 
 	// Decide: native WS upstream or HTTP bridge
 	// Native WS only for OpenAI Responses format channels

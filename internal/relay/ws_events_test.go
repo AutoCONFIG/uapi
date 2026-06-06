@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/google/uuid"
 )
 
 func TestResponsesWSIncompleteIsSuccessfulTerminal(t *testing.T) {
@@ -75,6 +76,7 @@ func TestWSHTTPBridgeAppliesCachePolicy(t *testing.T) {
 	body, err := convertWSHTTPBridgeRequestBody(
 		&db.Channel{Type: "openai", APIFormat: "responses"},
 		nil,
+		nil,
 		[]byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"stable","cache_control":{"type":"ephemeral"}}]}]}`),
 	)
 	if err != nil {
@@ -87,6 +89,96 @@ func TestWSHTTPBridgeAppliesCachePolicy(t *testing.T) {
 	if strings.Contains(text, `"cache_control"`) {
 		t.Fatalf("Responses bridge body should not forward content cache_control: %s", body)
 	}
+}
+
+func TestWSHTTPBridgeNormalizesCodexRequestShape(t *testing.T) {
+	body, err := convertWSHTTPBridgeRequestBody(
+		&db.Channel{Base: db.Base{ID: mustUUID(t, "11111111-1111-1111-1111-111111111111")}, Type: "openai", APIFormat: "codex_apikey"},
+		&db.Account{Base: db.Base{ID: mustUUID(t, "22222222-2222-2222-2222-222222222222")}},
+		nil,
+		[]byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"reasoning":{"effort":"high"}}`),
+	)
+	if err != nil {
+		t.Fatalf("convertWSHTTPBridgeRequestBody: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		`"prompt_cache_key":`,
+		`"client_metadata":`,
+		`"x-codex-installation-id":`,
+		`"include":["reasoning.encrypted_content"]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Codex bridge body missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestWSToolCallRepairPrependsCachedFunctionCallOutput(t *testing.T) {
+	cache := newWSToolCallCache(0, 0)
+	cache.RecordResponseEvent("sess-1", []byte(`{"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"file_path\":\"a.go\"}","status":"completed"}}`))
+
+	repaired := cache.RepairCreate("sess-1", []byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`))
+	var decoded struct {
+		Input []map[string]interface{} `json:"input"`
+	}
+	if err := json.Unmarshal(repaired, &decoded); err != nil {
+		t.Fatalf("repaired create is not JSON: %v", err)
+	}
+	if len(decoded.Input) != 2 {
+		t.Fatalf("input len = %d, want 2; body=%s", len(decoded.Input), repaired)
+	}
+	if decoded.Input[0]["type"] != "function_call" || decoded.Input[0]["call_id"] != "call_1" {
+		t.Fatalf("missing cached function_call before output: %s", repaired)
+	}
+	if decoded.Input[1]["type"] != "function_call_output" {
+		t.Fatalf("output moved unexpectedly: %s", repaired)
+	}
+}
+
+func TestWSToolCallRepairDoesNotDuplicateExistingCall(t *testing.T) {
+	cache := newWSToolCallCache(0, 0)
+	cache.RecordResponseEvent("sess-1", []byte(`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{}"}}`))
+
+	payload := []byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
+	repaired := cache.RepairCreate("sess-1", payload)
+	var decoded struct {
+		Input []map[string]interface{} `json:"input"`
+	}
+	if err := json.Unmarshal(repaired, &decoded); err != nil {
+		t.Fatalf("repaired create is not JSON: %v", err)
+	}
+	if len(decoded.Input) != 2 {
+		t.Fatalf("input len = %d, want 2; body=%s", len(decoded.Input), repaired)
+	}
+}
+
+func TestWSToolCallRepairSupportsCustomToolCalls(t *testing.T) {
+	cache := newWSToolCallCache(0, 0)
+	cache.RecordCreate("sess-1", []byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"patch"}]}`))
+
+	repaired := cache.RepairCreate("sess-1", []byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"custom_tool_call_output","call_id":"call_custom","output":"ok"}]}`))
+	var decoded struct {
+		Input []map[string]interface{} `json:"input"`
+	}
+	if err := json.Unmarshal(repaired, &decoded); err != nil {
+		t.Fatalf("repaired create is not JSON: %v", err)
+	}
+	if len(decoded.Input) != 2 {
+		t.Fatalf("input len = %d, want 2; body=%s", len(decoded.Input), repaired)
+	}
+	if decoded.Input[0]["type"] != "custom_tool_call" {
+		t.Fatalf("missing cached custom_tool_call before output: %s", repaired)
+	}
+}
+
+func mustUUID(t *testing.T, raw string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestRelayRequestParsesGeminiMaxOutputTokens(t *testing.T) {

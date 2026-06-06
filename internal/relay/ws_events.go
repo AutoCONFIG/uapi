@@ -82,6 +82,12 @@ type WSResponseCreateEvent struct {
 	Tools              json.RawMessage `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
+	Include            json.RawMessage `json:"include,omitempty"`
+	PromptCacheKey     string          `json:"prompt_cache_key,omitempty"`
+	ClientMetadata     json.RawMessage `json:"client_metadata,omitempty"`
+	Text               json.RawMessage `json:"text,omitempty"`
+	ServiceTier        string          `json:"service_tier,omitempty"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 

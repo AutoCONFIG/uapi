@@ -23,7 +23,6 @@ import (
 //
 // The proxy forwards the client's message as-is and relays server events back.
 // Authentication uses Bearer token in the Authorization header.
-// No subprotocols or OpenAI-Beta headers are required for Responses WS.
 func (h *WSHandler) tryNativeUpstream(
 	sess *Session,
 	msg []byte,
@@ -42,6 +41,7 @@ func (h *WSHandler) tryNativeUpstream(
 		Provider:  ch.Type,
 		AccountID: acc.ID.String(),
 		Endpoint:  endpoint,
+		SessionID: sess.id,
 	}
 
 	// 1. Refresh credentials (handles OAuth token expiry)
@@ -55,6 +55,7 @@ func (h *WSHandler) tryNativeUpstream(
 	dialFn := func() (*UpstreamConn, error) {
 		headers := http.Header{}
 		headers.Set("Authorization", "Bearer "+validCreds)
+		headers.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
 
 		conn, _, err := dialUpstreamWS(endpoint, upstreamPath, headers)
 		if err != nil {
@@ -65,6 +66,7 @@ func (h *WSHandler) tryNativeUpstream(
 			provider:  ch.Type,
 			keyID:     acc.ID.String(),
 			endpoint:  endpoint,
+			sessionID: sess.id,
 			createdAt: time.Now(),
 		}
 		uc.lastUsed.Store(time.Now().Unix())
@@ -126,10 +128,6 @@ func (h *WSHandler) proxyUpstreamToClient(
 			logger.Default().Panic("relay.ws", "panic in upstream proxy", r, logger.F("session", sess.id))
 		}
 
-		// After turn completes, discard the connection (don't return to pool).
-		// WS connections may have buffered data from the previous turn,
-		// so it's safer to close and let a fresh connection be created for the next turn.
-		h.upstream.Discard(upstreamConn)
 		sess.ReleaseTurn()
 
 		// If the client disconnects after upstream has generated output, keep
@@ -144,6 +142,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 			} else {
 				h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 			}
+			h.upstream.Discard(upstreamConn)
 		}
 	}()
 
@@ -162,6 +161,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 				logger.Component("relay.ws").Warn("upstream read error", logger.F("session", sess.id), logger.Err(err))
 			}
 			// Upstream closed unexpectedly — treat as error, don't settle
+			h.upstream.Discard(upstreamConn)
 			return
 		}
 
@@ -177,6 +177,9 @@ func (h *WSHandler) proxyUpstreamToClient(
 			}
 			continue
 		}
+		if h.toolCalls != nil {
+			h.toolCalls.RecordResponseEvent(sess.id, msg)
+		}
 
 		// Forward ALL events to client as-is — the upstream sends valid
 		// Responses WS events that the client (Codex/Gemini-CLI) understands.
@@ -189,6 +192,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 			ts.markDone()
 			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)
+			h.upstream.Discard(upstreamConn)
 			return
 		}
 
@@ -209,6 +213,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 				h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
 			}
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, promptTokens, completionTokens, start, 200, cacheCreationTokens, cacheReadTokens)
+			h.upstream.Put(upstreamConn)
 			return
 		}
 	}

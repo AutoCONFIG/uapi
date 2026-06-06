@@ -282,6 +282,7 @@ type anthropicIREmitter struct {
 	thinkingStopped        bool
 	textStarted            bool
 	textStopped            bool
+	usage                  *relayir.Usage
 	toolBlockIndexByCall   map[string]int
 	toolBlockStoppedByCall map[string]bool
 }
@@ -297,7 +298,12 @@ func newAnthropicIREmitter() streamIREmitter {
 
 func (e *anthropicIREmitter) Emit(event relayir.StreamEvent) []byte {
 	e.setMeta(event)
+	if event.Usage != nil {
+		e.usage = event.Usage
+	}
 	switch event.Type {
+	case relayir.EventUsage:
+		return nil
 	case relayir.EventResponseCreated, relayir.EventMessageStart:
 		return e.ensureMessageStarted()
 	case relayir.EventReasoningDelta, relayir.EventReasoningEnd:
@@ -454,7 +460,27 @@ func (e *anthropicIREmitter) messageDeltaAndStop(finish *relayir.Finish) []byte 
 			reason = "tool_use"
 		}
 	}
-	return append(sseEventJSON("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": reason}, "usage": map[string]interface{}{"output_tokens": 0}}), sseEventJSON("message_stop", map[string]interface{}{"type": "message_stop"})...)
+	return append(sseEventJSON("message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": reason}, "usage": anthropicUsageFromIR(e.usage)}), sseEventJSON("message_stop", map[string]interface{}{"type": "message_stop"})...)
+}
+
+func anthropicUsageFromIR(usage *relayir.Usage) map[string]interface{} {
+	out := map[string]interface{}{"output_tokens": 0}
+	if usage == nil {
+		return out
+	}
+	if usage.InputTokens > 0 {
+		out["input_tokens"] = usage.InputTokens
+	}
+	if usage.OutputTokens > 0 {
+		out["output_tokens"] = usage.OutputTokens
+	}
+	if usage.CacheCreationTokens > 0 {
+		out["cache_creation_input_tokens"] = usage.CacheCreationTokens
+	}
+	if usage.CacheReadTokens > 0 {
+		out["cache_read_input_tokens"] = usage.CacheReadTokens
+	}
+	return out
 }
 
 func (e *anthropicIREmitter) Done() []byte {

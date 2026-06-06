@@ -113,14 +113,7 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
-	targetType := existing.Type
-	targetAPIFormat := existing.APIFormat
-	if req.Type != nil {
-		targetType = *req.Type
-	}
-	if req.APIFormat != nil {
-		targetAPIFormat = *req.APIFormat
-	}
+	targetType, targetAPIFormat := resolveChannelTypeAndAPIFormat(existing.Type, existing.APIFormat, req.Type, req.APIFormat)
 	if !validChannelFormatForType(targetType, targetAPIFormat) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel type and api_format are incompatible")
 		return
@@ -153,12 +146,12 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 	if req.Weight != nil {
 		updates["weight"] = normalizeChannelWeight(*req.Weight)
 	}
-	if req.APIFormat != nil {
-		if ok, msg := h.channelAccountsCompatibleWithAPIFormat(existing.ID, *req.APIFormat); !ok {
+	if req.APIFormat != nil || targetAPIFormat != existing.APIFormat {
+		if ok, msg := h.channelAccountsCompatibleWithAPIFormat(existing.ID, targetAPIFormat); !ok {
 			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
 			return
 		}
-		updates["api_format"] = *req.APIFormat
+		updates["api_format"] = targetAPIFormat
 	}
 	if req.ForceStream != nil {
 		updates["force_stream"] = *req.ForceStream
@@ -267,13 +260,43 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 }
 
 func isAPIKeyAPIFormat(apiFormat string) bool {
-	return apiFormat == "" || apiFormat == "standard"
+	return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex_apikey"
+}
+
+func resolveChannelTypeAndAPIFormat(existingType, existingAPIFormat string, requestedType, requestedAPIFormat *string) (string, string) {
+	targetType := existingType
+	targetAPIFormat := existingAPIFormat
+	if requestedType != nil {
+		targetType = *requestedType
+	}
+	if requestedAPIFormat != nil {
+		targetAPIFormat = *requestedAPIFormat
+	} else if requestedType != nil && *requestedType != existingType && isAPIKeyAPIFormat(targetAPIFormat) && !validChannelFormatForType(targetType, targetAPIFormat) {
+		targetAPIFormat = apiKeyAPIFormatForType(targetType, targetAPIFormat)
+	}
+	return targetType, targetAPIFormat
+}
+
+func apiKeyAPIFormatForType(channelType, currentAPIFormat string) string {
+	if validChannelFormatForType(channelType, currentAPIFormat) && isAPIKeyAPIFormat(currentAPIFormat) {
+		return currentAPIFormat
+	}
+	switch channelType {
+	case "openai":
+		return "standard"
+	case "gemini":
+		return "standard"
+	case "anthropic":
+		return "standard"
+	default:
+		return currentAPIFormat
+	}
 }
 
 func validChannelFormatForType(channelType, apiFormat string) bool {
 	switch channelType {
 	case "openai":
-		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex" || apiFormat == "chatgpt_reverse"
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex" || apiFormat == "codex_apikey" || apiFormat == "chatgpt_reverse"
 	case "gemini":
 		return apiFormat == "" || apiFormat == "standard" || apiFormat == "gemini_code"
 	case "anthropic":

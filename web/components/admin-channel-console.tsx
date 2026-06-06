@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Clipboard, Eye, EyeOff, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { EmptyState, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
-import { apiKeyChannelPresets, channelDefaults, channelPresets, defaultChannelPreset, isOAuthAPIFormat, isReverseAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, reverseChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
+import { apiKeyChannelPresets, apiKeyPresetForType, channelDefaults, channelPresets, defaultChannelPreset, isAPIKeyAPIFormat, isOAuthAPIFormat, isReverseAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, reverseChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
 
 function createInitialDraft(preset: ChannelPreset = defaultChannelPreset) {
@@ -56,9 +56,18 @@ const channelTypeOptions = [
 ];
 
 function editableChannelTypeOptions(channel: Pick<Channel, "type" | "api_format">) {
-  const apiFormat = channel.api_format || "standard";
-  if (apiFormat === "standard") return channelTypeOptions;
+  if (isAPIKeyAPIFormat(channel.api_format)) return channelTypeOptions;
   return channelTypeOptions.filter((option) => option.value === channel.type);
+}
+
+function apiKeyAPIFormatForType(channelType: string, currentAPIFormat: string): string {
+  if (validAPIKeyFormatForType(channelType, currentAPIFormat)) return currentAPIFormat;
+  return apiKeyPresetForType(channelType)?.apiFormat || currentAPIFormat;
+}
+
+function validAPIKeyFormatForType(channelType: string, apiFormat: string): boolean {
+  if (!apiFormat) return apiKeyChannelPresets.some((preset) => preset.type === channelType);
+  return apiKeyChannelPresets.some((preset) => preset.type === channelType && preset.apiFormat === apiFormat);
 }
 
 function modelValues(raw: string): string[] {
@@ -1076,7 +1085,7 @@ export function AdminChannelConsole() {
                           className={selected.type === option.value ? "active" : ""}
                           key={option.value}
                           onClick={() => {
-                            if (option.value !== selected.type) patchChannel(selected.id, { type: option.value } as Partial<Channel>);
+                            if (option.value !== selected.type) patchChannel(selected.id, { type: option.value, api_format: apiKeyAPIFormatForType(option.value, selected.api_format) } as Partial<Channel>);
                           }}
                           type="button"
                         >
@@ -1244,6 +1253,7 @@ export function AdminChannelConsole() {
                   <div className="segmented">
                     <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">对话补全</button>
                     <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">响应接口</button>
+                    <button className={draft.apiFormat === "codex_apikey" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "codex_apikey" }))} type="button">Codex 响应</button>
                   </div>
                 </div>
               ) : null}

@@ -112,7 +112,7 @@ func TestSupportsRelayRequestTypeMakesNonTextCapabilitiesExplicit(t *testing.T) 
 }
 
 func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","prompt_cache_key":"thread-1","tools":[{"type":"web_search_preview"}]}`), true)
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","store":true,"max_output_tokens":1,"temperature":0.2,"top_k":10,"service_tier":"auto","user":"u1","prompt_cache_key":"thread-1","tools":[{"type":"web_search_preview"}]}`), true, "")
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -169,8 +169,133 @@ func TestNormalizeCodexResponsesRequestAddsRequiredDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexResponsesRequestAddsStableClientMetadata(t *testing.T) {
+	first := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","prompt_cache_key":"thread-1"}`), true, "channel-a:account-a")
+	second := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","prompt_cache_key":"thread-1"}`), true, "channel-a:account-a")
+
+	var firstBody, secondBody map[string]interface{}
+	if err := json.Unmarshal(first, &firstBody); err != nil {
+		t.Fatalf("first normalized body is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(second, &secondBody); err != nil {
+		t.Fatalf("second normalized body is not JSON: %v", err)
+	}
+	firstMetadata, ok := firstBody["client_metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("first client_metadata missing: %#v", firstBody)
+	}
+	secondMetadata, ok := secondBody["client_metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("second client_metadata missing: %#v", secondBody)
+	}
+	installationID, _ := firstMetadata["x-codex-installation-id"].(string)
+	if installationID == "" {
+		t.Fatalf("x-codex-installation-id missing: %#v", firstMetadata)
+	}
+	if secondMetadata["x-codex-installation-id"] != installationID {
+		t.Fatalf("x-codex-installation-id is not stable: first=%#v second=%#v", firstMetadata, secondMetadata)
+	}
+	if _, ok := firstMetadata["x-codex-window-id"]; ok {
+		t.Fatalf("x-codex-window-id should not be synthesized in HTTP body metadata: %#v", firstMetadata)
+	}
+	if firstBody["prompt_cache_key"] != "thread-1" {
+		t.Fatalf("prompt_cache_key should be preserved: %#v", firstBody["prompt_cache_key"])
+	}
+}
+
+func TestNormalizeCodexResponsesRequestAddsStablePromptCacheKeyWhenMissing(t *testing.T) {
+	first := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), true, "channel-a:account-a")
+	second := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi again"}`), true, "channel-a:account-a")
+
+	var firstBody, secondBody map[string]interface{}
+	if err := json.Unmarshal(first, &firstBody); err != nil {
+		t.Fatalf("first normalized body is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(second, &secondBody); err != nil {
+		t.Fatalf("second normalized body is not JSON: %v", err)
+	}
+	firstKey, _ := firstBody["prompt_cache_key"].(string)
+	if firstKey == "" {
+		t.Fatalf("prompt_cache_key missing: %#v", firstBody)
+	}
+	if secondBody["prompt_cache_key"] != firstKey {
+		t.Fatalf("prompt_cache_key is not stable: first=%#v second=%#v", firstBody["prompt_cache_key"], secondBody["prompt_cache_key"])
+	}
+}
+
+func TestNormalizeCodexResponsesRequestPromptCacheKeyIsScoped(t *testing.T) {
+	first := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), true, "channel-a:account-a:scope-a")
+	second := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), true, "channel-a:account-a:scope-b")
+
+	var firstBody, secondBody map[string]interface{}
+	if err := json.Unmarshal(first, &firstBody); err != nil {
+		t.Fatalf("first normalized body is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(second, &secondBody); err != nil {
+		t.Fatalf("second normalized body is not JSON: %v", err)
+	}
+	if firstBody["prompt_cache_key"] == secondBody["prompt_cache_key"] {
+		t.Fatalf("prompt_cache_key should differ across scopes: %#v", firstBody["prompt_cache_key"])
+	}
+}
+
+func TestNormalizeCodexResponsesRequestPreservesExistingClientMetadata(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":"hi",
+		"prompt_cache_key":"thread-1",
+		"client_metadata":{
+			"x-codex-installation-id":"install-existing",
+			"x-codex-window-id":"window-existing",
+			"custom":"keep"
+		}
+	}`), true, "channel-a:account-a")
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	metadata, ok := body["client_metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("client_metadata missing: %#v", body)
+	}
+	if metadata["x-codex-installation-id"] != "install-existing" {
+		t.Fatalf("installation id overwritten: %#v", metadata)
+	}
+	if metadata["x-codex-window-id"] != "window-existing" {
+		t.Fatalf("window id overwritten: %#v", metadata)
+	}
+	if metadata["custom"] != "keep" {
+		t.Fatalf("custom metadata lost: %#v", metadata)
+	}
+}
+
+func TestApplyCodexMetadataHeadersUsesWindowMetadata(t *testing.T) {
+	var req fasthttp.Request
+	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"client_metadata":{"x-codex-window-id":"thread-1:0"}}`))
+
+	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
+	}
+
+	var nonCodexReq fasthttp.Request
+	applyCodexMetadataHeaders(&nonCodexReq, provider.FormatOpenAIResponses, []byte(`{"client_metadata":{"x-codex-window-id":"thread-1:0"}}`))
+	if got := string(nonCodexReq.Header.Peek("X-Codex-Window-Id")); got != "" {
+		t.Fatalf("non-Codex request should not receive X-Codex-Window-Id, got %q", got)
+	}
+}
+
+func TestApplyCodexMetadataHeadersSynthesizesWindowFromPromptCacheKey(t *testing.T) {
+	var req fasthttp.Request
+	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"prompt_cache_key":"thread-1"}`))
+
+	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
+	}
+}
+
 func TestNormalizeCodexResponsesRequestHonorsConfiguredStreamMode(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), false)
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi"}`), false, "")
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -181,7 +306,7 @@ func TestNormalizeCodexResponsesRequestHonorsConfiguredStreamMode(t *testing.T) 
 }
 
 func TestNormalizeCodexResponsesRequestIncludesEncryptedReasoningOnlyWithReasoning(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"high"}}`), true)
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"high"}}`), true, "")
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -207,7 +332,7 @@ func TestNormalizeCodexResponsesRequestMergesReasoningIncludeAndTextControls(t *
 				"schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
 			}
 		}
-	}`), true)
+	}`), true, "")
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)
@@ -243,7 +368,7 @@ func TestNormalizeCodexResponsesRequestMergesReasoningIncludeAndTextControls(t *
 }
 
 func TestNormalizeCodexResponsesRequestConvertsSystemInputRole(t *testing.T) {
-	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"system","content":"rules"}],"service_tier":"priority"}`), true)
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"system","content":"rules"}],"service_tier":"priority"}`), true, "")
 	var body map[string]interface{}
 	if err := json.Unmarshal(got, &body); err != nil {
 		t.Fatalf("normalized body is not JSON: %v", err)

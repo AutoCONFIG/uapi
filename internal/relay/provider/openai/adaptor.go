@@ -37,7 +37,7 @@ func (a *OpenAIAdaptor) GetRequestURL(path string) (string, error) {
 	if openAIPassthroughPath(path) {
 		return base + strings.TrimPrefix(path, "/v1"), nil
 	}
-	if a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex" {
+	if isOpenAIResponsesAPIFormat(a.channel.APIFormat) || isCodexResponsesAPIFormat(a.channel.APIFormat) {
 		return base + "/responses", nil
 	}
 	return base + "/chat/completions", nil
@@ -55,7 +55,7 @@ func openAIPassthroughPath(path string) bool {
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {
 	req.Header.Set("Authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
-	if a.channel != nil && a.channel.APIFormat == "codex" {
+	if a.channel != nil && isCodexResponsesAPIFormat(a.channel.APIFormat) {
 		req.Header.Set("originator", CodexOriginator)
 		req.Header.Set("User-Agent", CodexUserAgent)
 		if accountID := metadataString(a.account, "chatgpt_account_id"); accountID != "" {
@@ -73,9 +73,9 @@ func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials st
 
 func (a *OpenAIAdaptor) FromIR(req *ir.Request) ([]byte, error) {
 	format := convert.FormatOpenAIChatCompletions
-	if a.channel != nil && (a.channel.APIFormat == "responses" || a.channel.APIFormat == "codex") {
+	if a.channel != nil && (isOpenAIResponsesAPIFormat(a.channel.APIFormat) || isCodexResponsesAPIFormat(a.channel.APIFormat)) {
 		format = convert.FormatOpenAIResponses
-		if a.channel.APIFormat == "codex" {
+		if isCodexResponsesAPIFormat(a.channel.APIFormat) {
 			format = convert.FormatCodexResponses
 		}
 	}
@@ -183,6 +183,14 @@ func (a *OpenAIAdaptor) GetChannelType() string { return "openai" }
 func isOpenAIPlatformBaseURL(base string) bool {
 	base = strings.TrimRight(strings.ToLower(strings.TrimSpace(base)), "/")
 	return base == "" || base == "https://api.openai.com" || base == "https://api.openai.com/v1"
+}
+
+func isOpenAIResponsesAPIFormat(format string) bool {
+	return format == "responses"
+}
+
+func isCodexResponsesAPIFormat(format string) bool {
+	return format == "codex" || format == "codex_apikey"
 }
 
 func metadataString(account *db.Account, key string) string {

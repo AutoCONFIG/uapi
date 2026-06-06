@@ -203,12 +203,18 @@ type relayDebugPrefix struct {
 type relayDebugTrace struct {
 	ID              string
 	Dir             string
+	startedAt       time.Time
 	mu              sync.Mutex
+	upstreamStarted time.Time
+	upstreamHeaders time.Time
 	streamBytes     map[string]int
 	streamTruncated map[string]bool
 	streamEvents    map[string]int
 	streamPayloads  map[string]int
 	streamLast      map[string]map[string]interface{}
+	streamFirstAt   map[string]time.Time
+	streamLastAt    map[string]time.Time
+	streamMaxGap    map[string]time.Duration
 }
 
 func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *db.Channel, acc *db.Account, claims *internalauth.Claims, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, model, routedModel string, stream bool) *relayDebugTrace {
@@ -259,11 +265,15 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 	trace := &relayDebugTrace{
 		ID:              traceID,
 		Dir:             outDir,
+		startedAt:       time.Now().UTC(),
 		streamBytes:     map[string]int{},
 		streamTruncated: map[string]bool{},
 		streamEvents:    map[string]int{},
 		streamPayloads:  map[string]int{},
 		streamLast:      map[string]map[string]interface{}{},
+		streamFirstAt:   map[string]time.Time{},
+		streamLastAt:    map[string]time.Time{},
+		streamMaxGap:    map[string]time.Duration{},
 	}
 	trace.Event("request_dump_written",
 		logger.F("client_format", string(clientFormat)),
@@ -600,6 +610,7 @@ func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 	if t == nil {
 		return
 	}
+	t.recordLifecycleEvent(name)
 	record := map[string]interface{}{
 		"timestamp":        time.Now().UTC().Format(time.RFC3339Nano),
 		"relay_request_id": t.ID,
@@ -611,6 +622,9 @@ func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 		}
 		record[field.Key] = field.Value
 	}
+	if relayDebugEventNeedsTiming(name) {
+		record["stream_timing"] = t.TimingState()
+	}
 	raw, err := json.Marshal(record)
 	if err != nil {
 		logger.Warnf("relay.debug_dump", "marshal event failed", logger.Err(err), logger.F("relay_request_id", t.ID))
@@ -621,12 +635,43 @@ func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 	t.writeJSONLRawLocked("events.jsonl", raw)
 }
 
+func (t *relayDebugTrace) recordLifecycleEvent(name string) {
+	if t == nil {
+		return
+	}
+	now := time.Now().UTC()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch name {
+	case "upstream_request_started":
+		if t.upstreamStarted.IsZero() {
+			t.upstreamStarted = now
+		}
+	case "upstream_headers_received":
+		if t.upstreamHeaders.IsZero() {
+			t.upstreamHeaders = now
+		}
+	}
+}
+
+func relayDebugEventNeedsTiming(name string) bool {
+	return strings.HasPrefix(name, "stream_result_") ||
+		name == "stream_forward_finished" ||
+		name == "scanner_eof" ||
+		name == "scanner_error" ||
+		name == "scanner_closed_by_downstream" ||
+		name == "scanner_benign_close_after_terminal" ||
+		name == "scanner_benign_close_before_terminal" ||
+		name == "stream_eof_without_terminal"
+}
+
 func (t *relayDebugTrace) StreamChunk(name string, body []byte) {
 	if t == nil || len(body) == 0 || name == "" {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.recordStreamChunkTimingLocked(name, time.Now().UTC())
 
 	written := t.streamBytes[name]
 	if written >= relayDebugStreamFileMaxSize {
@@ -662,6 +707,18 @@ func (t *relayDebugTrace) StreamChunk(name string, body []byte) {
 	t.writeStreamEventSummaryLocked(name, body, len(chunk), truncated)
 }
 
+func (t *relayDebugTrace) recordStreamChunkTimingLocked(name string, now time.Time) {
+	if t.streamFirstAt[name].IsZero() {
+		t.streamFirstAt[name] = now
+	}
+	if last := t.streamLastAt[name]; !last.IsZero() {
+		if gap := now.Sub(last); gap > t.streamMaxGap[name] {
+			t.streamMaxGap[name] = gap
+		}
+	}
+	t.streamLastAt[name] = now
+}
+
 func (t *relayDebugTrace) StreamState(name string) map[string]interface{} {
 	if t == nil {
 		return nil
@@ -674,6 +731,17 @@ func (t *relayDebugTrace) StreamState(name string) map[string]interface{} {
 		"data_payloads": t.streamPayloads[name],
 		"bytes":         t.streamBytes[name],
 		"truncated":     t.streamTruncated[name],
+	}
+	if !t.startedAt.IsZero() {
+		if first := t.streamFirstAt[name]; !first.IsZero() {
+			state["first_ms"] = first.Sub(t.startedAt).Milliseconds()
+		}
+		if last := t.streamLastAt[name]; !last.IsZero() {
+			state["last_ms"] = last.Sub(t.startedAt).Milliseconds()
+		}
+	}
+	if gap := t.streamMaxGap[name]; gap > 0 {
+		state["max_gap_ms"] = gap.Milliseconds()
 	}
 	if last := t.streamLast[name]; last != nil {
 		state["last"] = last
@@ -693,6 +761,57 @@ func (t *relayDebugTrace) StreamStates(names ...string) []map[string]interface{}
 		states = append(states, t.StreamState(name))
 	}
 	return states
+}
+
+func (t *relayDebugTrace) TimingState() map[string]interface{} {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := map[string]interface{}{}
+	if !t.startedAt.IsZero() {
+		out["request_started_at"] = t.startedAt.Format(time.RFC3339Nano)
+	}
+	if !t.upstreamStarted.IsZero() {
+		out["upstream_request_started_ms"] = t.upstreamStarted.Sub(t.startedAt).Milliseconds()
+	}
+	if !t.upstreamHeaders.IsZero() {
+		out["upstream_headers_ms"] = t.upstreamHeaders.Sub(t.startedAt).Milliseconds()
+		if !t.upstreamStarted.IsZero() {
+			out["upstream_request_to_headers_ms"] = t.upstreamHeaders.Sub(t.upstreamStarted).Milliseconds()
+		}
+	}
+	addStream := func(prefix, name string) {
+		first := t.streamFirstAt[name]
+		last := t.streamLastAt[name]
+		if !first.IsZero() {
+			out[prefix+"_first_ms"] = first.Sub(t.startedAt).Milliseconds()
+			if !t.upstreamHeaders.IsZero() {
+				out["headers_to_"+prefix+"_first_ms"] = first.Sub(t.upstreamHeaders).Milliseconds()
+			}
+		}
+		if !last.IsZero() {
+			out[prefix+"_last_ms"] = last.Sub(t.startedAt).Milliseconds()
+		}
+		if gap := t.streamMaxGap[name]; gap > 0 {
+			out[prefix+"_max_idle_ms"] = gap.Milliseconds()
+		}
+	}
+	addStream("upstream", "stream.upstream.sse")
+	addStream("normalized", "stream.normalized.sse")
+	addStream("downstream", "stream.downstream.sse")
+	if upstreamFirst := t.streamFirstAt["stream.upstream.sse"]; !upstreamFirst.IsZero() {
+		if downstreamFirst := t.streamFirstAt["stream.downstream.sse"]; !downstreamFirst.IsZero() {
+			out["first_upstream_to_first_downstream_ms"] = downstreamFirst.Sub(upstreamFirst).Milliseconds()
+		}
+	}
+	if upstreamLast := t.streamLastAt["stream.upstream.sse"]; !upstreamLast.IsZero() {
+		if downstreamLast := t.streamLastAt["stream.downstream.sse"]; !downstreamLast.IsZero() {
+			out["last_upstream_to_last_downstream_ms"] = downstreamLast.Sub(upstreamLast).Milliseconds()
+		}
+	}
+	return out
 }
 
 func (t *relayDebugTrace) noteStreamTruncatedLocked(name string, written int) {

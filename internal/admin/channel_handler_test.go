@@ -11,6 +11,7 @@ func TestValidChannelFormatForType(t *testing.T) {
 		{"openai", "standard"},
 		{"openai", "responses"},
 		{"openai", "codex"},
+		{"openai", "codex_apikey"},
 		{"gemini", ""},
 		{"gemini", "standard"},
 		{"gemini", "gemini_code"},
@@ -46,16 +47,37 @@ func TestValidChannelFormatForType(t *testing.T) {
 }
 
 func TestIsAPIKeyAPIFormat(t *testing.T) {
-	valid := []string{"", "standard"}
+	valid := []string{"", "standard", "responses", "codex_apikey"}
 	for _, format := range valid {
 		if !isAPIKeyAPIFormat(format) {
 			t.Fatalf("expected %q to be API Key format", format)
 		}
 	}
-	invalid := []string{"responses", "codex", "claude_code", "gemini_code", "antigravity", "chatgpt_reverse"}
+	invalid := []string{"codex", "claude_code", "gemini_code", "antigravity", "chatgpt_reverse"}
 	for _, format := range invalid {
 		if isAPIKeyAPIFormat(format) {
 			t.Fatalf("expected %q not to be API Key format", format)
 		}
+	}
+}
+
+func TestResolveChannelTypeAndAPIFormat(t *testing.T) {
+	gemini := "gemini"
+	anthropic := "anthropic"
+	responses := "responses"
+
+	typ, format := resolveChannelTypeAndAPIFormat("openai", "responses", &gemini, nil)
+	if typ != "gemini" || format != "standard" {
+		t.Fatalf("expected openai/responses switching to gemini to use standard, got %s/%s", typ, format)
+	}
+
+	typ, format = resolveChannelTypeAndAPIFormat("openai", "codex_apikey", &anthropic, nil)
+	if typ != "anthropic" || format != "standard" {
+		t.Fatalf("expected openai/codex_apikey switching to anthropic to use standard, got %s/%s", typ, format)
+	}
+
+	typ, format = resolveChannelTypeAndAPIFormat("openai", "responses", &gemini, &responses)
+	if typ != "gemini" || format != "responses" {
+		t.Fatalf("expected explicit api_format to be preserved for validation, got %s/%s", typ, format)
 	}
 }

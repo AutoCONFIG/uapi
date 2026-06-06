@@ -481,7 +481,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	case "openai":
 		if targetChannel.APIFormat == "chatgpt_reverse" {
 			upstreamFormat = provider.FormatChatGPTReverse
-		} else if targetChannel.APIFormat == "codex" {
+		} else if isCodexAPIFormat(targetChannel.APIFormat) {
 			upstreamFormat = provider.FormatCodexResponses
 		} else if targetChannel.APIFormat == "responses" {
 			upstreamFormat = provider.FormatOpenAIResponses
@@ -506,7 +506,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		upstreamFormat = provider.FormatOpenAIChatCompletions
 	}
 
-	nativeCodexPassthrough := targetChannel.APIFormat == "codex" && isLikelyNativeCodexClientRequest(ctx)
+	nativeCodexPassthrough := isCodexAPIFormat(targetChannel.APIFormat) && isLikelyNativeCodexClientRequest(ctx)
 	if nativeCodexPassthrough {
 		clientFormat = provider.FormatCodexResponses
 	}
@@ -575,8 +575,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	routedModel = routedModelFromBody(convertedBody, routedModel)
-	if targetChannel.APIFormat == "codex" && upstreamFormat == provider.FormatCodexResponses && !nativeCodexPassthrough {
-		convertedBody = normalizeCodexResponsesRequest(convertedBody, effectiveStream)
+	if isCodexAPIFormat(targetChannel.APIFormat) && upstreamFormat == provider.FormatCodexResponses && !nativeCodexPassthrough {
+		convertedBody = normalizeCodexResponsesRequest(convertedBody, effectiveStream, codexClientMetadataSeed(targetChannel, account, token.ID.String()))
 		routedModel = routedModelFromBody(convertedBody, routedModel)
 	}
 	if effectiveStream && shouldInjectConvertedStreamField(upstreamFormat) && (!sameFormat || forceStreamActive) {
@@ -652,6 +652,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
+	applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
 	trace.Event("upstream_request_started",
 		logger.F("mode", "stream"),
@@ -844,6 +845,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
+	applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
 	trace.Event("upstream_request_started",
 		logger.F("mode", "force_stream"),
@@ -884,6 +886,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 				return
 			}
+			applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 			trace.Event("upstream_request_started",
 				logger.F("mode", "force_stream_retry"),
 			)
@@ -1241,6 +1244,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, currentAccount, model, start, tokenPlanID)
 			return
 		}
+		applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
 		err := bufferedClient.Do(upReq, upResp)
 		fasthttp.ReleaseRequest(upReq)
@@ -2798,7 +2802,7 @@ func channelForceStreamModels(settings string) map[string]struct{} {
 	return out
 }
 
-func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
+func normalizeCodexResponsesRequest(body []byte, stream bool, clientMetadataSeed string) []byte {
 	var bodyMap map[string]interface{}
 	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return body
@@ -2818,6 +2822,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
 	if codexResponsesHasReasoning(bodyMap) {
 		bodyMap["include"] = appendUniqueStringInclude(bodyMap["include"], "reasoning.encrypted_content")
 	}
+	normalizeCodexResponsesClientMetadata(bodyMap, clientMetadataSeed)
 	for _, key := range []string{
 		"max_output_tokens",
 		"max_completion_tokens",
@@ -2857,6 +2862,56 @@ func normalizeCodexResponsesRequest(body []byte, stream bool) []byte {
 		return body
 	}
 	return result
+}
+
+func normalizeCodexResponsesClientMetadata(bodyMap map[string]interface{}, seed string) {
+	clientMetadata, _ := bodyMap["client_metadata"].(map[string]interface{})
+	if clientMetadata == nil {
+		clientMetadata = map[string]interface{}{}
+	}
+	if seed != "" {
+		if installationID, _ := clientMetadata["x-codex-installation-id"].(string); strings.TrimSpace(installationID) == "" {
+			clientMetadata["x-codex-installation-id"] = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-installation:"+seed)).String()
+		}
+		if promptCacheKey, _ := bodyMap["prompt_cache_key"].(string); strings.TrimSpace(promptCacheKey) == "" {
+			bodyMap["prompt_cache_key"] = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-thread:"+seed)).String()
+		}
+	}
+	if len(clientMetadata) > 0 {
+		bodyMap["client_metadata"] = clientMetadata
+	}
+}
+
+func codexClientMetadataSeed(ch *db.Channel, acc *db.Account, scope string) string {
+	if ch == nil || acc == nil {
+		return ""
+	}
+	parts := []string{ch.ID.String(), acc.ID.String()}
+	if strings.TrimSpace(scope) != "" {
+		parts = append(parts, strings.TrimSpace(scope))
+	}
+	return strings.Join(parts, ":")
+}
+
+func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Format, body []byte) {
+	if req == nil || upstreamFormat != provider.FormatCodexResponses {
+		return
+	}
+	var bodyMap map[string]interface{}
+	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
+		return
+	}
+	clientMetadata, _ := bodyMap["client_metadata"].(map[string]interface{})
+	if clientMetadata == nil {
+		clientMetadata = map[string]interface{}{}
+	}
+	if windowID, _ := clientMetadata["x-codex-window-id"].(string); strings.TrimSpace(windowID) != "" {
+		req.Header.Set("X-Codex-Window-Id", strings.TrimSpace(windowID))
+		return
+	}
+	if promptCacheKey, _ := bodyMap["prompt_cache_key"].(string); strings.TrimSpace(promptCacheKey) != "" {
+		req.Header.Set("X-Codex-Window-Id", strings.TrimSpace(promptCacheKey)+":0")
+	}
 }
 
 func codexResponsesHasReasoning(bodyMap map[string]interface{}) bool {
@@ -3300,6 +3355,10 @@ func antigravityPublicModelsForChannel(models, settingsRaw string) []string {
 
 func isOAuthAPIFormat(format string) bool {
 	return format == "codex" || format == "gemini_code" || format == "claude_code" || format == "antigravity"
+}
+
+func isCodexAPIFormat(format string) bool {
+	return format == "codex" || format == "codex_apikey"
 }
 
 func permissionForFormat(format provider.Format) string {

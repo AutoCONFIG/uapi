@@ -34,7 +34,7 @@ func (h *WSHandler) httpBridgeFallback(
 	adaptor.SetRequestParams(model, true) // always stream in bridge mode
 
 	body := wsCreateToHTTPBody(msg)
-	convertedBody, err := convertWSHTTPBridgeRequestBody(ch, adaptor, msg)
+	convertedBody, err := convertWSHTTPBridgeRequestBody(ch, acc, adaptor, msg, sess.id)
 	if err != nil {
 		WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
 		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
@@ -74,6 +74,7 @@ func (h *WSHandler) httpBridgeFallback(
 		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		return false
 	}
+	applyCodexMetadataHeaders(upReq, channelUpstreamFormat(ch), convertedBody)
 
 	// 5. Execute streaming request
 	if err := doStreamingRequest(upReq, upResp); err != nil {
@@ -101,7 +102,7 @@ func (h *WSHandler) httpBridgeFallback(
 	return true
 }
 
-func convertWSHTTPBridgeRequestBody(ch *db.Channel, adaptor provider.Adaptor, msg []byte) ([]byte, error) {
+func convertWSHTTPBridgeRequestBody(ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, msg []byte, seedScope ...string) ([]byte, error) {
 	body := wsCreateToHTTPBody(msg)
 	upstreamFormat := channelUpstreamFormat(ch)
 	clientFormat := provider.FormatOpenAIResponses
@@ -115,11 +116,23 @@ func convertWSHTTPBridgeRequestBody(ch *db.Channel, adaptor provider.Adaptor, ms
 	if err != nil {
 		return nil, err
 	}
+	if isCodexAPIFormat(ch.APIFormat) && upstreamFormat == provider.FormatCodexResponses {
+		convertedBody = normalizeCodexResponsesRequest(convertedBody, true, codexClientMetadataSeed(ch, acc, firstString(seedScope...)))
+	}
 	bodyWithCachePolicy, _, policyErr := upstreamconfig.ApplyCachePassthroughPolicy(ch, upstreamFormat, convertedBody)
 	if policyErr != nil {
 		return nil, policyErr
 	}
 	return bodyWithCachePolicy, nil
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // bridgeSSEToWS reads SSE from upstream and forwards each event as a WS text message.
@@ -224,6 +237,9 @@ func (h *WSHandler) bridgeSSEToWS(
 			if pt, ct := ParseResponsesUsage([]byte(data)); pt > 0 || ct > 0 {
 				responsesPromptTokens = pt
 				responsesCompletionTokens = ct
+			}
+			if h.toolCalls != nil {
+				h.toolCalls.RecordResponseEvent(sess.id, []byte(data))
 			}
 			if err := sess.WriteMessage(ws.TextMessage, []byte(data)); err != nil {
 				interrupted = true
@@ -377,6 +393,24 @@ func wsCreateToHTTPBody(msg []byte) []byte {
 	if evt.PreviousResponseID != "" {
 		bodyMap["previous_response_id"] = evt.PreviousResponseID
 	}
+	if evt.Reasoning != nil {
+		bodyMap["reasoning"] = json.RawMessage(evt.Reasoning)
+	}
+	if evt.Include != nil {
+		bodyMap["include"] = json.RawMessage(evt.Include)
+	}
+	if evt.PromptCacheKey != "" {
+		bodyMap["prompt_cache_key"] = evt.PromptCacheKey
+	}
+	if evt.ClientMetadata != nil {
+		bodyMap["client_metadata"] = json.RawMessage(evt.ClientMetadata)
+	}
+	if evt.Text != nil {
+		bodyMap["text"] = json.RawMessage(evt.Text)
+	}
+	if evt.ServiceTier != "" {
+		bodyMap["service_tier"] = evt.ServiceTier
+	}
 	if evt.Store != nil {
 		bodyMap["store"] = *evt.Store
 	}
@@ -394,7 +428,7 @@ func wsCreateToHTTPBody(msg []byte) []byte {
 func channelUpstreamFormat(ch *db.Channel) provider.Format {
 	switch ch.Type {
 	case "openai":
-		if ch.APIFormat == "codex" {
+		if ch.APIFormat == "codex" || ch.APIFormat == "codex_apikey" {
 			return provider.FormatCodexResponses
 		}
 		if ch.APIFormat == "responses" {
