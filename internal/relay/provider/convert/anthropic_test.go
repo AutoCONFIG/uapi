@@ -483,6 +483,120 @@ func TestOpenAIResponsesWebSearchToolToAnthropicBuiltin(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesDeveloperMessagesBecomeAnthropicSystem(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":[
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"dev one"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"dev two"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"again"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	var got struct {
+		System   interface{} `json:"system"`
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if got.System == nil {
+		t.Fatalf("developer content must be promoted to Anthropic system: %s", converted)
+	}
+	for idx, msg := range got.Messages {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			t.Fatalf("messages[%d].role = %q, want user/assistant only; body=%s", idx, msg.Role, converted)
+		}
+	}
+	text := string(converted)
+	if !strings.Contains(text, "dev one") || !strings.Contains(text, "dev two") {
+		t.Fatalf("developer text missing from system: %s", converted)
+	}
+}
+
+func TestOpenAIResponsesWebSearchOmittedForGLMAnthropicCompat(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":"hi",
+		"tools":[{"type":"web_search","name":"web_search"}]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	if _, ok := got["tools"]; ok {
+		t.Fatalf("GLM Anthropic-compatible upstream must not receive Anthropic server tools: %s", converted)
+	}
+}
+
+func TestOpenAIResponsesPromptCacheKeyDoesNotInventAnthropicCacheControl(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"prompt_cache_key":"session-1",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	if strings.Contains(text, "prompt_cache_key") {
+		t.Fatalf("Anthropic target must not receive OpenAI prompt_cache_key: %s", converted)
+	}
+	if strings.Contains(text, "cache_control") {
+		t.Fatalf("prompt_cache_key alone must not synthesize Anthropic cache_control: %s", converted)
+	}
+}
+
+func TestGLMAnthropicCompatDropsRedactedThinkingHistory(t *testing.T) {
+	body := []byte(`{
+		"model":"glm-5.1",
+		"input":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"visible"}],"encrypted_content":"enc_1"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	if strings.Contains(text, "redacted_thinking") || strings.Contains(text, "enc_1") {
+		t.Fatalf("GLM Anthropic-compatible target must not receive redacted_thinking: %s", converted)
+	}
+	if !strings.Contains(text, `"type":"thinking"`) || !strings.Contains(text, "visible") {
+		t.Fatalf("GLM Anthropic-compatible target should keep supported thinking text: %s", converted)
+	}
+}
+
+func TestClaudeAnthropicKeepsRedactedThinkingHistory(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"input":[
+			{"type":"reasoning","encrypted_content":"enc_1"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	if !strings.Contains(text, `"type":"redacted_thinking"`) || !strings.Contains(text, `"data":"enc_1"`) {
+		t.Fatalf("real Anthropic target should keep redacted_thinking: %s", converted)
+	}
+}
+
 func TestOpenAIResponsesWebSearchDisabledOmittedForAnthropic(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

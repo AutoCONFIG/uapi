@@ -173,16 +173,20 @@ func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		out[k] = v
 	}
 	if len(req.Instructions) > 0 {
-		out["system"] = anthropicSystemFromIR(req.SourceProtocol, req.Instructions)
+		out["system"] = anthropicSystemFromIR(req.SourceProtocol, req.Instructions, req.Model)
 	}
 	messages := make([]map[string]interface{}, 0, len(req.Turns))
 	for _, turn := range req.Turns {
+		if turn.Role == relayir.RoleSystem || turn.Role == relayir.RoleDeveloper {
+			out["system"] = appendAnthropicSystem(out["system"], anthropicSystemFromIR(req.SourceProtocol, []relayir.Instruction{anthropicInstructionFromTurn(turn)}, req.Model))
+			continue
+		}
 		role := anthropicRole(string(turn.Role))
 		if role == "tool" || role == "function" {
 			role = "user"
 		}
 		msg := map[string]interface{}{"role": role}
-		blocks, err := anthropicBlocksFromIRTurn(req.SourceProtocol, turn)
+		blocks, err := anthropicBlocksFromIRTurn(req.SourceProtocol, turn, req.Model)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +221,7 @@ func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		for _, tool := range req.Tools {
 			tools = append(tools, schemaToolFromIR(tool))
 		}
-		if projected := anthropicTools(tools, req.SourceProtocol == relayir.ProtocolAnthropic || req.SourceProtocol == relayir.ProtocolClaudeCode); len(projected) > 0 {
+		if projected := anthropicTools(tools, req.SourceProtocol == relayir.ProtocolAnthropic || req.SourceProtocol == relayir.ProtocolClaudeCode, req.Model); len(projected) > 0 {
 			out["tools"] = projected
 		}
 	}
@@ -231,6 +235,82 @@ func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		removeAnthropicForcedThinkingExtras(out)
 	}
 	return json.Marshal(out)
+}
+
+func anthropicInstructionFromTurn(turn relayir.Turn) relayir.Instruction {
+	inst := relayir.Instruction{
+		Role:     relayir.RoleSystem,
+		Items:    append([]relayir.Item(nil), turn.Items...),
+		Name:     turn.Name,
+		ID:       turn.ID,
+		Metadata: relayir.CloneRawMap(turn.Metadata),
+		Native:   turn.Native,
+	}
+	var texts []string
+	for _, item := range turn.Items {
+		if item.Text != nil && item.Text.Text != "" {
+			texts = append(texts, item.Text.Text)
+		}
+	}
+	inst.Text = joinNonEmpty(texts, "\n\n")
+	return inst
+}
+
+func appendAnthropicSystem(existing interface{}, addition interface{}) interface{} {
+	if addition == nil {
+		return existing
+	}
+	if existing == nil {
+		return addition
+	}
+	blocks := append(anthropicSystemBlocks(existing), anthropicSystemBlocks(addition)...)
+	if len(blocks) == 0 {
+		return existing
+	}
+	if len(blocks) == 1 {
+		if typ, _ := blocks[0]["type"].(string); typ == "text" {
+			if text, _ := blocks[0]["text"].(string); text != "" {
+				return text
+			}
+		}
+	}
+	return blocks
+}
+
+func anthropicSystemBlocks(value interface{}) []map[string]interface{} {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []map[string]interface{}{{"type": "text", "text": v}}
+	case []map[string]interface{}:
+		return append([]map[string]interface{}(nil), v...)
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				out = append(out, cloneInterfaceMap(m))
+			}
+		}
+		return out
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			return anthropicSystemBlocks(text)
+		}
+		var blocks []map[string]interface{}
+		if json.Unmarshal(raw, &blocks) == nil {
+			return blocks
+		}
+	}
+	return nil
 }
 
 func nilIfEmptyToolChoice(choice *relayir.ToolChoice) json.RawMessage {
@@ -253,7 +333,7 @@ func anthropicThinkingFromIRRequest(req *relayir.Request) interface{} {
 	return anthropicThinkingFromGeminiThinking(req.Generation.Thinking)
 }
 
-func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instruction) interface{} {
+func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instruction, model string) interface{} {
 	if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(instructions) == 1 && len(instructions[0].Native.Raw) > 0 {
 		var raw interface{}
 		if json.Unmarshal(instructions[0].Native.Raw, &raw) == nil {
@@ -266,7 +346,7 @@ func anthropicSystemFromIR(source relayir.Protocol, instructions []relayir.Instr
 			if source != relayir.ProtocolAnthropic && isAnthropicTransportTextItem(item) {
 				continue
 			}
-			block, err := anthropicBlockFromIRItem(item)
+			block, err := anthropicBlockFromIRItem(item, model)
 			if err != nil {
 				continue
 			}
@@ -381,7 +461,7 @@ func cloneInterfaceMap(in map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func anthropicTools(tools []schema.Tool, preserveNative bool) []map[string]interface{} {
+func anthropicTools(tools []schema.Tool, preserveNative bool, model string) []map[string]interface{} {
 	projected := tools
 	if !preserveNative {
 		projected = functionToolProjections(tools)
@@ -389,7 +469,7 @@ func anthropicTools(tools []schema.Tool, preserveNative bool) []map[string]inter
 	out := make([]map[string]interface{}, 0, len(projected))
 	if !preserveNative {
 		for _, tool := range tools {
-			if strings.TrimSpace(tool.Type) == "web_search" {
+			if isAnthropicWebSearchToolType(tool.Type) && shouldEmitAnthropicServerTools(model) {
 				if normalized := anthropicTool(tool, false); normalized != nil {
 					out = append(out, normalized)
 				}
@@ -399,7 +479,7 @@ func anthropicTools(tools []schema.Tool, preserveNative bool) []map[string]inter
 	for _, tool := range projected {
 		normalized := anthropicTool(tool, preserveNative)
 		if normalized != nil {
-			if preserveNative || strings.TrimSpace(tool.Type) != "web_search" {
+			if preserveNative || !isAnthropicWebSearchToolType(tool.Type) {
 				out = append(out, normalized)
 			}
 		}
@@ -408,7 +488,7 @@ func anthropicTools(tools []schema.Tool, preserveNative bool) []map[string]inter
 }
 
 func anthropicTool(tool schema.Tool, preserveNative bool) map[string]interface{} {
-	if strings.TrimSpace(tool.Type) == "web_search" {
+	if isAnthropicWebSearchToolType(tool.Type) {
 		return anthropicWebSearchTool(tool)
 	}
 	name, description, inputSchema := normalizedFunctionTool(tool)
@@ -454,6 +534,21 @@ func anthropicTool(tool schema.Tool, preserveNative bool) map[string]interface{}
 	return out
 }
 
+func isAnthropicWebSearchToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func shouldEmitAnthropicServerTools(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(model, "glm-"):
+		return false
+	default:
+		return true
+	}
+}
+
 func anthropicWebSearchTool(tool schema.Tool) map[string]interface{} {
 	if externalWebAccess := rawBool(tool.Extra["external_web_access"]); externalWebAccess != nil && !*externalWebAccess {
 		return nil
@@ -465,6 +560,9 @@ func anthropicWebSearchTool(tool schema.Tool) map[string]interface{} {
 	out := map[string]interface{}{
 		"type": "web_search_20250305",
 		"name": name,
+	}
+	if typ := strings.TrimSpace(tool.Type); strings.HasPrefix(typ, "web_search_") {
+		out["type"] = typ
 	}
 	if raw := tool.Extra["max_uses"]; len(raw) > 0 && string(raw) != "null" {
 		out["max_uses"] = json.RawMessage(raw)
@@ -533,17 +631,20 @@ func isAnthropicFamily(format Format) bool {
 	return format == FormatAnthropic || format == FormatClaudeCode
 }
 
-func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) ([]map[string]interface{}, error) {
+func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn, model string) ([]map[string]interface{}, error) {
 	blocks := make([]map[string]interface{}, 0, len(turn.Items))
 	for _, item := range turn.Items {
 		if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(item.Native.Raw) > 0 {
 			var raw map[string]interface{}
 			if json.Unmarshal(item.Native.Raw, &raw) == nil {
+				if shouldDropAnthropicRedactedThinking(model, raw) {
+					continue
+				}
 				blocks = append(blocks, raw)
 				continue
 			}
 		}
-		block, err := anthropicBlockFromIRItem(item)
+		block, err := anthropicBlockFromIRItem(item, model)
 		if err != nil {
 			return nil, err
 		}
@@ -554,10 +655,14 @@ func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn) ([]ma
 	return blocks, nil
 }
 
-func anthropicBlockFromIRItem(item relayir.Item) (map[string]interface{}, error) {
+func anthropicBlockFromIRItem(item relayir.Item, model string) (map[string]interface{}, error) {
 	switch item.Kind {
 	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
-		return anthropicReasoningBlock(schemaReasoningFromIR(item)), nil
+		block := anthropicReasoningBlock(schemaReasoningFromIR(item))
+		if shouldDropAnthropicRedactedThinking(model, block) {
+			return nil, nil
+		}
+		return block, nil
 	case relayir.ItemToolUse, relayir.ItemFunctionCall:
 		block := anthropicToolUseBlock(schemaToolCallFromIR(item))
 		applyAnthropicCacheControl(block, item.Metadata)
@@ -581,6 +686,19 @@ func anthropicBlockFromIRItem(item relayir.Item) (map[string]interface{}, error)
 		}
 	}
 	return nil, nil
+}
+
+func shouldDropAnthropicRedactedThinking(model string, block map[string]interface{}) bool {
+	if block == nil || !isGLMAnthropicCompatModel(model) {
+		return false
+	}
+	typ, _ := block["type"].(string)
+	return typ == "redacted_thinking"
+}
+
+func isGLMAnthropicCompatModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "glm-")
 }
 
 func anthropicReasoningBlock(rc schema.ContentPart) map[string]interface{} {

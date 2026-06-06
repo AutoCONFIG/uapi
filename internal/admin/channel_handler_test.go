@@ -44,3 +44,18 @@ func TestValidChannelFormatForType(t *testing.T) {
 		}
 	}
 }
+
+func TestIsAPIKeyAPIFormat(t *testing.T) {
+	valid := []string{"", "standard"}
+	for _, format := range valid {
+		if !isAPIKeyAPIFormat(format) {
+			t.Fatalf("expected %q to be API Key format", format)
+		}
+	}
+	invalid := []string{"responses", "codex", "claude_code", "gemini_code", "antigravity", "chatgpt_reverse"}
+	for _, format := range invalid {
+		if isAPIKeyAPIFormat(format) {
+			t.Fatalf("expected %q not to be API Key format", format)
+		}
+	}
+}

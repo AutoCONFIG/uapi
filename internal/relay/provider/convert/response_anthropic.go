@@ -88,7 +88,7 @@ func emitAnthropicResponseDirectIR(resp *relayir.Response) ([]byte, error) {
 					continue
 				}
 			}
-			block, err := anthropicBlockFromIRItem(item)
+			block, err := anthropicBlockFromIRItem(item, resp.Model)
 			if err != nil {
 				return nil, err
 			}

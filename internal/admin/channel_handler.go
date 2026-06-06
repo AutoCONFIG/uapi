@@ -125,6 +125,12 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "channel type and api_format are incompatible")
 		return
 	}
+	if req.Type != nil && *req.Type != existing.Type {
+		if ok, msg := h.channelAccountsCompatibleWithTypeChange(existing.ID, targetAPIFormat); !ok {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
+			return
+		}
+	}
 	updates := map[string]interface{}{}
 	if req.Name != nil {
 		updates["name"] = *req.Name
@@ -208,6 +214,22 @@ func normalizeChannelSettings(raw string) string {
 	return string(encoded)
 }
 
+func (h *Handler) channelAccountsCompatibleWithTypeChange(channelID uuid.UUID, apiFormat string) (bool, string) {
+	if !isAPIKeyAPIFormat(apiFormat) {
+		return false, "Channel type can only be changed for API Key channels"
+	}
+	var accounts []db.Account
+	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
+		return false, "load accounts failed"
+	}
+	for _, acc := range accounts {
+		if acc.CredType != "api_key" {
+			return false, "Channel type can only be changed when all accounts are API Key credentials"
+		}
+	}
+	return true, ""
+}
+
 func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, apiFormat string) (bool, string) {
 	var accounts []db.Account
 	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
@@ -242,6 +264,10 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 		}
 	}
 	return true, ""
+}
+
+func isAPIKeyAPIFormat(apiFormat string) bool {
+	return apiFormat == "" || apiFormat == "standard"
 }
 
 func validChannelFormatForType(channelType, apiFormat string) bool {

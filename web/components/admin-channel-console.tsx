@@ -49,6 +49,18 @@ function supportsModelSync(channel: Pick<Channel, "api_format">): boolean {
   return !channel.api_format || channel.api_format === "standard" || channel.api_format === "responses" || channel.api_format === "antigravity";
 }
 
+const channelTypeOptions = [
+  { value: "openai", label: "OpenAI API Key" },
+  { value: "anthropic", label: "Anthropic API Key" },
+  { value: "gemini", label: "Gemini API Key" },
+];
+
+function editableChannelTypeOptions(channel: Pick<Channel, "type" | "api_format">) {
+  const apiFormat = channel.api_format || "standard";
+  if (apiFormat === "standard") return channelTypeOptions;
+  return channelTypeOptions.filter((option) => option.value === channel.type);
+}
+
 function modelValues(raw: string): string[] {
   const seen = new Set<string>();
   const values: string[] = [];
@@ -1055,6 +1067,25 @@ export function AdminChannelConsole() {
                   const value = e.target.value.trim();
                   if (value && value !== selected.name) patchChannel(selected.id, { name: value });
                 }} placeholder="渠道名称" />
+                {editableChannelTypeOptions(selected).length > 1 ? (
+                  <div className="field wide">
+                    <label>渠道类型</label>
+                    <div className="segmented">
+                      {editableChannelTypeOptions(selected).map((option) => (
+                        <button
+                          className={selected.type === option.value ? "active" : ""}
+                          key={option.value}
+                          onClick={() => {
+                            if (option.value !== selected.type) patchChannel(selected.id, { type: option.value } as Partial<Channel>);
+                          }}
+                          type="button"
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <div className="channel-route-edit">
                   <label>
                     <span>优先级</span>
