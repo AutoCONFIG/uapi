@@ -36,26 +36,9 @@ func TestOpenAIResponsesKeepsOpenAIPlatformEndpoint(t *testing.T) {
 	}
 }
 
-func TestCodexAPIKeyUsesCodexFormatWithoutChatGPTEndpointSwitch(t *testing.T) {
-	adaptor := &openai.OpenAIAdaptor{}
-	adaptor.Init(&db.Channel{APIFormat: "codex_apikey", Endpoint: "https://api.openai.com/v1"}, &db.Account{})
-
-	got, err := adaptor.GetRequestURL("/v1/chat/completions")
-	if err != nil {
-		t.Fatalf("GetRequestURL: %v", err)
-	}
-	want := "https://api.openai.com/v1/responses"
-	if got != want {
-		t.Fatalf("codex_apikey request url = %q, want %q", got, want)
-	}
-}
-
 func TestDefaultEndpointSeparatesCodexOAuthFromOpenAIAPIKey(t *testing.T) {
 	if got := upstreamconfig.DefaultEndpoint("openai", "codex"); got != "https://chatgpt.com/backend-api/codex" {
 		t.Fatalf("codex endpoint = %q", got)
-	}
-	if got := upstreamconfig.DefaultEndpoint("openai", "codex_apikey"); got != "https://api.openai.com/v1" {
-		t.Fatalf("codex_apikey endpoint = %q", got)
 	}
 	if got := upstreamconfig.DefaultEndpoint("openai", "responses"); got != "https://api.openai.com/v1" {
 		t.Fatalf("openai responses endpoint = %q", got)

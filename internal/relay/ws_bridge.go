@@ -410,7 +410,7 @@ func wsCreateToNativeMessage(msg []byte) []byte {
 func channelUpstreamFormat(ch *db.Channel) provider.Format {
 	switch ch.Type {
 	case "openai":
-		if ch.APIFormat == "codex" || ch.APIFormat == "codex_apikey" {
+		if ch.APIFormat == "codex" {
 			return provider.FormatCodexResponses
 		}
 		if ch.APIFormat == "responses" {

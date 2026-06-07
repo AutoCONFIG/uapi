@@ -1253,7 +1253,6 @@ export function AdminChannelConsole() {
                   <div className="segmented">
                     <button className={draft.apiFormat === "standard" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "standard" }))} type="button">对话补全</button>
                     <button className={draft.apiFormat === "responses" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "responses" }))} type="button">响应接口</button>
-                    <button className={draft.apiFormat === "codex_apikey" ? "active" : ""} onClick={() => setDraft((d) => ({ ...d, apiFormat: "codex_apikey" }))} type="button">Codex 响应</button>
                   </div>
                 </div>
               ) : null}

@@ -159,7 +159,7 @@ func TestWSHTTPBridgeAppliesCachePolicy(t *testing.T) {
 
 func TestWSHTTPBridgeNormalizesCodexRequestShape(t *testing.T) {
 	body, err := convertWSHTTPBridgeRequestBody(
-		&db.Channel{Base: db.Base{ID: mustUUID(t, "11111111-1111-1111-1111-111111111111")}, Type: "openai", APIFormat: "codex_apikey"},
+		&db.Channel{Base: db.Base{ID: mustUUID(t, "11111111-1111-1111-1111-111111111111")}, Type: "openai", APIFormat: "codex"},
 		&db.Account{Base: db.Base{ID: mustUUID(t, "22222222-2222-2222-2222-222222222222")}},
 		nil,
 		[]byte(`{"type":"response.create","model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"reasoning":{"effort":"high"}}`),

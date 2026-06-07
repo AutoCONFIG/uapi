@@ -3461,7 +3461,7 @@ func isOAuthAPIFormat(format string) bool {
 }
 
 func isCodexAPIFormat(format string) bool {
-	return format == "codex" || format == "codex_apikey"
+	return format == "codex"
 }
 
 func permissionForFormat(format provider.Format) string {

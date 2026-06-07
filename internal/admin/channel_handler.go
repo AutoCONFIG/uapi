@@ -260,7 +260,7 @@ func (h *Handler) channelAccountsCompatibleWithAPIFormat(channelID uuid.UUID, ap
 }
 
 func isAPIKeyAPIFormat(apiFormat string) bool {
-	return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex_apikey"
+	return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses"
 }
 
 func resolveChannelTypeAndAPIFormat(existingType, existingAPIFormat string, requestedType, requestedAPIFormat *string) (string, string) {
@@ -296,7 +296,7 @@ func apiKeyAPIFormatForType(channelType, currentAPIFormat string) string {
 func validChannelFormatForType(channelType, apiFormat string) bool {
 	switch channelType {
 	case "openai":
-		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex" || apiFormat == "codex_apikey" || apiFormat == "chatgpt_reverse"
+		return apiFormat == "" || apiFormat == "standard" || apiFormat == "responses" || apiFormat == "codex" || apiFormat == "chatgpt_reverse"
 	case "gemini":
 		return apiFormat == "" || apiFormat == "standard" || apiFormat == "gemini_code"
 	case "anthropic":

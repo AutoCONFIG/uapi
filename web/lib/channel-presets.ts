@@ -49,7 +49,6 @@ export const oauthChannelPresets: ChannelPreset[] = [
 ];
 
 export const apiKeyChannelPresets: ChannelPreset[] = [
-  { id: "openai_codex_apikey", label: "OpenAI Codex API Key", type: "openai", apiFormat: "codex_apikey", auth: "apikey", endpoint: channelDefaults.openai, models: codexModels, forceStreamModels: codexModels, note: "Temporary API key channel using Codex Responses format" },
   { id: "openai_responses_api", label: "OpenAI Responses API", type: "openai", apiFormat: "responses", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Responses API" },
   { id: "openai_chat_completions", label: "OpenAI Chat Completions API", type: "openai", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.openai, models: "", note: "OpenAI Chat Completions API" },
   { id: "gemini_api", label: "Gemini API", type: "gemini", apiFormat: "standard", auth: "apikey", endpoint: channelDefaults.gemini, models: "", note: "Gemini generateContent API" },
@@ -109,7 +108,6 @@ export function presetTitleLines(preset: ChannelPreset): [string, string] {
     gemini_code: ["Google", "Gemini Code"],
     claude_code: ["Anthropic", "Claude Code"],
     chatgpt_reverse: ["OpenAI", "ChatGPT Reverse"],
-    openai_codex_apikey: ["OpenAI", "Codex API Key"],
     openai_responses_api: ["OpenAI", "Responses API"],
     openai_chat_completions: ["OpenAI", "Chat Completions"],
     gemini_api: ["Google", "Gemini API"],

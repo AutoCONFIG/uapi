@@ -190,7 +190,7 @@ func isOpenAIResponsesAPIFormat(format string) bool {
 }
 
 func isCodexResponsesAPIFormat(format string) bool {
-	return format == "codex" || format == "codex_apikey"
+	return format == "codex"
 }
 
 func metadataString(account *db.Account, key string) string {
