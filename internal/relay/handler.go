@@ -777,7 +777,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				if pt > 0 || ct > 0 {
 					go r.finishUsageWithRoutedModelFormatsCacheAndAdmin(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, 499, estTokens, adminInfo, r.clientIPForDirectRequest(ctx, claims))
 				} else {
-					go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, 499, estTokens, "client disconnected", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+					go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, 499, estTokens, "client disconnected", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 				}
 				return
 			}
@@ -786,13 +786,13 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				logger.Err(result.err),
 			)
 			logger.Warnf("relay.stream", "forward failed", logger.Err(result.err))
-			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, result.err.Error(), r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
 		if result.failed {
 			trace.Event("stream_result_upstream_failure", logger.F("status", fasthttp.StatusBadGateway))
 			logger.Warnf("relay.stream", "upstream stream reported failure")
-			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream reported failure", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
 		if result.emptyStream {
@@ -802,13 +802,13 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				logger.F("completion_tokens", result.completionTokens),
 			)
 			logger.Warnf("relay.stream", "upstream stream completed without payload events")
-			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream completed without payload events", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "upstream stream completed without payload events", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
 		if !result.finalized {
 			trace.Event("stream_result_missing_terminal", logger.F("status", fasthttp.StatusBadGateway))
 			logger.Warnf("relay.stream", "stream ended without terminal event")
-			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
+			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
 		{
@@ -1929,7 +1929,9 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 		r.runtimeMu.RLock()
 		channels := make([]db.Channel, 0, len(r.runtimeChannels))
 		for _, ch := range r.runtimeChannels {
-			channels = append(channels, ch)
+			if ch.Enabled {
+				channels = append(channels, ch)
+			}
 		}
 		r.runtimeMu.RUnlock()
 		channels = channelCandidatesForModelAndCapability(channels, model, capabilityReq, rand.Intn)
