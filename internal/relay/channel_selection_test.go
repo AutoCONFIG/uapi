@@ -164,6 +164,45 @@ func TestSessionFromMetadataUserIDRequiresCompleteLegacySessionSuffix(t *testing
 	}
 }
 
+func TestRouteLogAdminInfoOnlyMarksAffinityWhenScopeExists(t *testing.T) {
+	info := routeLogAdminInfo("", []map[string]interface{}{
+		{"source": "priority", "channel_id": "ch-1", "selected": true, "account_id": "acc-1"},
+	})
+	if _, ok := info["affinity"]; ok {
+		t.Fatalf("routeLogAdminInfo without scope must not include affinity: %#v", info)
+	}
+	if path, ok := info["route_path"].([]map[string]interface{}); !ok || len(path) != 1 {
+		t.Fatalf("route_path = %#v, want one attempt", info["route_path"])
+	}
+}
+
+func TestRouteLogAdminInfoMarksAffinityHitAndFallbackPath(t *testing.T) {
+	info := routeLogAdminInfo("codex:session-1234567890", []map[string]interface{}{
+		{"source": "affinity", "channel_id": "ch-1", "selected": true, "account_id": "acc-1", "affinity_account_id": "acc-1"},
+	})
+	affinity, ok := info["affinity"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing affinity info: %#v", info)
+	}
+	if hit, _ := affinity["hit"].(bool); !hit {
+		t.Fatalf("affinity hit = %#v, want true", affinity["hit"])
+	}
+	if affinity["source"] != "codex" {
+		t.Fatalf("affinity source = %#v, want codex", affinity["source"])
+	}
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, Name: "codex"}
+	from := &db.Account{Base: db.Base{ID: uuid.New()}, Name: "one"}
+	to := &db.Account{Base: db.Base{ID: uuid.New()}, Name: "two"}
+	appendRouteFallback(info, "buffered", ch, from, to, 429, "quota_exhausted", 1)
+	path, ok := info["fallback_path"].([]map[string]interface{})
+	if !ok || len(path) != 1 {
+		t.Fatalf("fallback_path = %#v, want one item", info["fallback_path"])
+	}
+	if path[0]["from_account_name"] != "one" || path[0]["to_account_name"] != "two" {
+		t.Fatalf("fallback_path item = %#v", path[0])
+	}
+}
+
 func TestUpstreamQuotaExhaustedDetection(t *testing.T) {
 	if !isUpstreamQuotaExhausted(fasthttp.StatusTooManyRequests, []byte(`{"error":{"message":"rate limited"}}`)) {
 		t.Fatalf("429 should be treated as quota/rate exhaustion")

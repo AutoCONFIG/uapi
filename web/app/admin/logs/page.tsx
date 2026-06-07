@@ -19,6 +19,33 @@ function cacheHitTokens(row: UsageLogItem) {
   return Number(row.cache_read_tokens ?? 0);
 }
 
+function textValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function routeSummary(row: UsageLogItem) {
+  const affinity = row.admin_info?.affinity;
+  const fallback = row.admin_info?.fallback_path ?? [];
+  const routePath = row.admin_info?.route_path ?? [];
+  const selected = row.admin_info?.selected ?? {};
+  const selectedSource = textValue(selected.source);
+  const selectedChannel = textValue(selected.name) || shortID(textValue(selected.channel_id));
+  return {
+    affinity,
+    fallback,
+    routePath,
+    selectedSource,
+    selectedChannel,
+  };
+}
+
+function fallbackLabel(item: Record<string, unknown>) {
+  const from = textValue(item.from_account_name) || shortID(textValue(item.from_account_id));
+  const to = textValue(item.to_account_name) || shortID(textValue(item.to_account_id));
+  const reason = textValue(item.reason) || "retry";
+  return `${from} → ${to} · ${reason}`;
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -78,9 +105,11 @@ export default function LogsPage() {
       <section className="card">
         <div className="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>用户</th><th>IP</th><th>账号</th><th>模型</th><th>格式</th><th>状态</th><th>Token</th><th>延迟</th></tr></thead>
+            <thead><tr><th>时间</th><th>用户</th><th>IP</th><th>账号</th><th>路由</th><th>模型</th><th>格式</th><th>状态</th><th>Token</th><th>延迟</th></tr></thead>
             <tbody>
-              {logs.map((row) => (
+              {logs.map((row) => {
+                const route = routeSummary(row);
+                return (
                 <tr key={row.id}>
                   <td>{new Date(row.created_at).toLocaleTimeString()}</td>
                   <td>
@@ -91,6 +120,32 @@ export default function LogsPage() {
                   <td>
                     <strong>{row.account_name || shortID(row.account_id)}</strong>
                     <div className="muted" style={{ fontSize: 12 }}>{row.channel_name || shortID(row.channel_id)} · {row.account_cred_type || "-"}</div>
+                  </td>
+                  <td>
+                    {route.affinity ? (
+                      <>
+                        <strong>{route.affinity.hit ? "亲和命中" : "亲和未命中"}</strong>
+                        <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                          {route.affinity.source || "-"}{route.affinity.key_hint ? ` · ${route.affinity.key_hint}` : ""}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <strong>未启用</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>无会话键</div>
+                      </>
+                    )}
+                    {route.fallback.length > 0 ? (
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                        回退 {route.fallback.map(fallbackLabel).join(" / ")}
+                      </div>
+                    ) : route.selectedSource ? (
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                        {route.selectedSource} · {route.selectedChannel || "-"}
+                      </div>
+                    ) : route.routePath.length > 0 ? (
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>尝试 {route.routePath.length} 个候选</div>
+                    ) : null}
                   </td>
                   <td>
                     <div style={{ whiteSpace: "nowrap" }}>
@@ -121,9 +176,9 @@ export default function LogsPage() {
                   </td>
                   <td>{row.latency_ms}ms</td>
                 </tr>
-              ))}
+              );})}
               {logs.length === 0 && !loading && (
-                <tr><td colSpan={9} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                <tr><td colSpan={10} className="muted" style={{ textAlign: "center", padding: 24 }}>
                   {loading ? "加载中…" : "暂无调用日志"}
                 </td></tr>
               )}

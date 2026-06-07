@@ -125,6 +125,17 @@ export type UsageLogItem = {
   latency_ms: number;
   status_code: number;
   error_message?: string;
+  admin_info?: {
+    affinity?: {
+      hit?: boolean;
+      source?: string;
+      key_hint?: string;
+      account_id?: string;
+    };
+    selected?: Record<string, unknown>;
+    route_path?: Array<Record<string, unknown>>;
+    fallback_path?: Array<Record<string, unknown>>;
+  };
 };
 
 export type UsageLogs = {
