@@ -75,15 +75,10 @@ func TestResolveChannelTypeAndAPIFormat(t *testing.T) {
 	}
 }
 
-func TestDefaultAffinityTTLForOAuthChannelFormats(t *testing.T) {
-	for _, format := range []string{"codex", "gemini_code", "claude_code", "antigravity"} {
+func TestDefaultAffinityTTLForChannelFormats(t *testing.T) {
+	for _, format := range []string{"", "standard", "responses", "chatgpt_reverse", "codex", "gemini_code", "claude_code", "antigravity"} {
 		if got := defaultAffinityTTLForChannel("openai", format); got != DefaultOAuthChannelAffinityTTL {
 			t.Fatalf("defaultAffinityTTLForChannel(%q) = %d, want %d", format, got, DefaultOAuthChannelAffinityTTL)
-		}
-	}
-	for _, format := range []string{"", "standard", "responses", "chatgpt_reverse"} {
-		if got := defaultAffinityTTLForChannel("openai", format); got != 0 {
-			t.Fatalf("defaultAffinityTTLForChannel(%q) = %d, want 0", format, got)
 		}
 	}
 }

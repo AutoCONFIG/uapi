@@ -201,12 +201,7 @@ func affinityTTLOrDefault(value *int, channelType, apiFormat string) int {
 }
 
 func defaultAffinityTTLForChannel(channelType, apiFormat string) int {
-	switch strings.TrimSpace(apiFormat) {
-	case "codex", "gemini_code", "claude_code", "antigravity":
-		return DefaultOAuthChannelAffinityTTL
-	default:
-		return 0
-	}
+	return DefaultOAuthChannelAffinityTTL
 }
 
 func normalizeAffinityTTL(value int) int {
