@@ -983,6 +983,100 @@ func TestStreamAndForwardConvertedPreservesEventNameForConverter(t *testing.T) {
 	}
 }
 
+func TestStreamAndForwardResponsesConvertsUpstreamErrorToFailedTerminal(t *testing.T) {
+	body := "event: error\n" +
+		"data: {\"type\":\"error\",\"message\":\"Server error '500 Internal Server Error'\"}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := newStreamConverterFunc(provider.FormatAnthropic, provider.FormatOpenAIResponses)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, false)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.failed || !result.finalized {
+		t.Fatalf("upstream error must become failed terminal stream: %+v\n%s", result, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "event: response.failed") || !strings.Contains(got, `"type":"response.failed"`) {
+		t.Fatalf("missing response.failed terminal event:\n%s", got)
+	}
+	if strings.Contains(got, "response.completed") {
+		t.Fatalf("upstream error must not emit response.completed:\n%s", got)
+	}
+}
+
+func TestPeekStreamBootstrapErrorDetectsFirstErrorEvent(t *testing.T) {
+	body := "event: error\n" +
+		"data: {\"type\":\"error\",\"message\":\"Server error '500 Internal Server Error'\"}\n\n"
+
+	replayed, message, failed, err := peekStreamBootstrapError(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("peek stream bootstrap: %v", err)
+	}
+	if !failed || !strings.Contains(message, "500 Internal Server Error") {
+		t.Fatalf("bootstrap error = (%q, %v), want 500 failure", message, failed)
+	}
+	out, err := io.ReadAll(replayed)
+	if err != nil {
+		t.Fatalf("read replayed stream: %v", err)
+	}
+	if string(out) != body {
+		t.Fatalf("replayed stream changed:\n%s", out)
+	}
+	if got := streamErrorHTTPStatus(message); got != 500 {
+		t.Fatalf("stream error status = %d, want 500", got)
+	}
+}
+
+func TestPeekStreamBootstrapErrorSkipsHeartbeatBeforeError(t *testing.T) {
+	body := ": ping\n\n" +
+		"event: error\n" +
+		"data: {\"type\":\"error\",\"message\":\"quota 429\"}\n\n"
+
+	replayed, message, failed, err := peekStreamBootstrapError(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("peek stream bootstrap: %v", err)
+	}
+	if !failed || message != "quota 429" {
+		t.Fatalf("bootstrap error = (%q, %v), want quota failure", message, failed)
+	}
+	out, err := io.ReadAll(replayed)
+	if err != nil {
+		t.Fatalf("read replayed stream: %v", err)
+	}
+	if string(out) != body {
+		t.Fatalf("replayed stream changed:\n%s", out)
+	}
+}
+
+func TestPeekStreamBootstrapErrorReplaysValidFirstEvent(t *testing.T) {
+	body := "event: message_start\n" +
+		"data: {\"type\":\"message_start\"}\n\n" +
+		"event: error\n" +
+		"data: {\"type\":\"error\",\"message\":\"late failure\"}\n\n"
+
+	replayed, message, failed, err := peekStreamBootstrapError(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("peek stream bootstrap: %v", err)
+	}
+	if failed || message != "" {
+		t.Fatalf("bootstrap error = (%q, %v), want no first-event failure", message, failed)
+	}
+	out, err := io.ReadAll(replayed)
+	if err != nil {
+		t.Fatalf("read replayed stream: %v", err)
+	}
+	if string(out) != body {
+		t.Fatalf("replayed stream changed:\n%s", out)
+	}
+}
+
 func TestNormalizeSSEEventPreservesSignificantDataWhitespace(t *testing.T) {
 	event := []byte("event: response.output_text.delta\n" +
 		"data: {\"delta\":\" leading and trailing \"}\n\n")

@@ -2,9 +2,11 @@ package relay
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,12 +14,34 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
+	"github.com/google/uuid"
 )
 
 const (
-	sseInitialBufSize = 8 * 1024
-	sseMaxBufSize     = 10 * 1024 * 1024
+	sseInitialBufSize            = 8 * 1024
+	sseMaxBufSize                = 10 * 1024 * 1024
+	sseBootstrapMaxSkippedEvents = 16
 )
+
+type prependedReadCloser struct {
+	prefix *bytes.Reader
+	reader io.Reader
+	closer io.Closer
+}
+
+func (r *prependedReadCloser) Read(p []byte) (int, error) {
+	if r.prefix != nil && r.prefix.Len() > 0 {
+		return r.prefix.Read(p)
+	}
+	return r.reader.Read(p)
+}
+
+func (r *prependedReadCloser) Close() error {
+	if r.closer == nil {
+		return nil
+	}
+	return r.closer.Close()
+}
 
 // streamResult carries streaming outcome from producer to main goroutine.
 type streamResult struct {
@@ -544,6 +568,62 @@ func streamAndForwardWithTrace(
 	return result
 }
 
+func peekStreamBootstrapError(bodyStream io.Reader) (io.Reader, string, bool, error) {
+	buffered := bufio.NewReaderSize(bodyStream, sseInitialBufSize)
+	var prefix []byte
+	closer, _ := bodyStream.(io.Closer)
+	wrapped := func() io.Reader {
+		return &prependedReadCloser{
+			prefix: bytes.NewReader(prefix),
+			reader: buffered,
+			closer: closer,
+		}
+	}
+
+	skippedEvents := 0
+	for len(prefix) <= sseMaxBufSize {
+		event, err := readNextSSEEvent(buffered)
+		if len(event) > 0 {
+			prefix = append(prefix, event...)
+			normalized := normalizeSSEEventForConverterWithEvent(event)
+			if len(normalized) > 0 {
+				if message, ok := streamErrorMessage(normalized); ok {
+					return wrapped(), message, true, nil
+				}
+				return wrapped(), "", false, nil
+			}
+			skippedEvents++
+			if skippedEvents >= sseBootstrapMaxSkippedEvents {
+				return wrapped(), "", false, nil
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return wrapped(), "", false, nil
+			}
+			return wrapped(), "", false, err
+		}
+	}
+	return wrapped(), "", false, errors.New("upstream stream bootstrap event too large")
+}
+
+func readNextSSEEvent(reader *bufio.Reader) ([]byte, error) {
+	var event []byte
+	for len(event) <= sseMaxBufSize {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			event = append(event, line...)
+			if strings.TrimSpace(string(line)) == "" {
+				return event, nil
+			}
+		}
+		if err != nil {
+			return event, err
+		}
+	}
+	return event, errors.New("upstream stream bootstrap event too large")
+}
+
 func streamDebugStateFields(trace *relayDebugTrace, mode string, sawDone, sawTerminal, sawChatFinish, failed bool, openEventBytes int, extra ...logger.Field) []logger.Field {
 	fields := []logger.Field{
 		logger.F("mode", mode),
@@ -590,12 +670,72 @@ func newStreamConverterFunc(upstreamFormat, clientFormat provider.Format) func([
 			return out
 		}
 		out := converter.Convert(line)
+		if len(out) == 0 && clientFormat == provider.FormatOpenAIResponses {
+			out = openAIResponsesFailedEventFromStreamError(line)
+		}
 		if streamHasTerminalEvent(out) || streamSawChatFinish(out) {
 			finished = true
 			converter.Reset()
 		}
 		return out
 	}
+}
+
+func openAIResponsesFailedEventFromStreamError(event []byte) []byte {
+	message, ok := streamErrorMessage(event)
+	if !ok {
+		return nil
+	}
+	respID := "resp_error_" + uuid.NewString()
+	payload, _ := json.Marshal(map[string]interface{}{
+		"type": "response.failed",
+		"response": map[string]interface{}{
+			"id":     respID,
+			"object": "response",
+			"status": "failed",
+			"error": map[string]interface{}{
+				"type":    "upstream_error",
+				"message": message,
+			},
+		},
+	})
+	return []byte("event: response.failed\ndata: " + string(payload) + "\n\n")
+}
+
+func streamErrorMessage(event []byte) (string, bool) {
+	for _, payload := range sseDataPayloads(event) {
+		var envelope struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Error   struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+			continue
+		}
+		if envelope.Type != "error" && envelope.Error.Message == "" {
+			continue
+		}
+		message := strings.TrimSpace(envelope.Message)
+		if message == "" {
+			message = strings.TrimSpace(envelope.Error.Message)
+		}
+		if message == "" {
+			message = "upstream stream error"
+		}
+		return message, true
+	}
+	return "", false
+}
+
+func streamErrorHTTPStatus(message string) int {
+	for _, status := range []int{400, 401, 403, 404, 408, 409, 413, 429, 500, 502, 503, 504} {
+		if strings.Contains(message, strconv.Itoa(status)) {
+			return status
+		}
+	}
+	return 0
 }
 
 func streamSawChatFinish(event []byte) bool {
@@ -816,6 +956,9 @@ func streamHasTerminalEvent(event []byte) bool {
 	if strings.Contains(s, "event: response.completed\n") ||
 		strings.Contains(s, "event: response.completed\r\n") ||
 		strings.Contains(s, `"type":"response.completed"`) ||
+		strings.Contains(s, "event: response.failed\n") ||
+		strings.Contains(s, "event: response.failed\r\n") ||
+		strings.Contains(s, `"type":"response.failed"`) ||
 		strings.Contains(s, "event: response.incomplete\n") ||
 		strings.Contains(s, "event: response.incomplete\r\n") ||
 		strings.Contains(s, `"type":"response.incomplete"`) ||
@@ -846,7 +989,7 @@ func streamHasTerminalEvent(event []byte) bool {
 			continue
 		}
 		switch envelope.Type {
-		case "response.completed", "response.incomplete", "message_stop":
+		case "response.completed", "response.failed", "response.incomplete", "message_stop":
 			return true
 		}
 		if isTerminalGeminiFinishReason(envelope.FinishReason) {

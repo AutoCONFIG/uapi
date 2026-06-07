@@ -115,7 +115,74 @@ func (h *WSHandler) httpBridgeFallback(
 			return false
 		}
 
-		go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body)
+		bodyStream := upResp.BodyStream()
+		if bodyStream == nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 502, "upstream_error", "upstream stream body missing")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			h.writeWSLog(sess.tokenID, ch.ID, currentAccount.ID, model, 0, 0, start, 502)
+			return false
+		}
+		peekedBodyStream, bootstrapMessage, bootstrapFailed, peekErr := peekStreamBootstrapError(bodyStream)
+		if peekErr != nil {
+			if closer, ok := peekedBodyStream.(io.Closer); ok {
+				_ = closer.Close()
+			}
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 502, "upstream_error", "read upstream stream failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			h.writeWSLog(sess.tokenID, ch.ID, currentAccount.ID, model, 0, 0, start, 502)
+			return false
+		}
+		if bootstrapFailed {
+			bootstrapStatus := streamErrorHTTPStatus(bootstrapMessage)
+			if bootstrapStatus == 0 {
+				bootstrapStatus = fasthttp.StatusBadGateway
+			}
+			bodyCopy := formatOpenAIError(bootstrapMessage)
+			failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(bootstrapStatus, bodyCopy)
+			if !accountFailover && bootstrapStatus >= 500 {
+				failoverReason = "upstream_stream_error"
+				accountFailover = true
+			}
+			if accountFailover && attempt < maxAttempts-1 {
+				if isQuota {
+					h.relayer.prepareAccountFailover(ch, currentAccount, bootstrapStatus, bodyCopy, true)
+				} else {
+					h.relayer.cooldownAndEvict(ch, currentAccount)
+				}
+				next := h.relayer.pickNext(ch, poolFromChannel(h.relayer.pools, ch))
+				if next != nil {
+					logger.Debugf("relay.ws", "bridge switching account after stream bootstrap error",
+						logger.F("channel_id", ch.ID.String()),
+						logger.F("from_account_id", currentAccount.ID.String()),
+						logger.F("account_id", next.ID.String()),
+						logger.F("status", bootstrapStatus),
+						logger.F("reason", failoverReason),
+					)
+					if closer, ok := peekedBodyStream.(io.Closer); ok {
+						_ = closer.Close()
+					}
+					fasthttp.ReleaseRequest(upReq)
+					fasthttp.ReleaseResponse(upResp)
+					currentAccount = next
+					continue
+				}
+			}
+			if closer, ok := peekedBodyStream.(io.Closer); ok {
+				_ = closer.Close()
+			}
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, fasthttp.StatusBadGateway, "upstream_error", bootstrapMessage)
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			h.writeWSLog(sess.tokenID, ch.ID, currentAccount.ID, model, 0, 0, start, fasthttp.StatusBadGateway)
+			return false
+		}
+
+		go h.bridgeSSEToWS(sess, upReq, upResp, peekedBodyStream, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body)
 		return true
 	}
 
@@ -163,6 +230,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	sess *Session,
 	upReq *fasthttp.Request,
 	upResp *fasthttp.Response,
+	bodyStream io.Reader,
 	adaptor provider.Adaptor,
 	ch *db.Channel,
 	acc *db.Account,
@@ -188,7 +256,6 @@ func (h *WSHandler) bridgeSSEToWS(
 
 	tracker := newStreamTracker(adaptor)
 
-	bodyStream := upResp.BodyStream()
 	if bodyStream == nil {
 		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, 502)

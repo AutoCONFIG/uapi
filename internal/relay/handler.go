@@ -728,6 +728,78 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		return
 	}
 
+	rawBodyStream := upResp.BodyStream()
+	if rawBodyStream == nil {
+		trace.Event("stream_bootstrap_missing_body", logger.F("status", fasthttp.StatusBadGateway))
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream stream body missing", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+		return
+	}
+	bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(rawBodyStream, rawBodyStream, r.streamIdleTimeout)
+	peekedBodyStream, bootstrapMessage, bootstrapFailed, peekErr := peekStreamBootstrapError(bodyStream)
+	if peekErr != nil {
+		trace.Event("stream_bootstrap_peek_failed", logger.Err(peekErr), logger.F("status", fasthttp.StatusBadGateway))
+		_ = bodyStream.Close()
+		stopIdleTimeout()
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "read upstream stream failed", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
+		return
+	}
+	if bootstrapFailed {
+		bootstrapStatus := streamErrorHTTPStatus(bootstrapMessage)
+		if bootstrapStatus == 0 {
+			bootstrapStatus = fasthttp.StatusBadGateway
+		}
+		bodyCopy := formatOpenAIError(bootstrapMessage)
+		trace.Event("stream_bootstrap_error",
+			logger.F("status", bootstrapStatus),
+			logger.F("body_preview", compactLogBody(bodyCopy)),
+			logger.F("quota_attempts", quotaAttempts),
+		)
+		failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(bootstrapStatus, bodyCopy)
+		if !accountFailover && bootstrapStatus >= 500 {
+			failoverReason = "upstream_stream_error"
+			accountFailover = true
+		}
+		if accountFailover && quotaAttempts < r.accountAttemptLimit(ch) {
+			if isQuota {
+				r.prepareAccountFailover(ch, acc, bootstrapStatus, bodyCopy, true)
+			} else {
+				r.cooldownAndEvict(ch, acc)
+			}
+			next := r.pickNext(ch, poolFromChannel(r.pools, ch))
+			if next != nil {
+				nextCreds, credErr := r.ensureCredentials(ch, next)
+				if credErr == nil {
+					trace.Event("stream_bootstrap_retry_switch_account",
+						logger.F("status", bootstrapStatus),
+						logger.F("reason", failoverReason),
+						logger.F("from_account_id", acc.ID.String()),
+						logger.F("account_id", next.ID.String()),
+						logger.F("quota_attempts", quotaAttempts+1),
+					)
+					_ = bodyStream.Close()
+					stopIdleTimeout()
+					fasthttp.ReleaseRequest(upReq)
+					fasthttp.ReleaseResponse(upResp)
+					adaptor.Init(ch, next)
+					appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, failoverReason, quotaAttempts+1)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, trace, adminInfo)
+					return
+				}
+				trace.Event("stream_bootstrap_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
+			}
+		}
+		_ = bodyStream.Close()
+		stopIdleTimeout()
+		fasthttp.ReleaseRequest(upReq)
+		fasthttp.ReleaseResponse(upResp)
+		r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
+		return
+	}
+
 	// SSE headers for downstream
 	ctx.SetStatusCode(statusCode)
 	ctx.Response.Header.Set("Content-Type", "text/event-stream")
@@ -756,10 +828,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		defer fasthttp.ReleaseRequest(upReq)
 		defer releaseStreamingResponse(upResp)
 		defer r.releaseLocalConcurrency(token.ID.String(), claims)
-
-		bodyStream, stopIdleTimeout := httputil.NewIdleTimeoutReader(upResp.BodyStream(), upResp.BodyStream(), r.streamIdleTimeout)
 		defer stopIdleTimeout()
-		result := streamAndForwardWithTrace(bodyStream, reader, tracker, inputConvert, outputConvert, sendDone, trace)
+		result := streamAndForwardWithTrace(peekedBodyStream, reader, tracker, inputConvert, outputConvert, sendDone, trace)
 		if result.err != nil {
 			if errors.Is(result.err, io.ErrClosedPipe) {
 				pt, ct, _ := tracker.Result()
