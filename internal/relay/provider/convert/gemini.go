@@ -215,8 +215,9 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 	}
 	names := toolCallNameByIDIR(reqIR.Turns)
 	var contents []map[string]interface{}
+	state := &geminiProjectionState{}
 	for _, turn := range reqIR.Turns {
-		parts, err := geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names)
+		parts, err := geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names, state)
 		if err != nil {
 			return nil, err
 		}
@@ -315,11 +316,15 @@ func geminiThinkingFromIRRequest(req *relayir.Request) interface{} {
 	return geminiThinkingFromReasoning(req.Generation.Reasoning)
 }
 
+type geminiProjectionState struct {
+	thoughtSignature string
+}
+
 func isGeminiEnvelopeProtocol(protocol relayir.Protocol) bool {
 	return protocol == relayir.ProtocolGeminiCLI || protocol == relayir.ProtocolGeminiCode || protocol == relayir.ProtocolAntigravity
 }
 
-func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string) ([]map[string]interface{}, error) {
+func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map[string]string, state *geminiProjectionState) ([]map[string]interface{}, error) {
 	parts := make([]map[string]interface{}, 0, len(turn.Items))
 	for _, item := range turn.Items {
 		if isAnthropicTransportTextItem(item) {
@@ -337,7 +342,9 @@ func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map
 			return nil, err
 		}
 		if part != nil {
+			applyGeminiThoughtSignature(state, part)
 			parts = append(parts, part)
+			rememberGeminiThoughtSignature(state, part)
 		}
 	}
 	return parts, nil
@@ -367,6 +374,28 @@ func geminiPartFromIRItem(item relayir.Item, names map[string]string) (map[strin
 		}
 	}
 	return nil, nil
+}
+
+func applyGeminiThoughtSignature(state *geminiProjectionState, part map[string]interface{}) {
+	if state == nil || state.thoughtSignature == "" {
+		return
+	}
+	if _, ok := part["functionCall"]; !ok {
+		return
+	}
+	if sig, _ := part["thoughtSignature"].(string); sig != "" {
+		return
+	}
+	part["thoughtSignature"] = state.thoughtSignature
+}
+
+func rememberGeminiThoughtSignature(state *geminiProjectionState, part map[string]interface{}) {
+	if state == nil {
+		return
+	}
+	if sig, _ := part["thoughtSignature"].(string); sig != "" {
+		state.thoughtSignature = sig
+	}
 }
 
 func toolCallNameByIDIR(turns []relayir.Turn) map[string]string {

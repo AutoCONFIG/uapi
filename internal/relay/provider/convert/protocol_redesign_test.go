@@ -647,6 +647,70 @@ func TestAnthropicStringToolResultsToGeminiUseStructResponses(t *testing.T) {
 	}
 }
 
+func TestResponsesEncryptedReasoningAttachesGeminiFunctionCallThoughtSignature(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"reasoning","summary":[],"encrypted_content":"sig_resp_1"},
+			{"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"ls -F\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	callPart := findObjectWithKey(got["contents"].([]interface{})[1].(map[string]interface{})["parts"].([]interface{}), "functionCall")
+	if callPart["thoughtSignature"] != "sig_resp_1" {
+		t.Fatalf("functionCall thoughtSignature = %#v, want sig_resp_1:\n%s", callPart["thoughtSignature"], converted)
+	}
+}
+
+func TestAnthropicRedactedThinkingAttachesGeminiFunctionCallThoughtSignature(t *testing.T) {
+	body := []byte(`{
+		"model":"claude",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"redacted_thinking","data":"sig_anthropic_1"},
+				{"type":"thinking","thinking":"plan","signature":""},
+				{"type":"tool_use","id":"call_1","name":"TaskCreate","input":{"title":"调查"}},
+				{"type":"tool_use","id":"call_2","name":"Bash","input":{"command":"ls -R"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"created"},
+				{"type":"tool_result","tool_use_id":"call_2","content":"files"}
+			]}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	parts := got["contents"].([]interface{})[0].(map[string]interface{})["parts"].([]interface{})
+	seen := 0
+	for _, rawPart := range parts {
+		part := rawPart.(map[string]interface{})
+		if _, ok := part["functionCall"]; !ok {
+			continue
+		}
+		seen++
+		if part["thoughtSignature"] != "sig_anthropic_1" {
+			t.Fatalf("functionCall thoughtSignature = %#v, want sig_anthropic_1:\n%s", part["thoughtSignature"], converted)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("functionCall count = %d, want 2:\n%s", seen, converted)
+	}
+}
+
 func TestCrossProtocolResponseConversions(t *testing.T) {
 	openAIResp := []byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
 	tests := []struct {
