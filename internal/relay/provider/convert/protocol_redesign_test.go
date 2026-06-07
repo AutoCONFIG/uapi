@@ -641,6 +641,44 @@ func TestCrossProtocolResponseConversions(t *testing.T) {
 	}
 }
 
+func TestGeminiResponseFunctionCallWithoutIDConvertsToAnthropicToolUse(t *testing.T) {
+	body := []byte(`{
+		"response":{
+			"candidates":[{
+				"index":0,
+				"content":{"role":"model","parts":[
+					{"thoughtSignature":"sig","functionCall":{"name":"Skill","args":{"skill":"brainstorming"}}}
+				]},
+				"finishReason":"STOP"
+			}],
+			"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}
+		}
+	}`)
+	converted, err := convert.ConvertResponse(convert.FormatGeminiCode, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("ConvertResponse: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted response: %v\n%s", err, converted)
+	}
+	blocks := got["content"].([]interface{})
+	toolUse := findObjectByType(blocks, "tool_use")
+	if toolUse["id"] == "" {
+		t.Fatalf("Gemini functionCall without id must synthesize Anthropic tool_use.id: %s", converted)
+	}
+	if toolUse["name"] != "Skill" {
+		t.Fatalf("tool_use name = %#v, want Skill: %s", toolUse["name"], converted)
+	}
+	input, ok := toolUse["input"].(map[string]interface{})
+	if !ok || input["skill"] != "brainstorming" {
+		t.Fatalf("tool_use input not preserved as object: %s", converted)
+	}
+	if got["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason = %#v, want tool_use: %s", got["stop_reason"], converted)
+	}
+}
+
 func TestConvertRequestWithAdaptorUsesNewRegistry(t *testing.T) {
 	adaptor := &anthropic.AnthropicAdaptor{}
 	adaptor.Init(&db.Channel{Type: "anthropic", APIFormat: "standard"}, &db.Account{})

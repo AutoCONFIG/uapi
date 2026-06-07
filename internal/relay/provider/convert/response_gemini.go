@@ -56,6 +56,9 @@ func parseGeminiResponseDirectIR(body []byte) (*relayir.Response, error) {
 				choice.Items = append(choice.Items, geminiResponsePartToIRItem(part, idx))
 			}
 		}
+		if choiceHasToolUse(choice) && choice.Finish != nil && choice.Finish.Reason == relayir.FinishStop {
+			choice.Finish.Reason = relayir.FinishToolCall
+		}
 		if cand.FinishReason == "SAFETY" || len(cand.SafetyRatings) > 0 {
 			choice.Items = append(choice.Items, geminiSafetyBlockItem(cand.FinishReason, cand.FinishMessage, rawJSON(cand), len(choice.Items)))
 			choice.Losses = append(choice.Losses, irloss(FormatGemini, "", "$.candidates[].safetyRatings", "safetyRatings", cand.SafetyRatings, "Gemini safety ratings are preserved as IR safety_block native metadata"))
@@ -65,12 +68,28 @@ func parseGeminiResponseDirectIR(body []byte) (*relayir.Response, error) {
 	return out, nil
 }
 
+func choiceHasToolUse(choice relayir.Choice) bool {
+	for _, item := range choice.Items {
+		if item.Kind == relayir.ItemToolUse || item.Kind == relayir.ItemFunctionCall {
+			return true
+		}
+	}
+	return false
+}
+
 func geminiResponsePartToIRItem(part schema.GeminiPart, idx int) relayir.Item {
+	if part.FunctionCall != nil && part.FunctionCall.ID == "" {
+		part.FunctionCall.ID = geminiSyntheticResponseToolCallID(idx)
+	}
 	item := geminiPartToIRItem(part, idx, nil, "$.candidates[].content.parts[]")
 	if part.FunctionResponse != nil {
 		item.Losses = append(item.Losses, geminiFunctionResponseLosses(part.FunctionResponse)...)
 	}
 	return item
+}
+
+func geminiSyntheticResponseToolCallID(idx int) string {
+	return fmt.Sprintf("toolu_gemini_%d", idx)
 }
 
 func geminiSafetyBlockItem(reason, message string, raw json.RawMessage, index int) relayir.Item {

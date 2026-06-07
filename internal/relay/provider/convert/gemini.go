@@ -121,7 +121,7 @@ func geminiPartToIRItem(part schema.GeminiPart, idx int, req *relayir.Request, p
 		}
 		return irContentPartItem(contentItemKindContent, schema.ContentPart{Type: "file", FileData: dataURI, FileType: part.InlineData.MimeType, MimeType: part.InlineData.MimeType}, rawPart, FormatGemini, idx)
 	case part.FunctionCall != nil:
-		return irToolUseItem(schema.ToolCall{Type: "function", Name: part.FunctionCall.Name, Function: struct {
+		return irToolUseItem(schema.ToolCall{ID: part.FunctionCall.ID, Type: "function", Name: part.FunctionCall.Name, Function: struct {
 			Name      string `json:"name"`
 			Arguments string `json:"arguments"`
 		}{Name: part.FunctionCall.Name, Arguments: string(part.FunctionCall.Args)}}, rawPart, FormatGemini, idx)
@@ -531,12 +531,14 @@ func geminiToolCallPart(tc schema.ToolCall) map[string]interface{} {
 	if name == "" {
 		name = tc.Function.Name
 	}
-	return map[string]interface{}{
-		"functionCall": map[string]interface{}{
-			"name": name,
-			"args": jsonArgumentValue(tc.Function.Arguments),
-		},
+	call := map[string]interface{}{
+		"name": name,
+		"args": jsonArgumentValue(tc.Function.Arguments),
 	}
+	if tc.ID != "" {
+		call["id"] = tc.ID
+	}
+	return map[string]interface{}{"functionCall": call}
 }
 
 func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]string) map[string]interface{} {

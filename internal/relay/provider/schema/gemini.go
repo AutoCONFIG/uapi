@@ -118,6 +118,7 @@ func geminiBlobFromRaw(raw json.RawMessage) *GeminiBlob {
 
 // GeminiFuncCall represents a function call in a Gemini part.
 type GeminiFuncCall struct {
+	ID   string          `json:"id,omitempty"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
