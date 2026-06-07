@@ -118,6 +118,31 @@ func TestAccountPoolPickByIDRequiresAvailableWeight(t *testing.T) {
 	}
 }
 
+func TestTerminalAccountErrorCoolsDownWithoutDisabling(t *testing.T) {
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}}
+	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{acc1, acc2})
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	relayer := &Relayer{pools: pools}
+
+	relayer.cooldownAccountOnTerminalUpstreamError(ch, acc1, fasthttp.StatusForbidden, []byte(`{"error":{"status":"PERMISSION_DENIED","message":"permission denied"}}`))
+
+	if !acc1.Enabled {
+		t.Fatalf("terminal account error must not hard-disable the account")
+	}
+	if got, _ := acc1.Metadata["auto_disable_reason"].(string); got != "permission_denied" {
+		t.Fatalf("auto_disable_reason = %q, want permission_denied", got)
+	}
+	if _, ok := pool.PickByID(acc1.ID.String()); ok {
+		t.Fatalf("cooled-down terminal-error account must not be selected")
+	}
+	if got, ok := pool.PickByID(acc2.ID.String()); !ok || got.ID != acc2.ID {
+		t.Fatalf("healthy account should remain selectable")
+	}
+}
+
 func TestAffinityCacheStoresSessionScopedAccount(t *testing.T) {
 	cache := NewAffinityCache()
 	cache.Set("token-1", "gpt-5.5", "session-a", "channel-1", "account-1", 60)

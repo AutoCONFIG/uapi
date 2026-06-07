@@ -110,6 +110,10 @@ func (p *AccountPool) Stats() AccountPoolStats {
 }
 
 func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
+	p.CooldownUntil(accountID, time.Now().Add(duration))
+}
+
+func (p *AccountPool) CooldownUntil(accountID string, until time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i := range p.accounts {
@@ -120,10 +124,13 @@ func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
 			p.totalWeight -= p.accounts[i].Weight
 			p.accounts[i].Weight = 0
 			p.accounts[i].CurrentWeight = 0
-			until := time.Now().Add(duration)
 			p.accounts[i].Account.CooldownUntil = &until
 			cooldownID := p.accounts[i].Account.ID.String()
 			cooldownWeight := p.accounts[i].OriginalWeight
+			duration := time.Until(until)
+			if duration < 0 {
+				duration = 0
+			}
 			time.AfterFunc(duration, func() {
 				p.mu.Lock()
 				defer p.mu.Unlock()
