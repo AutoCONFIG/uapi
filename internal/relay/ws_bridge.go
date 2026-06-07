@@ -361,62 +361,44 @@ func wsSSEEventType(data []byte) string {
 // The client sends: {"type":"response.create","model":"...","input":[...],...}
 // The HTTP endpoint expects just the request params with stream=true.
 func wsCreateToHTTPBody(msg []byte) []byte {
-	var evt WSResponseCreateEvent
-	if err := json.Unmarshal(msg, &evt); err != nil {
+	var bodyMap map[string]interface{}
+	if err := provider.DecodeJSONUseNumber(msg, &bodyMap); err != nil {
 		return msg
 	}
-
-	bodyMap := make(map[string]interface{})
-	bodyMap["model"] = evt.Model
+	if nested, _ := bodyMap["response"].(map[string]interface{}); nested != nil {
+		bodyMap = nested
+	}
+	delete(bodyMap, "type")
+	delete(bodyMap, "event_id")
+	delete(bodyMap, "response")
 	bodyMap["stream"] = true
-	if evt.Input != nil {
-		bodyMap["input"] = json.RawMessage(evt.Input)
+
+	data, _ := json.Marshal(bodyMap)
+	return cleanJSONUndefinedPlaceholders(data)
+}
+
+// wsCreateToNativeMessage converts a downstream response.create payload to the
+// official Responses WebSocket create event. The WS protocol carries
+// type=response.create but does not need HTTP-only stream/background flags.
+func wsCreateToNativeMessage(msg []byte) []byte {
+	var bodyMap map[string]interface{}
+	if err := provider.DecodeJSONUseNumber(msg, &bodyMap); err != nil {
+		return cleanJSONUndefinedPlaceholders(msg)
 	}
-	if evt.Instructions != "" {
-		bodyMap["instructions"] = evt.Instructions
+	if nested, _ := bodyMap["response"].(map[string]interface{}); nested != nil {
+		flattened := make(map[string]interface{}, len(nested)+2)
+		for key, value := range nested {
+			flattened[key] = value
+		}
+		if eventID, ok := bodyMap["event_id"]; ok {
+			flattened["event_id"] = eventID
+		}
+		bodyMap = flattened
 	}
-	if evt.MaxOutputTokens > 0 {
-		bodyMap["max_output_tokens"] = evt.MaxOutputTokens
-	}
-	if evt.Temperature != nil {
-		bodyMap["temperature"] = *evt.Temperature
-	}
-	if evt.TopP != nil {
-		bodyMap["top_p"] = *evt.TopP
-	}
-	if evt.Tools != nil {
-		bodyMap["tools"] = json.RawMessage(evt.Tools)
-	}
-	if evt.ToolChoice != nil {
-		bodyMap["tool_choice"] = json.RawMessage(evt.ToolChoice)
-	}
-	if evt.PreviousResponseID != "" {
-		bodyMap["previous_response_id"] = evt.PreviousResponseID
-	}
-	if evt.Reasoning != nil {
-		bodyMap["reasoning"] = json.RawMessage(evt.Reasoning)
-	}
-	if evt.Include != nil {
-		bodyMap["include"] = json.RawMessage(evt.Include)
-	}
-	if evt.PromptCacheKey != "" {
-		bodyMap["prompt_cache_key"] = evt.PromptCacheKey
-	}
-	if evt.ClientMetadata != nil {
-		bodyMap["client_metadata"] = json.RawMessage(evt.ClientMetadata)
-	}
-	if evt.Text != nil {
-		bodyMap["text"] = json.RawMessage(evt.Text)
-	}
-	if evt.ServiceTier != "" {
-		bodyMap["service_tier"] = evt.ServiceTier
-	}
-	if evt.Store != nil {
-		bodyMap["store"] = *evt.Store
-	}
-	if evt.Metadata != nil {
-		bodyMap["metadata"] = json.RawMessage(evt.Metadata)
-	}
+	bodyMap["type"] = WSEventResponseCreate
+	delete(bodyMap, "stream")
+	delete(bodyMap, "background")
+	delete(bodyMap, "response")
 
 	data, _ := json.Marshal(bodyMap)
 	return cleanJSONUndefinedPlaceholders(data)

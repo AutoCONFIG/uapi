@@ -80,8 +80,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 
 	// 3. Forward response.create to upstream after request cleanup.
-	// The client sends the flat format that OpenAI expects directly.
-	forwardMsg := cleanJSONUndefinedPlaceholders(msg)
+	forwardMsg := wsCreateToNativeMessage(msg)
 	upstreamConn.writeMu.Lock()
 	err = upstreamConn.conn.WriteMessage(ws.TextMessage, forwardMsg)
 	upstreamConn.writeMu.Unlock()

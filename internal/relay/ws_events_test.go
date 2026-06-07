@@ -72,6 +72,72 @@ func TestWSCreateToHTTPBodyCleansUndefinedPlaceholders(t *testing.T) {
 	}
 }
 
+func TestWSCreateToHTTPBodyPreservesResponsesFields(t *testing.T) {
+	body := wsCreateToHTTPBody([]byte(`{"type":"response.create","event_id":"evt_1","model":"gpt-test","input":[],"parallel_tool_calls":false,"max_tool_calls":3,"tool_choice":"auto","stream":false}`))
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("ws http body is not JSON: %v", err)
+	}
+	if _, ok := decoded["type"]; ok {
+		t.Fatalf("type should be stripped from HTTP body: %s", body)
+	}
+	if _, ok := decoded["event_id"]; ok {
+		t.Fatalf("event_id should be stripped from HTTP body: %s", body)
+	}
+	if decoded["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls not preserved: %#v", decoded["parallel_tool_calls"])
+	}
+	if decoded["max_tool_calls"] == nil {
+		t.Fatalf("max_tool_calls not preserved: %s", body)
+	}
+	if decoded["stream"] != true {
+		t.Fatalf("stream should be forced true: %#v", decoded["stream"])
+	}
+}
+
+func TestWSCreateToNativeMessageDropsHTTPOnlyFields(t *testing.T) {
+	body := wsCreateToNativeMessage([]byte(`{"type":"response.create","event_id":"evt_1","model":"gpt-test","input":"hi","stream":true,"background":true,"parallel_tool_calls":false}`))
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("native ws body is not JSON: %v", err)
+	}
+	if decoded["type"] != WSEventResponseCreate {
+		t.Fatalf("type = %#v, want response.create", decoded["type"])
+	}
+	if decoded["model"] != "gpt-test" || decoded["input"] != "hi" {
+		t.Fatalf("payload fields not preserved: %s", body)
+	}
+	if decoded["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls not preserved: %#v", decoded["parallel_tool_calls"])
+	}
+	if _, ok := decoded["stream"]; ok {
+		t.Fatalf("stream should be stripped for native WS: %s", body)
+	}
+	if _, ok := decoded["background"]; ok {
+		t.Fatalf("background should be stripped for native WS: %s", body)
+	}
+}
+
+func TestWSCreateToNativeMessageFlattensNestedResponse(t *testing.T) {
+	body := wsCreateToNativeMessage([]byte(`{"type":"response.create","event_id":"evt_1","response":{"model":"gpt-test","input":"hi","stream":true}}`))
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("native ws body is not JSON: %v", err)
+	}
+	if decoded["type"] != WSEventResponseCreate || decoded["event_id"] != "evt_1" {
+		t.Fatalf("native envelope fields not normalized: %s", body)
+	}
+	if decoded["model"] != "gpt-test" || decoded["input"] != "hi" {
+		t.Fatalf("nested response not flattened: %s", body)
+	}
+	if _, ok := decoded["response"]; ok {
+		t.Fatalf("response wrapper should be stripped: %s", body)
+	}
+	if _, ok := decoded["stream"]; ok {
+		t.Fatalf("stream should be stripped for native WS: %s", body)
+	}
+}
+
 func TestWSHTTPBridgeAppliesCachePolicy(t *testing.T) {
 	body, err := convertWSHTTPBridgeRequestBody(
 		&db.Channel{Type: "openai", APIFormat: "responses"},
