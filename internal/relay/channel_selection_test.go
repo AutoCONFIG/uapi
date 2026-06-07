@@ -203,6 +203,30 @@ func TestRouteLogAdminInfoMarksAffinityHitAndFallbackPath(t *testing.T) {
 	}
 }
 
+func TestRouteSelectionErrorDistinguishesNoAccountFromNoChannel(t *testing.T) {
+	attempts := []map[string]interface{}{
+		{
+			"supports_model":      true,
+			"supports_capability": true,
+			"skip_reason":         "no available account",
+		},
+	}
+	if err := routeSelectionError(&attempts); err != errNoAccount {
+		t.Fatalf("routeSelectionError = %v, want %v", err, errNoAccount)
+	}
+
+	attempts = []map[string]interface{}{
+		{
+			"supports_model":      false,
+			"supports_capability": true,
+			"skip_reason":         "unsupported_model",
+		},
+	}
+	if err := routeSelectionError(&attempts); err != errNoChannel {
+		t.Fatalf("routeSelectionError = %v, want %v", err, errNoChannel)
+	}
+}
+
 func TestUpstreamQuotaExhaustedDetection(t *testing.T) {
 	if !isUpstreamQuotaExhausted(fasthttp.StatusTooManyRequests, []byte(`{"error":{"message":"rate limited"}}`)) {
 		t.Fatalf("429 should be treated as quota/rate exhaustion")

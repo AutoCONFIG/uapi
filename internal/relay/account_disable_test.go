@@ -118,6 +118,23 @@ func TestAccountPoolPickByIDRequiresAvailableWeight(t *testing.T) {
 	}
 }
 
+func TestAccountPoolPickExcludingSkipsOnlyForCurrentRequest(t *testing.T) {
+	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{acc1, acc2})
+
+	got, ok := pool.PickExcluding(map[string]bool{acc1.ID.String(): true})
+	if !ok || got.ID != acc2.ID {
+		t.Fatalf("PickExcluding = (%v,%v), want second account", got, ok)
+	}
+	if count := pool.AvailableCount(); count != 2 {
+		t.Fatalf("PickExcluding must not mutate global availability, got %d", count)
+	}
+	if _, ok := pool.PickByID(acc1.ID.String()); !ok {
+		t.Fatalf("excluded account must remain globally available")
+	}
+}
+
 func TestTerminalAccountErrorCoolsDownWithoutDisabling(t *testing.T) {
 	ch := &db.Channel{Base: db.Base{ID: uuid.New()}}
 	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
@@ -156,5 +173,24 @@ func TestAffinityCacheStoresSessionScopedAccount(t *testing.T) {
 	}
 	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-c"); ch != "" || acc != "" {
 		t.Fatalf("unexpected affinity miss value = (%q,%q)", ch, acc)
+	}
+}
+
+func TestAffinityCacheEvictsOnlyFailedAccount(t *testing.T) {
+	cache := NewAffinityCache()
+	cache.Set("token-1", "gpt-5.5", "session-a", "channel-1", "account-1", 60)
+	cache.Set("token-1", "gpt-5.5", "session-b", "channel-1", "account-2", 60)
+	cache.Set("token-1", "gpt-5.5", "session-c", "channel-2", "account-1", 60)
+
+	cache.EvictAccount("channel-1", "account-1")
+
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-a"); ch != "" || acc != "" {
+		t.Fatalf("failed account affinity should be evicted, got (%q,%q)", ch, acc)
+	}
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-b"); ch != "channel-1" || acc != "account-2" {
+		t.Fatalf("other account affinity = (%q,%q), want channel-1/account-2", ch, acc)
+	}
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-c"); ch != "channel-2" || acc != "account-1" {
+		t.Fatalf("same account on another channel = (%q,%q), want channel-2/account-1", ch, acc)
 	}
 }

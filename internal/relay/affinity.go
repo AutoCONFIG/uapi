@@ -86,5 +86,16 @@ func (ac *AffinityCache) EvictChannel(channelID string) {
 	}
 }
 
+// EvictAccount removes entries pointing to a specific channel/account pair.
+func (ac *AffinityCache) EvictAccount(channelID, accountID string) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	for k, v := range ac.entries {
+		if v.channelID == channelID && v.accountID == accountID {
+			delete(ac.entries, k)
+		}
+	}
+}
+
 // Close is kept for server lifecycle symmetry. Expired entries are removed lazily on access.
 func (ac *AffinityCache) Close() {}

@@ -58,22 +58,48 @@ func (p *AccountPool) Pick() (*db.Account, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.totalWeight == 0 {
+	return p.pickLocked(nil)
+}
+
+func (p *AccountPool) PickExcluding(excluded map[string]bool) (*db.Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pickLocked(excluded)
+}
+
+func (p *AccountPool) pickLocked(excluded map[string]bool) (*db.Account, bool) {
+	totalWeight := 0
+	for i := range p.accounts {
+		if p.accounts[i].Weight <= 0 {
+			continue
+		}
+		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+			continue
+		}
+		totalWeight += p.accounts[i].Weight
+	}
+	if totalWeight == 0 {
 		return nil, false
 	}
 
 	var best *WeightedAccount
 	for i := range p.accounts {
+		if p.accounts[i].Weight <= 0 {
+			continue
+		}
+		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+			continue
+		}
 		p.accounts[i].CurrentWeight += p.accounts[i].Weight
 		if best == nil || p.accounts[i].CurrentWeight > best.CurrentWeight {
 			best = &p.accounts[i]
 		}
 	}
-	if best != nil {
-		best.CurrentWeight -= p.totalWeight
-		return best.Account, true
+	if best == nil {
+		return nil, false
 	}
-	return nil, false
+	best.CurrentWeight -= totalWeight
+	return best.Account, true
 }
 
 func (p *AccountPool) PickByID(accountID string) (*db.Account, bool) {
