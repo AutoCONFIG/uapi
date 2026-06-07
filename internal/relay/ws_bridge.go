@@ -94,19 +94,16 @@ func (h *WSHandler) httpBridgeFallback(
 			bodyCopy := readUpstreamErrorBody(upResp)
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
-			if isUpstreamQuotaExhausted(statusCode, bodyCopy) && attempt < maxAttempts-1 {
-				if h.relayer.quotaScheduler != nil && currentAccount != nil && ch != nil {
-					h.relayer.quotaScheduler.On429(currentAccount.ID, ch.ID)
-				}
-				h.relayer.markAutoDisable(currentAccount, "quota_exhausted")
-				h.relayer.cooldownAndEvict(ch, currentAccount)
+			if failoverReason, isQuota, ok := upstreamAccountFailoverReason(statusCode, bodyCopy); ok && attempt < maxAttempts-1 {
+				h.relayer.prepareAccountFailover(ch, currentAccount, statusCode, bodyCopy, isQuota)
 				next := h.relayer.pickNext(ch, poolFromChannel(h.relayer.pools, ch))
 				if next != nil {
-					logger.Debugf("relay.ws", "bridge switching account after quota error",
+					logger.Debugf("relay.ws", "bridge switching account after upstream account error",
 						logger.F("channel_id", ch.ID.String()),
 						logger.F("from_account_id", currentAccount.ID.String()),
 						logger.F("account_id", next.ID.String()),
 						logger.F("status", statusCode),
+						logger.F("reason", failoverReason),
 					)
 					currentAccount = next
 					continue

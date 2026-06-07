@@ -699,18 +699,15 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				return
 			}
 		}
-		if isUpstreamQuotaExhausted(statusCode, bodyCopy) && quotaAttempts < r.accountAttemptLimit(ch) {
-			if r.quotaScheduler != nil && acc != nil && ch != nil {
-				r.quotaScheduler.On429(acc.ID, ch.ID)
-			}
-			r.markAutoDisable(acc, "quota_exhausted")
-			r.cooldownAndEvict(ch, acc)
+		if failoverReason, isQuota, ok := upstreamAccountFailoverReason(statusCode, bodyCopy); ok && quotaAttempts < r.accountAttemptLimit(ch) {
+			r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
 			next := r.pickNext(ch, poolFromChannel(r.pools, ch))
 			if next != nil {
 				nextCreds, credErr := r.ensureCredentials(ch, next)
 				if credErr == nil {
 					trace.Event("stream_retry_switch_account",
 						logger.F("status", statusCode),
+						logger.F("reason", failoverReason),
 						logger.F("from_account_id", acc.ID.String()),
 						logger.F("account_id", next.ID.String()),
 						logger.F("quota_attempts", quotaAttempts+1),
@@ -718,7 +715,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					fasthttp.ReleaseRequest(upReq)
 					fasthttp.ReleaseResponse(upResp)
 					adaptor.Init(ch, next)
-					appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, "quota_exhausted", quotaAttempts+1)
+					appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, failoverReason, quotaAttempts+1)
 					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, trace, adminInfo)
 					return
 				}
@@ -947,24 +944,21 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			}
 		}
 		if statusCode >= 400 {
-			if isUpstreamQuotaExhausted(statusCode, bodyCopy) && quotaAttempt < r.accountAttemptLimit(ch) {
-				if r.quotaScheduler != nil && acc != nil && ch != nil {
-					r.quotaScheduler.On429(acc.ID, ch.ID)
-				}
-				r.markAutoDisable(acc, "quota_exhausted")
-				r.cooldownAndEvict(ch, acc)
+			if failoverReason, isQuota, ok := upstreamAccountFailoverReason(statusCode, bodyCopy); ok && quotaAttempt < r.accountAttemptLimit(ch) {
+				r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
 				next := r.pickNext(ch, poolFromChannel(r.pools, ch))
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
 					if credErr == nil {
 						trace.Event("force_stream_retry_switch_account",
 							logger.F("status", statusCode),
+							logger.F("reason", failoverReason),
 							logger.F("from_account_id", acc.ID.String()),
 							logger.F("account_id", next.ID.String()),
 							logger.F("quota_attempts", quotaAttempt+1),
 						)
 						adaptor.Init(ch, next)
-						appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, "quota_exhausted", quotaAttempt+1)
+						appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
 						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, quotaAttempt+1)
 						return
 					}
@@ -1297,6 +1291,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	for retry := 0; retry < maxAttempts; retry++ {
 		upReq := fasthttp.AcquireRequest()
 		upResp := fasthttp.AcquireResponse()
+		retryReason := "upstream_retry"
 
 		upReq.SetRequestURI(url)
 		upReq.Header.SetMethodBytes(ctx.Method())
@@ -1344,6 +1339,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			}
 			// Medium/long delay or unknown: switch account
 			shouldRetry = true
+			retryReason = "quota_exhausted"
 			r.markAutoDisable(currentAccount, "quota_exhausted")
 		} else if isUpstreamQuotaExhausted(upResp.StatusCode(), upResp.Body()) {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
@@ -1361,6 +1357,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				logger.F("body_preview", compactLogBody(respBody)),
 			)
 			shouldRetry = true
+			retryReason = "quota_exhausted"
 			r.markAutoDisable(currentAccount, "quota_exhausted")
 		} else if currentAccount != nil && !refreshedAuthAccounts[currentAccount.ID] && isOAuthAuthFailure(currentAccount, upResp.StatusCode(), upResp.Body()) {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
@@ -1380,6 +1377,22 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				fasthttp.ReleaseResponse(upResp)
 				continue
 			}
+		} else if failoverReason, isQuota, ok := upstreamAccountFailoverReason(upResp.StatusCode(), upResp.Body()); ok {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
+			respBody = copyBody(upResp)
+			statusCode = upResp.StatusCode()
+			copyHeaders(upResp, &respHeaders)
+			trace.Event("upstream_account_failover",
+				logger.F("mode", "buffered"),
+				logger.F("retry", retry),
+				logger.F("status", statusCode),
+				logger.F("reason", failoverReason),
+				logger.F("body_bytes", len(respBody)),
+				logger.F("body_preview", compactLogBody(respBody)),
+			)
+			shouldRetry = true
+			retryReason = failoverReason
+			r.prepareAccountFailover(ch, currentAccount, statusCode, respBody, isQuota)
 		} else if upResp.StatusCode() >= 500 {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
@@ -1412,7 +1425,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				logger.F("retry", retry),
 				logger.F("account_id", currentAccount.ID.String()),
 			)
-			appendRouteFallback(adminInfo, "buffered", ch, previousAccount, currentAccount, statusCode, "upstream_retry", retry+1)
+			appendRouteFallback(adminInfo, "buffered", ch, previousAccount, currentAccount, statusCode, retryReason, retry+1)
 			respAccount = currentAccount
 			adaptor.Init(ch, currentAccount)
 			currentCreds, err = r.ensureCredentials(ch, currentAccount)
@@ -2600,6 +2613,28 @@ func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
 	if r.affinity != nil {
 		r.affinity.EvictChannel(ch.ID.String())
 	}
+}
+
+func upstreamAccountFailoverReason(statusCode int, body []byte) (string, bool, bool) {
+	if isUpstreamQuotaExhausted(statusCode, body) {
+		return "quota_exhausted", true, true
+	}
+	if reason, ok := terminalAccountDisableReason(statusCode, body); ok {
+		return reason, false, true
+	}
+	return "", false, false
+}
+
+func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, statusCode int, body []byte, isQuota bool) {
+	if isQuota {
+		if r.quotaScheduler != nil && acc != nil && ch != nil {
+			r.quotaScheduler.On429(acc.ID, ch.ID)
+		}
+		r.markAutoDisable(acc, "quota_exhausted")
+		r.cooldownAndEvict(ch, acc)
+		return
+	}
+	r.disableAccountOnTerminalUpstreamError(ch, acc, statusCode, body)
 }
 
 func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {

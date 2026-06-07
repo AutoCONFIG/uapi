@@ -215,6 +215,22 @@ func TestUpstreamQuotaExhaustedDetection(t *testing.T) {
 	}
 }
 
+func TestUpstreamAccountFailoverReason(t *testing.T) {
+	reason, isQuota, ok := upstreamAccountFailoverReason(fasthttp.StatusForbidden, []byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}`))
+	if !ok || !isQuota || reason != "quota_exhausted" {
+		t.Fatalf("quota failover = (%q, %v, %v), want quota_exhausted true true", reason, isQuota, ok)
+	}
+
+	reason, isQuota, ok = upstreamAccountFailoverReason(fasthttp.StatusForbidden, []byte(`{"error":{"status":"PERMISSION_DENIED","message":"permission denied"}}`))
+	if !ok || isQuota || reason != "permission_denied" {
+		t.Fatalf("permission failover = (%q, %v, %v), want permission_denied false true", reason, isQuota, ok)
+	}
+
+	if reason, isQuota, ok = upstreamAccountFailoverReason(fasthttp.StatusBadRequest, []byte(`{"error":{"message":"invalid request"}}`)); ok {
+		t.Fatalf("ordinary request error failover = (%q, %v, %v), want disabled", reason, isQuota, ok)
+	}
+}
+
 func TestRuntimeResolveUsesSessionAccountAffinity(t *testing.T) {
 	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
 		t.Fatalf("crypto init: %v", err)
