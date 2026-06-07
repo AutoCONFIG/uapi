@@ -76,6 +76,33 @@ func (p *AccountPool) Pick() (*db.Account, bool) {
 	return nil, false
 }
 
+func (p *AccountPool) PickByID(accountID string) (*db.Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.totalWeight == 0 {
+		return nil, false
+	}
+	for i := range p.accounts {
+		if p.accounts[i].Account.ID.String() != accountID || p.accounts[i].Weight <= 0 {
+			continue
+		}
+		return p.accounts[i].Account, true
+	}
+	return nil, false
+}
+
+func (p *AccountPool) AvailableCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	count := 0
+	for i := range p.accounts {
+		if p.accounts[i].Weight > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (p *AccountPool) Stats() AccountPoolStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

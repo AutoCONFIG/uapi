@@ -414,10 +414,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var err error
 	var routeAttempts []map[string]interface{}
 	capabilityReq := channelcap.AnalyzeJSON(string(requestType), body)
+	affinityScope := requestAffinityScope(ctx, body)
 	if gatewayAuthenticated && internalClaims.ChannelID != "" && internalClaims.AccountID != "" {
 		targetChannel, account, adaptor, creds, err = r.resolveSelectedChannelAndAccount(internalClaims.ChannelID, internalClaims.AccountID, req.Model)
 	} else {
-		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccountWithAttempts(token.ID.String(), req.Model, &routeAttempts, capabilityReq)
+		targetChannel, account, adaptor, creds, err = r.resolveChannelAndAccountWithAttempts(token.ID.String(), req.Model, affinityScope, &routeAttempts, capabilityReq)
 	}
 	if err != nil {
 		if relayDebugDumpEnabled() {
@@ -628,18 +629,14 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace)
 	}
 
-	// 10. Record affinity for non-streaming paths (handleBuffered + handleForceStream are synchronous)
-	if !req.Stream && targetChannel.AffinityTTL > 0 && ctx.Response.StatusCode() < 400 {
-		r.affinity.Set(token.ID.String(), req.Model, targetChannel.ID.String(), targetChannel.AffinityTTL)
-	}
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
 func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace) {
-	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, trace)
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, trace)
 }
 
-func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, trace *relayDebugTrace) {
+func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, trace *relayDebugTrace) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -690,8 +687,33 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				trace.Event("oauth_refreshed_after_upstream_error", logger.F("status", statusCode))
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, trace)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, trace)
 				return
+			}
+		}
+		if isUpstreamQuotaExhausted(statusCode, bodyCopy) && quotaAttempts < r.accountAttemptLimit(ch) {
+			if r.quotaScheduler != nil && acc != nil && ch != nil {
+				r.quotaScheduler.On429(acc.ID, ch.ID)
+			}
+			r.markAutoDisable(acc, "quota_exhausted")
+			r.cooldownAndEvict(ch, acc)
+			next := r.pickNext(ch, poolFromChannel(r.pools, ch))
+			if next != nil {
+				nextCreds, credErr := r.ensureCredentials(ch, next)
+				if credErr == nil {
+					trace.Event("stream_retry_switch_account",
+						logger.F("status", statusCode),
+						logger.F("from_account_id", acc.ID.String()),
+						logger.F("account_id", next.ID.String()),
+						logger.F("quota_attempts", quotaAttempts+1),
+					)
+					fasthttp.ReleaseRequest(upReq)
+					fasthttp.ReleaseResponse(upResp)
+					adaptor.Init(ch, next)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, trace)
+					return
+				}
+				trace.Event("stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 			}
 		}
 		fasthttp.ReleaseRequest(upReq)
@@ -785,8 +807,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		}
 		{
 			// Record affinity only on successful stream completion
-			if ch.AffinityTTL > 0 {
-				r.affinity.Set(token.ID.String(), model, ch.ID.String(), ch.AffinityTTL)
+			if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
+				r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
 			}
 		}
 		pt, ct, parseFailed := tracker.Result()
@@ -825,7 +847,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, quotaAttempts ...int) {
+	quotaAttempt := firstInt(quotaAttempts...)
 	defer func() {
 		if rec := recover(); rec != nil {
 			logger.Default().Panic("relay.stream", "force stream panic", rec)
@@ -915,6 +938,29 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			}
 		}
 		if statusCode >= 400 {
+			if isUpstreamQuotaExhausted(statusCode, bodyCopy) && quotaAttempt < r.accountAttemptLimit(ch) {
+				if r.quotaScheduler != nil && acc != nil && ch != nil {
+					r.quotaScheduler.On429(acc.ID, ch.ID)
+				}
+				r.markAutoDisable(acc, "quota_exhausted")
+				r.cooldownAndEvict(ch, acc)
+				next := r.pickNext(ch, poolFromChannel(r.pools, ch))
+				if next != nil {
+					nextCreds, credErr := r.ensureCredentials(ch, next)
+					if credErr == nil {
+						trace.Event("force_stream_retry_switch_account",
+							logger.F("status", statusCode),
+							logger.F("from_account_id", acc.ID.String()),
+							logger.F("account_id", next.ID.String()),
+							logger.F("quota_attempts", quotaAttempt+1),
+						)
+						adaptor.Init(ch, next)
+						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, quotaAttempt+1)
+						return
+					}
+					trace.Event("force_stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
+				}
+			}
 			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 		}
@@ -988,6 +1034,9 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
+	if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
+		r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+	}
 
 	logger.Debugf("relay.stream", "force stream request completed",
 		logger.F("token_id", token.ID.String()),
@@ -1230,8 +1279,12 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	currentCreds := creds
 	currentAccount := acc
 	refreshedAuthAccounts := make(map[uuid.UUID]bool)
+	maxAttempts := r.accountAttemptLimit(ch)
+	if maxAttempts < 3 {
+		maxAttempts = 3
+	}
 
-	for retry := 0; retry < 3; retry++ {
+	for retry := 0; retry < maxAttempts; retry++ {
 		upReq := fasthttp.AcquireRequest()
 		upResp := fasthttp.AcquireResponse()
 
@@ -1272,7 +1325,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				logger.F("body_bytes", len(respBody429)),
 				logger.F("body_preview", compactLogBody(respBody429)),
 			)
-			if retryDelay >= 0 && retryDelay <= 3*time.Second && retry < 2 {
+			if retryDelay >= 0 && retryDelay <= 3*time.Second && retry < maxAttempts-1 {
 				// Short delay: wait and retry same account
 				logger.Infof("relay.429", "short retry delay, retrying same account", logger.F("delay", retryDelay), logger.F("retry", retry))
 				time.Sleep(retryDelay)
@@ -1280,6 +1333,23 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				continue
 			}
 			// Medium/long delay or unknown: switch account
+			shouldRetry = true
+			r.markAutoDisable(currentAccount, "quota_exhausted")
+		} else if isUpstreamQuotaExhausted(upResp.StatusCode(), upResp.Body()) {
+			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
+			respBody = copyBody(upResp)
+			statusCode = upResp.StatusCode()
+			copyHeaders(upResp, &respHeaders)
+			if r.quotaScheduler != nil && currentAccount != nil && ch != nil {
+				r.quotaScheduler.On429(currentAccount.ID, ch.ID)
+			}
+			trace.Event("upstream_quota_exhausted",
+				logger.F("mode", "buffered"),
+				logger.F("retry", retry),
+				logger.F("status", statusCode),
+				logger.F("body_bytes", len(respBody)),
+				logger.F("body_preview", compactLogBody(respBody)),
+			)
 			shouldRetry = true
 			r.markAutoDisable(currentAccount, "quota_exhausted")
 		} else if currentAccount != nil && !refreshedAuthAccounts[currentAccount.ID] && isOAuthAuthFailure(currentAccount, upResp.StatusCode(), upResp.Body()) {
@@ -1453,6 +1523,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
+	if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
+		r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), respAccount.ID.String(), ch.AffinityTTL)
+	}
 
 	logger.Debugf("relay.buffered", "buffered request completed",
 		logger.F("token_id", token.ID.String()),
@@ -1782,21 +1855,24 @@ func geminiCodeFallbackBody(model string, body []byte) (string, []byte, bool) {
 // --- Helpers ---
 
 func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
-	return r.resolveChannelAndAccountWithAttempts(tokenID, model, nil, capabilityReq...)
+	return r.resolveChannelAndAccountWithAttempts(tokenID, model, "", nil, capabilityReq...)
 }
 
-func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model string, attempts *[]map[string]interface{}, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
+func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityScope string, attempts *[]map[string]interface{}, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	// Try affinity cache first
-	if r.db != nil {
-		if chID := r.affinity.Get(tokenID, model); chID != "" {
+	if r.db != nil && affinityScope != "" {
+		if chID, accID := r.affinity.Get(tokenID, model, affinityScope); chID != "" {
 			var ch db.Channel
 			if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
 				modelOK := channelSupportsModel(ch, model)
 				capabilityOK := channelSupportsCapability(ch, capabilityReq...)
 				attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
 				attempt["source"] = "affinity"
+				if accID != "" {
+					attempt["affinity_account_id"] = accID
+				}
 				if modelOK && capabilityOK {
-					if acc, adaptor, creds, err := r.pickAccount(ch); err == nil {
+					if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID); err == nil {
 						attempt["selected"] = true
 						attempt["account_id"] = acc.ID.String()
 						appendRouteAttempt(attempts, attempt)
@@ -2161,6 +2237,29 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 	return account, adaptor, creds, nil
 }
 
+func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string) (*db.Account, provider.Adaptor, string, error) {
+	if strings.TrimSpace(accountID) == "" {
+		return r.pickAccount(ch)
+	}
+	adaptor := getAdaptorForChannel(&ch)
+	if adaptor == nil {
+		return nil, nil, "", fmt.Errorf("unsupported channel type")
+	}
+	pool, ok := r.pools.GetPool(ch.ID.String())
+	if !ok {
+		return nil, nil, "", fmt.Errorf("channel pool not initialized")
+	}
+	account, ok := pool.PickByID(accountID)
+	if !ok {
+		return nil, nil, "", fmt.Errorf("affinity account unavailable")
+	}
+	creds, err := r.ensureCredentials(&ch, account)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("credential error: %w", err)
+	}
+	return account, adaptor, creds, nil
+}
+
 func (r *Relayer) ensureCredentials(ch *db.Channel, account *db.Account) (string, error) {
 	before := oauthAccountSyncSnapshot(account)
 	credential, err := EnsureValidCredentialsForChannel(account, ch, r.db)
@@ -2344,7 +2443,9 @@ func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
 	}
 	acc.Metadata["auto_disable_reason"] = reason
 	acc.Metadata["auto_disable_time"] = time.Now().UTC().Format(time.RFC3339)
-	r.db.Model(acc).Update("metadata", acc.Metadata)
+	if r.db != nil {
+		r.db.Model(acc).Update("metadata", acc.Metadata)
+	}
 }
 
 func (r *Relayer) disableAccountOnTerminalUpstreamError(ch *db.Channel, acc *db.Account, statusCode int, body []byte) {
@@ -2474,7 +2575,9 @@ func (r *Relayer) clearAutoDisable(acc *db.Account) {
 	}
 	delete(acc.Metadata, "auto_disable_reason")
 	delete(acc.Metadata, "auto_disable_time")
-	r.db.Model(acc).Update("metadata", acc.Metadata)
+	if r.db != nil {
+		r.db.Model(acc).Update("metadata", acc.Metadata)
+	}
 }
 
 func (r *Relayer) retryNext(ch *db.Channel, failed *db.Account) *db.Account {
@@ -2497,6 +2600,103 @@ func (r *Relayer) pickNext(ch *db.Channel, pool *AccountPool) *db.Account {
 func poolFromChannel(pm *PoolManager, ch *db.Channel) *AccountPool {
 	p, _ := pm.GetPool(ch.ID.String())
 	return p
+}
+
+func (r *Relayer) accountAttemptLimit(ch *db.Channel) int {
+	if r == nil || r.pools == nil || ch == nil {
+		return 1
+	}
+	pool := poolFromChannel(r.pools, ch)
+	if pool == nil {
+		return 1
+	}
+	count := pool.AvailableCount()
+	if count <= 0 {
+		return 1
+	}
+	return count + 1
+}
+
+func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
+	for _, value := range []string{
+		requestJSONSessionValue(body),
+		headerString(ctx, "X-Session-ID"),
+		headerString(ctx, "Session_id"),
+		headerString(ctx, "X-Amp-Thread-Id"),
+		headerString(ctx, "X-Client-Request-Id"),
+		headerString(ctx, "Thread-Id"),
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func headerString(ctx *fasthttp.RequestCtx, name string) string {
+	if ctx == nil {
+		return ""
+	}
+	return strings.TrimSpace(string(ctx.Request.Header.Peek(name)))
+}
+
+func requestJSONSessionValue(body []byte) string {
+	var root map[string]interface{}
+	if err := provider.DecodeJSONUseNumber(body, &root); err != nil {
+		return ""
+	}
+	for _, key := range []string{
+		"prompt_cache_key",
+		"session_id",
+		"sessionId",
+		"conversation_id",
+		"conversationId",
+		"conversation",
+	} {
+		if value := stringFromJSONValue(root[key]); value != "" {
+			return value
+		}
+	}
+	for _, nestedKey := range []string{"metadata", "client_metadata"} {
+		if nested, ok := root[nestedKey].(map[string]interface{}); ok {
+			for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation_id", "conversationId"} {
+				if value := stringFromJSONValue(nested[key]); value != "" {
+					return value
+				}
+			}
+			if value := sessionFromMetadataUserID(nested["user_id"]); value != "" {
+				return value
+			}
+		}
+	}
+	return sessionFromMetadataUserID(root["user_id"])
+}
+
+func sessionFromMetadataUserID(value interface{}) string {
+	text := stringFromJSONValue(value)
+	if text == "" {
+		return ""
+	}
+	var nested map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &nested); err == nil {
+		for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"} {
+			if value := stringFromJSONValue(nested[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func stringFromJSONValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	default:
+		return ""
+	}
 }
 
 func (r *Relayer) refundAndError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, msg string, claims *internalauth.Claims, ch *db.Channel, acc *db.Account, model string, start time.Time, tokenPlanIDs ...uuid.UUID) {
@@ -3224,6 +3424,45 @@ func parseRetryDelay(body []byte, apiFormat provider.Format) time.Duration {
 	}
 
 	return -1
+}
+
+func isUpstreamQuotaExhausted(statusCode int, body []byte) bool {
+	if statusCode == fasthttp.StatusTooManyRequests {
+		return true
+	}
+	fields := collectErrorFields(body)
+	status := strings.ToUpper(firstNonEmptyDisableString(
+		stringField(fields, "error.status"),
+		stringField(fields, "status"),
+	))
+	code := strings.ToLower(firstNonEmptyDisableString(
+		stringField(fields, "error.code"),
+		stringField(fields, "code"),
+		stringField(fields, "error.type"),
+		stringField(fields, "type"),
+	))
+	message := strings.ToLower(firstNonEmptyDisableString(
+		stringField(fields, "error.message"),
+		stringField(fields, "message"),
+		stringField(fields, "detail"),
+	))
+	if status == "RESOURCE_EXHAUSTED" || strings.Contains(code, "insufficient_quota") || strings.Contains(code, "quota") || strings.Contains(code, "rate_limit") {
+		return true
+	}
+	for _, marker := range []string{
+		"quota exceeded",
+		"quota exhausted",
+		"usage limit",
+		"rate limit",
+		"too many requests",
+		"capacity exceeded",
+		"no capacity",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // hopByHopHeaders should not be forwarded between proxy hops.

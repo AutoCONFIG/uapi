@@ -30,76 +30,102 @@ func (h *WSHandler) httpBridgeFallback(
 	tokenPlanID uuid.UUID,
 	start time.Time,
 ) bool {
-	adaptor.Init(ch, acc)
-	adaptor.SetRequestParams(model, true) // always stream in bridge mode
-
 	body := wsCreateToHTTPBody(msg)
-	convertedBody, err := convertWSHTTPBridgeRequestBody(ch, acc, adaptor, msg, sess.id)
-	if err != nil {
-		WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		return false
+	currentAccount := acc
+	currentCreds := creds
+	maxAttempts := h.relayer.accountAttemptLimit(ch)
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		adaptor.Init(ch, currentAccount)
+		adaptor.SetRequestParams(model, true) // always stream in bridge mode
+
+		convertedBody, err := convertWSHTTPBridgeRequestBody(ch, currentAccount, adaptor, msg, sess.id)
+		if err != nil {
+			WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			return false
+		}
+
+		upReq := fasthttp.AcquireRequest()
+		upResp := fasthttp.AcquireResponse()
+
+		upstreamURL, err := adaptor.GetRequestURL("/v1/responses")
+		if err != nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 500, "url_error", "build upstream url failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			return false
+		}
+
+		currentCreds, err = h.relayer.ensureCredentials(ch, currentAccount)
+		if err != nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 500, "cred_error", "credential refresh failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			return false
+		}
+
+		upReq.SetRequestURI(upstreamURL)
+		upReq.Header.SetMethodBytes([]byte("POST"))
+		upReq.SetBody(convertedBody)
+		if err := adaptor.SetupRequestHeader(upReq, currentCreds); err != nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 500, "header_error", "setup headers failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			return false
+		}
+		applyCodexMetadataHeaders(upReq, channelUpstreamFormat(ch), convertedBody)
+
+		if err := doStreamingRequest(upReq, upResp); err != nil {
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			WriteWSErrorSession(sess, 502, "upstream_error", "upstream request failed")
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			return false
+		}
+
+		statusCode := upResp.StatusCode()
+		if statusCode >= 400 {
+			bodyCopy := readUpstreamErrorBody(upResp)
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			if isUpstreamQuotaExhausted(statusCode, bodyCopy) && attempt < maxAttempts-1 {
+				if h.relayer.quotaScheduler != nil && currentAccount != nil && ch != nil {
+					h.relayer.quotaScheduler.On429(currentAccount.ID, ch.ID)
+				}
+				h.relayer.markAutoDisable(currentAccount, "quota_exhausted")
+				h.relayer.cooldownAndEvict(ch, currentAccount)
+				next := h.relayer.pickNext(ch, poolFromChannel(h.relayer.pools, ch))
+				if next != nil {
+					logger.Debugf("relay.ws", "bridge switching account after quota error",
+						logger.F("channel_id", ch.ID.String()),
+						logger.F("from_account_id", currentAccount.ID.String()),
+						logger.F("account_id", next.ID.String()),
+						logger.F("status", statusCode),
+					)
+					currentAccount = next
+					continue
+				}
+			}
+			WriteWSErrorSession(sess, statusCode, "upstream_error", extractErrorMessage(bodyCopy))
+			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+			h.writeWSLog(sess.tokenID, ch.ID, currentAccount.ID, model, 0, 0, start, statusCode)
+			return false
+		}
+
+		go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body)
+		return true
 	}
 
-	// 4. Build and send upstream HTTP request
-	upReq := fasthttp.AcquireRequest()
-	upResp := fasthttp.AcquireResponse()
-
-	upstreamURL, err := adaptor.GetRequestURL("/v1/responses")
-	if err != nil {
-		fasthttp.ReleaseRequest(upReq)
-		fasthttp.ReleaseResponse(upResp)
-		WriteWSErrorSession(sess, 500, "url_error", "build upstream url failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		return false
-	}
-
-	// Refresh credentials (handles OAuth token expiry)
-	creds, err = EnsureValidCredentialsForChannel(acc, ch, h.db)
-	if err != nil {
-		fasthttp.ReleaseRequest(upReq)
-		fasthttp.ReleaseResponse(upResp)
-		WriteWSErrorSession(sess, 500, "cred_error", "credential refresh failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		return false
-	}
-
-	upReq.SetRequestURI(upstreamURL)
-	upReq.Header.SetMethodBytes([]byte("POST"))
-	upReq.SetBody(convertedBody)
-	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
-		fasthttp.ReleaseRequest(upReq)
-		fasthttp.ReleaseResponse(upResp)
-		WriteWSErrorSession(sess, 500, "header_error", "setup headers failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		return false
-	}
-	applyCodexMetadataHeaders(upReq, channelUpstreamFormat(ch), convertedBody)
-
-	// 5. Execute streaming request
-	if err := doStreamingRequest(upReq, upResp); err != nil {
-		fasthttp.ReleaseRequest(upReq)
-		fasthttp.ReleaseResponse(upResp)
-		WriteWSErrorSession(sess, 502, "upstream_error", "upstream request failed")
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		return false
-	}
-
-	statusCode := upResp.StatusCode()
-	if statusCode >= 400 {
-		bodyCopy := make([]byte, len(upResp.Body()))
-		copy(bodyCopy, upResp.Body())
-		fasthttp.ReleaseRequest(upReq)
-		fasthttp.ReleaseResponse(upResp)
-		WriteWSErrorSession(sess, statusCode, "upstream_error", extractErrorMessage(bodyCopy))
-		h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
-		h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, 0, 0, start, statusCode)
-		return false
-	}
-
-	// 5. Bridge SSE response → WS messages in a goroutine
-	go h.bridgeSSEToWS(sess, upReq, upResp, adaptor, ch, acc, model, estTokens, tokenPlanID, start, body)
-	return true
+	WriteWSErrorSession(sess, 503, "upstream_error", "all accounts exhausted")
+	h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
+	h.writeWSLog(sess.tokenID, ch.ID, currentAccount.ID, model, 0, 0, start, 503)
+	return false
 }
 
 func convertWSHTTPBridgeRequestBody(ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, msg []byte, seedScope ...string) ([]byte, error) {
@@ -341,7 +367,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	estimateMissingUsage(&pt, &ct, requestBody, nil, tracker.EstimatedOutputTokens())
 	h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model, cacheCreationTokens, cacheReadTokens)
 	if ch.AffinityTTL > 0 {
-		h.relayer.affinity.Set(sess.tokenID, model, ch.ID.String(), ch.AffinityTTL)
+		h.relayer.affinity.Set(sess.tokenID, model, sess.id, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
 	}
 	h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 200, cacheCreationTokens, cacheReadTokens)
 	turnFinalized = true

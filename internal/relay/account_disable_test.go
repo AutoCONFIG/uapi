@@ -2,6 +2,7 @@ package relay
 
 import (
 	"testing"
+	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/google/uuid"
@@ -93,5 +94,42 @@ func TestAccountPoolDisableRemovesAccountFromSelection(t *testing.T) {
 		if got.ID == acc1.ID {
 			t.Fatalf("disabled account was selected")
 		}
+	}
+}
+
+func TestAccountPoolPickByIDRequiresAvailableWeight(t *testing.T) {
+	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{acc1, acc2})
+
+	if got, ok := pool.PickByID(acc1.ID.String()); !ok || got.ID != acc1.ID {
+		t.Fatalf("PickByID did not return available affinity account")
+	}
+	if count := pool.AvailableCount(); count != 2 {
+		t.Fatalf("AvailableCount = %d, want 2", count)
+	}
+
+	pool.Cooldown(acc1.ID.String(), time.Hour)
+	if _, ok := pool.PickByID(acc1.ID.String()); ok {
+		t.Fatalf("cooled-down affinity account must not be selected")
+	}
+	if count := pool.AvailableCount(); count != 1 {
+		t.Fatalf("AvailableCount after cooldown = %d, want 1", count)
+	}
+}
+
+func TestAffinityCacheStoresSessionScopedAccount(t *testing.T) {
+	cache := NewAffinityCache()
+	cache.Set("token-1", "gpt-5.5", "session-a", "channel-1", "account-1", 60)
+	cache.Set("token-1", "gpt-5.5", "session-b", "channel-1", "account-2", 60)
+
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-a"); ch != "channel-1" || acc != "account-1" {
+		t.Fatalf("session-a affinity = (%q,%q)", ch, acc)
+	}
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-b"); ch != "channel-1" || acc != "account-2" {
+		t.Fatalf("session-b affinity = (%q,%q)", ch, acc)
+	}
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-c"); ch != "" || acc != "" {
+		t.Fatalf("unexpected affinity miss value = (%q,%q)", ch, acc)
 	}
 }

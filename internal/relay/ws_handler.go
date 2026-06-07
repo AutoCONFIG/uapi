@@ -331,7 +331,7 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	}
 
 	// Resolve channel and account (reuse relayer logic)
-	ch, account, adaptor, creds, err := h.relayer.resolveChannelAndAccount(sess.tokenID, model)
+	ch, account, adaptor, creds, err := h.relayer.resolveChannelAndAccountWithAttempts(sess.tokenID, model, sess.id, nil)
 	if err != nil {
 		WriteWSErrorSession(sess, 404, "no_channel", err.Error())
 		return

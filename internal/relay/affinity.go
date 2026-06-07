@@ -7,10 +7,11 @@ import (
 
 type affinityEntry struct {
 	channelID string
+	accountID string
 	expiresAt time.Time
 }
 
-// AffinityCache maps tokenID:model → channelID with TTL support.
+// AffinityCache maps tokenID:model[:session] -> channel/account with TTL support.
 type AffinityCache struct {
 	mu      sync.RWMutex
 	entries map[string]affinityEntry
@@ -22,19 +23,23 @@ func NewAffinityCache() *AffinityCache {
 	}
 }
 
-func (ac *AffinityCache) key(tokenID, model string) string {
-	return tokenID + ":" + model
+func (ac *AffinityCache) key(tokenID, model, scope string) string {
+	key := tokenID + ":" + model
+	if scope != "" {
+		key += ":" + scope
+	}
+	return key
 }
 
-// Get returns the cached channelID for tokenID+model, or empty string on miss.
+// Get returns the cached channel/account for tokenID+model+scope, or empty strings on miss.
 // Lazy-deletes expired entries on access.
-func (ac *AffinityCache) Get(tokenID, model string) string {
-	k := ac.key(tokenID, model)
+func (ac *AffinityCache) Get(tokenID, model, scope string) (string, string) {
+	k := ac.key(tokenID, model, scope)
 	ac.mu.RLock()
 	e, ok := ac.entries[k]
 	if !ok {
 		ac.mu.RUnlock()
-		return ""
+		return "", ""
 	}
 	if time.Now().After(e.expiresAt) {
 		ac.mu.RUnlock()
@@ -44,26 +49,28 @@ func (ac *AffinityCache) Get(tokenID, model string) string {
 		if !stillExists || time.Now().After(fresh.expiresAt) {
 			delete(ac.entries, k)
 			ac.mu.Unlock()
-			return ""
+			return "", ""
 		}
 		// Entry was refreshed between our RUnlock and Lock
 		channelID := fresh.channelID
+		accountID := fresh.accountID
 		ac.mu.Unlock()
-		return channelID
+		return channelID, accountID
 	}
 	ac.mu.RUnlock()
-	return e.channelID
+	return e.channelID, e.accountID
 }
 
 // Set records an affinity mapping with the given TTL in seconds.
-func (ac *AffinityCache) Set(tokenID, model, channelID string, ttlSeconds int) {
+func (ac *AffinityCache) Set(tokenID, model, scope, channelID, accountID string, ttlSeconds int) {
 	if ttlSeconds <= 0 {
 		return
 	}
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
-	ac.entries[ac.key(tokenID, model)] = affinityEntry{
+	ac.entries[ac.key(tokenID, model, scope)] = affinityEntry{
 		channelID: channelID,
+		accountID: accountID,
 		expiresAt: time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 	}
 }
