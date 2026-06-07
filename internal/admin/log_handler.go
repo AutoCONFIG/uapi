@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ type AdminUsageLogItem struct {
 	ErrorMessage        string                 `json:"error_message,omitempty"`
 	AdminInfo           map[string]interface{} `gorm:"-" json:"admin_info,omitempty"`
 	AdminInfoRaw        json.RawMessage        `gorm:"column:admin_info" json:"-"`
+	AccountMetadataRaw  json.RawMessage        `gorm:"column:account_metadata" json:"-"`
 }
 
 // HandleLogs returns a paginated list of request logs.
@@ -52,7 +54,7 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 	page, limit := h.parsePagination(ctx)
 	offset := (page - 1) * limit
 	query := h.db.Table("logs").
-		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, accounts.metadata->>'project_id' AS account_project_id, COALESCE(accounts.metadata->>'account_id', accounts.metadata->>'chatgpt_account_id', accounts.metadata->>'email', accounts.metadata->>'email_address') AS account_external_id, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.cache_creation_tokens, logs.cache_read_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message, logs.admin_info").
+		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, accounts.metadata->>'project_id' AS account_project_id, COALESCE(accounts.metadata->>'account_id', accounts.metadata->>'chatgpt_account_id', accounts.metadata->>'email', accounts.metadata->>'email_address') AS account_external_id, accounts.metadata AS account_metadata, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.cache_creation_tokens, logs.cache_read_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message, logs.admin_info").
 		Joins("LEFT JOIN tokens ON tokens.id = logs.token_id").
 		Joins("LEFT JOIN users ON users.id::text = tokens.user_id").
 		Joins("LEFT JOIN channels ON channels.id = logs.channel_id").
@@ -88,12 +90,14 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	for i := range items {
-		if len(items[i].AdminInfoRaw) == 0 || string(items[i].AdminInfoRaw) == "null" {
-			continue
+		if len(items[i].AdminInfoRaw) > 0 && string(items[i].AdminInfoRaw) != "null" {
+			var decoded map[string]interface{}
+			if err := json.Unmarshal(items[i].AdminInfoRaw, &decoded); err == nil {
+				items[i].AdminInfo = decoded
+			}
 		}
-		var decoded map[string]interface{}
-		if err := json.Unmarshal(items[i].AdminInfoRaw, &decoded); err == nil {
-			items[i].AdminInfo = decoded
+		if strings.TrimSpace(items[i].AccountExternalID) == "" {
+			items[i].AccountExternalID = googleAccountEmailFromMetadata(items[i].AccountMetadataRaw)
 		}
 	}
 	if items == nil {
@@ -105,6 +109,40 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 		Limit: limit,
 		Items: items,
 	})
+}
+
+func googleAccountEmailFromMetadata(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return ""
+	}
+	if email := stringFromMap(meta, "email"); email != "" {
+		return email
+	}
+	if email := stringFromMap(meta, "email_address"); email != "" {
+		return email
+	}
+	lca, _ := meta["load_code_assist"].(map[string]interface{})
+	manageURL := stringFromMap(lca, "manageSubscriptionUri")
+	if manageURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(manageURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Query().Get("Email"))
+}
+
+func stringFromMap(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	value, _ := m[key].(string)
+	return strings.TrimSpace(value)
 }
 
 // ListAuditLogs returns a paginated list of audit logs.

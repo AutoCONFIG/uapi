@@ -336,10 +336,21 @@ export function AdminChannelConsole() {
 
   function accountMetaSummary(account: Account): string {
     const meta = account.metadata || {};
-    const email = typeof meta.email === "string" ? meta.email : typeof meta.email_address === "string" ? meta.email_address : "";
+    const email = typeof meta.email === "string" ? meta.email : typeof meta.email_address === "string" ? meta.email_address : googleEmailFromMetadata(meta);
     const plan = typeof meta.chatgpt_plan_type === "string" ? meta.chatgpt_plan_type : typeof meta.subscription_type === "string" ? meta.subscription_type : "";
     const project = typeof meta.project_id === "string" ? meta.project_id : "";
     return [email, plan, project].filter(Boolean).join(" · ");
+  }
+
+  function googleEmailFromMetadata(meta: Record<string, unknown>): string {
+    const lca = asRecord(meta.load_code_assist);
+    const raw = stringValue(lca?.manageSubscriptionUri);
+    if (!raw) return "";
+    try {
+      return new URL(raw).searchParams.get("Email") || "";
+    } catch {
+      return "";
+    }
   }
 
   function accountValidation(account: Account): { message: string; url: string } | null {

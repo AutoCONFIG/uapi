@@ -61,7 +61,7 @@ function affinityLabel(row: UsageLogItem) {
 }
 
 function accountDetail(row: UsageLogItem) {
-  return [row.account_project_id, row.account_external_id].filter(Boolean).join(" · ");
+  return [row.account_external_id, row.account_project_id].filter(Boolean).join(" · ");
 }
 
 export default function LogsPage() {
