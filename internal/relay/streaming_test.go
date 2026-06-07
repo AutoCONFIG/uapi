@@ -347,6 +347,92 @@ func TestStreamAndForwardRawFinalizesOnMessageStop(t *testing.T) {
 	}
 }
 
+func TestStreamAndForwardRawSynthesizesAnthropicTerminalOnEOF(t *testing.T) {
+	body := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, nil, false)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("streamAndForward error: %v", result.err)
+	}
+	if !result.finalized || result.failed || result.emptyStream {
+		t.Fatalf("anthropic EOF with payload must be finalized after synthetic terminal: %+v", result)
+	}
+	got := string(out)
+	for _, want := range []string{
+		`"type":"content_block_stop","index":1`,
+		`"stop_reason":"end_turn"`,
+		`"type":"message_stop"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("synthetic terminal missing %s in stream:\n%s", want, got)
+		}
+	}
+}
+
+func TestStreamAndForwardRawSynthesizesAnthropicMessageStopAfterClosedBlock(t *testing.T) {
+	body := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, nil, false)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed || result.emptyStream {
+		t.Fatalf("anthropic EOF after closed block must synthesize message stop: %+v", result)
+	}
+	got := string(out)
+	if strings.Count(got, `"type":"content_block_stop"`) != 1 {
+		t.Fatalf("closed block should not get duplicate synthetic stop event:\n%s", got)
+	}
+	if !strings.Contains(got, `"type":"message_stop"`) {
+		t.Fatalf("synthetic message_stop missing:\n%s", got)
+	}
+}
+
+func TestStreamAndForwardRawDoesNotFinalizeEmptyAnthropicEOF(t *testing.T) {
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(strings.NewReader(""), reader, newStreamTracker(testUsageParser{}), nil, nil, false)
+	}()
+
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if result.finalized || result.emptyStream {
+		t.Fatalf("empty EOF must remain unfinalized: %+v", result)
+	}
+}
+
 func TestStreamAndForwardConvertedJoinsMultiLineDataEvent(t *testing.T) {
 	body := "data: {\"a\":1,\n" +
 		"data: \"b\":2}\n\n"

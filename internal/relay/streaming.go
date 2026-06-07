@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -829,6 +830,8 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 	sawChatFinish := false
 	failed := false
 	nonDonePayloads := 0
+	anthropicSeen := false
+	openAnthropicBlocks := map[int]bool{}
 
 	flush := func() bool {
 		if len(event) == 0 {
@@ -843,6 +846,7 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 				nonDonePayloads++
 			}
 			tracker.TrackChunk([]byte(payload))
+			updateRawAnthropicStreamState(payload, &anthropicSeen, openAnthropicBlocks)
 		}
 		trace.StreamChunk("stream.downstream.sse", event)
 		ok := reader.Send(event)
@@ -934,6 +938,23 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 			streamDebugStateFields(trace, "raw", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok))...,
 		)
 		sawDone = sawChatFinish || sawTerminal
+	} else if !sendDone && !sawDone && !sawTerminal && !failed && anthropicSeen && nonDonePayloads > 0 {
+		terminal := synthesizeRawAnthropicTerminalEvents(openAnthropicBlocks)
+		injectedOpenBlocks := len(openAnthropicBlocks)
+		for index := range openAnthropicBlocks {
+			delete(openAnthropicBlocks, index)
+		}
+		ok := reader.Send(terminal)
+		trace.StreamChunk("stream.downstream.sse", terminal)
+		trace.Event("stream_anthropic_terminal_injected",
+			streamDebugStateFields(trace, "raw", sawDone, true, sawChatFinish, failed, 0,
+				logger.F("send_ok", ok),
+				logger.F("open_blocks", injectedOpenBlocks),
+			)...,
+		)
+		if ok {
+			sawTerminal = true
+		}
 	}
 	pt, ct, parseFailed := tracker.Result()
 	finalized := sawDone || sawTerminal
@@ -949,6 +970,48 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 		)...,
 	)
 	return streamResult{promptTokens: pt, completionTokens: ct, finalized: finalized, failed: failed, emptyStream: emptyStream, parseFailed: parseFailed}
+}
+
+func updateRawAnthropicStreamState(payload string, seen *bool, openBlocks map[int]bool) {
+	var event struct {
+		Type  string `json:"type"`
+		Index int    `json:"index"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return
+	}
+	switch event.Type {
+	case "content_block_start", "content_block_stop":
+		*seen = true
+	}
+	switch event.Type {
+	case "content_block_start":
+		openBlocks[event.Index] = true
+	case "content_block_stop":
+		delete(openBlocks, event.Index)
+	}
+}
+
+func synthesizeRawAnthropicTerminalEvents(openBlocks map[int]bool) []byte {
+	var b strings.Builder
+	indexes := make([]int, 0, len(openBlocks))
+	for index := range openBlocks {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		b.WriteString("event: content_block_stop\n")
+		b.WriteString(`data: {"type":"content_block_stop","index":`)
+		b.WriteString(strconv.Itoa(index))
+		b.WriteString("}\n\n")
+	}
+	b.WriteString("event: message_delta\n")
+	b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`)
+	b.WriteString("\n\n")
+	b.WriteString("event: message_stop\n")
+	b.WriteString(`data: {"type":"message_stop"}`)
+	b.WriteString("\n\n")
+	return []byte(b.String())
 }
 
 func streamHasTerminalEvent(event []byte) bool {
