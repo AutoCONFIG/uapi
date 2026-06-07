@@ -52,6 +52,10 @@ func main() {
 			log.Error("init system settings failed", logger.Err(err))
 			os.Exit(1)
 		}
+		if err := admin.EnsureDefaultChannelAffinityTTL(database); err != nil {
+			log.Error("init channel affinity defaults failed", logger.Err(err))
+			os.Exit(1)
+		}
 
 		billing = relay.NewBillingService(database)
 

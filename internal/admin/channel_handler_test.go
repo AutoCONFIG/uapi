@@ -74,3 +74,26 @@ func TestResolveChannelTypeAndAPIFormat(t *testing.T) {
 		t.Fatalf("expected explicit api_format to be preserved for validation, got %s/%s", typ, format)
 	}
 }
+
+func TestDefaultAffinityTTLForOAuthChannelFormats(t *testing.T) {
+	for _, format := range []string{"codex", "gemini_code", "claude_code", "antigravity"} {
+		if got := defaultAffinityTTLForChannel("openai", format); got != DefaultOAuthChannelAffinityTTL {
+			t.Fatalf("defaultAffinityTTLForChannel(%q) = %d, want %d", format, got, DefaultOAuthChannelAffinityTTL)
+		}
+	}
+	for _, format := range []string{"", "standard", "responses", "chatgpt_reverse"} {
+		if got := defaultAffinityTTLForChannel("openai", format); got != 0 {
+			t.Fatalf("defaultAffinityTTLForChannel(%q) = %d, want 0", format, got)
+		}
+	}
+}
+
+func TestAffinityTTLOrDefaultPreservesExplicitZero(t *testing.T) {
+	zero := 0
+	if got := affinityTTLOrDefault(&zero, "openai", "codex"); got != 0 {
+		t.Fatalf("explicit zero affinity ttl = %d, want 0", got)
+	}
+	if got := affinityTTLOrDefault(nil, "openai", "codex"); got != DefaultOAuthChannelAffinityTTL {
+		t.Fatalf("missing affinity ttl = %d, want default", got)
+	}
+}

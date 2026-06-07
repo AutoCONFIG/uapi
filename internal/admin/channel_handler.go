@@ -11,6 +11,8 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+const DefaultOAuthChannelAffinityTTL = 600
+
 // HandleChannels routes channel CRUD operations by HTTP method.
 func (h *Handler) HandleChannels(ctx *fasthttp.RequestCtx) {
 	method := string(ctx.Method())
@@ -76,7 +78,7 @@ func (h *Handler) createChannel(ctx *fasthttp.RequestCtx) {
 		Weight:       normalizeChannelWeight(req.Weight),
 		APIFormat:    req.APIFormat,
 		ForceStream:  req.ForceStream,
-		AffinityTTL:  req.AffinityTTL,
+		AffinityTTL:  affinityTTLOrDefault(req.AffinityTTL, req.Type, req.APIFormat),
 		Settings:     normalizeChannelSettings(req.Settings),
 		Enabled:      true,
 	}
@@ -157,7 +159,7 @@ func (h *Handler) updateChannel(ctx *fasthttp.RequestCtx) {
 		updates["force_stream"] = *req.ForceStream
 	}
 	if req.AffinityTTL != nil {
-		updates["affinity_ttl"] = *req.AffinityTTL
+		updates["affinity_ttl"] = normalizeAffinityTTL(*req.AffinityTTL)
 	}
 	if req.Settings != nil {
 		updates["settings"] = normalizeChannelSettings(*req.Settings)
@@ -187,6 +189,32 @@ func normalizeChannelWeight(value int) int {
 	}
 	if value > 10000 {
 		return 10000
+	}
+	return value
+}
+
+func affinityTTLOrDefault(value *int, channelType, apiFormat string) int {
+	if value != nil {
+		return normalizeAffinityTTL(*value)
+	}
+	return defaultAffinityTTLForChannel(channelType, apiFormat)
+}
+
+func defaultAffinityTTLForChannel(channelType, apiFormat string) int {
+	switch strings.TrimSpace(apiFormat) {
+	case "codex", "gemini_code", "claude_code", "antigravity":
+		return DefaultOAuthChannelAffinityTTL
+	default:
+		return 0
+	}
+}
+
+func normalizeAffinityTTL(value int) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > 86400 {
+		return 86400
 	}
 	return value
 }

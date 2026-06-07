@@ -496,7 +496,6 @@ export function AdminChannelConsole() {
         priority: channelDraft.priority,
         weight: channelDraft.weight,
         api_format: channelDraft.apiFormat,
-        affinity_ttl: 0,
         settings: channelSettingsWithForceStreamModels(channelDraft.apiFormat === "antigravity" ? antigravitySettingsJSON(defaultAntigravitySettings(true)) : "{}", channelDraft.forceStreamModels),
       });
       setChannels((cur) => [created, ...cur]);
@@ -547,10 +546,11 @@ export function AdminChannelConsole() {
     }
   }
 
-  function patchChannelNumber(channel: Channel, field: "priority" | "weight", value: string) {
+  function patchChannelNumber(channel: Channel, field: "priority" | "weight" | "affinity_ttl", value: string) {
     const parsed = Number.parseInt(value, 10);
     if (!Number.isFinite(parsed)) return;
-    const next = field === "weight" ? Math.max(1, Math.min(10000, parsed)) : Math.max(0, Math.min(10000, parsed));
+    const max = field === "affinity_ttl" ? 86400 : 10000;
+    const next = field === "weight" ? Math.max(1, Math.min(max, parsed)) : Math.max(0, Math.min(max, parsed));
     if (next !== channel[field]) patchChannel(channel.id, { [field]: next } as Partial<Channel>);
   }
 
@@ -1103,6 +1103,10 @@ export function AdminChannelConsole() {
                   <label>
                     <span>权重</span>
                     <input className="input" defaultValue={selected.weight ?? 100} key={`drawer-weight-${selected.id}-${selected.weight}`} min={1} max={10000} onBlur={(event) => patchChannelNumber(selected, "weight", event.target.value)} type="number" />
+                  </label>
+                  <label>
+                    <span>亲和 TTL（秒）</span>
+                    <input className="input" defaultValue={selected.affinity_ttl ?? 0} key={`drawer-affinity-${selected.id}-${selected.affinity_ttl}`} min={0} max={86400} onBlur={(event) => patchChannelNumber(selected, "affinity_ttl", event.target.value)} type="number" />
                   </label>
                 </div>
                 <div className="field channel-force-stream-models">

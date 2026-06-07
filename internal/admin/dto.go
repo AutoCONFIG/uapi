@@ -19,7 +19,7 @@ type CreateChannelRequest struct {
 	Weight       int    `json:"weight"`
 	APIFormat    string `json:"api_format"`
 	ForceStream  bool   `json:"force_stream"`
-	AffinityTTL  int    `json:"affinity_ttl"`
+	AffinityTTL  *int   `json:"affinity_ttl,omitempty"`
 	Settings     string `json:"settings"`
 }
 
