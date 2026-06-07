@@ -2877,6 +2877,28 @@ func normalizeCodexResponsesClientMetadata(bodyMap map[string]interface{}, seed 
 			bodyMap["prompt_cache_key"] = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-thread:"+seed)).String()
 		}
 	}
+	promptCacheKey, _ := bodyMap["prompt_cache_key"].(string)
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey != "" {
+		windowID := promptCacheKey + ":0"
+		if existing, _ := clientMetadata["x-codex-window-id"].(string); strings.TrimSpace(existing) == "" {
+			clientMetadata["x-codex-window-id"] = windowID
+		}
+		if existing, _ := clientMetadata["x-codex-turn-metadata"].(string); strings.TrimSpace(existing) == "" {
+			turnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+promptCacheKey)).String()
+			if seed != "" {
+				turnID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+seed+":"+promptCacheKey)).String()
+			}
+			turnMetadata, err := json.Marshal(map[string]string{
+				"prompt_cache_key": promptCacheKey,
+				"turn_id":          turnID,
+				"window_id":        windowID,
+			})
+			if err == nil {
+				clientMetadata["x-codex-turn-metadata"] = string(turnMetadata)
+			}
+		}
+	}
 	if len(clientMetadata) > 0 {
 		bodyMap["client_metadata"] = clientMetadata
 	}
@@ -2905,12 +2927,21 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 	if clientMetadata == nil {
 		clientMetadata = map[string]interface{}{}
 	}
+	promptCacheKey, _ := bodyMap["prompt_cache_key"].(string)
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	if windowID, _ := clientMetadata["x-codex-window-id"].(string); strings.TrimSpace(windowID) != "" {
 		req.Header.Set("X-Codex-Window-Id", strings.TrimSpace(windowID))
-		return
+	} else if promptCacheKey != "" {
+		req.Header.Set("X-Codex-Window-Id", promptCacheKey+":0")
 	}
-	if promptCacheKey, _ := bodyMap["prompt_cache_key"].(string); strings.TrimSpace(promptCacheKey) != "" {
-		req.Header.Set("X-Codex-Window-Id", strings.TrimSpace(promptCacheKey)+":0")
+	if turnMetadata, _ := clientMetadata["x-codex-turn-metadata"].(string); strings.TrimSpace(turnMetadata) != "" {
+		req.Header.Set("X-Codex-Turn-Metadata", strings.TrimSpace(turnMetadata))
+	}
+	if promptCacheKey != "" {
+		req.Header.Set("Session_id", promptCacheKey)
+		req.Header.Set("Conversation_id", promptCacheKey)
+		req.Header.Set("X-Client-Request-Id", promptCacheKey)
+		req.Header.Set("Thread-Id", promptCacheKey)
 	}
 }
 

@@ -195,8 +195,11 @@ func TestNormalizeCodexResponsesRequestAddsStableClientMetadata(t *testing.T) {
 	if secondMetadata["x-codex-installation-id"] != installationID {
 		t.Fatalf("x-codex-installation-id is not stable: first=%#v second=%#v", firstMetadata, secondMetadata)
 	}
-	if _, ok := firstMetadata["x-codex-window-id"]; ok {
-		t.Fatalf("x-codex-window-id should not be synthesized in HTTP body metadata: %#v", firstMetadata)
+	if firstMetadata["x-codex-window-id"] != "thread-1:0" {
+		t.Fatalf("x-codex-window-id = %#v, want thread-1:0", firstMetadata["x-codex-window-id"])
+	}
+	if firstMetadata["x-codex-turn-metadata"] == nil {
+		t.Fatalf("x-codex-turn-metadata should be synthesized: %#v", firstMetadata)
 	}
 	if firstBody["prompt_cache_key"] != "thread-1" {
 		t.Fatalf("prompt_cache_key should be preserved: %#v", firstBody["prompt_cache_key"])
@@ -265,17 +268,54 @@ func TestNormalizeCodexResponsesRequestPreservesExistingClientMetadata(t *testin
 	if metadata["x-codex-window-id"] != "window-existing" {
 		t.Fatalf("window id overwritten: %#v", metadata)
 	}
+	if metadata["x-codex-turn-metadata"] == nil {
+		t.Fatalf("turn metadata should be synthesized when prompt_cache_key exists: %#v", metadata)
+	}
 	if metadata["custom"] != "keep" {
 		t.Fatalf("custom metadata lost: %#v", metadata)
 	}
 }
 
+func TestNormalizeCodexResponsesRequestAddsCacheIdentityMetadata(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{"model":"gpt-5.5","input":"hi","prompt_cache_key":"thread-1"}`), true, "channel-a:account-a")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	metadata, ok := body["client_metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("client_metadata missing: %#v", body)
+	}
+	if metadata["x-codex-window-id"] != "thread-1:0" {
+		t.Fatalf("x-codex-window-id = %#v, want thread-1:0", metadata["x-codex-window-id"])
+	}
+	rawTurnMetadata, _ := metadata["x-codex-turn-metadata"].(string)
+	if rawTurnMetadata == "" {
+		t.Fatalf("x-codex-turn-metadata missing: %#v", metadata)
+	}
+	var turnMetadata map[string]string
+	if err := json.Unmarshal([]byte(rawTurnMetadata), &turnMetadata); err != nil {
+		t.Fatalf("turn metadata is not JSON: %v; %q", err, rawTurnMetadata)
+	}
+	if turnMetadata["prompt_cache_key"] != "thread-1" || turnMetadata["window_id"] != "thread-1:0" || turnMetadata["turn_id"] == "" {
+		t.Fatalf("turn metadata = %#v, want prompt_cache_key/window_id/turn_id", turnMetadata)
+	}
+}
+
 func TestApplyCodexMetadataHeadersUsesWindowMetadata(t *testing.T) {
 	var req fasthttp.Request
-	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"client_metadata":{"x-codex-window-id":"thread-1:0"}}`))
+	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"prompt_cache_key":"thread-1","client_metadata":{"x-codex-window-id":"thread-1:0","x-codex-turn-metadata":"{\"prompt_cache_key\":\"thread-1\",\"turn_id\":\"turn-1\",\"window_id\":\"thread-1:0\"}"}}`))
 
 	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
+	}
+	if got := string(req.Header.Peek("X-Codex-Turn-Metadata")); !strings.Contains(got, `"prompt_cache_key":"thread-1"`) {
+		t.Fatalf("X-Codex-Turn-Metadata = %q, want prompt_cache_key", got)
+	}
+	for _, header := range []string{"Session_id", "Conversation_id", "X-Client-Request-Id", "Thread-Id"} {
+		if got := string(req.Header.Peek(header)); got != "thread-1" {
+			t.Fatalf("%s = %q, want thread-1", header, got)
+		}
 	}
 
 	var nonCodexReq fasthttp.Request
