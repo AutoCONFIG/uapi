@@ -554,6 +554,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		logger.F("channel_type", targetChannel.Type),
 		logger.F("api_format", targetChannel.APIFormat),
 		logger.F("account_id", account.ID.String()),
+		logger.F("account_name", account.Name),
 		logger.F("account_cred_type", account.CredType),
 		logger.F("gateway_authenticated", gatewayAuthenticated),
 	)
@@ -616,6 +617,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			logger.F("channel_type", targetChannel.Type),
 			logger.F("api_format", targetChannel.APIFormat),
 			logger.F("account_id", account.ID.String()),
+			logger.F("account_name", account.Name),
 			logger.F("account_cred_type", account.CredType),
 			logger.F("gateway_authenticated", gatewayAuthenticated),
 			logger.F("upstream_url", upstreamURL),
@@ -1574,10 +1576,10 @@ func logGeminiCodeUpstreamError(ch *db.Channel, acc *db.Account, statusCode int,
 		EnabledCreditTypes []string `json:"enabled_credit_types"`
 	}
 	if err := json.Unmarshal(reqBody, &summary); err != nil {
-		logger.Warnf("relay.gemini_code", "upstream error", logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("status", statusCode), logger.Err(err), logger.F("response", compactLogBody(respBody)))
+		logger.Warnf("relay.gemini_code", "upstream error", logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("account_name", acc.Name), logger.F("status", statusCode), logger.Err(err), logger.F("response", compactLogBody(respBody)))
 		return
 	}
-	logger.Warnf("relay.gemini_code", "upstream error", logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("status", statusCode), logger.F("model", summary.Model), logger.F("project", summary.Project), logger.F("enabled_credit_types", summary.EnabledCreditTypes), logger.F("response", compactLogBody(respBody)))
+	logger.Warnf("relay.gemini_code", "upstream error", logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("account_name", acc.Name), logger.F("status", statusCode), logger.F("model", summary.Model), logger.F("project", summary.Project), logger.F("enabled_credit_types", summary.EnabledCreditTypes), logger.F("response", compactLogBody(respBody)))
 }
 
 func compactLogBody(body []byte) string {

@@ -60,6 +60,10 @@ function affinityLabel(row: UsageLogItem) {
   };
 }
 
+function accountDetail(row: UsageLogItem) {
+  return [row.account_project_id, row.account_external_id].filter(Boolean).join(" · ");
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -135,6 +139,7 @@ export default function LogsPage() {
                   <td>
                     <strong>{row.account_name || shortID(row.account_id)}</strong>
                     <div className="muted" style={{ fontSize: 12 }}>{row.channel_name || shortID(row.channel_id)} · {row.account_cred_type || "-"}</div>
+                    {accountDetail(row) ? <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{accountDetail(row)}</div> : null}
                     <div style={{ fontSize: 12, marginTop: 4 }}><strong>{affinity.title}</strong></div>
                     <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{affinity.detail}</div>
                     {route.fallback.length > 0 ? (

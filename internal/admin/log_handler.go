@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -23,6 +24,8 @@ type AdminUsageLogItem struct {
 	AccountID           uuid.UUID              `json:"account_id"`
 	AccountName         string                 `json:"account_name,omitempty"`
 	AccountCredType     string                 `json:"account_cred_type,omitempty"`
+	AccountProjectID    string                 `json:"account_project_id,omitempty"`
+	AccountExternalID   string                 `json:"account_external_id,omitempty"`
 	Model               string                 `json:"model"`
 	RoutedModel         string                 `json:"routed_model"`
 	ClientFormat        string                 `json:"client_format"`
@@ -36,7 +39,8 @@ type AdminUsageLogItem struct {
 	LatencyMs           int64                  `json:"latency_ms"`
 	StatusCode          int                    `json:"status_code"`
 	ErrorMessage        string                 `json:"error_message,omitempty"`
-	AdminInfo           map[string]interface{} `json:"admin_info,omitempty"`
+	AdminInfo           map[string]interface{} `gorm:"-" json:"admin_info,omitempty"`
+	AdminInfoRaw        json.RawMessage        `gorm:"column:admin_info" json:"-"`
 }
 
 // HandleLogs returns a paginated list of request logs.
@@ -48,7 +52,7 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 	page, limit := h.parsePagination(ctx)
 	offset := (page - 1) * limit
 	query := h.db.Table("logs").
-		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.cache_creation_tokens, logs.cache_read_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message, logs.admin_info").
+		Select("logs.id, logs.created_at, logs.token_id, tokens.user_id, users.username, users.email AS user_email, logs.client_ip, logs.channel_id, channels.name AS channel_name, logs.account_id, accounts.name AS account_name, accounts.cred_type AS account_cred_type, accounts.metadata->>'project_id' AS account_project_id, COALESCE(accounts.metadata->>'account_id', accounts.metadata->>'chatgpt_account_id', accounts.metadata->>'email', accounts.metadata->>'email_address') AS account_external_id, logs.model, logs.routed_model, logs.client_format, logs.upstream_format, logs.is_stream, logs.prompt_tokens, logs.completion_tokens, logs.cache_creation_tokens, logs.cache_read_tokens, logs.total_tokens, logs.latency_ms, logs.status_code, logs.error_message, logs.admin_info").
 		Joins("LEFT JOIN tokens ON tokens.id = logs.token_id").
 		Joins("LEFT JOIN users ON users.id::text = tokens.user_id").
 		Joins("LEFT JOIN channels ON channels.id = logs.channel_id").
@@ -82,6 +86,15 @@ func (h *Handler) HandleLogs(ctx *fasthttp.RequestCtx) {
 	if err := query.Order("logs.created_at desc").Limit(limit).Offset(offset).Scan(&items).Error; err != nil {
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, "failed to query logs")
 		return
+	}
+	for i := range items {
+		if len(items[i].AdminInfoRaw) == 0 || string(items[i].AdminInfoRaw) == "null" {
+			continue
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(items[i].AdminInfoRaw, &decoded); err == nil {
+			items[i].AdminInfo = decoded
+		}
 	}
 	if items == nil {
 		items = []AdminUsageLogItem{}

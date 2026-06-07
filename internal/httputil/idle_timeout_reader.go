@@ -88,6 +88,7 @@ func isClosedStreamPanic(recovered interface{}) bool {
 	msg := fmt.Sprint(recovered)
 	return strings.Contains(msg, "slice bounds out of range") ||
 		strings.Contains(msg, "body closed") ||
+		strings.Contains(msg, "invalid memory address or nil pointer dereference") ||
 		strings.Contains(msg, "use of closed network connection")
 }
 

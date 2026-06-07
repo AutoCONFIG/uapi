@@ -117,6 +117,8 @@ export type UsageLogItem = {
   account_id?: string;
   account_name?: string;
   account_cred_type?: string;
+  account_project_id?: string;
+  account_external_id?: string;
   is_stream: boolean;
   prompt_tokens: number;
   completion_tokens: number;
