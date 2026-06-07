@@ -711,6 +711,45 @@ func TestAnthropicRedactedThinkingAttachesGeminiFunctionCallThoughtSignature(t *
 	}
 }
 
+func TestResponsesParallelFunctionCallsAndOutputsGroupForGemini(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.go\"}"},
+			{"type":"function_call","call_id":"call_2","name":"read_file","arguments":"{\"path\":\"b.go\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"a"},
+			{"type":"function_call_output","call_id":"call_2","output":"b"}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	contents := got["contents"].([]interface{})
+	if len(contents) != 2 {
+		t.Fatalf("contents len = %d, want 2 grouped tool turns:\n%s", len(contents), converted)
+	}
+	callParts := contents[0].(map[string]interface{})["parts"].([]interface{})
+	responseParts := contents[1].(map[string]interface{})["parts"].([]interface{})
+	if len(callParts) != 2 || len(responseParts) != 2 {
+		t.Fatalf("parallel calls/responses must be grouped as 2+2 parts, got %d+%d:\n%s", len(callParts), len(responseParts), converted)
+	}
+	for i, rawPart := range callParts {
+		if _, ok := rawPart.(map[string]interface{})["functionCall"]; !ok {
+			t.Fatalf("call part %d missing functionCall:\n%s", i, converted)
+		}
+	}
+	for i, rawPart := range responseParts {
+		if _, ok := rawPart.(map[string]interface{})["functionResponse"]; !ok {
+			t.Fatalf("response part %d missing functionResponse:\n%s", i, converted)
+		}
+	}
+}
+
 func TestCrossProtocolResponseConversions(t *testing.T) {
 	openAIResp := []byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
 	tests := []struct {

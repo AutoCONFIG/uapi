@@ -216,16 +216,38 @@ func emitGeminiRequestDirectIR(reqIR *relayir.Request) ([]byte, error) {
 	names := toolCallNameByIDIR(reqIR.Turns)
 	var contents []map[string]interface{}
 	state := &geminiProjectionState{}
+	var pendingRole string
+	var pendingParts []map[string]interface{}
+	flushPending := func() {
+		if len(pendingParts) == 0 {
+			return
+		}
+		contents = append(contents, map[string]interface{}{"role": pendingRole, "parts": pendingParts})
+		pendingRole = ""
+		pendingParts = nil
+	}
 	for _, turn := range reqIR.Turns {
 		parts, err := geminiPartsFromIRTurn(reqIR.SourceProtocol, turn, names, state)
 		if err != nil {
 			return nil, err
 		}
-		contents = append(contents, map[string]interface{}{
-			"role":  internalRoleToGemini(string(turn.Role)),
-			"parts": parts,
-		})
+		role := internalRoleToGemini(string(turn.Role))
+		if shouldGroupGeminiToolParts(reqIR.SourceProtocol, parts) {
+			if pendingRole == "" || pendingRole == role && sameGeminiToolPartKind(pendingParts, parts) {
+				pendingRole = role
+				pendingParts = append(pendingParts, parts...)
+				continue
+			}
+		}
+		flushPending()
+		if shouldGroupGeminiToolParts(reqIR.SourceProtocol, parts) {
+			pendingRole = role
+			pendingParts = append(pendingParts, parts...)
+			continue
+		}
+		contents = append(contents, map[string]interface{}{"role": role, "parts": parts})
 	}
+	flushPending()
 	out["contents"] = contents
 	genConfig := map[string]interface{}{}
 	if reqIR.Generation.MaxTokens != nil {
@@ -348,6 +370,51 @@ func geminiPartsFromIRTurn(source relayir.Protocol, turn relayir.Turn, names map
 		}
 	}
 	return parts, nil
+}
+
+func shouldGroupGeminiToolParts(source relayir.Protocol, parts []map[string]interface{}) bool {
+	if source == relayir.ProtocolGemini || isGeminiEnvelopeProtocol(source) || len(parts) == 0 {
+		return false
+	}
+	return sameGeminiToolPartKind(nil, parts)
+}
+
+func sameGeminiToolPartKind(existing, next []map[string]interface{}) bool {
+	kind := geminiToolPartKind(next)
+	if kind == "" {
+		return false
+	}
+	if len(existing) == 0 {
+		return true
+	}
+	return geminiToolPartKind(existing) == kind
+}
+
+func geminiToolPartKind(parts []map[string]interface{}) string {
+	kind := ""
+	for _, part := range parts {
+		current := ""
+		if _, ok := part["functionCall"]; ok {
+			current = "functionCall"
+		}
+		if _, ok := part["functionResponse"]; ok {
+			if current != "" {
+				return ""
+			}
+			current = "functionResponse"
+		}
+		if current == "" {
+			return ""
+		}
+		if kind == "" {
+			kind = current
+			continue
+		}
+		if kind != current {
+			return ""
+		}
+	}
+	return kind
 }
 
 func geminiPartFromIRItem(item relayir.Item, names map[string]string) (map[string]interface{}, error) {
