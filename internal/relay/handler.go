@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -49,6 +50,8 @@ const maxResponseSize = 100 * 1024 * 1024
 const largePayloadThresholdBytesDefault = 256 * 1024 * 1024
 
 const defaultStreamIdleTimeout = 300 * time.Second
+
+var claudeCodeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
 type Relayer struct {
 	db                *gorm.DB
@@ -1860,10 +1863,35 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq 
 
 func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityScope string, attempts *[]map[string]interface{}, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	// Try affinity cache first
-	if r.db != nil && affinityScope != "" {
+	if affinityScope != "" && r.affinity != nil {
 		if chID, accID := r.affinity.Get(tokenID, model, affinityScope); chID != "" {
-			var ch db.Channel
-			if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
+			if r.db != nil {
+				var ch db.Channel
+				if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
+					modelOK := channelSupportsModel(ch, model)
+					capabilityOK := channelSupportsCapability(ch, capabilityReq...)
+					attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
+					attempt["source"] = "affinity"
+					if accID != "" {
+						attempt["affinity_account_id"] = accID
+					}
+					if modelOK && capabilityOK {
+						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID); err == nil {
+							attempt["selected"] = true
+							attempt["account_id"] = acc.ID.String()
+							appendRouteAttempt(attempts, attempt)
+							return &ch, acc, adaptor, creds, nil
+						} else {
+							attempt["skip_reason"] = err.Error()
+						}
+					} else if !modelOK {
+						attempt["skip_reason"] = "unsupported_model"
+					} else {
+						attempt["skip_reason"] = "unsupported_capability"
+					}
+					appendRouteAttempt(attempts, attempt)
+				}
+			} else if ch, ok := r.runtimeChannelByID(chID); ok {
 				modelOK := channelSupportsModel(ch, model)
 				capabilityOK := channelSupportsCapability(ch, capabilityReq...)
 				attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
@@ -1968,12 +1996,16 @@ func (r *Relayer) routeAttemptInfo(ch db.Channel, modelOK, capabilityOK bool) ma
 		"supports_model":      modelOK,
 		"supports_capability": capabilityOK,
 	}
-	if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
-		stats := pool.Stats()
-		item["pool_exists"] = true
-		item["pool_accounts"] = stats.Accounts
-		item["pool_total_weight"] = stats.TotalWeight
-		item["pool_closed"] = stats.Closed
+	if r.pools != nil {
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+			stats := pool.Stats()
+			item["pool_exists"] = true
+			item["pool_accounts"] = stats.Accounts
+			item["pool_total_weight"] = stats.TotalWeight
+			item["pool_closed"] = stats.Closed
+		} else {
+			item["pool_exists"] = false
+		}
 	} else {
 		item["pool_exists"] = false
 	}
@@ -2004,12 +2036,16 @@ func (r *Relayer) routeFailureDiagnostics(model string, capabilityReq ...channel
 			"supports_model":      modelOK,
 			"supports_capability": capabilityOK,
 		}
-		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
-			stats := pool.Stats()
-			item["pool_exists"] = true
-			item["pool_accounts"] = stats.Accounts
-			item["pool_total_weight"] = stats.TotalWeight
-			item["pool_closed"] = stats.Closed
+		if r.pools != nil {
+			if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+				stats := pool.Stats()
+				item["pool_exists"] = true
+				item["pool_accounts"] = stats.Accounts
+				item["pool_total_weight"] = stats.TotalWeight
+				item["pool_closed"] = stats.Closed
+			} else {
+				item["pool_exists"] = false
+			}
 		} else {
 			item["pool_exists"] = false
 		}
@@ -2139,6 +2175,20 @@ func (r *Relayer) runtimeSelected(channelID, accountID uuid.UUID) (*db.Channel, 
 		return nil, nil, false
 	}
 	return &ch, &acc, true
+}
+
+func (r *Relayer) runtimeChannelByID(channelID string) (db.Channel, bool) {
+	id, err := uuid.Parse(channelID)
+	if err != nil {
+		return db.Channel{}, false
+	}
+	r.runtimeMu.RLock()
+	defer r.runtimeMu.RUnlock()
+	ch, ok := r.runtimeChannels[id]
+	if !ok || !ch.Enabled {
+		return db.Channel{}, false
+	}
+	return ch, true
 }
 
 func (r *Relayer) ApplyRuntimeConfig(cfg RuntimeConfig) {
@@ -2422,10 +2472,17 @@ func (r *Relayer) pushRuntimeAccountUpdate(account *db.Account) {
 }
 
 func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
-	if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
-		pool.Cooldown(acc.ID.String(), 5*time.Minute)
+	if r == nil || ch == nil || acc == nil {
+		return
 	}
-	r.affinity.EvictChannel(ch.ID.String())
+	if r.pools != nil {
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+			pool.Cooldown(acc.ID.String(), 5*time.Minute)
+		}
+	}
+	if r.affinity != nil {
+		r.affinity.EvictChannel(ch.ID.String())
+	}
 }
 
 func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
@@ -2598,6 +2655,9 @@ func (r *Relayer) pickNext(ch *db.Channel, pool *AccountPool) *db.Account {
 }
 
 func poolFromChannel(pm *PoolManager, ch *db.Channel) *AccountPool {
+	if pm == nil || ch == nil {
+		return nil
+	}
 	p, _ := pm.GetPool(ch.ID.String())
 	return p
 }
@@ -2619,12 +2679,15 @@ func (r *Relayer) accountAttemptLimit(ch *db.Channel) int {
 
 func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 	for _, value := range []string{
+		requestClaudeAffinityScope(body),
+		headerAffinityScope(ctx, "X-Session-ID", "header"),
+		headerAffinityScope(ctx, "x-session-affinity", "opencode"),
+		headerAffinityScope(ctx, "Session-Id", "codex"),
+		headerAffinityScope(ctx, "Session_id", "codex"),
+		headerAffinityScope(ctx, "X-Amp-Thread-Id", "amp"),
+		headerAffinityScope(ctx, "X-Client-Request-Id", "clientreq"),
+		headerAffinityScope(ctx, "Thread-Id", "thread"),
 		requestJSONSessionValue(body),
-		headerString(ctx, "X-Session-ID"),
-		headerString(ctx, "Session_id"),
-		headerString(ctx, "X-Amp-Thread-Id"),
-		headerString(ctx, "X-Client-Request-Id"),
-		headerString(ctx, "Thread-Id"),
 	} {
 		if value = strings.TrimSpace(value); value != "" {
 			return value
@@ -2633,11 +2696,26 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 	return ""
 }
 
-func headerString(ctx *fasthttp.RequestCtx, name string) string {
+func headerAffinityScope(ctx *fasthttp.RequestCtx, name string, prefix string) string {
 	if ctx == nil {
 		return ""
 	}
-	return strings.TrimSpace(string(ctx.Request.Header.Peek(name)))
+	value := strings.TrimSpace(string(ctx.Request.Header.Peek(name)))
+	if value == "" {
+		return ""
+	}
+	return prefix + ":" + value
+}
+
+func requestClaudeAffinityScope(body []byte) string {
+	var root map[string]interface{}
+	if err := provider.DecodeJSONUseNumber(body, &root); err != nil {
+		return ""
+	}
+	if metadata, ok := root["metadata"].(map[string]interface{}); ok {
+		return sessionFromMetadataUserID(metadata["user_id"])
+	}
+	return sessionFromMetadataUserID(root["user_id"])
 }
 
 func requestJSONSessionValue(body []byte) string {
@@ -2654,22 +2732,24 @@ func requestJSONSessionValue(body []byte) string {
 		"conversation",
 	} {
 		if value := stringFromJSONValue(root[key]); value != "" {
-			return value
+			return "body:" + key + ":" + value
 		}
 	}
 	for _, nestedKey := range []string{"metadata", "client_metadata"} {
 		if nested, ok := root[nestedKey].(map[string]interface{}); ok {
 			for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation_id", "conversationId"} {
 				if value := stringFromJSONValue(nested[key]); value != "" {
-					return value
+					return nestedKey + ":" + key + ":" + value
 				}
 			}
-			if value := sessionFromMetadataUserID(nested["user_id"]); value != "" {
-				return value
+			if nestedKey == "metadata" {
+				if value := stringFromJSONValue(nested["user_id"]); value != "" {
+					return "user:" + value
+				}
 			}
 		}
 	}
-	return sessionFromMetadataUserID(root["user_id"])
+	return ""
 }
 
 func sessionFromMetadataUserID(value interface{}) string {
@@ -2681,9 +2761,12 @@ func sessionFromMetadataUserID(value interface{}) string {
 	if err := json.Unmarshal([]byte(text), &nested); err == nil {
 		for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId", "thread_id", "threadId"} {
 			if value := stringFromJSONValue(nested[key]); value != "" {
-				return value
+				return "claude:" + value
 			}
 		}
+	}
+	if matches := claudeCodeSessionPattern.FindStringSubmatch(text); len(matches) >= 2 {
+		return "claude:" + matches[1]
 	}
 	return ""
 }

@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
 
@@ -92,17 +94,27 @@ func TestRequestAffinityScopeUsesSessionIdentifiers(t *testing.T) {
 		{
 			name: "codex prompt cache key",
 			body: []byte(`{"model":"gpt-5.5","prompt_cache_key":"thread-1","input":"hi"}`),
-			want: "thread-1",
+			want: "body:prompt_cache_key:thread-1",
 		},
 		{
 			name: "anthropic metadata user id session",
 			body: []byte(`{"model":"claude","metadata":{"user_id":"{\"session_id\":\"sess-1\"}"},"messages":[]}`),
-			want: "sess-1",
+			want: "claude:sess-1",
+		},
+		{
+			name: "claude code legacy metadata session",
+			body: []byte(`{"model":"claude","metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},"messages":[]}`),
+			want: "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344",
+		},
+		{
+			name: "non claude metadata user id fallback",
+			body: []byte(`{"model":"claude","metadata":{"user_id":"plain-user"},"messages":[]}`),
+			want: "user:plain-user",
 		},
 		{
 			name: "gemini session id",
 			body: []byte(`{"model":"gemini","session_id":"gemini-session","contents":[]}`),
-			want: "gemini-session",
+			want: "body:session_id:gemini-session",
 		},
 	}
 	for _, tc := range cases {
@@ -117,8 +129,38 @@ func TestRequestAffinityScopeUsesSessionIdentifiers(t *testing.T) {
 func TestRequestAffinityScopeFallsBackToHeaders(t *testing.T) {
 	var ctx fasthttp.RequestCtx
 	ctx.Request.Header.Set("X-Session-ID", "header-session")
-	if got := requestAffinityScope(&ctx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "header-session" {
+	if got := requestAffinityScope(&ctx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "header:header-session" {
 		t.Fatalf("requestAffinityScope header fallback = %q", got)
+	}
+}
+
+func TestRequestAffinityScopeSupportsCodexAndOpenCodeHeaders(t *testing.T) {
+	var codexCtx fasthttp.RequestCtx
+	codexCtx.Request.Header.Set("Session-Id", "codex-session")
+	if got := requestAffinityScope(&codexCtx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "codex:codex-session" {
+		t.Fatalf("Session-Id affinity = %q", got)
+	}
+
+	var openCodeCtx fasthttp.RequestCtx
+	openCodeCtx.Request.Header.Set("x-session-affinity", "opencode-session")
+	if got := requestAffinityScope(&openCodeCtx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "opencode:opencode-session" {
+		t.Fatalf("x-session-affinity = %q", got)
+	}
+}
+
+func TestRequestAffinityScopeClaudeMetadataHasPriorityOverHeaders(t *testing.T) {
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.Set("X-Session-ID", "header-session")
+	ctx.Request.Header.Set("Session_id", "codex-session")
+	body := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	if got := requestAffinityScope(&ctx, body); got != "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344" {
+		t.Fatalf("requestAffinityScope priority = %q", got)
+	}
+}
+
+func TestSessionFromMetadataUserIDRequiresCompleteLegacySessionSuffix(t *testing.T) {
+	if got := sessionFromMetadataUserID("user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344_extra"); got != "" {
+		t.Fatalf("sessionFromMetadataUserID with trailing junk = %q, want empty", got)
 	}
 }
 
@@ -131,5 +173,103 @@ func TestUpstreamQuotaExhaustedDetection(t *testing.T) {
 	}
 	if isUpstreamQuotaExhausted(fasthttp.StatusBadRequest, []byte(`{"error":{"message":"invalid request"}}`)) {
 		t.Fatalf("ordinary user errors must not trigger account failover")
+	}
+}
+
+func TestRuntimeResolveUsesSessionAccountAffinity(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	cred1, err := crypto.Encrypt("sk-one")
+	if err != nil {
+		t.Fatalf("encrypt cred1: %v", err)
+	}
+	cred2, err := crypto.Encrypt("sk-two")
+	if err != nil {
+		t.Fatalf("encrypt cred2: %v", err)
+	}
+	chID := uuid.New()
+	acc1ID := uuid.New()
+	acc2ID := uuid.New()
+	relayer := NewRelayer(nil, NewPoolManager(), nil, NewAffinityCache(), 10, "", false, "")
+	relayer.ApplyRuntimeConfig(RuntimeConfig{
+		Version: 1,
+		Channels: []db.Channel{{
+			Base:      db.Base{ID: chID},
+			Name:      "runtime-openai",
+			Type:      "openai",
+			APIFormat: "standard",
+			Models:    "gpt-5.5",
+			Enabled:   true,
+		}},
+		Accounts: []RuntimeAccount{
+			{ID: acc1ID, ChannelID: chID, Name: "one", Credentials: cred1, CredType: "api_key", Weight: 1, Enabled: true},
+			{ID: acc2ID, ChannelID: chID, Name: "two", Credentials: cred2, CredType: "api_key", Weight: 1, Enabled: true},
+		},
+	})
+	relayer.affinity.Set("token-1", "gpt-5.5", "codex:thread-1", chID.String(), acc2ID.String(), 60)
+
+	_, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttempts("token-1", "gpt-5.5", "codex:thread-1", nil)
+	if err != nil {
+		t.Fatalf("resolve with runtime affinity: %v", err)
+	}
+	if acc.ID != acc2ID {
+		t.Fatalf("account = %s, want affinity account %s", acc.ID, acc2ID)
+	}
+	if creds != "sk-two" {
+		t.Fatalf("creds = %q, want sk-two", creds)
+	}
+}
+
+func TestRuntimeResolveIgnoresDisabledAffinityChannel(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	enabledCred, err := crypto.Encrypt("sk-enabled")
+	if err != nil {
+		t.Fatalf("encrypt enabled cred: %v", err)
+	}
+	disabledCred, err := crypto.Encrypt("sk-disabled")
+	if err != nil {
+		t.Fatalf("encrypt disabled cred: %v", err)
+	}
+	enabledChID := uuid.New()
+	disabledChID := uuid.New()
+	enabledAccID := uuid.New()
+	disabledAccID := uuid.New()
+	relayer := NewRelayer(nil, NewPoolManager(), nil, NewAffinityCache(), 10, "", false, "")
+	relayer.ApplyRuntimeConfig(RuntimeConfig{
+		Version: 1,
+		Channels: []db.Channel{
+			{
+				Base:      db.Base{ID: enabledChID},
+				Name:      "enabled",
+				Type:      "openai",
+				APIFormat: "standard",
+				Models:    "gpt-5.5",
+				Enabled:   true,
+			},
+			{
+				Base:      db.Base{ID: disabledChID},
+				Name:      "disabled",
+				Type:      "openai",
+				APIFormat: "standard",
+				Models:    "gpt-5.5",
+				Enabled:   false,
+			},
+		},
+		Accounts: []RuntimeAccount{
+			{ID: enabledAccID, ChannelID: enabledChID, Name: "enabled", Credentials: enabledCred, CredType: "api_key", Weight: 1, Enabled: true},
+			{ID: disabledAccID, ChannelID: disabledChID, Name: "disabled", Credentials: disabledCred, CredType: "api_key", Weight: 1, Enabled: true},
+		},
+	})
+	relayer.affinity.Set("token-1", "gpt-5.5", "codex:thread-1", disabledChID.String(), disabledAccID.String(), 60)
+
+	ch, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttempts("token-1", "gpt-5.5", "codex:thread-1", nil)
+	if err != nil {
+		t.Fatalf("resolve with disabled runtime affinity: %v", err)
+	}
+	if ch.ID != enabledChID || acc.ID != enabledAccID || creds != "sk-enabled" {
+		t.Fatalf("selected (%s,%s,%q), want enabled (%s,%s,sk-enabled)", ch.ID, acc.ID, creds, enabledChID, enabledAccID)
 	}
 }
