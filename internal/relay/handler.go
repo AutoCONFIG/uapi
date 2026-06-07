@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2823,6 +2824,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool, clientMetadataSeed
 		bodyMap["include"] = appendUniqueStringInclude(bodyMap["include"], "reasoning.encrypted_content")
 	}
 	normalizeCodexResponsesClientMetadata(bodyMap, clientMetadataSeed)
+	sanitizeCodexReasoningEncryptedContent(bodyMap)
 	for _, key := range []string{
 		"max_output_tokens",
 		"max_completion_tokens",
@@ -2881,22 +2883,21 @@ func normalizeCodexResponsesClientMetadata(bodyMap map[string]interface{}, seed 
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	if promptCacheKey != "" {
 		windowID := promptCacheKey + ":0"
-		if existing, _ := clientMetadata["x-codex-window-id"].(string); strings.TrimSpace(existing) == "" {
-			clientMetadata["x-codex-window-id"] = windowID
+		clientMetadata["x-codex-window-id"] = windowID
+		turnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+promptCacheKey)).String()
+		if seed != "" {
+			turnID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+seed+":"+promptCacheKey)).String()
 		}
-		if existing, _ := clientMetadata["x-codex-turn-metadata"].(string); strings.TrimSpace(existing) == "" {
-			turnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+promptCacheKey)).String()
-			if seed != "" {
-				turnID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("uapi:codex-turn:"+seed+":"+promptCacheKey)).String()
-			}
-			turnMetadata, err := json.Marshal(map[string]string{
-				"prompt_cache_key": promptCacheKey,
-				"turn_id":          turnID,
-				"window_id":        windowID,
-			})
-			if err == nil {
-				clientMetadata["x-codex-turn-metadata"] = string(turnMetadata)
-			}
+		if existing, _ := clientMetadata["x-codex-turn-metadata"].(string); strings.TrimSpace(existing) != "" {
+			turnID = codexTurnIDFromMetadata(existing, turnID)
+		}
+		turnMetadata, err := json.Marshal(map[string]string{
+			"prompt_cache_key": promptCacheKey,
+			"turn_id":          turnID,
+			"window_id":        windowID,
+		})
+		if err == nil {
+			clientMetadata["x-codex-turn-metadata"] = string(turnMetadata)
 		}
 	}
 	if len(clientMetadata) > 0 {
@@ -2919,6 +2920,7 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 	if req == nil || upstreamFormat != provider.FormatCodexResponses {
 		return
 	}
+	ensureCodexOfficialHeaders(req)
 	var bodyMap map[string]interface{}
 	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return
@@ -2943,6 +2945,76 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 		req.Header.Set("X-Client-Request-Id", promptCacheKey)
 		req.Header.Set("Thread-Id", promptCacheKey)
 	}
+}
+
+func ensureCodexOfficialHeaders(req *fasthttp.Request) {
+	for _, header := range []string{
+		"Version",
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Client-Request-Id",
+		"X-ResponsesAPI-Include-Timing-Metrics",
+	} {
+		if len(req.Header.Peek(header)) == 0 {
+			req.Header.Set(header, "")
+		}
+	}
+}
+
+func codexTurnIDFromMetadata(raw string, fallback string) string {
+	var metadata map[string]interface{}
+	if err := provider.DecodeJSONUseNumber([]byte(raw), &metadata); err != nil {
+		return fallback
+	}
+	if turnID, _ := metadata["turn_id"].(string); strings.TrimSpace(turnID) != "" {
+		return strings.TrimSpace(turnID)
+	}
+	return fallback
+}
+
+func sanitizeCodexReasoningEncryptedContent(bodyMap map[string]interface{}) {
+	items, ok := bodyMap["input"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "reasoning" {
+			continue
+		}
+		rawEncrypted, exists := item["encrypted_content"]
+		if !exists {
+			continue
+		}
+		encrypted, ok := rawEncrypted.(string)
+		if !ok || !isValidCodexReasoningEncryptedContent(encrypted) {
+			delete(item, "encrypted_content")
+		}
+	}
+}
+
+func isValidCodexReasoningEncryptedContent(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || !strings.HasPrefix(value, "gAAAA") || len(value) > 200000 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '=' {
+			continue
+		}
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		decoded, err = base64.URLEncoding.DecodeString(value)
+	}
+	if err != nil || len(decoded) < 73 || decoded[0] != 0x80 {
+		return false
+	}
+	ciphertextLen := len(decoded) - (1 + 8 + 16 + 32)
+	return ciphertextLen > 0 && ciphertextLen%16 == 0
 }
 
 func codexResponsesHasReasoning(bodyMap map[string]interface{}) bool {

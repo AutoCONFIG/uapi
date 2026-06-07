@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -242,7 +243,7 @@ func TestNormalizeCodexResponsesRequestPromptCacheKeyIsScoped(t *testing.T) {
 	}
 }
 
-func TestNormalizeCodexResponsesRequestPreservesExistingClientMetadata(t *testing.T) {
+func TestNormalizeCodexResponsesRequestAlignsExistingClientMetadata(t *testing.T) {
 	got := normalizeCodexResponsesRequest([]byte(`{
 		"model":"gpt-5.5",
 		"input":"hi",
@@ -250,6 +251,7 @@ func TestNormalizeCodexResponsesRequestPreservesExistingClientMetadata(t *testin
 		"client_metadata":{
 			"x-codex-installation-id":"install-existing",
 			"x-codex-window-id":"window-existing",
+			"x-codex-turn-metadata":"{\"prompt_cache_key\":\"old-thread\",\"turn_id\":\"turn-existing\",\"window_id\":\"old-thread:0\"}",
 			"custom":"keep"
 		}
 	}`), true, "channel-a:account-a")
@@ -265,11 +267,16 @@ func TestNormalizeCodexResponsesRequestPreservesExistingClientMetadata(t *testin
 	if metadata["x-codex-installation-id"] != "install-existing" {
 		t.Fatalf("installation id overwritten: %#v", metadata)
 	}
-	if metadata["x-codex-window-id"] != "window-existing" {
-		t.Fatalf("window id overwritten: %#v", metadata)
+	if metadata["x-codex-window-id"] != "thread-1:0" {
+		t.Fatalf("window id not aligned: %#v", metadata)
 	}
-	if metadata["x-codex-turn-metadata"] == nil {
-		t.Fatalf("turn metadata should be synthesized when prompt_cache_key exists: %#v", metadata)
+	rawTurnMetadata, _ := metadata["x-codex-turn-metadata"].(string)
+	var turnMetadata map[string]string
+	if err := json.Unmarshal([]byte(rawTurnMetadata), &turnMetadata); err != nil {
+		t.Fatalf("turn metadata is not JSON: %v; %q", err, rawTurnMetadata)
+	}
+	if turnMetadata["prompt_cache_key"] != "thread-1" || turnMetadata["window_id"] != "thread-1:0" || turnMetadata["turn_id"] != "turn-existing" {
+		t.Fatalf("turn metadata not aligned: %#v", turnMetadata)
 	}
 	if metadata["custom"] != "keep" {
 		t.Fatalf("custom metadata lost: %#v", metadata)
@@ -317,6 +324,11 @@ func TestApplyCodexMetadataHeadersUsesWindowMetadata(t *testing.T) {
 			t.Fatalf("%s = %q, want thread-1", header, got)
 		}
 	}
+	for _, header := range []string{"Version", "X-Codex-Turn-State", "X-ResponsesAPI-Include-Timing-Metrics"} {
+		if !testHeaderPresent(&req, header) {
+			t.Fatalf("%s should be present", header)
+		}
+	}
 
 	var nonCodexReq fasthttp.Request
 	applyCodexMetadataHeaders(&nonCodexReq, provider.FormatOpenAIResponses, []byte(`{"client_metadata":{"x-codex-window-id":"thread-1:0"}}`))
@@ -332,6 +344,51 @@ func TestApplyCodexMetadataHeadersSynthesizesWindowFromPromptCacheKey(t *testing
 	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
 	}
+}
+
+func TestNormalizeCodexResponsesRequestSanitizesInvalidReasoningEncryptedContent(t *testing.T) {
+	validBytes := []byte{0x80}
+	validBytes = append(validBytes, make([]byte, 8)...)
+	validBytes = append(validBytes, make([]byte, 16)...)
+	validBytes = append(validBytes, make([]byte, 16)...)
+	validBytes = append(validBytes, make([]byte, 32)...)
+	valid := base64.RawURLEncoding.EncodeToString(validBytes)
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"reasoning","encrypted_content":" not-valid "},
+			{"type":"reasoning","encrypted_content":123},
+			{"type":"reasoning","encrypted_content":"`+valid+`"},
+			{"type":"message","role":"user","encrypted_content":"leave-message-alone","content":[{"type":"input_text","text":"hi"}]}
+		]
+	}`), true, "channel-a:account-a")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	if _, ok := input[0].(map[string]interface{})["encrypted_content"]; ok {
+		t.Fatalf("invalid reasoning encrypted_content should be removed: %s", got)
+	}
+	if _, ok := input[1].(map[string]interface{})["encrypted_content"]; ok {
+		t.Fatalf("non-string reasoning encrypted_content should be removed: %s", got)
+	}
+	if input[2].(map[string]interface{})["encrypted_content"] != valid {
+		t.Fatalf("valid reasoning encrypted_content should be preserved: %s", got)
+	}
+	if input[3].(map[string]interface{})["encrypted_content"] != "leave-message-alone" {
+		t.Fatalf("non-reasoning encrypted_content should be preserved: %s", got)
+	}
+}
+
+func testHeaderPresent(req *fasthttp.Request, name string) bool {
+	found := false
+	req.Header.VisitAll(func(key, _ []byte) {
+		if strings.EqualFold(string(key), name) {
+			found = true
+		}
+	})
+	return found
 }
 
 func TestNormalizeCodexResponsesRequestHonorsConfiguredStreamMode(t *testing.T) {
