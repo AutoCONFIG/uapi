@@ -611,6 +611,42 @@ func TestOpenAIChatToolResultToGeminiDoesNotDuplicateAsText(t *testing.T) {
 	}
 }
 
+func TestAnthropicStringToolResultsToGeminiUseStructResponses(t *testing.T) {
+	body := []byte(`{
+		"model":"claude",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"using-superpowers"}},
+				{"type":"tool_use","id":"toolu_2","name":"TaskCreate","input":{"title":"调查项目核心功能实现细节"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":"Launching skill: using-superpowers"},
+				{"type":"tool_result","tool_use_id":"toolu_2","content":"Task #1 created successfully: 调查项目核心功能实现细节"}
+			]}
+		]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatAnthropic, convert.FormatGemini, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	contents := got["contents"].([]interface{})
+	parts := contents[1].(map[string]interface{})["parts"].([]interface{})
+	for i, part := range parts {
+		resp := part.(map[string]interface{})["functionResponse"].(map[string]interface{})["response"]
+		object, ok := resp.(map[string]interface{})
+		if !ok {
+			t.Fatalf("functionResponse.response %d must be a JSON object for Gemini Struct, got %#v:\n%s", i, resp, converted)
+		}
+		if object["content"] == "" {
+			t.Fatalf("functionResponse.response %d missing wrapped content: %#v\n%s", i, object, converted)
+		}
+	}
+}
+
 func TestCrossProtocolResponseConversions(t *testing.T) {
 	openAIResp := []byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
 	tests := []struct {

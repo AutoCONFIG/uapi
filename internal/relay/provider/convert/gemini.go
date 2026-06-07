@@ -542,18 +542,34 @@ func geminiToolCallPart(tc schema.ToolCall) map[string]interface{} {
 }
 
 func geminiToolResultPart(result schema.ToolResult, toolCallNames map[string]string) map[string]interface{} {
-	var response interface{}
-	if len(result.ContentRaw) > 0 {
-		_ = json.Unmarshal(result.ContentRaw, &response)
-	} else {
-		_ = json.Unmarshal([]byte(result.Content), &response)
-	}
 	return map[string]interface{}{
 		"functionResponse": map[string]interface{}{
 			"name":     toolResponseName(result.ToolCallID, toolCallNames),
-			"response": response,
+			"response": geminiToolResultResponse(result),
 		},
 	}
+}
+
+func geminiToolResultResponse(result schema.ToolResult) map[string]interface{} {
+	var parsed interface{}
+	if len(result.ContentRaw) > 0 {
+		if err := json.Unmarshal(result.ContentRaw, &parsed); err == nil {
+			if object, ok := parsed.(map[string]interface{}); ok {
+				return object
+			}
+			return map[string]interface{}{"content": parsed}
+		}
+	}
+	if result.Content != "" {
+		if err := json.Unmarshal([]byte(result.Content), &parsed); err == nil {
+			if object, ok := parsed.(map[string]interface{}); ok {
+				return object
+			}
+			return map[string]interface{}{"content": parsed}
+		}
+		return map[string]interface{}{"content": result.Content}
+	}
+	return map[string]interface{}{}
 }
 
 func toolResponseName(toolCallID string, names map[string]string) string {

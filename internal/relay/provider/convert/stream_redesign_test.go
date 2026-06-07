@@ -530,6 +530,31 @@ func TestDirectGeminiToResponsesStreamCoversTextThinkingUsageAndTerminal(t *test
 	}
 }
 
+func TestGeminiThoughtSignatureFunctionCallPartStreamsResponsesToolCall(t *testing.T) {
+	converter := stream.NewConverter(convert.FormatGeminiCode, convert.FormatOpenAIResponses)
+	if converter == nil {
+		t.Fatalf("missing IR gemini_code -> responses converter")
+	}
+	out := converter.Convert([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_1","functionCall":{"name":"exec_command","args":{"cmd":"ls -F"}}}]}}],"modelVersion":"gemini-3.1-flash-lite"}}` + "\n\n"))
+	out = append(out, converter.Convert([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-3.1-flash-lite"}}`+"\n\n"))...)
+	got := string(out)
+	for _, want := range []string{
+		`event: response.output_item.added`,
+		`"type":"reasoning"`,
+		`"encrypted_content":"sig_1"`,
+		`"type":"function_call"`,
+		`"name":"exec_command"`,
+		`event: response.function_call_arguments.delta`,
+		`"delta":"{\"cmd\":\"ls -F\"}"`,
+		`event: response.output_item.done`,
+		`event: response.completed`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Gemini thoughtSignature+functionCall stream missing %s:\n%s", want, got)
+		}
+	}
+}
+
 func TestDirectAnthropicToGeminiStreamPreservesSignatureDelta(t *testing.T) {
 	converter := stream.NewConverter(convert.FormatAnthropic, convert.FormatGemini)
 	if converter == nil {

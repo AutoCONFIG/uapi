@@ -230,13 +230,14 @@ func (p *geminiIRParser) parseBody(body []byte) []relayir.StreamEvent {
 	}
 	candidate := response.Candidates[0]
 	for idx, part := range candidate.Content.Parts {
-		switch {
-		case part.Text != "" && part.Thought:
+		if part.Text != "" && part.Thought {
 			out = append(out, relayir.StreamEvent{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), ItemIndex: idx, Delta: relayir.ItemDelta{Kind: relayir.ItemReasoning, Text: part.Text, Signature: part.ThoughtSignature}})
-		case part.Text != "":
+		} else if part.Text != "" {
 			out = append(out, relayir.StreamEvent{Type: relayir.EventContentDelta, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), ItemIndex: idx, Delta: relayir.ItemDelta{Kind: relayir.ItemText, Text: part.Text}})
-		case part.ThoughtSignature != "":
+		} else if part.ThoughtSignature != "" {
 			out = append(out, relayir.StreamEvent{Type: relayir.EventReasoningDelta, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), ItemIndex: idx, Delta: relayir.ItemDelta{Kind: relayir.ItemEncryptedReasoning, Signature: part.ThoughtSignature}})
+		}
+		switch {
 		case part.FunctionCall != nil:
 			callID := randomID("call_")
 			out = append(out, relayir.StreamEvent{Type: relayir.EventToolCallStart, ResponseID: p.id, Model: firstNonEmpty(p.model, "gemini"), ItemIndex: idx, Delta: relayir.ItemDelta{Kind: relayir.ItemToolUse}, Native: relayir.NativeEnvelope{Protocol: relayir.ProtocolGemini, Meta: rawMeta("call_id", callID, "name", part.FunctionCall.Name)}})
