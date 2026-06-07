@@ -481,6 +481,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 		tokenPlanID = planID
 	}
+	r.recordSelectedAffinity(token.ID.String(), req.Model, affinityScope, targetChannel, account)
 	// Determine upstream format from channel type
 	var upstreamFormat provider.Format
 	switch targetChannel.Type {
@@ -1992,6 +1993,13 @@ func appendRouteAttempt(attempts *[]map[string]interface{}, attempt map[string]i
 		return
 	}
 	*attempts = append(*attempts, attempt)
+}
+
+func (r *Relayer) recordSelectedAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account) {
+	if r == nil || r.affinity == nil || ch == nil || acc == nil || strings.TrimSpace(scope) == "" || ch.AffinityTTL <= 0 {
+		return
+	}
+	r.affinity.Set(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
 }
 
 func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) map[string]interface{} {

@@ -46,6 +46,20 @@ function fallbackLabel(item: Record<string, unknown>) {
   return `${from} → ${to} · ${reason}`;
 }
 
+function affinityLabel(row: UsageLogItem) {
+  const route = routeSummary(row);
+  if (!route.affinity) {
+    return { title: "亲和未启用", detail: "无会话键", route };
+  }
+  const source = route.affinity.source || "-";
+  const hint = route.affinity.key_hint ? ` · ${route.affinity.key_hint}` : "";
+  return {
+    title: route.affinity.hit ? "亲和命中" : "亲和未命中",
+    detail: `${source}${hint}`,
+    route,
+  };
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<UsageLogItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -105,10 +119,11 @@ export default function LogsPage() {
       <section className="card">
         <div className="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>用户</th><th>IP</th><th>账号</th><th>路由</th><th>模型</th><th>格式</th><th>状态</th><th>Token</th><th>延迟</th></tr></thead>
+            <thead><tr><th>时间</th><th>用户</th><th>IP</th><th>账号</th><th>模型</th><th>格式</th><th>状态</th><th>Token</th><th>延迟</th></tr></thead>
             <tbody>
               {logs.map((row) => {
-                const route = routeSummary(row);
+                const affinity = affinityLabel(row);
+                const route = affinity.route;
                 return (
                 <tr key={row.id}>
                   <td>{new Date(row.created_at).toLocaleTimeString()}</td>
@@ -120,21 +135,8 @@ export default function LogsPage() {
                   <td>
                     <strong>{row.account_name || shortID(row.account_id)}</strong>
                     <div className="muted" style={{ fontSize: 12 }}>{row.channel_name || shortID(row.channel_id)} · {row.account_cred_type || "-"}</div>
-                  </td>
-                  <td>
-                    {route.affinity ? (
-                      <>
-                        <strong>{route.affinity.hit ? "亲和命中" : "亲和未命中"}</strong>
-                        <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
-                          {route.affinity.source || "-"}{route.affinity.key_hint ? ` · ${route.affinity.key_hint}` : ""}
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <strong>未启用</strong>
-                        <div className="muted" style={{ fontSize: 12 }}>无会话键</div>
-                      </>
-                    )}
+                    <div style={{ fontSize: 12, marginTop: 4 }}><strong>{affinity.title}</strong></div>
+                    <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{affinity.detail}</div>
                     {route.fallback.length > 0 ? (
                       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                         回退 {route.fallback.map(fallbackLabel).join(" / ")}
@@ -178,7 +180,7 @@ export default function LogsPage() {
                 </tr>
               );})}
               {logs.length === 0 && !loading && (
-                <tr><td colSpan={10} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                <tr><td colSpan={9} className="muted" style={{ textAlign: "center", padding: 24 }}>
                   {loading ? "加载中…" : "暂无调用日志"}
                 </td></tr>
               )}
