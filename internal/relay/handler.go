@@ -2777,6 +2777,10 @@ func (r *Relayer) pushRuntimeAccountUpdate(account *db.Account) {
 }
 
 func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
+	// For API Key channels, do not cooldown on failure - just transient skip for this request
+	if isAPIKeyChannel(ch) {
+		return
+	}
 	if r == nil || ch == nil || acc == nil {
 		return
 	}
@@ -2808,6 +2812,9 @@ func upstreamAccountFailoverReason(statusCode int, body []byte) (string, bool, b
 }
 
 func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, statusCode int, body []byte, isQuota bool) {
+	if isAPIKeyChannel(ch) {
+		return
+	}
 	if isQuota {
 		if r.quotaScheduler != nil && acc != nil && ch != nil {
 			r.quotaScheduler.On429(acc.ID, ch.ID)
@@ -3813,6 +3820,25 @@ func parseRetryDelay(body []byte, apiFormat provider.Format) time.Duration {
 	}
 
 	return -1
+}
+
+// isAPIKeyChannel returns true if the channel uses API Key authentication
+// (not OAuth, not Reverse). These channels should use transient failover
+// instead of permanent cooldown on failures.
+func isAPIKeyChannel(ch *db.Channel) bool {
+	if ch == nil {
+		return false
+	}
+	apiFormat := ch.APIFormat
+	// Not OAuth
+	if apiFormat == "codex" || apiFormat == "gemini_code" || apiFormat == "claude_code" || apiFormat == "antigravity" {
+		return false
+	}
+	// Not Reverse
+	if apiFormat == "chatgpt_reverse" {
+		return false
+	}
+	return true
 }
 
 func isUpstreamQuotaExhausted(statusCode int, body []byte) bool {

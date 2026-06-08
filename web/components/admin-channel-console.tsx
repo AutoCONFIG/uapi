@@ -709,7 +709,7 @@ export function AdminChannelConsole() {
     let success = 0;
 
     if (isOAuth) {
-      // OAuth channel: use completeChannelOAuth with oauth_json directly
+      // OAuth channel: use completeChannelOAuth + bindChannelOAuth
       for (const item of batchParsed) {
         try {
           let oauthJSON = item.credentials;
@@ -751,19 +751,9 @@ export function AdminChannelConsole() {
           setBatchError(err instanceof Error ? err.message : "导入失败");
         }
       }
-    } else if (isReverse) {
-      // Reverse channel: use reverse auth flow
-      for (const item of batchParsed) {
-        try {
-          const started = await adminApi.startChannelReverseAuth(token, { channel_id: selected.id, account_name: item.name });
-          const status = await adminApi.completeChannelReverseAuth(token, { state: started.state, callback_url: item.credentials, channel_id: selected.id });
-          if (status.status === "completed") success++;
-        } catch (err) {
-          console.warn("batch import failed for", item.name, err);
-        }
-      }
     } else {
-      // API key channel: direct createAccount
+      // API key / Reverse channel: use createAccount directly
+      // Backend createAccount already handles reverse channels via parseReverseCredentialInput
       for (const item of batchParsed) {
         try {
           const account = await adminApi.createAccount(token, { channel_id: selected.id, name: item.name, credentials: item.credentials, weight: item.weight, enabled: item.enabled });
