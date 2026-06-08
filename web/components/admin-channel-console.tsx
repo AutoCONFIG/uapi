@@ -701,33 +701,83 @@ export function AdminChannelConsole() {
 
   async function runBatchImport() {
     if (!token || !selected || batchParsed.length === 0) return;
+    const isOAuth = isOAuthChannel(selected);
+    const isReverse = isReverseChannel(selected);
+
     setBatchImporting(true);
     setBatchError("");
     let success = 0;
-    for (const item of batchParsed) {
-      try {
-        const account = await adminApi.createAccount(token, {
-          channel_id: selected.id,
-          name: item.name,
-          credentials: item.credentials,
-          weight: item.weight,
-          enabled: item.enabled,
-        });
-        setAccounts((cur) => [account, ...cur]);
-        success++;
-      } catch (err) {
-        console.warn("batch import failed for", item.name, err);
+
+    if (isOAuth) {
+      // OAuth channel: use completeChannelOAuth with oauth_json directly
+      for (const item of batchParsed) {
+        try {
+          let oauthJSON = item.credentials;
+          let parsedCred: Record<string, unknown> | null = null;
+          try { parsedCred = JSON.parse(oauthJSON); } catch { /* not JSON */ }
+
+          let completeBody: { state: string; oauth_json?: string; channel_id: string; provider?: string };
+          const provider = oauthProviderForChannel(selected);
+          const state = `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+          if (parsedCred && (parsedCred.access_token || parsedCred.id_token || parsedCred.tokens)) {
+            completeBody = { state, oauth_json: JSON.stringify(parsedCred), channel_id: selected.id, provider };
+          } else {
+            completeBody = {
+              state,
+              oauth_json: JSON.stringify({ access_token: oauthJSON, refresh_token: parsedCred?.refresh_token || "" }),
+              channel_id: selected.id,
+              provider,
+            };
+          }
+
+          const status = await adminApi.completeChannelOAuth(token, completeBody);
+          if (status.status === "completed") {
+            const account = await adminApi.bindChannelOAuth(token, {
+              state,
+              account_name: item.name,
+              weight: item.weight,
+              enabled: item.enabled,
+            });
+            setAccounts((cur) => [account, ...cur]);
+            success++;
+          } else if (status.status === "error") {
+            setBatchError(`认证失败: ${status.error}`);
+            break;
+          }
+        } catch (err) {
+          console.warn("batch import failed for", item.name, err);
+          setBatchError(err instanceof Error ? err.message : "导入失败");
+        }
+      }
+    } else if (isReverse) {
+      // Reverse channel: use reverse auth flow
+      for (const item of batchParsed) {
+        try {
+          const started = await adminApi.startChannelReverseAuth(token, { channel_id: selected.id, account_name: item.name });
+          const status = await adminApi.completeChannelReverseAuth(token, { state: started.state, callback_url: item.credentials, channel_id: selected.id });
+          if (status.status === "completed") success++;
+        } catch (err) {
+          console.warn("batch import failed for", item.name, err);
+        }
+      }
+    } else {
+      // API key channel: direct createAccount
+      for (const item of batchParsed) {
+        try {
+          const account = await adminApi.createAccount(token, { channel_id: selected.id, name: item.name, credentials: item.credentials, weight: item.weight, enabled: item.enabled });
+          setAccounts((cur) => [account, ...cur]);
+          success++;
+        } catch (err) {
+          console.warn("batch import failed for", item.name, err);
+        }
       }
     }
+
     setBatchSuccess(success);
     setBatchImporting(false);
     if (success > 0) {
-      setTimeout(() => {
-        setBatchImportOpen(false);
-        setBatchJSON("");
-        setBatchParsed([]);
-        setBatchSuccess(0);
-      }, 1500);
+      setTimeout(() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchSuccess(0); }, 1500);
     }
   }
 
