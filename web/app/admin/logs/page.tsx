@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { formatAdminDateTime } from "@/lib/datetime";
 import { formatTokens } from "@/lib/format";
 import type { UsageLogItem } from "@/types/api";
 
@@ -130,7 +131,7 @@ export default function LogsPage() {
                 const route = affinity.route;
                 return (
                 <tr key={row.id}>
-                  <td>{new Date(row.created_at).toLocaleTimeString()}</td>
+                  <td>{formatAdminDateTime(row.created_at)}</td>
                   <td>
                     <strong>{row.username || row.user_email || "-"}</strong>
                     {row.user_id ? <div className="muted" style={{ fontSize: 12 }}>{row.user_id}</div> : null}

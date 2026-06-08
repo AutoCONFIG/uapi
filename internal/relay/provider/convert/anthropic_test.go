@@ -558,7 +558,7 @@ func TestOpenAIResponsesPromptCacheKeyDoesNotInventAnthropicCacheControl(t *test
 	}
 }
 
-func TestGLMAnthropicCompatDropsRedactedThinkingHistory(t *testing.T) {
+func TestGLMAnthropicCompatDropsResponsesReasoningHistory(t *testing.T) {
 	body := []byte(`{
 		"model":"glm-5.1",
 		"input":[
@@ -574,8 +574,8 @@ func TestGLMAnthropicCompatDropsRedactedThinkingHistory(t *testing.T) {
 	if strings.Contains(text, "redacted_thinking") || strings.Contains(text, "enc_1") {
 		t.Fatalf("GLM Anthropic-compatible target must not receive redacted_thinking: %s", converted)
 	}
-	if !strings.Contains(text, `"type":"thinking"`) || !strings.Contains(text, "visible") {
-		t.Fatalf("GLM Anthropic-compatible target should keep supported thinking text: %s", converted)
+	if strings.Contains(text, `"type":"thinking"`) || strings.Contains(text, "visible") {
+		t.Fatalf("GLM Anthropic-compatible target must not receive unsigned Responses reasoning history: %s", converted)
 	}
 }
 
@@ -594,6 +594,38 @@ func TestClaudeAnthropicKeepsRedactedThinkingHistory(t *testing.T) {
 	text := string(converted)
 	if !strings.Contains(text, `"type":"redacted_thinking"`) || !strings.Contains(text, `"data":"enc_1"`) {
 		t.Fatalf("real Anthropic target should keep redacted_thinking: %s", converted)
+	}
+}
+
+func TestOpenAIResponsesReasoningSummaryDoesNotBecomeUnsignedAnthropicThinking(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"input":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"visible prior reasoning"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("OpenAI Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	if strings.Contains(text, `"type":"thinking"`) || strings.Contains(text, "visible prior reasoning") {
+		t.Fatalf("Anthropic target must not receive unsigned cross-provider thinking history: %s", converted)
+	}
+	var got struct {
+		Messages []struct {
+			Role    string            `json:"role"`
+			Content []json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	for idx, msg := range got.Messages {
+		if len(msg.Content) == 0 {
+			t.Fatalf("messages[%d] has no content after dropping reasoning history: %s", idx, converted)
+		}
 	}
 }
 

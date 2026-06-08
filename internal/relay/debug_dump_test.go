@@ -3,6 +3,7 @@ package relay
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,23 @@ func TestCleanupRelayDebugDumpDirWithLimitsKeepsNewestEntries(t *testing.T) {
 	}
 	if pathExists(filepath.Join(dir, "oldest")) {
 		t.Fatal("oldest entry was not removed")
+	}
+}
+
+func TestRelayDebugDumpLocalTimestampsUseConfiguredLocalZone(t *testing.T) {
+	previousLocal := time.Local
+	time.Local = time.FixedZone("CST", 8*60*60)
+	t.Cleanup(func() {
+		time.Local = previousLocal
+	})
+
+	now := time.Date(2026, 6, 8, 0, 1, 2, 3000000, time.UTC)
+	name := relayDebugDumpEntryName(now, "trace")
+	if !strings.HasPrefix(name, "20260608T080102.003000000+0800-trace") {
+		t.Fatalf("relayDebugDumpEntryName() = %q, want Beijing +0800 timestamp", name)
+	}
+	if got := relayDebugDumpTimestamp(now); got != "2026-06-08T08:01:02.003+08:00" {
+		t.Fatalf("relayDebugDumpTimestamp() = %q, want Beijing RFC3339 timestamp", got)
 	}
 }
 

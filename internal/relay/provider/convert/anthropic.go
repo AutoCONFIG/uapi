@@ -190,9 +190,10 @@ func emitAnthropicRequestDirectIR(req *relayir.Request) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(blocks) > 0 {
-			msg["content"] = blocks
+		if len(blocks) == 0 {
+			continue
 		}
+		msg["content"] = blocks
 		messages = append(messages, msg)
 	}
 	out["messages"] = messages
@@ -637,7 +638,7 @@ func anthropicBlocksFromIRTurn(source relayir.Protocol, turn relayir.Turn, model
 		if (source == relayir.ProtocolAnthropic || source == relayir.ProtocolClaudeCode) && len(item.Native.Raw) > 0 {
 			var raw map[string]interface{}
 			if json.Unmarshal(item.Native.Raw, &raw) == nil {
-				if shouldDropAnthropicRedactedThinking(model, raw) {
+				if shouldDropAnthropicThinkingBlock(model, raw) {
 					continue
 				}
 				blocks = append(blocks, raw)
@@ -659,7 +660,7 @@ func anthropicBlockFromIRItem(item relayir.Item, model string) (map[string]inter
 	switch item.Kind {
 	case relayir.ItemReasoning, relayir.ItemThinking, relayir.ItemRedactedThinking, relayir.ItemEncryptedReasoning:
 		block := anthropicReasoningBlock(schemaReasoningFromIR(item))
-		if shouldDropAnthropicRedactedThinking(model, block) {
+		if shouldDropAnthropicThinkingBlock(model, block) {
 			return nil, nil
 		}
 		return block, nil
@@ -688,12 +689,21 @@ func anthropicBlockFromIRItem(item relayir.Item, model string) (map[string]inter
 	return nil, nil
 }
 
-func shouldDropAnthropicRedactedThinking(model string, block map[string]interface{}) bool {
-	if block == nil || !isGLMAnthropicCompatModel(model) {
+func shouldDropAnthropicThinkingBlock(model string, block map[string]interface{}) bool {
+	if block == nil {
 		return false
 	}
 	typ, _ := block["type"].(string)
-	return typ == "redacted_thinking"
+	switch typ {
+	case "thinking":
+		thinking, _ := block["thinking"].(string)
+		signature, _ := block["signature"].(string)
+		return thinking == "" || signature == ""
+	case "redacted_thinking":
+		return isGLMAnthropicCompatModel(model)
+	default:
+		return false
+	}
 }
 
 func isGLMAnthropicCompatModel(model string) bool {

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AppShell, PageHead, StatusBadge } from "@/components/shell";
 import { adminApi } from "@/lib/api";
+import { formatAdminDateTime } from "@/lib/datetime";
 
 type AuditEntry = {
   id: number;
@@ -74,7 +75,7 @@ export default function AuditLogsPage() {
             <tbody>
               {logs.map((row) => (
                 <tr key={row.id}>
-                  <td>{new Date(row.created_at).toLocaleTimeString()}</td>
+                  <td>{formatAdminDateTime(row.created_at)}</td>
                   <td>{row.user || "-"}</td>
                   <td className="muted" style={{ fontSize: 12 }}>{row.ip_address || "-"}</td>
                   <td><StatusBadge value={actionLabel(row.action)} /></td>

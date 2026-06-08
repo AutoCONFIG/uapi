@@ -32,7 +32,7 @@ const (
 
 var (
 	relayDebugDumpDir              = os.Getenv(relayDebugDumpDirEnv)
-	relayDebugDumpProcessStartedAt = time.Now().UTC()
+	relayDebugDumpProcessStartedAt = time.Now()
 )
 
 func init() {
@@ -217,12 +217,21 @@ type relayDebugTrace struct {
 	streamMaxGap    map[string]time.Duration
 }
 
+func relayDebugDumpTimestamp(t time.Time) string {
+	return t.Local().Format(time.RFC3339Nano)
+}
+
+func relayDebugDumpEntryName(t time.Time, traceID string) string {
+	return t.Local().Format("20060102T150405.000000000-0700") + "-" + traceID
+}
+
 func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *db.Channel, acc *db.Account, claims *internalauth.Claims, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, model, routedModel string, stream bool) *relayDebugTrace {
 	if relayDebugDumpDir == "" {
 		return nil
 	}
 	traceID := uuid.NewString()
-	name := time.Now().UTC().Format("20060102T150405.000000000Z") + "-" + traceID
+	now := time.Now()
+	name := relayDebugDumpEntryName(now, traceID)
 	outDir := filepath.Join(relayDebugDumpDir, name)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		logger.Warnf("relay.debug_dump", "create dump dir failed", logger.Err(err), logger.F("dir", outDir))
@@ -230,10 +239,10 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 	}
 
 	summary := relayDebugDumpSummary{
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp:        relayDebugDumpTimestamp(now),
 		RelayRequestID:   traceID,
 		ProcessID:        os.Getpid(),
-		ProcessStartedAt: relayDebugDumpProcessStartedAt.Format(time.RFC3339Nano),
+		ProcessStartedAt: relayDebugDumpTimestamp(relayDebugDumpProcessStartedAt),
 		TokenID:          token.ID.String(),
 		ClientFormat:     clientFormat,
 		UpstreamFormat:   upstreamFormat,
@@ -265,7 +274,7 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 	trace := &relayDebugTrace{
 		ID:              traceID,
 		Dir:             outDir,
-		startedAt:       time.Now().UTC(),
+		startedAt:       now,
 		streamBytes:     map[string]int{},
 		streamTruncated: map[string]bool{},
 		streamEvents:    map[string]int{},
@@ -612,7 +621,7 @@ func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 	}
 	t.recordLifecycleEvent(name)
 	record := map[string]interface{}{
-		"timestamp":        time.Now().UTC().Format(time.RFC3339Nano),
+		"timestamp":        relayDebugDumpTimestamp(time.Now()),
 		"relay_request_id": t.ID,
 		"event":            name,
 	}
@@ -639,7 +648,7 @@ func (t *relayDebugTrace) recordLifecycleEvent(name string) {
 	if t == nil {
 		return
 	}
-	now := time.Now().UTC()
+	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch name {
@@ -671,7 +680,7 @@ func (t *relayDebugTrace) StreamChunk(name string, body []byte) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.recordStreamChunkTimingLocked(name, time.Now().UTC())
+	t.recordStreamChunkTimingLocked(name, time.Now())
 
 	written := t.streamBytes[name]
 	if written >= relayDebugStreamFileMaxSize {
@@ -771,7 +780,7 @@ func (t *relayDebugTrace) TimingState() map[string]interface{} {
 	defer t.mu.Unlock()
 	out := map[string]interface{}{}
 	if !t.startedAt.IsZero() {
-		out["request_started_at"] = t.startedAt.Format(time.RFC3339Nano)
+		out["request_started_at"] = relayDebugDumpTimestamp(t.startedAt)
 	}
 	if !t.upstreamStarted.IsZero() {
 		out["upstream_request_started_ms"] = t.upstreamStarted.Sub(t.startedAt).Milliseconds()
@@ -820,7 +829,7 @@ func (t *relayDebugTrace) noteStreamTruncatedLocked(name string, written int) {
 	}
 	t.streamTruncated[name] = true
 	record := map[string]interface{}{
-		"timestamp":        time.Now().UTC().Format(time.RFC3339Nano),
+		"timestamp":        relayDebugDumpTimestamp(time.Now()),
 		"relay_request_id": t.ID,
 		"event":            "stream_dump_truncated",
 		"file":             name,
@@ -849,7 +858,7 @@ func (t *relayDebugTrace) writeStreamEventSummaryLocked(name string, body []byte
 	if n, ok := record["data_payloads"].(int); ok {
 		t.streamPayloads[name] += n
 	}
-	record["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+	record["timestamp"] = relayDebugDumpTimestamp(time.Now())
 	record["relay_request_id"] = t.ID
 	record["event"] = "stream_chunk"
 	record["file"] = name
