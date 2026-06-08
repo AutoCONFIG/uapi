@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,8 +27,8 @@ const (
 	relayDebugDumpDirEnv            = "UAPI_RELAY_DEBUG_DUMP_DIR"
 	relayDebugDumpMaxAgeEnv         = "UAPI_RELAY_DEBUG_DUMP_MAX_AGE"
 	relayDebugDumpMaxEntriesEnv     = "UAPI_RELAY_DEBUG_DUMP_MAX_ENTRIES"
-	relayDebugDumpDefaultMaxAge     = 3 * time.Hour
-	relayDebugDumpDefaultMaxEntries = 200
+	relayDebugDumpDefaultMaxAge     = 7 * 24 * time.Hour  // 7 days
+	relayDebugDumpDefaultMaxEntries = 7                   // keep 7 daily archives
 	relayDebugStreamFileMaxSize     = 2 * 1024 * 1024
 )
 
@@ -37,13 +39,159 @@ var (
 
 func init() {
 	cleanupRelayDebugDumpDir()
+	// Start daily rotation ticker
+	go func() {
+		// Calculate time until next midnight
+		now := time.Now()
+		nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+		duration := nextMidnight.Sub(now)
+
+		timer := time.AfterFunc(duration, func() {
+			rotateAndCleanupRelayDebugDumpDir()
+			// Then run every 24 hours
+			ticker := time.NewTicker(24 * time.Hour)
+			for range ticker.C {
+				rotateAndCleanupRelayDebugDumpDir()
+			}
+		})
+		_ = timer // Let it run
+	}()
 }
 
 func relayDebugDumpEnabled() bool {
 	return relayDebugDumpDir != ""
 }
 
+// rotateAndCleanupRelayDebugDumpDir rotates yesterday's dump to .tar.gz and cleans up old archives
+func rotateAndCleanupRelayDebugDumpDir() {
+	if relayDebugDumpDir == "" {
+		return
+	}
+	dir := filepath.Clean(relayDebugDumpDir)
+	if dir == "." || dir == string(filepath.Separator) {
+		logger.Warnf("relay.debug_dump", "skip unsafe dump dir", logger.F("dir", relayDebugDumpDir))
+		return
+	}
+
+	yesterday := time.Now().AddDate(0, 0, -1).Local().Format("2006-01-02")
+	dayDir := filepath.Join(dir, yesterday)
+	archiveName := yesterday + ".tar.gz"
+	archivePath := filepath.Join(dir, archiveName)
+
+	// Check if day directory exists
+	if _, err := os.Stat(dayDir); os.IsNotExist(err) {
+		// No yesterday directory, nothing to rotate
+		return
+	}
+
+	// Check if archive already exists
+	if _, err := os.Stat(archivePath); err == nil {
+		logger.Infof("relay.debug_dump", "archive already exists, skipping", logger.F("archive", archiveName))
+	} else {
+		// Create tar.gz archive
+		if err := createTarGz(dayDir, archivePath); err != nil {
+			logger.Warnf("relay.debug_dump", "create archive failed", logger.Err(err), logger.F("day_dir", dayDir), logger.F("archive", archivePath))
+			return
+		}
+		logger.Infof("relay.debug_dump", "rotated daily dump to archive", logger.F("archive", archiveName))
+	}
+
+	// Remove the original day directory after successful archive
+	if err := os.RemoveAll(dayDir); err != nil {
+		logger.Warnf("relay.debug_dump", "remove day dir failed", logger.Err(err), logger.F("day_dir", dayDir))
+	}
+
+	// Clean up old archives
+	cleanupOldArchives(dir)
+}
+
+func createTarGz(srcDir, destPath string) error {
+	file, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	gzw := gzip.NewWriter(file)
+	defer gzw.Close()
+
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Get relative path
+		relPath, err := filepath.Rel(filepath.Dir(srcDir), path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, relPath)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if _, err := tw.Write(data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func cleanupOldArchives(dir string) {
+	maxEntries := relayDebugDumpMaxEntries()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Warnf("relay.debug_dump", "read dir for cleanup failed", logger.Err(err))
+		return
+	}
+
+	// Collect .tar.gz archives
+	var archives []relayDebugDumpEntry
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tar.gz") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		archives = append(archives, relayDebugDumpEntry{name: name, modTime: info.ModTime()})
+	}
+
+	// Sort by modification time (newest first)
+	sort.Slice(archives, func(i, j int) bool {
+		return archives[i].modTime.After(archives[j].modTime)
+	})
+
+	// Remove old archives beyond maxEntries
+	removed := 0
+	if maxEntries > 0 && len(archives) > maxEntries {
+		for _, arch := range archives[maxEntries:] {
+			if removeRelayDebugDumpEntry(dir, arch.name) {
+				removed++
+			}
+		}
+	}
+
+	if removed > 0 {
+		logger.Infof("relay.debug_dump", "cleaned old archives", logger.F("removed", removed), logger.F("kept", len(archives)-removed))
+	}
+}
+
 func cleanupRelayDebugDumpDir() {
+	// Initial cleanup on startup: rotate and clean any stale day directories
 	if relayDebugDumpDir == "" {
 		return
 	}
@@ -56,33 +204,14 @@ func cleanupRelayDebugDumpDir() {
 		logger.Warnf("relay.debug_dump", "create dump dir before cleanup failed", logger.Err(err), logger.F("dir", dir))
 		return
 	}
-	maxAge := relayDebugDumpMaxAge()
-	maxEntries := relayDebugDumpMaxEntries()
-	removed, kept, err := cleanupRelayDebugDumpDirWithLimits(dir, maxAge, maxEntries, time.Now())
-	if err != nil {
-		logger.Warnf("relay.debug_dump", "cleanup dump dir failed", logger.Err(err), logger.F("dir", dir))
-		return
-	}
-	logger.Infof("relay.debug_dump", "old dump entries cleaned",
-		logger.F("dir", dir),
-		logger.F("removed", removed),
-		logger.F("kept", kept),
-		logger.F("max_age", maxAge.String()),
-		logger.F("max_entries", maxEntries),
-	)
-}
 
-func relayDebugDumpMaxAge() time.Duration {
-	raw := os.Getenv(relayDebugDumpMaxAgeEnv)
-	if raw == "" {
-		return relayDebugDumpDefaultMaxAge
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < 0 {
-		logger.Warnf("relay.debug_dump", "invalid max age, using default", logger.F("env", relayDebugDumpMaxAgeEnv), logger.F("value", raw))
-		return relayDebugDumpDefaultMaxAge
-	}
-	return d
+	// On startup: rotate yesterday if not already done, clean old archives
+	rotateAndCleanupRelayDebugDumpDir()
+
+	logger.Infof("relay.debug_dump", "debug dump initialized",
+		logger.F("dir", relayDebugDumpDir),
+		logger.F("max_archives", relayDebugDumpMaxEntries()),
+	)
 }
 
 func relayDebugDumpMaxEntries() int {
@@ -101,44 +230,6 @@ func relayDebugDumpMaxEntries() int {
 type relayDebugDumpEntry struct {
 	name    string
 	modTime time.Time
-}
-
-func cleanupRelayDebugDumpDirWithLimits(dir string, maxAge time.Duration, maxEntries int, now time.Time) (removed int, kept int, err error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, 0, err
-	}
-	var remaining []relayDebugDumpEntry
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == "." || name == ".." {
-			continue
-		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			logger.Warnf("relay.debug_dump", "stat dump entry failed", logger.Err(infoErr), logger.F("dir", dir), logger.F("entry", name))
-			continue
-		}
-		if maxAge > 0 && now.Sub(info.ModTime()) > maxAge {
-			if removeRelayDebugDumpEntry(dir, name) {
-				removed++
-			}
-			continue
-		}
-		remaining = append(remaining, relayDebugDumpEntry{name: name, modTime: info.ModTime()})
-	}
-	sort.Slice(remaining, func(i, j int) bool {
-		return remaining[i].modTime.After(remaining[j].modTime)
-	})
-	if maxEntries > 0 && len(remaining) > maxEntries {
-		for _, entry := range remaining[maxEntries:] {
-			if removeRelayDebugDumpEntry(dir, entry.name) {
-				removed++
-			}
-		}
-		remaining = remaining[:maxEntries]
-	}
-	return removed, len(remaining), nil
 }
 
 func removeRelayDebugDumpEntry(dir, name string) bool {
@@ -221,18 +312,28 @@ func relayDebugDumpTimestamp(t time.Time) string {
 	return t.Local().Format(time.RFC3339Nano)
 }
 
+func relayDebugDumpCurrentDayDir() string {
+	if relayDebugDumpDir == "" {
+		return ""
+	}
+	// Use local time date as subdirectory name
+	day := time.Now().Local().Format("2006-01-02")
+	return filepath.Join(relayDebugDumpDir, day)
+}
+
 func relayDebugDumpEntryName(t time.Time, traceID string) string {
 	return t.Local().Format("20060102T150405.000000000-0700") + "-" + traceID
 }
 
 func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *db.Channel, acc *db.Account, claims *internalauth.Claims, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, model, routedModel string, stream bool) *relayDebugTrace {
-	if relayDebugDumpDir == "" {
+	dayDir := relayDebugDumpCurrentDayDir()
+	if dayDir == "" {
 		return nil
 	}
 	traceID := uuid.NewString()
 	now := time.Now()
 	name := relayDebugDumpEntryName(now, traceID)
-	outDir := filepath.Join(relayDebugDumpDir, name)
+	outDir := filepath.Join(dayDir, name)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		logger.Warnf("relay.debug_dump", "create dump dir failed", logger.Err(err), logger.F("dir", outDir))
 		return nil
