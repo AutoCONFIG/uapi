@@ -721,6 +721,7 @@ export function AdminChannelConsole() {
           const state = `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
           if (parsedCred && (parsedCred.access_token || parsedCred.id_token || parsedCred.tokens)) {
+            if (provider === "codex" && !parsedCred.auth_mode) parsedCred.auth_mode = "chatgpt";
             completeBody = { state, oauth_json: JSON.stringify(parsedCred), channel_id: selected.id, provider };
           } else {
             completeBody = {
