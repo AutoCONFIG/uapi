@@ -320,6 +320,12 @@ export function AdminChannelConsole() {
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
   const [quotaSyncing, setQuotaSyncing] = useState(false);
   const [createKind, setCreateKind] = useState<"oauth" | "reverse" | "apikey">("oauth");
+  const [batchImportOpen, setBatchImportOpen] = useState(false);
+  const [batchJSON, setBatchJSON] = useState("");
+  const [batchParsed, setBatchParsed] = useState<Array<{name: string; credentials: string; weight: number; enabled: boolean}>>([]);
+  const [batchImporting, setBatchImporting] = useState(false);
+  const [batchError, setBatchError] = useState("");
+  const [batchSuccess, setBatchSuccess] = useState(0);
 
   const token = typeof window !== "undefined" ? window.localStorage.getItem("uapi.admin.token") : "";
   const sortedChannels = useMemo(() => channels.slice().sort((left, right) => {
@@ -625,6 +631,103 @@ export function AdminChannelConsole() {
       setCredError(err instanceof Error ? err.message : "添加失败");
     } finally {
       setCredLoading(false);
+    }
+  }
+
+  function parseBatchJSON() {
+    setBatchError("");
+    setBatchSuccess(0);
+    try {
+      const parsed = JSON.parse(batchJSON);
+      const accounts = Array.isArray(parsed) ? parsed : parsed.accounts || [];
+      if (!Array.isArray(accounts) || accounts.length === 0) {
+        setBatchError("未找到账号数据");
+        return;
+      }
+
+      // 检测 platform
+      const firstWithPlatform = accounts.find((a: Record<string, unknown>) => a.platform);
+      const detectedPlatform = firstWithPlatform?.platform as string | undefined;
+
+      // 尝试匹配 channel
+      let matchedChannel: Channel | null = null;
+      if (detectedPlatform) {
+        const platformMap: Record<string, string> = {
+          openai: "openai_oauth",
+          anthropic: "anthropic_oauth",
+          gemini: "gemini_oauth",
+          google: "gemini_oauth",
+          claude: "anthropic_oauth",
+          chatgpt: "openai_oauth",
+        };
+        const apiFormat = platformMap[detectedPlatform.toLowerCase()];
+        if (apiFormat) {
+          matchedChannel = channels.find((ch) => ch.api_format === apiFormat && ch.enabled) || null;
+        }
+      }
+
+      const results: Array<{name: string; credentials: string; weight: number; enabled: boolean; platform?: string}> = [];
+      for (const item of accounts) {
+        const name = item.name || item.email || item.username || `account-${results.length}`;
+        const credentials = item.credentials || item.token || item.auth || item;
+        if (!credentials) continue;
+        const weight = item.weight || item.concurrency || item.priority || 100;
+        const enabled = item.enabled !== false;
+        const platform = item.platform as string | undefined;
+        results.push({
+          name: String(name),
+          credentials: typeof credentials === "string" ? credentials : JSON.stringify(credentials),
+          weight: Number(weight) || 100,
+          enabled,
+          platform,
+        });
+      }
+      if (results.length === 0) {
+        setBatchError("未找到有效的账号数据（需要 name 和 credentials）");
+        return;
+      }
+      setBatchParsed(results);
+      // 如果没选 channel 但检测到 platform，提供建议
+      if (!selected && matchedChannel) {
+        setSelectedID(matchedChannel.id);
+        setBatchError(`已自动匹配 ${detectedPlatform} 渠道: ${matchedChannel.name}`);
+      } else if (!selected) {
+        setBatchError("请先选择一个渠道，或确保 JSON 包含 platform 字段");
+      }
+    } catch (err) {
+      setBatchError(err instanceof Error ? err.message : "JSON 解析失败");
+    }
+  }
+
+  async function runBatchImport() {
+    if (!token || !selected || batchParsed.length === 0) return;
+    setBatchImporting(true);
+    setBatchError("");
+    let success = 0;
+    for (const item of batchParsed) {
+      try {
+        const account = await adminApi.createAccount(token, {
+          channel_id: selected.id,
+          name: item.name,
+          credentials: item.credentials,
+          weight: item.weight,
+          enabled: item.enabled,
+        });
+        setAccounts((cur) => [account, ...cur]);
+        success++;
+      } catch (err) {
+        console.warn("batch import failed for", item.name, err);
+      }
+    }
+    setBatchSuccess(success);
+    setBatchImporting(false);
+    if (success > 0) {
+      setTimeout(() => {
+        setBatchImportOpen(false);
+        setBatchJSON("");
+        setBatchParsed([]);
+        setBatchSuccess(0);
+      }, 1500);
     }
   }
 
@@ -1170,6 +1273,7 @@ export function AdminChannelConsole() {
               <div className="credential-editor account-create-panel">
                 <div className="section-head">
                   <div><h2>新增账号</h2><p className="muted">账号添加后归入当前渠道，由 Gateway 统一调度。</p></div>
+                  <button className="btn ghost" onClick={() => setBatchImportOpen(true)} type="button">批量导入</button>
                   {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isOAuthChannel(selected) && !isReverseChannel(selected) ? (
                     <div className="segmented">
                       <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> {isReverseChannel(selected) ? "Access Token" : "密钥"}</button>
@@ -1282,6 +1386,51 @@ export function AdminChannelConsole() {
           </section>
         </div>
       ) : null}
+
+      {batchImportOpen && selected && (
+        <div className="channel-modal-backdrop" onClick={() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchError(""); setBatchSuccess(0); }} role="presentation">
+          <section aria-label="批量导入账号" aria-modal="true" className="channel-modal" onClick={(event) => event.stopPropagation()} role="dialog">
+            <div className="drawer-head">
+              <div>
+                <p className="eyebrow">批量导入</p>
+                <h2>批量导入账号到 {selected.name}</h2>
+              </div>
+              <button className="btn" onClick={() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchError(""); setBatchSuccess(0); }} title="关闭" type="button"><X /></button>
+            </div>
+            <div className="drawer-body">
+              <p className="batch-hint">粘贴 JSON 数据。支持字段：name, credentials, weight/concurrency, enabled。</p>
+              <textarea
+                className="input"
+                placeholder='[{"name": "account1", "credentials": {...}, "concurrency": 10}]'
+                rows={8}
+                value={batchJSON}
+                onChange={(e) => setBatchJSON(e.target.value)}
+              />
+              {batchParsed.length > 0 && (
+                <div className="batch-preview">
+                  <strong>解析成功 {batchParsed.length} 个账号：</strong>
+                  <ul>{batchParsed.slice(0, 5).map((item, i) => <li key={i}>{item.name} (权重: {item.weight})</li>)}
+                    {batchParsed.length > 5 && <li>...还有 {batchParsed.length - 5} 个</li>}
+                  </ul>
+                </div>
+              )}
+              {batchError && <p className="form-error">{batchError}</p>}
+              {batchSuccess > 0 && <p className="form-success">✅ 成功导入 {batchSuccess} 个账号</p>}
+            </div>
+            <div className="drawer-foot">
+              <button className="btn ghost" disabled={!batchJSON.trim()} onClick={parseBatchJSON} type="button">解析</button>
+              <button
+                className="btn primary"
+                disabled={batchParsed.length === 0 || batchImporting}
+                onClick={runBatchImport}
+                type="button"
+              >
+                {batchImporting ? "导入中..." : `导入 ${batchParsed.length} 个账号`}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </>
   );
 }

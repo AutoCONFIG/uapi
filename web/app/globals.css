@@ -3529,6 +3529,31 @@ tr:last-child td {
   font-weight: 650;
 }
 
+/* Batch import styles */
+.batch-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.batch-preview {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--card-bg);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.batch-preview ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.batch-preview li {
+  margin: 4px 0;
+  color: var(--muted);
+}
+
 
 .chart-bars {
   display: grid;
