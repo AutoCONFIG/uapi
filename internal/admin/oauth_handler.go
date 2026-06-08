@@ -285,20 +285,15 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 				return
 			}
 			if session.Provider == "codex" {
+				// Codex: require auth_mode to be chatgpt, but allow simplified JSON formats
+				// that don't have full tokens object - just need access_token + refresh_token
 				if imported.AuthMode != "chatgpt" {
 					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json auth_mode must be chatgpt")
 					return
 				}
-				if !imported.HasTokens {
-					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex oauth_json must be official auth.json with tokens")
-					return
-				}
-				if imported.IDToken == "" {
-					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens.id_token is required")
-					return
-				}
-				if imported.AccountID == "" {
-					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens.account_id is required")
+				// If HasTokens is true, verify id_token and account_id exist
+				if imported.HasTokens && (imported.IDToken == "" || imported.AccountID == "") {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens requires id_token and account_id")
 					return
 				}
 			}

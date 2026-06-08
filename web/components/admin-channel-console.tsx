@@ -699,6 +699,94 @@ export function AdminChannelConsole() {
     }
   }
 
+  // Convert various Codex/OpenAI OAuth JSON formats to the standard auth.json format expected by backend
+  function convertCodexOAuthJSON(input: Record<string, unknown>, provider: string): Record<string, unknown> {
+    if (provider !== "codex") return input;
+
+    // Already has full tokens structure - pass through
+    if (input.tokens && typeof input.tokens === "object") {
+      const tokens = input.tokens as Record<string, unknown>;
+      if (tokens.id_token && tokens.account_id) {
+        // Ensure auth_mode is set
+        if (!input.auth_mode) {
+          return { ...input, auth_mode: "chatgpt" };
+        }
+        return input;
+      }
+    }
+
+    // Build standard auth.json format from simplified input
+    const accessToken = (input.access_token as string) || "";
+    const refreshToken = (input.refresh_token as string) || "";
+
+    if (!accessToken && !refreshToken) {
+      return input;
+    }
+
+    // Extract account_id from various possible locations
+    const accountId = (input.account_id as string) ||
+      (input.chatgpt_account_id as string) ||
+      (input.tokens as Record<string, unknown>)?.account_id as string ||
+      (input.id_token as Record<string, unknown>)?.account_id as string ||
+      (input.id_token as Record<string, unknown>)?.chatgpt_account_id as string ||
+      "";
+
+    // Extract id_token if present
+    const idToken = (input.id_token as string) ||
+      (input.tokens as Record<string, unknown>)?.id_token as string || "";
+
+    // Extract user_id from various locations
+    const userId = (input.chatgpt_user_id as string) ||
+      (input.user_id as string) ||
+      "";
+
+    // Extract organization_id
+    const orgId = (input.organization_id as string) ||
+      (input.org_id as string) ||
+      "";
+
+    // Extract plan_type
+    const planType = (input.plan_type as string) ||
+      (input.plan as string) ||
+      "";
+
+    // Extract email
+    const email = (input.email as string) || "";
+
+    // Build the tokens object with all extracted fields
+    const tokensObj: Record<string, unknown> = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    };
+
+    // Only add id_token and account_id if they exist
+    if (idToken) {
+      tokensObj.id_token = idToken;
+    }
+    if (accountId) {
+      tokensObj.account_id = accountId;
+    }
+
+    // Build result with all available metadata
+    const result: Record<string, unknown> = {
+      auth_mode: "chatgpt",
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      tokens: tokensObj,
+    };
+
+    // Add optional metadata if available
+    if (userId) tokensObj.chatgpt_user_id = userId;
+    if (orgId) tokensObj.organization_id = orgId;
+    if (planType) tokensObj.chatgpt_plan_type = planType;
+    if (email) {
+      result.email = email;
+      tokensObj.email = email;
+    }
+
+    return result;
+  }
+
   async function runBatchImport() {
     if (!token || !selected || batchParsed.length === 0) return;
     const isOAuth = isOAuthChannel(selected);
@@ -721,8 +809,9 @@ export function AdminChannelConsole() {
           const state = `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
           if (parsedCred && (parsedCred.access_token || parsedCred.id_token || parsedCred.tokens)) {
-            if (provider === "codex" && !parsedCred.auth_mode) parsedCred.auth_mode = "chatgpt";
-            completeBody = { state, oauth_json: JSON.stringify(parsedCred), channel_id: selected.id, provider };
+            // Convert Codex OAuth JSON to standard format
+            const convertedCred = convertCodexOAuthJSON(parsedCred, provider);
+            completeBody = { state, oauth_json: JSON.stringify(convertedCred), channel_id: selected.id, provider };
           } else {
             completeBody = {
               state,
