@@ -633,10 +633,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, requestType)
 	} else if forceStreamActive {
 		streaming = true
-		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, nil)
+		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, nil)
 	} else {
 		streaming = true // handleBuffered manages its own concurrency release
-		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo)
+		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, 0)
 	}
 
 }
@@ -669,7 +669,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		logger.F("body_stream", requestJSONBool(body, "stream")),
 	)
 	// The streaming request returns after receiving headers; the body is read from BodyStream.
-	if err := doStreamingRequest(upReq, upResp); err != nil {
+	if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 		trace.Event("upstream_request_failed", logger.Err(err), logger.F("auth_retried", authRetried))
 		logger.Warnf("relay.upstream", "streaming request failed", logger.Err(err))
 		fasthttp.ReleaseRequest(upReq)
@@ -708,35 +708,37 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			failoverReason = "upstream_status"
 			transientFailover = true
 		}
-		// For 500 errors, try channel failover instead of account failover within same channel
-		if transientFailover && quotaAttempts < r.channelAttemptLimit() {
-			// Mark current channel as temporarily unavailable for this request
-			r.prepareChannelFailover(ch, statusCode, bodyCopy)
-			// Try to select a different channel
-			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-				trace.Event("stream_retry_switch_channel",
-					logger.F("status", statusCode),
-					logger.F("reason", failoverReason),
-					logger.F("from_channel_id", ch.ID.String()),
-					logger.F("channel_id", nextCh.ID.String()),
-					logger.F("account_id", nextAcc.ID.String()),
-					logger.F("quota_attempts", quotaAttempts+1),
-				)
-				fasthttp.ReleaseRequest(upReq)
-				fasthttp.ReleaseResponse(upResp)
-				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
-				return
+		// Gateway-level error (5xx/408): skip the entire channel, do NOT retry accounts within same channel
+		if transientFailover {
+			if quotaAttempts < r.channelAttemptLimit() {
+				r.prepareChannelFailover(ch, statusCode, bodyCopy)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("stream_retry_switch_channel",
+						logger.F("status", statusCode),
+						logger.F("reason", failoverReason),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("quota_attempts", quotaAttempts+1),
+					)
+					fasthttp.ReleaseRequest(upReq)
+					fasthttp.ReleaseResponse(upResp)
+					appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempts+1)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+					return
+				}
 			}
+			// No alternative channel available: surface the upstream error (no account retry for gateway errors)
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
+			return
 		}
-		if (accountFailover || transientFailover) && quotaAttempts < r.accountAttemptLimit(ch) {
-			if accountFailover {
-				r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
-			} else {
-				transientExcluded = addExcludedAccount(transientExcluded, acc)
-			}
+		// Account-level error (401/402/quota/etc): try up to N accounts on the same channel
+		if accountFailover && quotaAttempts < r.accountAttemptLimit(ch) {
+			r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
 			next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
 			if next != nil {
 				nextCreds, credErr := r.ensureCredentials(ch, next)
@@ -757,17 +759,24 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				trace.Event("stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 			}
-			if transientFailover && quotaAttempts+1 < r.accountAttemptLimit(ch) {
-				trace.Event("stream_retry_same_account",
+		}
+		// Account retries exhausted (or no more accounts on this channel): escalate to channel failover
+		if accountFailover && quotaAttempts < r.channelAttemptLimit() {
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_retry_escalate_channel",
 					logger.F("status", statusCode),
 					logger.F("reason", failoverReason),
-					logger.F("account_id", acc.ID.String()),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
 					logger.F("quota_attempts", quotaAttempts+1),
 				)
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
-				appendRouteFallback(adminInfo, "stream", ch, acc, acc, statusCode, failoverReason, quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_escalation", quotaAttempts+1)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -813,36 +822,44 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			failoverReason = "upstream_stream_error"
 			transientFailover = true
 		}
-		// For service errors (5xx/408), try channel failover first
-		if transientFailover && quotaAttempts < r.channelAttemptLimit() {
-			r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy)
-			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-				trace.Event("stream_bootstrap_retry_switch_channel",
-					logger.F("status", bootstrapStatus),
-					logger.F("reason", failoverReason),
-					logger.F("from_channel_id", ch.ID.String()),
-					logger.F("channel_id", nextCh.ID.String()),
-					logger.F("account_id", nextAcc.ID.String()),
-					logger.F("quota_attempts", quotaAttempts+1),
-				)
-				_ = bodyStream.Close()
-				stopIdleTimeout()
-				fasthttp.ReleaseRequest(upReq)
-				fasthttp.ReleaseResponse(upResp)
-				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
-				return
+		// Gateway-level error (5xx/408): skip the entire channel, do NOT retry accounts within same channel
+		if transientFailover {
+			if quotaAttempts < r.channelAttemptLimit() {
+				r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("stream_bootstrap_retry_switch_channel",
+						logger.F("status", bootstrapStatus),
+						logger.F("reason", failoverReason),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("quota_attempts", quotaAttempts+1),
+					)
+					_ = bodyStream.Close()
+					stopIdleTimeout()
+					fasthttp.ReleaseRequest(upReq)
+					fasthttp.ReleaseResponse(upResp)
+					appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", quotaAttempts+1)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+					return
+				}
 			}
+			// No alternative channel available
+			_ = bodyStream.Close()
+			stopIdleTimeout()
+			fasthttp.ReleaseRequest(upReq)
+			fasthttp.ReleaseResponse(upResp)
+			r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
+			return
 		}
-		if (accountFailover || transientFailover) && quotaAttempts < r.accountAttemptLimit(ch) {
+		// Account-level error: try up to N accounts on the same channel
+		if accountFailover && quotaAttempts < r.accountAttemptLimit(ch) {
 			if isQuota {
 				r.prepareAccountFailover(ch, acc, bootstrapStatus, bodyCopy, true)
-			} else if accountFailover {
-				r.cooldownAndEvict(ch, acc)
 			} else {
-				transientExcluded = addExcludedAccount(transientExcluded, acc)
+				r.cooldownAndEvict(ch, acc)
 			}
 			next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
 			if next != nil {
@@ -866,19 +883,26 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				trace.Event("stream_bootstrap_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 			}
-			if transientFailover && quotaAttempts+1 < r.accountAttemptLimit(ch) {
-				trace.Event("stream_bootstrap_retry_same_account",
+		}
+		// Account retries exhausted: escalate to channel failover
+		if accountFailover && quotaAttempts < r.channelAttemptLimit() {
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_bootstrap_retry_escalate_channel",
 					logger.F("status", bootstrapStatus),
 					logger.F("reason", failoverReason),
-					logger.F("account_id", acc.ID.String()),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
 					logger.F("quota_attempts", quotaAttempts+1),
 				)
 				_ = bodyStream.Close()
 				stopIdleTimeout()
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
-				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, acc, bootstrapStatus, failoverReason, quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_escalation", quotaAttempts+1)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -1027,7 +1051,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, transientExcluded map[string]bool, quotaAttempts ...int) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, transientExcluded map[string]bool, quotaAttempts ...int) {
 	quotaAttempt := firstInt(quotaAttempts...)
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -1057,7 +1081,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		logger.F("headers", relayDebugRequestHeaders(upReq)),
 		logger.F("body_stream", requestJSONBool(body, "stream")),
 	)
-	if err := doStreamingRequest(upReq, upResp); err != nil {
+	if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 		trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream"))
 		logger.Warnf("relay.upstream", "force stream request failed", logger.Err(err))
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
@@ -1095,7 +1119,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			trace.Event("upstream_request_started",
 				logger.F("mode", "force_stream_retry"),
 			)
-			if err := doStreamingRequest(upReq, upResp); err != nil {
+			if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 				trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream_retry"))
 				logger.Warnf("relay.upstream", "force stream request failed after oauth refresh", logger.Err(err))
 				r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
@@ -1124,12 +1148,33 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			if !accountFailover && (statusCode >= 500 || statusCode == fasthttp.StatusRequestTimeout) {
 				failoverReason = "upstream_status"
 				transientFailover = true
-				transientExcluded = addExcludedAccount(transientExcluded, acc)
 			}
-			if (accountFailover || transientFailover) && quotaAttempt < r.accountAttemptLimit(ch) {
-				if accountFailover {
-					r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
+			// Gateway-level error (5xx/408): skip the entire channel
+			if transientFailover {
+				if quotaAttempt < r.channelAttemptLimit() {
+					r.prepareChannelFailover(ch, statusCode, bodyCopy)
+					nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+						token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+					if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+						trace.Event("force_stream_retry_switch_channel",
+							logger.F("status", statusCode),
+							logger.F("reason", failoverReason),
+							logger.F("from_channel_id", ch.ID.String()),
+							logger.F("channel_id", nextCh.ID.String()),
+							logger.F("account_id", nextAcc.ID.String()),
+							logger.F("quota_attempts", quotaAttempt+1),
+						)
+						appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempt+1)
+						r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
+						return
+					}
 				}
+				r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
+				return
+			}
+			// Account-level error: try up to N accounts on same channel
+			if accountFailover && quotaAttempt < r.accountAttemptLimit(ch) {
+				r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
 				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
@@ -1143,20 +1188,27 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
-						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, transientExcluded, quotaAttempt+1)
+						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
 						return
 					}
 					trace.Event("force_stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 				}
-				if transientFailover && quotaAttempt+1 < r.accountAttemptLimit(ch) {
-					trace.Event("force_stream_retry_same_account",
+			}
+			// Account retries exhausted: escalate to channel failover
+			if accountFailover && quotaAttempt < r.channelAttemptLimit() {
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("force_stream_retry_escalate_channel",
 						logger.F("status", statusCode),
 						logger.F("reason", failoverReason),
-						logger.F("account_id", acc.ID.String()),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
 						logger.F("quota_attempts", quotaAttempt+1),
 					)
-					appendRouteFallback(adminInfo, "force_stream", ch, acc, acc, statusCode, failoverReason, quotaAttempt+1)
-					r.handleForceStream(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, transientExcluded, quotaAttempt+1)
+					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_escalation", quotaAttempt+1)
+					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
 					return
 				}
 			}
@@ -1314,7 +1366,7 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
-	if err := bufferedClient.Do(upReq, upResp); err != nil {
+	if err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp); err != nil {
 		logger.Warnf("relay.media", "upstream media request failed", logger.F("request_type", string(requestType)), logger.Err(err))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
@@ -1341,7 +1393,7 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 				return
 			}
-			if err := bufferedClient.Do(upReq, upResp); err != nil {
+			if err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp); err != nil {
 				logger.Warnf("relay.media", "upstream media request failed after oauth refresh", logger.F("request_type", string(requestType)), logger.Err(err))
 				r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 				return
@@ -1472,7 +1524,7 @@ func (r *Relayer) InvalidateChannelCache() {
 }
 
 // handleBuffered: standard buffered request with retry.
-func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}) {
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, channelAttempts int) {
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
@@ -1503,17 +1555,36 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		}
 		applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
-		err := bufferedClient.Do(upReq, upResp)
+		err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp)
 		fasthttp.ReleaseRequest(upReq)
 
 		shouldRetry := false
-		transientRetry := false
 		if err != nil {
 			trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "buffered"), logger.F("retry", retry))
-			logger.Warnf("relay.upstream", "buffered request failed", logger.F("retry", retry), logger.Err(err))
-			shouldRetry = true
-			transientRetry = true
-			retryReason = "upstream_request_error"
+			logger.Warnf("relay.upstream", "buffered request failed, switching channel", logger.F("retry", retry), logger.Err(err))
+			fasthttp.ReleaseResponse(upResp)
+			// Network error is a gateway-level failure: try channel failover
+			if channelAttempts < r.channelAttemptLimit() {
+				r.prepareChannelFailover(ch, fasthttp.StatusBadGateway, []byte(err.Error()))
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("buffered_retry_switch_channel",
+						logger.F("reason", "upstream_request_error"),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("channel_attempts", channelAttempts+1),
+					)
+					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, fasthttp.StatusBadGateway, "channel_failover", channelAttempts+1)
+					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
+					return
+				}
+			}
+			// No alternative channel: surface error
+			trace.Event("buffered_no_alternative_channel", logger.F("reason", "upstream_request_error"), logger.F("channel_attempts", channelAttempts))
+			r.refundAndError(ctx, token.ID.String(), estTokens, "upstream request failed: "+err.Error(), claims, ch, currentAccount, model, start, tokenPlanID)
+			return
 		} else if upResp.StatusCode() == 429 {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 			// Trigger quota refresh on 429 so admin can see updated usage
@@ -1594,9 +1665,9 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			shouldRetry = true
 			retryReason = failoverReason
 			r.prepareAccountFailover(ch, currentAccount, statusCode, respBody, isQuota)
-		} else if upResp.StatusCode() >= 500 {
+		} else if upResp.StatusCode() >= 500 || upResp.StatusCode() == fasthttp.StatusRequestTimeout {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
-			logger.Warnf("relay.upstream", "retryable upstream status", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
+			logger.Warnf("relay.upstream", "gateway-level upstream status, switching channel", logger.F("status", upResp.StatusCode()), logger.F("retry", retry))
 			respBody = copyBody(upResp)
 			statusCode = upResp.StatusCode()
 			copyHeaders(upResp, &respHeaders)
@@ -1607,9 +1678,31 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				logger.F("body_bytes", len(respBody)),
 				logger.F("body_preview", compactLogBody(respBody)),
 			)
-			shouldRetry = true
-			transientRetry = true
-			retryReason = "upstream_status"
+			// Gateway-level error (5xx/408): skip entire channel, do NOT retry accounts within same channel
+			if channelAttempts < r.channelAttemptLimit() {
+				r.prepareChannelFailover(ch, statusCode, respBody)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("buffered_retry_switch_channel",
+						logger.F("status", statusCode),
+						logger.F("reason", "channel_failover"),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("channel_attempts", channelAttempts+1),
+					)
+					fasthttp.ReleaseResponse(upResp)
+					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_failover", channelAttempts+1)
+					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
+					return
+				}
+			}
+			// No alternative channel available: surface the upstream error directly
+			fasthttp.ReleaseResponse(upResp)
+			trace.Event("buffered_no_alternative_channel", logger.F("status", statusCode), logger.F("channel_attempts", channelAttempts))
+			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, currentAccount, model, false, start, clientFormat, claims, tokenPlanID)
+			return
 		} else {
 			trace.Event("upstream_headers_received", logger.F("mode", "buffered"), logger.F("retry", retry), logger.F("status", upResp.StatusCode()))
 		}
@@ -1617,26 +1710,26 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		if shouldRetry {
 			previousAccount := currentAccount
 			fasthttp.ReleaseResponse(upResp)
-			if transientRetry {
-				transientExcluded = addExcludedAccount(transientExcluded, currentAccount)
-			}
 			nextAccount := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
 			if nextAccount == nil {
-				if transientRetry && retry < maxAttempts-1 {
-					fields := []logger.Field{
-						logger.F("mode", "buffered"),
-						logger.F("retry", retry),
-						logger.F("status", statusCode),
-						logger.F("reason", retryReason),
-					}
-					if previousAccount != nil {
-						fields = append(fields, logger.F("account_id", previousAccount.ID.String()))
-					}
-					trace.Event("retry_same_account", fields...)
-					appendRouteFallback(adminInfo, "buffered", ch, previousAccount, previousAccount, statusCode, retryReason, retry+1)
-					continue
-				}
+				// All accounts on this channel exhausted: escalate to channel failover
 				trace.Event("retry_account_unavailable", logger.F("mode", "buffered"), logger.F("retry", retry))
+				if channelAttempts < r.channelAttemptLimit() {
+					nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+						token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+					if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+						trace.Event("buffered_retry_escalate_channel",
+							logger.F("reason", retryReason),
+							logger.F("from_channel_id", ch.ID.String()),
+							logger.F("channel_id", nextCh.ID.String()),
+							logger.F("account_id", nextAcc.ID.String()),
+							logger.F("channel_attempts", channelAttempts+1),
+						)
+						appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_escalation", channelAttempts+1)
+						r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
+						return
+					}
+				}
 				break
 			}
 			currentAccount = nextAccount
@@ -2843,10 +2936,6 @@ func (r *Relayer) pushRuntimeAccountUpdate(account *db.Account) {
 }
 
 func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
-	// For API Key channels, do not cooldown on failure - just transient skip for this request
-	if isAPIKeyChannel(ch) {
-		return
-	}
 	if r == nil || ch == nil || acc == nil {
 		return
 	}
@@ -2857,9 +2946,11 @@ func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
 		}
 	}
 	acc.CooldownUntil = &until
-	if r.db != nil {
-		if err := r.db.Model(acc).Update("cooldown_until", until).Error; err != nil {
-			logger.Warnf("relay.account", "persist account cooldown failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
+	if !isAPIKeyChannel(ch) {
+		if r.db != nil {
+			if err := r.db.Model(acc).Update("cooldown_until", until).Error; err != nil {
+				logger.Warnf("relay.account", "persist account cooldown failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
+			}
 		}
 	}
 	if r.affinity != nil {
@@ -2878,7 +2969,12 @@ func upstreamAccountFailoverReason(statusCode int, body []byte) (string, bool, b
 }
 
 func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, statusCode int, body []byte, isQuota bool) {
+	// For API key channels, at least evict affinity cache and apply short pool cooldown
+	// (but don't persist cooldown to DB since API key channels are stateless)
 	if isAPIKeyChannel(ch) {
+		if isQuota && r.affinity != nil && ch != nil && acc != nil {
+			r.affinity.EvictAccount(ch.ID.String(), acc.ID.String())
+		}
 		return
 	}
 	if isQuota {
@@ -3053,7 +3149,11 @@ func (r *Relayer) accountAttemptLimit(ch *db.Channel) int {
 	if count <= 0 {
 		return 1
 	}
-	return count + 1
+	// Cap at 3 accounts per channel; beyond that, escalate to channel failover
+	if count > 3 {
+		count = 3
+	}
+	return count
 }
 
 func (r *Relayer) channelAttemptLimit() int {
@@ -4473,6 +4573,31 @@ func isLikelyNativeCodexClientRequest(ctx *fasthttp.RequestCtx) bool {
 	}
 	userAgent := strings.ToLower(string(ctx.Request.Header.UserAgent()))
 	return strings.Contains(userAgent, "codex")
+}
+
+// HTTPDoer is an optional interface adaptors may implement to take over the
+// upstream HTTP roundtrip. Used by chatgpt_reverse to apply TLS fingerprint
+// impersonation (utls) instead of fasthttp's native TLS stack.
+type HTTPDoer interface {
+	DoHTTPRequest(req *fasthttp.Request, resp *fasthttp.Response) error
+}
+
+// doUpstreamStreaming routes a streaming request through HTTPDoer if the
+// adaptor implements it; otherwise falls back to the default fasthttp client.
+func doUpstreamStreaming(adaptor provider.Adaptor, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if d, ok := adaptor.(HTTPDoer); ok {
+		return d.DoHTTPRequest(req, resp)
+	}
+	return doStreamingRequest(req, resp)
+}
+
+// doUpstreamBuffered routes a buffered request through HTTPDoer if the
+// adaptor implements it; otherwise falls back to the buffered fasthttp client.
+func doUpstreamBuffered(adaptor provider.Adaptor, bufferedClient *fasthttp.Client, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if d, ok := adaptor.(HTTPDoer); ok {
+		return d.DoHTTPRequest(req, resp)
+	}
+	return bufferedClient.Do(req, resp)
 }
 
 func doStreamingRequest(req *fasthttp.Request, resp *fasthttp.Response) error {

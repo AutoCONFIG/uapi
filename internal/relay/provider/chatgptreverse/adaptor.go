@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	mathrand "math/rand"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -40,6 +41,7 @@ type Adaptor struct {
 	sessionID    string
 	scriptSource []string
 	dataBuild    string
+	httpClient   *http.Client
 }
 
 func (a *Adaptor) Init(channel *db.Channel, account *db.Account) {
@@ -59,6 +61,7 @@ func (a *Adaptor) Init(channel *db.Channel, account *db.Account) {
 	if a.sessionID == "" {
 		a.sessionID = uuid.NewString()
 	}
+	a.httpClient = newUTLSClient()
 }
 
 func (a *Adaptor) SetRequestParams(model string, stream bool) {
@@ -366,38 +369,32 @@ func (a *Adaptor) startImageConversation(req ImageGenerationRequest, accessToken
 }
 
 func (a *Adaptor) doJSON(path string, body []byte, accessToken string, requirements requirements, accept string, conduitToken string) ([]byte, int, error) {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + path)
-	req.Header.SetMethod("POST")
-	req.SetBody(body)
-	setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", accept)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-OpenAI-Target-Path", path)
-	req.Header.Set("X-OpenAI-Target-Route", path)
-	req.Header.Set("OpenAI-Sentinel-Chat-Requirements-Token", requirements.Token)
+	headers := browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Authorization"] = "Bearer " + accessToken
+	headers["Accept"] = accept
+	headers["Content-Type"] = "application/json"
+	headers["X-OpenAI-Target-Path"] = path
+	headers["X-OpenAI-Target-Route"] = path
+	headers["OpenAI-Sentinel-Chat-Requirements-Token"] = requirements.Token
 	if requirements.ProofToken != "" {
-		req.Header.Set("OpenAI-Sentinel-Proof-Token", requirements.ProofToken)
+		headers["OpenAI-Sentinel-Proof-Token"] = requirements.ProofToken
 	}
 	if requirements.SOToken != "" {
-		req.Header.Set("OpenAI-Sentinel-SO-Token", requirements.SOToken)
+		headers["OpenAI-Sentinel-SO-Token"] = requirements.SOToken
 	}
 	if requirements.TurnstileToken != "" {
-		req.Header.Set("OpenAI-Sentinel-Turnstile-Token", requirements.TurnstileToken)
+		headers["OpenAI-Sentinel-Turnstile-Token"] = requirements.TurnstileToken
 	}
 	if conduitToken != "" {
-		req.Header.Set("X-Conduit-Token", conduitToken)
-		req.Header.Set("X-Oai-Turn-Trace-Id", uuid.NewString())
+		headers["X-Conduit-Token"] = conduitToken
+		headers["X-Oai-Turn-Trace-Id"] = uuid.NewString()
 	}
-	if err := fasthttp.DoTimeout(req, resp, 300*time.Second); err != nil {
+	url := strings.TrimRight(a.baseURL(), "/") + path
+	status, respBody, err := a.doHTTP("POST", url, headers, body, 300*time.Second)
+	if err != nil {
 		return nil, 0, err
 	}
-	out := append([]byte(nil), resp.Body()...)
-	return out, resp.StatusCode(), nil
+	return respBody, status, nil
 }
 
 func conversationMessages(req *ir.Request) ([]map[string]interface{}, error) {
@@ -486,30 +483,22 @@ type requirements struct {
 }
 
 func (a *Adaptor) bootstrap() error {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + "/")
-	req.Header.SetMethod("GET")
-	setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	// Use a larger read buffer to handle chatgpt.com's large response headers
-	client := &fasthttp.Client{
-		ReadBufferSize: 32768, // 32KB to handle CSP and other security headers
-	}
-	if err := client.DoTimeout(req, resp, 30*time.Second); err != nil {
+	headers := browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+	headers["Sec-Fetch-Dest"] = "document"
+	headers["Sec-Fetch-Mode"] = "navigate"
+	headers["Sec-Fetch-Site"] = "none"
+	headers["Sec-Fetch-User"] = "?1"
+	headers["Upgrade-Insecure-Requests"] = "1"
+	url := strings.TrimRight(a.baseURL(), "/") + "/"
+	status, body, err := a.doHTTP("GET", url, headers, nil, 30*time.Second)
+	if err != nil {
 		return fmt.Errorf("chatgpt reverse bootstrap failed: %w", err)
 	}
-	if resp.StatusCode() >= 400 {
-		return fmt.Errorf("chatgpt reverse bootstrap status %d", resp.StatusCode())
+	if status >= 400 {
+		return fmt.Errorf("chatgpt reverse bootstrap status %d", status)
 	}
-	a.scriptSource, a.dataBuild = parsePowResources(string(resp.Body()))
+	a.scriptSource, a.dataBuild = parsePowResources(string(body))
 	return nil
 }
 
@@ -517,23 +506,18 @@ func (a *Adaptor) chatRequirements(accessToken string) (requirements, error) {
 	p := buildLegacyRequirementsToken(defaultUserAgent, a.scriptSource, a.dataBuild)
 	path := "/backend-api/sentinel/chat-requirements"
 	body, _ := json.Marshal(map[string]string{"p": p})
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + path)
-	req.Header.SetMethod("POST")
-	req.SetBody(body)
-	setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-OpenAI-Target-Path", path)
-	req.Header.Set("X-OpenAI-Target-Route", path)
-	if err := fasthttp.DoTimeout(req, resp, 30*time.Second); err != nil {
+	headers := browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Authorization"] = "Bearer " + accessToken
+	headers["Content-Type"] = "application/json"
+	headers["X-OpenAI-Target-Path"] = path
+	headers["X-OpenAI-Target-Route"] = path
+	url := strings.TrimRight(a.baseURL(), "/") + path
+	status, respBody, err := a.doHTTP("POST", url, headers, body, 30*time.Second)
+	if err != nil {
 		return requirements{}, fmt.Errorf("chatgpt reverse requirements failed: %w", err)
 	}
-	if resp.StatusCode() >= 400 {
-		return requirements{}, fmt.Errorf("chatgpt reverse requirements status %d: %s", resp.StatusCode(), truncateBody(resp.Body()))
+	if status >= 400 {
+		return requirements{}, fmt.Errorf("chatgpt reverse requirements status %d: %s", status, truncateBody(respBody))
 	}
 	var raw struct {
 		Token   string `json:"token"`
@@ -551,7 +535,7 @@ func (a *Adaptor) chatRequirements(accessToken string) (requirements, error) {
 			Difficulty string `json:"difficulty"`
 		} `json:"proofofwork"`
 	}
-	if err := json.Unmarshal(resp.Body(), &raw); err != nil {
+	if err := json.Unmarshal(respBody, &raw); err != nil {
 		return requirements{}, fmt.Errorf("decode chatgpt reverse requirements: %w", err)
 	}
 	if raw.Arkose.Required {
@@ -591,30 +575,40 @@ func (a *Adaptor) baseURL() string {
 }
 
 func setBrowserHeaders(h *fasthttp.RequestHeader, deviceID, sessionID string) {
-	h.Set("User-Agent", defaultUserAgent)
-	h.Set("Origin", "https://chatgpt.com")
-	h.Set("Referer", "https://chatgpt.com/")
-	h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Pragma", "no-cache")
-	h.Set("Priority", "u=1, i")
-	h.Set("Sec-Ch-Ua", `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`)
-	h.Set("Sec-Ch-Ua-Arch", `"x86"`)
-	h.Set("Sec-Ch-Ua-Bitness", `"64"`)
-	h.Set("Sec-Ch-Ua-Full-Version", `"143.0.3650.96"`)
-	h.Set("Sec-Ch-Ua-Full-Version-List", `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`)
-	h.Set("Sec-Ch-Ua-Mobile", "?0")
-	h.Set("Sec-Ch-Ua-Model", `""`)
-	h.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	h.Set("Sec-Ch-Ua-Platform-Version", `"19.0.0"`)
-	h.Set("Sec-Fetch-Dest", "empty")
-	h.Set("Sec-Fetch-Mode", "cors")
-	h.Set("Sec-Fetch-Site", "same-origin")
-	h.Set("OAI-Device-Id", deviceID)
-	h.Set("OAI-Session-Id", sessionID)
-	h.Set("OAI-Language", "zh-CN")
-	h.Set("OAI-Client-Version", "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887")
-	h.Set("OAI-Client-Build-Number", "6708908")
+	for k, v := range browserHeaderMap(deviceID, sessionID) {
+		h.Set(k, v)
+	}
+}
+
+// browserHeaderMap returns the same headers as setBrowserHeaders, in map form
+// for use with the utls-based net/http client.
+func browserHeaderMap(deviceID, sessionID string) map[string]string {
+	return map[string]string{
+		"User-Agent":                  defaultUserAgent,
+		"Origin":                      "https://chatgpt.com",
+		"Referer":                     "https://chatgpt.com/",
+		"Accept-Language":             "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+		"Cache-Control":               "no-cache",
+		"Pragma":                      "no-cache",
+		"Priority":                    "u=1, i",
+		"Sec-Ch-Ua":                   `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		"Sec-Ch-Ua-Arch":              `"x86"`,
+		"Sec-Ch-Ua-Bitness":           `"64"`,
+		"Sec-Ch-Ua-Full-Version":      `"143.0.3650.96"`,
+		"Sec-Ch-Ua-Full-Version-List": `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
+		"Sec-Ch-Ua-Mobile":            "?0",
+		"Sec-Ch-Ua-Model":             `""`,
+		"Sec-Ch-Ua-Platform":          `"Windows"`,
+		"Sec-Ch-Ua-Platform-Version":  `"19.0.0"`,
+		"Sec-Fetch-Dest":              "empty",
+		"Sec-Fetch-Mode":              "cors",
+		"Sec-Fetch-Site":              "same-origin",
+		"OAI-Device-Id":               deviceID,
+		"OAI-Session-Id":              sessionID,
+		"OAI-Language":                "zh-CN",
+		"OAI-Client-Version":          "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887",
+		"OAI-Client-Build-Number":     "6708908",
+	}
 }
 
 func parsePowResources(html string) ([]string, string) {
@@ -827,21 +821,14 @@ func (a *Adaptor) pollImageConversation(conversationID, accessToken string) ([]s
 	route := "/backend-api/conversation/{conversation_id}"
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		req := fasthttp.AcquireRequest()
-		resp := fasthttp.AcquireResponse()
-		req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + path)
-		req.Header.SetMethod("GET")
-		setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Referer", strings.TrimRight(a.baseURL(), "/")+"/c/"+conversationID)
-		req.Header.Set("X-OpenAI-Target-Path", path)
-		req.Header.Set("X-OpenAI-Target-Route", route)
-		err := fasthttp.DoTimeout(req, resp, 30*time.Second)
-		body := append([]byte(nil), resp.Body()...)
-		status := resp.StatusCode()
-		fasthttp.ReleaseRequest(req)
-		fasthttp.ReleaseResponse(resp)
+		headers := browserHeaderMap(a.deviceID, a.sessionID)
+		headers["Authorization"] = "Bearer " + accessToken
+		headers["Accept"] = "application/json"
+		headers["Referer"] = strings.TrimRight(a.baseURL(), "/") + "/c/" + conversationID
+		headers["X-OpenAI-Target-Path"] = path
+		headers["X-OpenAI-Target-Route"] = route
+		fullURL := strings.TrimRight(a.baseURL(), "/") + path
+		status, body, err := a.doHTTP("GET", fullURL, headers, nil, 30*time.Second)
 		if err == nil && status < 400 {
 			files, sediments := imageIDsFromPayload(string(body))
 			if len(files) > 0 || len(sediments) > 0 {
@@ -864,22 +851,18 @@ func (a *Adaptor) resolveAttachmentDownloadURL(conversationID, attachmentID, acc
 }
 
 func (a *Adaptor) resolveDownloadURL(path, route, accessToken string) string {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + path)
-	req.Header.SetMethod("GET")
-	setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-OpenAI-Target-Path", path)
-	req.Header.Set("X-OpenAI-Target-Route", route)
-	if err := fasthttp.DoTimeout(req, resp, 30*time.Second); err != nil || resp.StatusCode() >= 400 {
+	headers := browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Authorization"] = "Bearer " + accessToken
+	headers["Accept"] = "application/json"
+	headers["X-OpenAI-Target-Path"] = path
+	headers["X-OpenAI-Target-Route"] = route
+	fullURL := strings.TrimRight(a.baseURL(), "/") + path
+	status, body, err := a.doHTTP("GET", fullURL, headers, nil, 30*time.Second)
+	if err != nil || status >= 400 {
 		return ""
 	}
 	var out map[string]interface{}
-	if err := json.Unmarshal(resp.Body(), &out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return ""
 	}
 	for _, key := range []string{"download_url", "url"} {
