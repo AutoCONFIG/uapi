@@ -354,3 +354,33 @@ func (h *Handler) deleteChannel(ctx *fasthttp.RequestCtx) {
 	auditDeleteCtx(h.db, "channel", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
+
+// HandleClearChannelFailure clears channel-model blocks for a channel,
+// re-enabling model routing through this channel. Route: POST /api/admin/channels/:id/clear-failure
+func (h *Handler) HandleClearChannelFailure(ctx *fasthttp.RequestCtx) {
+	idStr := ctx.UserValue("id").(string)
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid channel id")
+		return
+	}
+	// Verify channel exists
+	var ch db.Channel
+	if h.db.Where("id = ? AND deleted_at IS NULL", id).First(&ch).Error != nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "channel not found")
+		return
+	}
+	cleared := 0
+	if h.channelModelBlock != nil {
+		cleared = h.channelModelBlock.ClearChannel(id.String())
+	}
+	// Refresh pool in case accounts were affected
+	if h.RefreshPool != nil {
+		h.RefreshPool(id.String())
+	}
+	h.jsonResponse(ctx, 200, map[string]interface{}{
+		"cleared":    true,
+		"channel_id": id.String(),
+		"blocks_removed": cleared,
+	})
+}

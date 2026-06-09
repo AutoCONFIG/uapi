@@ -563,3 +563,49 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 	auditDeleteCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
+
+// HandleClearAccountCooldown clears cooldown and auto-disable state for an account,
+// allowing it to be reused immediately. Route: POST /api/admin/accounts/:id/clear-cooldown
+func (h *Handler) HandleClearAccountCooldown(ctx *fasthttp.RequestCtx) {
+	idStr := ctx.UserValue("id").(string)
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid account id")
+		return
+	}
+	// Clear cooldown_until and auto-disable metadata
+	updates := map[string]interface{}{
+		"cooldown_until": nil,
+	}
+	result := h.db.Model(&db.Account{}).
+		Where("id = ? AND deleted_at IS NULL", id).
+		Updates(updates)
+	if result.Error != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "clear cooldown failed")
+		return
+	}
+	if result.RowsAffected == 0 {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "account not found")
+		return
+	}
+	// Also clear auto-disable metadata fields
+	var acc db.Account
+	if h.db.Where("id = ? AND deleted_at IS NULL", id).First(&acc).Error == nil {
+		if acc.Metadata != nil {
+			delete(acc.Metadata, "auto_disable_reason")
+			delete(acc.Metadata, "auto_disable_time")
+			delete(acc.Metadata, "last_terminal_error_reason")
+			delete(acc.Metadata, "last_terminal_error_at")
+			h.db.Model(&acc).Update("metadata", acc.Metadata)
+		}
+	}
+	// Refresh pool to re-enable the account
+	if h.RefreshPool != nil {
+		h.RefreshPool(acc.ChannelID.String())
+	}
+	h.jsonResponse(ctx, 200, map[string]interface{}{
+		"cleared":  true,
+		"account_id": id.String(),
+		"channel_id": acc.ChannelID.String(),
+	})
+}

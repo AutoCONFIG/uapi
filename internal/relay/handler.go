@@ -421,7 +421,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var err error
 	var routeAttempts []map[string]interface{}
 	capabilityReq := channelcap.AnalyzeJSON(string(requestType), body)
-	affinityScope := requestAffinityScope(ctx, body)
+	affinityScope := requestAffinityScopeWithTokenID(ctx, body, token.ID.String())
 	if gatewayAuthenticated && internalClaims.ChannelID != "" && internalClaims.AccountID != "" {
 		targetChannel, account, adaptor, creds, err = r.resolveSelectedChannelAndAccount(internalClaims.ChannelID, internalClaims.AccountID, req.Model)
 	} else {
@@ -1568,7 +1568,14 @@ func (r *Relayer) InvalidateChannelCache() {
 		return
 	}
 	r.chCache.invalidate()
-	logger.Infof("relay.channel_cache", "channel cache invalidated")
+}
+
+// ChannelModelBlock returns the channel-model blocklist for admin operations.
+func (r *Relayer) ChannelModelBlock() *ChannelModelBlocklist {
+	if r == nil {
+		return nil
+	}
+	return r.channelModelBlock
 }
 
 // handleBuffered: standard buffered request with retry.
@@ -3279,6 +3286,19 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 		if value = strings.TrimSpace(value); value != "" {
 			return value
 		}
+	}
+	return ""
+}
+
+// requestAffinityScopeWithTokenID returns an affinity scope, falling back to
+// "token:<tokenID>" when no provider-specific scope is found. This ensures
+// every request has at least a basic per-token affinity binding.
+func requestAffinityScopeWithTokenID(ctx *fasthttp.RequestCtx, body []byte, tokenID string) string {
+	if scope := requestAffinityScope(ctx, body); scope != "" {
+		return scope
+	}
+	if tokenID != "" {
+		return "token:" + tokenID
 	}
 	return ""
 }

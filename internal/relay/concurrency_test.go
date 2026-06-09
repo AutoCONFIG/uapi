@@ -75,35 +75,63 @@ func TestConcurrencyLimiter_FIFOOrder(t *testing.T) {
 
 	var order []string
 	var mu sync.Mutex
-	var wg sync.WaitGroup
+	queued := make(chan struct{}) // each goroutine signals after entering queue
 
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			cl.Acquire(ctx, "k")
-			mu.Lock()
-			order = append(order, string(rune('A'+id)))
-			mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-			cl.Release("k")
-		}(i)
-	}
-
-	time.Sleep(50 * time.Millisecond) // let all goroutines queue
-	for i := 0; i < 3; i++ {
+	// Start goroutine 1: will block in Acquire (queue position 0)
+	go func() {
+		<-queued // wait until we're in the queue
+		cl.Acquire(ctx, "k")
+		mu.Lock()
+		order = append(order, "A")
+		mu.Unlock()
 		cl.Release("k")
-		time.Sleep(20 * time.Millisecond)
-	}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	queued <- struct{}{} // let goroutine 1 enter Acquire and queue
 
-	wg.Wait()
+	// Start goroutine 2: will block in Acquire (queue position 1)
+	queued = make(chan struct{})
+	go func() {
+		<-queued
+		cl.Acquire(ctx, "k")
+		mu.Lock()
+		order = append(order, "B")
+		mu.Unlock()
+		cl.Release("k")
+	}()
+	time.Sleep(10 * time.Millisecond)
+	queued <- struct{}{}
 
+	// Start goroutine 3: will block in Acquire (queue position 2)
+	queued = make(chan struct{})
+	go func() {
+		<-queued
+		cl.Acquire(ctx, "k")
+		mu.Lock()
+		order = append(order, "C")
+		mu.Unlock()
+		cl.Release("k")
+	}()
+	time.Sleep(10 * time.Millisecond)
+	queued <- struct{}{}
+
+	// Now release all 3 in order
+	time.Sleep(20 * time.Millisecond) // ensure all goroutines are queued
+	cl.Release("k")                    // wake A
+	time.Sleep(20 * time.Millisecond)
+	cl.Release("k")                    // wake B
+	time.Sleep(20 * time.Millisecond)
+	cl.Release("k")                    // wake C
+
+	time.Sleep(50 * time.Millisecond) // let all finish
+
+	mu.Lock()
+	defer mu.Unlock()
 	if len(order) != 3 {
 		t.Fatalf("expected 3 acquired, got %d", len(order))
 	}
-	// FIFO: first waiter should be first to proceed
-	if order[0] != "A" {
-		t.Fatalf("FIFO violated: first should be A, got %s", order[0])
+	if order[0] != "A" || order[1] != "B" || order[2] != "C" {
+		t.Fatalf("FIFO violated: expected [A B C], got %v", order)
 	}
 }
 
