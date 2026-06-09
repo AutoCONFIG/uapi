@@ -232,7 +232,9 @@ func convertAntigravityModels(models []modelEntry, metadata map[string]interface
 	for _, m := range models {
 		name := strings.TrimPrefix(m.Name, "models/")
 		spec, ok := antigravity.CanonicalModel(name)
-		label := antigravity.DisplayName(name)
+		// Use semantic label instead of model name for Antigravity
+		label := "模型额度"
+		_ = spec // keep for future use
 		dedupeKey := name
 		if ok {
 			dedupeKey = spec.ID

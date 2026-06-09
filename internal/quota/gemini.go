@@ -132,13 +132,15 @@ func geminiBucketLabel(bucket map[string]interface{}, index int) string {
 	tokenType, _ := bucket["tokenType"].(string)
 
 	// Determine bucket type based on model name
-	// Gemini has two main quota types: Pro and Flash
+	// Gemini has three main quota types: Pro, Flash, and Lite
 	if model != "" {
 		lowerModel := strings.ToLower(model)
 		if strings.Contains(lowerModel, "pro") {
-			return "Pro 每日额度"
-		} else if strings.Contains(lowerModel, "flash") || strings.Contains(lowerModel, "lite") {
-			return "Flash 每日额度"
+			return "Pro 额度"
+		} else if strings.Contains(lowerModel, "flash") {
+			return "Flash 额度"
+		} else if strings.Contains(lowerModel, "lite") {
+			return "Lite 额度"
 		}
 		return fmt.Sprintf("%s 额度", model)
 	}

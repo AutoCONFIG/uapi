@@ -638,8 +638,30 @@ export function AdminChannelConsole() {
     setBatchError("");
     setBatchSuccess(0);
     try {
-      const parsed = JSON.parse(batchJSON);
-      const accounts = Array.isArray(parsed) ? parsed : parsed.accounts || [];
+      let accounts: Record<string, unknown>[] = [];
+      const trimmed = batchJSON.trim();
+
+      // 尝试解析为标准JSON数组
+      try {
+        const parsed = JSON.parse(trimmed);
+        accounts = Array.isArray(parsed) ? parsed : parsed.accounts || [];
+      } catch {
+        // 如果标准JSON解析失败，尝试NDJSON格式（换行符分隔的JSON）
+        if (trimmed.includes("\n")) {
+          const lines = trimmed.split("\n").filter((line) => line.trim());
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line.trim());
+              if (obj && typeof obj === "object") {
+                accounts.push(obj);
+              }
+            } catch {
+              // 跳过无法解析的行
+            }
+          }
+        }
+      }
+
       if (!Array.isArray(accounts) || accounts.length === 0) {
         setBatchError("未找到账号数据");
         return;
