@@ -309,6 +309,8 @@ export const adminApi = {
     request<Record<string, unknown>>("/api/admin/accounts/" + accountId + "/refresh-quota", { method: "POST", token }),
   refreshChannelQuota: (token: string, channelId: string) =>
     request<{ refreshed: number; errors: number; error_messages?: string[] }>("/api/admin/channels/" + channelId + "/refresh-quota", { method: "POST", token }),
+  deleteAuthFailedAccounts: (token: string, channelId: string) =>
+    request<{ deleted: number }>("/api/admin/channels/" + channelId + "/delete-auth-failed-accounts", { method: "POST", token }),
   exportAccount: (token: string, body: { id: string; password: string }) =>
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>

@@ -62,9 +62,16 @@ func IsAuthFailureError(err error) bool {
 		"invalid_grant",
 		"invalid token",
 		"invalid_token",
+		"invalid refresh token",
+		"invalid credentials",
+		"invalid_request",
 		"token revoked",
 		"token_revoked",
+		"token expired",
 		"refresh_token_expired",
+		"no refresh token",
+		"empty refresh token",
+		"refresh response missing access token",
 		"account disabled",
 		"account_disabled",
 		"account suspended",
@@ -195,6 +202,9 @@ func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error
 	if token, err := s.quotaAccessToken(&acc, ch, credential); err == nil && token != "" {
 		accessToken = token
 	} else if err != nil {
+		if IsAuthFailureError(err) {
+			return nil, err
+		}
 		logger.Warnf("quota.token", "failed to refresh oauth access token before quota fetch", logger.F("account_id", acc.ID.String()), logger.Err(err))
 	}
 	if acc.CredType == "oauth_token" && cloudCodeMetadataIncomplete(ch.APIFormat, acc.Metadata) {

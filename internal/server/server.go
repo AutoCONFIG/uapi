@@ -262,6 +262,7 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/admin/accounts/export", s.handleAdminAuth(s.adminHandler.HandleAccountCredentialExport))
 	r.POST("/api/admin/accounts/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshAccountQuota))
 	r.POST("/api/admin/channels/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshChannelQuota))
+	r.POST("/api/admin/channels/:id/delete-auth-failed-accounts", s.handleAdminAuth(s.adminHandler.HandleDeleteAuthFailedAccounts))
 	r.GET("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.POST("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.PUT("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))

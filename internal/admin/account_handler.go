@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -596,4 +597,96 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 	}
 	auditDeleteCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
+}
+
+func (h *Handler) HandleDeleteAuthFailedAccounts(ctx *fasthttp.RequestCtx) {
+	idStr := ctx.UserValue("id")
+	if idStr == nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "missing channel id")
+		return
+	}
+	channelID, err := uuid.Parse(strings.TrimSpace(fmt.Sprint(idStr)))
+	if err != nil {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid channel id")
+		return
+	}
+
+	var accounts []db.Account
+	if err := h.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "query accounts failed")
+		return
+	}
+	deleteIDs := make([]uuid.UUID, 0, len(accounts))
+	for i := range accounts {
+		if accountHasAuthFailure(accounts[i]) {
+			deleteIDs = append(deleteIDs, accounts[i].ID)
+		}
+	}
+	if len(deleteIDs) == 0 {
+		h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": 0})
+		return
+	}
+
+	now := time.Now()
+	result := h.db.Model(&db.Account{}).
+		Where("channel_id = ? AND id IN ? AND deleted_at IS NULL", channelID, deleteIDs).
+		Update("deleted_at", now)
+	if result.Error != nil {
+		h.jsonError(ctx, fasthttp.StatusInternalServerError, "delete failed")
+		return
+	}
+	if h.OAuthIdle != nil {
+		for _, id := range deleteIDs {
+			h.OAuthIdle.CancelAccount(id)
+		}
+	}
+	if h.RefreshPool != nil {
+		h.RefreshPool(channelID.String())
+	}
+	auditDeleteCtx(h.db, "account", channelID, h.getAdminUser(ctx), ctx, map[string]interface{}{"deleted_auth_failed_accounts": result.RowsAffected})
+	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": result.RowsAffected})
+}
+
+func accountHasAuthFailure(acc db.Account) bool {
+	if acc.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"disabled_reason", "auto_disable_reason", "last_terminal_error_reason"} {
+		if authFailureReason(acc.Metadata[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+func authFailureReason(value interface{}) bool {
+	reason, ok := value.(string)
+	if !ok {
+		return false
+	}
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" || reason == "quota_exhausted" {
+		return false
+	}
+	for _, part := range []string{
+		"auth",
+		"credential",
+		"token",
+		"unauthorized",
+		"unauthenticated",
+		"invalid_grant",
+		"invalid_api_key",
+		"invalid_key",
+		"api_key_revoked",
+		"account_forbidden",
+		"account_disabled",
+		"account_suspended",
+		"account_terminated",
+		"banned",
+	} {
+		if strings.Contains(reason, part) {
+			return true
+		}
+	}
+	return false
 }

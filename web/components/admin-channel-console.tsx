@@ -449,6 +449,7 @@ export function AdminChannelConsole() {
   const [exportData, setExportData] = useState<Record<string, unknown> | null>(null);
   const [expandedQuotaIds, setExpandedQuotaIds] = useState<Set<string>>(new Set());
   const [quotaSyncing, setQuotaSyncing] = useState(false);
+  const [authFailedDeleting, setAuthFailedDeleting] = useState(false);
   const [createKind, setCreateKind] = useState<"oauth" | "reverse" | "apikey">("oauth");
   const [batchImportOpen, setBatchImportOpen] = useState(false);
   const [batchJSON, setBatchJSON] = useState("");
@@ -613,6 +614,7 @@ export function AdminChannelConsole() {
       .slice()
       .sort((left, right) => accountLowestQuotaRemaining(left) - accountLowestQuotaRemaining(right));
   }, [selected?.id, accounts]);
+  const authFailedAccountCount = useMemo(() => selectedAccounts.filter(accountHasAuthFailure).length, [selectedAccounts]);
 
 
   function applyPreset(preset: ChannelPreset) {
@@ -1229,6 +1231,28 @@ export function AdminChannelConsole() {
     }
   }
 
+  async function deleteAuthFailedAccounts(channel: Channel) {
+    if (!token || authFailedDeleting) return;
+    if (authFailedAccountCount <= 0) {
+      setError("当前渠道没有认证失败账号。");
+      return;
+    }
+    const ok = window.confirm(`自动删除异常账号将删除当前渠道中 ${authFailedAccountCount} 个认证失败账号，手动停用和额度耗尽账号不会删除。是否继续？`);
+    if (!ok) return;
+    setAuthFailedDeleting(true);
+    setError("");
+    try {
+      const result = await adminApi.deleteAuthFailedAccounts(token, channel.id);
+      const refreshed = await adminApi.accounts(token, 1, 1000);
+      setAccounts(refreshed.items);
+      setError(result.deleted > 0 ? `已删除 ${result.deleted} 个认证失败账号。` : "当前渠道没有认证失败账号。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "自动删除异常账号失败");
+    } finally {
+      setAuthFailedDeleting(false);
+    }
+  }
+
   return (
     <>
       <section className="ops-summary">
@@ -1314,8 +1338,9 @@ export function AdminChannelConsole() {
 	                      }
 	                      adminApi.accounts(token, 1, 1000).then(r => setAccounts(r.items)).catch(() => {}).finally(() => setQuotaSyncing(false));
 	                    }} type="button"><RefreshCw /> {quotaSyncing ? "刷新中" : "刷新额度"}</button>
-                  ) : null}
-                  <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
+	                  ) : null}
+                  <button className="btn danger" disabled={authFailedDeleting || authFailedAccountCount === 0} onClick={() => deleteAuthFailedAccounts(selected)} title="只删除认证失败或上游封禁账号，不删除手动停用或额度耗尽账号" type="button"><Trash2 /> {authFailedDeleting ? "删除中" : `自动删除异常账号${authFailedAccountCount > 0 ? ` (${authFailedAccountCount})` : ""}`}</button>
+	                  <button className="btn" onClick={() => setDetailOpen(true)} type="button"><Plus /> 新增账号</button>
                 </div>
               </div>
 
@@ -2030,6 +2055,36 @@ function accountState(account: Account): { tone: AccountTone; label: string } {
   const usage = accountUsagePercent(account);
   if ((usage !== null && usage >= 100) || Boolean(account.cooldown_until)) return { tone: "warning", label: "额度耗尽" };
   return { tone: "healthy", label: "账号正常" };
+}
+
+function accountHasAuthFailure(account: Account): boolean {
+  const meta = account.metadata || {};
+  return [
+    stringValue(meta.disabled_reason),
+    stringValue(meta.auto_disable_reason),
+    stringValue(meta.last_terminal_error_reason),
+  ].some(authFailureReason);
+}
+
+function authFailureReason(reason: string): boolean {
+  const value = reason.trim().toLowerCase();
+  if (!value || value === "quota_exhausted" || value.includes("quota")) return false;
+  return [
+    "auth",
+    "credential",
+    "token",
+    "unauthorized",
+    "unauthenticated",
+    "invalid_grant",
+    "invalid_api_key",
+    "invalid_key",
+    "api_key_revoked",
+    "account_forbidden",
+    "account_disabled",
+    "account_suspended",
+    "account_terminated",
+    "banned",
+  ].some((part) => value.includes(part));
 }
 
 function accountUsagePercent(account: Account): number | null {

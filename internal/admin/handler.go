@@ -499,12 +499,38 @@ func (h *Handler) handleQuotaForbidden(accountID uuid.UUID, reason string) {
 }
 
 func (h *Handler) applyQuotaAccountFailure(accountID uuid.UUID, statusCode int, body []byte, isQuota bool) {
-	if h == nil || h.accountRecovery == nil || h.db == nil || accountID == uuid.Nil {
+	if h == nil || h.db == nil || accountID == uuid.Nil {
 		return
 	}
 	var acc db.Account
 	if err := h.db.Where("id = ? AND deleted_at IS NULL", accountID).First(&acc).Error; err != nil {
 		return
 	}
-	h.accountRecovery.HandleAccountFailure(acc.ID.String(), acc.ChannelID.String(), statusCode, body, isQuota)
+	if h.accountRecovery != nil {
+		h.accountRecovery.HandleAccountFailure(acc.ID.String(), acc.ChannelID.String(), statusCode, body, isQuota)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if acc.Metadata == nil {
+		acc.Metadata = map[string]interface{}{}
+	}
+	acc.Metadata["disabled_reason"] = "credential_invalid"
+	acc.Metadata["disabled_at"] = now
+	acc.Metadata["auth_failure_next_action"] = "disabled"
+	acc.Metadata["auto_disable_reason"] = "credential_invalid"
+	acc.Metadata["auto_disable_time"] = now
+	acc.Metadata["last_terminal_error_reason"] = "credential_invalid"
+	acc.Metadata["last_terminal_error_at"] = now
+	acc.Enabled = false
+	acc.CooldownUntil = nil
+	_ = h.db.Model(&db.Account{}).
+		Where("id = ? AND deleted_at IS NULL", acc.ID).
+		Updates(map[string]interface{}{
+			"enabled":        false,
+			"cooldown_until": nil,
+			"metadata":       acc.Metadata,
+		}).Error
+	if h.RefreshPool != nil {
+		h.RefreshPool(acc.ChannelID.String())
+	}
 }

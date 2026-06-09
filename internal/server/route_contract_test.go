@@ -82,6 +82,7 @@ func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 		"POST /api/admin/accounts/:id/refresh-quota",
 		"POST /api/admin/accounts/export",
 		"POST /api/admin/channels",
+		"POST /api/admin/channels/:id/delete-auth-failed-accounts",
 		"POST /api/admin/channels/:id/refresh-quota",
 		"POST /api/admin/channels/models/sync",
 		"POST /api/admin/channels/oauth/auth-url",
