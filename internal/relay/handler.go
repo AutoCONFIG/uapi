@@ -627,7 +627,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	// 9. Dispatch
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
-		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo)
+		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, requestType)
 	} else if forceStreamActive {
 		streaming = true
 		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, nil)
@@ -639,11 +639,11 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
-func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}) {
-	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo)
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, requestType relayRequestType) {
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, "", requestType)
 }
 
-func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}) {
+func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -695,7 +695,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
 				appendRouteFallback(adminInfo, "stream", ch, acc, acc, statusCode, "oauth_refresh", quotaAttempts)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, transientExcluded, trace, adminInfo)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, transientExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -704,6 +704,29 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		if !accountFailover && statusCode >= 500 {
 			failoverReason = "upstream_status"
 			transientFailover = true
+		}
+		// For 500 errors, try channel failover instead of account failover within same channel
+		if transientFailover && quotaAttempts < r.channelAttemptLimit() {
+			// Mark current channel as temporarily unavailable for this request
+			r.prepareChannelFailover(ch, statusCode, bodyCopy)
+			// Try to select a different channel
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_retry_switch_channel",
+					logger.F("status", statusCode),
+					logger.F("reason", failoverReason),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+					logger.F("quota_attempts", quotaAttempts+1),
+				)
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempts+1)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+				return
+			}
 		}
 		if (accountFailover || transientFailover) && quotaAttempts < r.accountAttemptLimit(ch) {
 			if accountFailover {
@@ -726,7 +749,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					fasthttp.ReleaseResponse(upResp)
 					adaptor.Init(ch, next)
 					appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, failoverReason, quotaAttempts+1)
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 					return
 				}
 				trace.Event("stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
@@ -741,7 +764,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
 				appendRouteFallback(adminInfo, "stream", ch, acc, acc, statusCode, failoverReason, quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -812,7 +835,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					fasthttp.ReleaseResponse(upResp)
 					adaptor.Init(ch, next)
 					appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, failoverReason, quotaAttempts+1)
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo)
+					r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 					return
 				}
 				trace.Event("stream_bootstrap_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
@@ -829,7 +852,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
 				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, acc, bootstrapStatus, failoverReason, quotaAttempts+1)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -3001,6 +3024,21 @@ func (r *Relayer) accountAttemptLimit(ch *db.Channel) int {
 		return 1
 	}
 	return count + 1
+}
+
+func (r *Relayer) channelAttemptLimit() int {
+	// Allow up to 3 channel failovers for 500 errors
+	return 3
+}
+
+func (r *Relayer) prepareChannelFailover(ch *db.Channel, statusCode int, body []byte) {
+	// Log the channel failover for debugging
+	logger.Warnf("relay.channel_failover", "channel failing over due to upstream error",
+		logger.F("channel_id", ch.ID.String()),
+		logger.F("channel_type", ch.Type),
+		logger.F("status", statusCode),
+		logger.F("body_preview", compactLogBody(body)),
+	)
 }
 
 func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {

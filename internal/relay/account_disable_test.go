@@ -136,7 +136,7 @@ func TestAccountPoolPickExcludingSkipsOnlyForCurrentRequest(t *testing.T) {
 }
 
 func TestTerminalAccountErrorCoolsDownWithoutDisabling(t *testing.T) {
-	ch := &db.Channel{Base: db.Base{ID: uuid.New()}}
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, APIFormat: "codex"}
 	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
 	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
 	pool := NewAccountPool([]*db.Account{acc1, acc2})

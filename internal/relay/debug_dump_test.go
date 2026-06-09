@@ -36,8 +36,9 @@ func TestCreateTarGz(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+	// createTarGz does not remove source dir; both archive and source dir remain
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (archive + source dir), got %d", len(entries))
 	}
 }
 
@@ -64,6 +65,7 @@ func TestCleanupOldArchives(t *testing.T) {
 	}
 
 	// Test with maxEntries = 1 (should keep only 1)
+	t.Setenv("UAPI_RELAY_DEBUG_DUMP_MAX_ENTRIES", "1")
 	relayDebugDumpDir = dir
 	cleanupOldArchives(dir)
 

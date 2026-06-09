@@ -110,14 +110,8 @@ func convertGeminiQuota(raw map[string]interface{}) *QuotaData {
 			if remainingPercent > 100 {
 				remainingPercent = 100
 			}
-			label := "额度桶"
-			if model, ok := bucket["modelId"].(string); ok && model != "" {
-				label = model
-			} else if name, ok := bucket["tokenType"].(string); ok && name != "" {
-				label = name
-			} else {
-				label = fmt.Sprintf("额度桶 %d", i+1)
-			}
+			// Generate friendly Chinese label based on model name
+			label := geminiBucketLabel(bucket, i)
 			var resetTime string
 			if rt, ok := bucket["resetTime"].(string); ok {
 				resetTime = rt
@@ -131,4 +125,28 @@ func convertGeminiQuota(raw map[string]interface{}) *QuotaData {
 	}
 
 	return qd
+}
+
+func geminiBucketLabel(bucket map[string]interface{}, index int) string {
+	model, _ := bucket["modelId"].(string)
+	tokenType, _ := bucket["tokenType"].(string)
+
+	// Determine bucket type based on model name
+	// Gemini has two main quota types: Pro and Flash
+	if model != "" {
+		lowerModel := strings.ToLower(model)
+		if strings.Contains(lowerModel, "pro") {
+			return "Pro 每日额度"
+		} else if strings.Contains(lowerModel, "flash") || strings.Contains(lowerModel, "lite") {
+			return "Flash 每日额度"
+		}
+		return fmt.Sprintf("%s 额度", model)
+	}
+
+	if tokenType != "" {
+		// Token type like "rpv" (requests per volume) or "rpm" (requests per minute)
+		return fmt.Sprintf("Gemini %s", tokenType)
+	}
+
+	return fmt.Sprintf("Gemini 额度桶 %d", index+1)
 }
