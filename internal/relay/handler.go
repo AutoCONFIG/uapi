@@ -806,9 +806,32 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		)
 		failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(bootstrapStatus, bodyCopy)
 		transientFailover := false
-		if !accountFailover && bootstrapStatus >= 500 {
+		if !accountFailover && (bootstrapStatus >= 500 || bootstrapStatus == fasthttp.StatusRequestTimeout) {
 			failoverReason = "upstream_stream_error"
 			transientFailover = true
+		}
+		// For service errors (5xx/408), try channel failover first
+		if transientFailover && quotaAttempts < r.channelAttemptLimit() {
+			r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
+				token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_bootstrap_retry_switch_channel",
+					logger.F("status", bootstrapStatus),
+					logger.F("reason", failoverReason),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+					logger.F("quota_attempts", quotaAttempts+1),
+				)
+				_ = bodyStream.Close()
+				stopIdleTimeout()
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", quotaAttempts+1)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+				return
+			}
 		}
 		if (accountFailover || transientFailover) && quotaAttempts < r.accountAttemptLimit(ch) {
 			if isQuota {
