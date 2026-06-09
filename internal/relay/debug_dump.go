@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -306,6 +307,9 @@ type relayDebugTrace struct {
 	streamFirstAt   map[string]time.Time
 	streamLastAt    map[string]time.Time
 	streamMaxGap    map[string]time.Duration
+	// Null chunk dedup: track consecutive null chunks per stream name.
+	streamConsecutiveNulls map[string]int
+	streamLastWasNull      map[string]bool
 }
 
 func relayDebugDumpTimestamp(t time.Time) string {
@@ -373,17 +377,19 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		writeRelayDebugFile(outDir, "summary.json", raw)
 	}
 	trace := &relayDebugTrace{
-		ID:              traceID,
-		Dir:             outDir,
-		startedAt:       now,
-		streamBytes:     map[string]int{},
-		streamTruncated: map[string]bool{},
-		streamEvents:    map[string]int{},
-		streamPayloads:  map[string]int{},
-		streamLast:      map[string]map[string]interface{}{},
-		streamFirstAt:   map[string]time.Time{},
-		streamLastAt:    map[string]time.Time{},
-		streamMaxGap:    map[string]time.Duration{},
+		ID:                    traceID,
+		Dir:                   outDir,
+		startedAt:             now,
+		streamBytes:           map[string]int{},
+		streamTruncated:       map[string]bool{},
+		streamEvents:          map[string]int{},
+		streamPayloads:        map[string]int{},
+		streamLast:            map[string]map[string]interface{}{},
+		streamFirstAt:         map[string]time.Time{},
+		streamLastAt:          map[string]time.Time{},
+		streamMaxGap:          map[string]time.Duration{},
+		streamConsecutiveNulls: map[string]int{},
+		streamLastWasNull:     map[string]bool{},
 	}
 	trace.Event("request_dump_written",
 		logger.F("client_format", string(clientFormat)),
@@ -783,6 +789,36 @@ func (t *relayDebugTrace) StreamChunk(name string, body []byte) {
 	defer t.mu.Unlock()
 	t.recordStreamChunkTimingLocked(name, time.Now())
 
+	// Null chunk dedup: detect consecutive empty/null chunks and skip writing
+	// them individually. Only the first and last null chunk are written; a
+	// summary line records how many were skipped. This reduces dump files from
+	// megabytes to kilobytes for requests where upstream sends thousands of
+	// empty heartbeat chunks during reasoning.
+	isNull := isDebugNullChunk(body)
+	if isNull {
+		t.streamConsecutiveNulls[name]++
+		t.streamLastWasNull[name] = true
+		// Always write the first null chunk so the stream file isn't empty.
+		if t.streamConsecutiveNulls[name] == 1 {
+			t.writeStreamChunkLocked(name, body)
+		}
+		return
+	}
+	// Non-null chunk: flush any pending null streak with a summary comment.
+	if t.streamLastWasNull[name] {
+		skipped := t.streamConsecutiveNulls[name]
+		if skipped > 1 {
+			summary := []byte(fmt.Sprintf("\n# null_chunk_dedup: skipped %d consecutive empty chunks\n\n", skipped))
+			t.writeStreamChunkLocked(name, summary)
+		}
+		t.streamConsecutiveNulls[name] = 0
+		t.streamLastWasNull[name] = false
+	}
+	t.writeStreamChunkLocked(name, body)
+}
+
+func (t *relayDebugTrace) writeStreamChunkLocked(name string, body []byte) {
+
 	written := t.streamBytes[name]
 	if written >= relayDebugStreamFileMaxSize {
 		t.noteStreamTruncatedLocked(name, written)
@@ -1115,4 +1151,45 @@ func relayDebugPreview(body []byte, limit int) string {
 		return s
 	}
 	return s[:limit] + "...(truncated)"
+}
+
+// isDebugNullChunk detects OpenAI SSE chunks that carry no meaningful content.
+// These are empty heartbeat chunks sent by some providers (e.g. during
+// reasoning) with content:null, tool_calls:null, and no finish_reason.
+func isDebugNullChunk(body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+	// Quick byte-level check before JSON parsing.
+	// Null chunks contain "content":null and no "usage" key.
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"content":null`) && !strings.Contains(bodyStr, `"content": null`) {
+		return false
+	}
+	if strings.Contains(bodyStr, `"finish_reason"`) {
+		finishIdx := strings.Index(bodyStr, `"finish_reason":`)
+		if finishIdx >= 0 {
+			after := bodyStr[finishIdx+15:]
+			after = strings.TrimSpace(after)
+			if len(after) > 0 && after[0] != 'n' && after[0] != 'N' {
+				// finish_reason is a non-null string → not a null chunk
+				return false
+			}
+		}
+	}
+	if strings.Contains(bodyStr, `"usage"`) {
+		return false
+	}
+	if strings.Contains(bodyStr, `"tool_calls"`) {
+		// Check if tool_calls has actual content (not null).
+		tcIdx := strings.Index(bodyStr, `"tool_calls":`)
+		if tcIdx >= 0 {
+			after := bodyStr[tcIdx+12:]
+			after = strings.TrimSpace(after)
+			if len(after) > 0 && after[0] == '[' {
+				return false // has actual tool_calls array
+			}
+		}
+	}
+	return true
 }

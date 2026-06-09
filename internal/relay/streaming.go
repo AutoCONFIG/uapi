@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
@@ -22,6 +23,12 @@ const (
 	sseInitialBufSize            = 8 * 1024
 	sseMaxBufSize                = 10 * 1024 * 1024
 	sseBootstrapMaxSkippedEvents = 16
+	// defaultContentIdleTimeout is the maximum duration the stream may receive
+	// only empty/null chunks before we abort. Unlike the byte-level idle timeout
+	// (which fires when the upstream stops sending entirely), this fires when the
+	// upstream keeps sending but produces no meaningful content—e.g. a model
+	// spending all tokens on hidden reasoning.
+	defaultContentIdleTimeout = 120 * time.Second
 )
 
 type prependedReadCloser struct {
@@ -53,6 +60,62 @@ type streamResult struct {
 	failed           bool
 	emptyStream      bool
 	parseFailed      bool // true if ParseStreamUsage had errors
+}
+
+var errContentIdleTimeout = errors.New("stream content idle timeout: upstream sent only empty chunks for too long")
+
+// isNonEmptyChunk checks whether an OpenAI SSE chunk contains any meaningful
+// content (non-empty text, tool calls, finish reason, or usage data). Empty
+// chunks are heartbeats emitted by some providers during reasoning.
+func isNonEmptyChunk(sseData []byte) bool {
+	if len(sseData) == 0 {
+		return false
+	}
+	// Extract the JSON payload from SSE data: lines
+	payload := sseData
+	for _, line := range strings.Split(string(sseData), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "data:") {
+			payload = []byte(strings.TrimPrefix(line, "data:"))
+			if len(payload) > 0 && payload[0] == ' ' {
+				payload = payload[1:]
+			}
+			break
+		}
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || string(payload) == "[DONE]" {
+		return false
+	}
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   *string `json:"content"`
+				ToolCalls *string `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage map[string]interface{} `json:"usage,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return true // can't parse → assume non-empty to be safe
+	}
+	if len(chunk.Choices) > 0 {
+		c := chunk.Choices[0]
+		if c.FinishReason != nil && *c.FinishReason != "" {
+			return true
+		}
+		if c.Delta.Content != nil && *c.Delta.Content != "" {
+			return true
+		}
+		if c.Delta.ToolCalls != nil && *c.Delta.ToolCalls != "null" && *c.Delta.ToolCalls != "" {
+			return true
+		}
+	}
+	if len(chunk.Usage) > 0 {
+		return true
+	}
+	return false
 }
 
 // streamTracker tracks usage in real-time from SSE chunks.
@@ -341,6 +404,9 @@ func streamAndForwardWithTrace(
 	failed := false
 	nonDonePayloads := 0
 	var event []byte
+	// Content-aware idle timeout: track when we last saw meaningful content.
+	lastContentAt := time.Now()
+	contentIdleTimeout := defaultContentIdleTimeout
 
 	flush := func() (bool, error) {
 		if len(event) == 0 {
@@ -356,6 +422,16 @@ func streamAndForwardWithTrace(
 		normalized := normalizeSSEEventForConverterWithEvent(current)
 		if len(normalized) == 0 {
 			return true, nil
+		}
+		// Content-aware idle timeout: reset only on meaningful content.
+		if isNonEmptyChunk(normalized) {
+			lastContentAt = time.Now()
+		} else if time.Since(lastContentAt) > contentIdleTimeout {
+			trace.Event("stream_content_idle_timeout",
+				logger.F("idle_seconds", int(time.Since(lastContentAt).Seconds())),
+				logger.F("timeout_seconds", int(contentIdleTimeout.Seconds())),
+			)
+			return false, errContentIdleTimeout
 		}
 		for _, payload := range sseDataPayloads(normalized) {
 			if strings.TrimSpace(payload) != "[DONE]" {
@@ -555,6 +631,21 @@ func streamAndForwardWithTrace(
 
 	pt, ct, parseFailed := tracker.Result()
 	emptyStream := nonDonePayloads == 0 && (sawDone || sawTerminal)
+	// Detect empty response: stream finalized with max_tokens but produced no content.
+	// Reference: bifrost EmptyResponseCondition + IncompleteStreamCondition.
+	if (sawDone || sawTerminal) && ct == 0 && nonDonePayloads > 0 {
+		if trace != nil {
+			trace.Event("stream_empty_response_detected",
+				logger.F("completion_tokens", ct),
+				logger.F("non_done_payloads", nonDonePayloads),
+				logger.F("saw_done", sawDone),
+				logger.F("saw_terminal", sawTerminal),
+			)
+		}
+		logger.Warnf("relay.sse", "empty response detected: stream finalized with zero completion tokens",
+			logger.F("non_done_payloads", nonDonePayloads),
+		)
+	}
 	result := streamResult{promptTokens: pt, completionTokens: ct, finalized: sawDone || sawTerminal, failed: failed, emptyStream: emptyStream, parseFailed: parseFailed}
 	trace.Event("stream_forward_finished",
 		streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0,
