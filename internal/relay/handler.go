@@ -581,7 +581,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	} else {
-		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor)
+		convertedBody, err = provider.ConvertRequestWithAdaptor(clientFormat, upstreamFormat, body, adaptor, creds)
 		if err != nil {
 			go r.finishFailureUsageWithRoutedModelFormatsAndErrorAndClientIP(claims, token.ID, targetChannel.ID, account.ID, req.Model, routedModel, false, clientFormat, upstreamFormat, start, fasthttp.StatusBadRequest, estimatedTokens, err.Error(), r.clientIPForDirectRequest(ctx, claims), tokenPlanID)
 			ctx.Error(`{"error":"convert request failed: `+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusBadRequest)

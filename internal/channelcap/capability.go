@@ -54,7 +54,14 @@ func Supports(ch db.Channel, req Request) bool {
 func supportsChatGPTReverse(req Request) bool {
 	switch req.Kind {
 	case KindChatCompletion:
-		if req.HasTools || req.HasImages {
+		if req.HasTools {
+			return false
+		}
+		return true
+	case KindMessages, KindResponses:
+		// chatgpt_reverse 渠道可以通过转换器将 anthropic messages 或 openai responses
+		// 转换为 ChatGPT web conversation 格式，只要不包含 tools
+		if req.HasTools {
 			return false
 		}
 		return true

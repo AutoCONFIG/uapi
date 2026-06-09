@@ -8,8 +8,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"math"
 	mathrand "math/rand"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -42,6 +49,7 @@ type Adaptor struct {
 	scriptSource []string
 	dataBuild    string
 	httpClient   *http.Client
+	accessToken  string
 }
 
 func (a *Adaptor) Init(channel *db.Channel, account *db.Account) {
@@ -69,6 +77,10 @@ func (a *Adaptor) SetRequestParams(model string, stream bool) {
 	a.stream = stream
 }
 
+func (a *Adaptor) SetCredentials(credentials string) {
+	a.accessToken = provider.ExtractCredentialKey(credentials)
+}
+
 func (a *Adaptor) GetRequestURL(path string) (string, error) {
 	return strings.TrimRight(a.baseURL(), "/") + "/backend-api/conversation", nil
 }
@@ -78,6 +90,7 @@ func (a *Adaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) 
 	if accessToken == "" {
 		return fmt.Errorf("chatgpt reverse access token is empty")
 	}
+	a.accessToken = accessToken
 	if err := a.bootstrap(); err != nil {
 		return err
 	}
@@ -105,7 +118,7 @@ func (a *Adaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) 
 }
 
 func (a *Adaptor) FromIR(req *ir.Request) ([]byte, error) {
-	messages, err := conversationMessages(req)
+	messages, err := a.conversationMessages(req)
 	if err != nil {
 		return nil, err
 	}
@@ -397,24 +410,37 @@ func (a *Adaptor) doJSON(path string, body []byte, accessToken string, requireme
 	return respBody, status, nil
 }
 
-func conversationMessages(req *ir.Request) ([]map[string]interface{}, error) {
+type uploadedAttachment struct {
+	FileID   string
+	FileName string
+	FileSize int
+	MimeType string
+	Width    int
+	Height   int
+	IsImage  bool
+}
+
+func (a *Adaptor) conversationMessages(req *ir.Request) ([]map[string]interface{}, error) {
 	out := make([]map[string]interface{}, 0, len(req.Instructions)+len(req.Turns))
 	for _, ins := range req.Instructions {
-		text := instructionText(ins)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		out = append(out, webTextMessage(roleString(ins.Role), text))
-	}
-	for _, turn := range req.Turns {
-		text, err := itemsText(turn.Items)
+		msg, err := a.webMessageFromItems(roleString(ins.Role), ins.Items, ins.Text)
 		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(text) == "" {
+		if msg == nil {
 			continue
 		}
-		out = append(out, webTextMessage(roleString(turn.Role), text))
+		out = append(out, msg)
+	}
+	for _, turn := range req.Turns {
+		msg, err := a.webMessageFromItems(roleString(turn.Role), turn.Items, "")
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			continue
+		}
+		out = append(out, msg)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("chatgpt reverse requires at least one text message")
@@ -422,16 +448,9 @@ func conversationMessages(req *ir.Request) ([]map[string]interface{}, error) {
 	return out, nil
 }
 
-func instructionText(ins ir.Instruction) string {
-	if strings.TrimSpace(ins.Text) != "" {
-		return ins.Text
-	}
-	text, _ := itemsText(ins.Items)
-	return text
-}
-
-func itemsText(items []ir.Item) (string, error) {
+func (a *Adaptor) webMessageFromItems(role string, items []ir.Item, fallbackText string) (map[string]interface{}, error) {
 	var b strings.Builder
+	var uploads []uploadedAttachment
 	for _, item := range items {
 		switch item.Kind {
 		case ir.ItemText:
@@ -442,11 +461,78 @@ func itemsText(items []ir.Item) (string, error) {
 			if item.ToolResult != nil {
 				b.WriteString(item.ToolResult.OutputText)
 			}
+		case ir.ItemImage:
+			if role != "user" {
+				return nil, fmt.Errorf("chatgpt reverse image input is only supported for user messages")
+			}
+			upload, err := a.uploadIRImage(item)
+			if err != nil {
+				return nil, err
+			}
+			uploads = append(uploads, upload)
+		case ir.ItemFile, ir.ItemDocument:
+			if role != "user" {
+				return nil, fmt.Errorf("chatgpt reverse file input is only supported for user messages")
+			}
+			upload, err := a.uploadIRFile(item)
+			if err != nil {
+				return nil, err
+			}
+			uploads = append(uploads, upload)
 		default:
-			return "", fmt.Errorf("chatgpt reverse currently supports text-only chat; unsupported item kind %q", item.Kind)
+			return nil, fmt.Errorf("chatgpt reverse currently supports text, images, and files; unsupported item kind %q", item.Kind)
 		}
 	}
-	return b.String(), nil
+	if b.Len() == 0 && strings.TrimSpace(fallbackText) != "" {
+		b.WriteString(fallbackText)
+	}
+	text := b.String()
+	if len(uploads) == 0 {
+		if strings.TrimSpace(text) == "" {
+			return nil, nil
+		}
+		return webTextMessage(role, text), nil
+	}
+	parts := make([]interface{}, 0, len(uploads)+1)
+	for _, upload := range uploads {
+		if upload.IsImage {
+			part := map[string]interface{}{
+				"content_type":  "image_asset_pointer",
+				"asset_pointer": "file-service://" + upload.FileID,
+				"size_bytes":    upload.FileSize,
+			}
+			if upload.Width > 0 {
+				part["width"] = upload.Width
+			}
+			if upload.Height > 0 {
+				part["height"] = upload.Height
+			}
+			parts = append(parts, part)
+			continue
+		}
+		parts = append(parts, map[string]interface{}{
+			"content_type":  "file_attachment",
+			"asset_pointer": "file-service://" + upload.FileID,
+			"size_bytes":    upload.FileSize,
+			"name":          upload.FileName,
+			"mime_type":     upload.MimeType,
+		})
+	}
+	if text != "" {
+		parts = append(parts, text)
+	}
+	msg := map[string]interface{}{
+		"id":     uuid.NewString(),
+		"author": map[string]interface{}{"role": role},
+		"content": map[string]interface{}{
+			"content_type": "multimodal_text",
+			"parts":        parts,
+		},
+		"metadata": map[string]interface{}{
+			"attachments": attachmentMetadata(uploads),
+		},
+	}
+	return msg, nil
 }
 
 func webTextMessage(role, text string) map[string]interface{} {
@@ -458,6 +544,274 @@ func webTextMessage(role, text string) map[string]interface{} {
 			"parts":        []string{text},
 		},
 	}
+}
+
+func attachmentMetadata(uploads []uploadedAttachment) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(uploads))
+	for _, upload := range uploads {
+		item := map[string]interface{}{
+			"id":       upload.FileID,
+			"mimeType": upload.MimeType,
+			"name":     upload.FileName,
+			"size":     upload.FileSize,
+		}
+		if upload.Width > 0 {
+			item["width"] = upload.Width
+		}
+		if upload.Height > 0 {
+			item["height"] = upload.Height
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (a *Adaptor) uploadIRImage(item ir.Item) (uploadedAttachment, error) {
+	if item.Image == nil {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse image item is empty")
+	}
+	source := firstNonEmpty(item.Image.DataURI, item.Image.URL)
+	data, mimeType, err := a.resolveInlineOrRemoteData(source, item.Image.MimeType, "image/*,*/*;q=0.8")
+	if err != nil {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse image input: %w", err)
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse image input has unsupported mime type %q", mimeType)
+	}
+	name := "image" + extensionForMime(mimeType, ".png")
+	width, height, _ := imageDimensions(data)
+	return a.uploadAttachment(data, name, mimeType, true, width, height)
+}
+
+func (a *Adaptor) uploadIRFile(item ir.Item) (uploadedAttachment, error) {
+	file := item.File
+	if file == nil {
+		file = item.Document
+	}
+	if file == nil {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse file item is empty")
+	}
+	if file.FileID != "" {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse cannot upload provider file_id %q; send file_data or file_url instead", file.FileID)
+	}
+	source := firstNonEmpty(file.DataURI, file.URL)
+	data, mimeType, err := a.resolveInlineOrRemoteData(source, file.MimeType, "*/*")
+	if err != nil {
+		return uploadedAttachment{}, fmt.Errorf("chatgpt reverse file input: %w", err)
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	name := strings.TrimSpace(file.Name)
+	if name == "" {
+		name = "attachment" + extensionForMime(mimeType, ".bin")
+	}
+	width, height := 0, 0
+	isImage := strings.HasPrefix(strings.ToLower(mimeType), "image/")
+	if isImage {
+		width, height, _ = imageDimensions(data)
+	}
+	return a.uploadAttachment(data, name, mimeType, isImage, width, height)
+}
+
+func (a *Adaptor) uploadAttachment(data []byte, fileName, mimeType string, isImage bool, width, height int) (uploadedAttachment, error) {
+	if len(data) == 0 {
+		return uploadedAttachment{}, fmt.Errorf("empty attachment")
+	}
+	if a.accessToken == "" {
+		return uploadedAttachment{}, fmt.Errorf("authenticated upstream account required for attachment upload")
+	}
+	path := "/backend-api/files"
+	body := map[string]interface{}{
+		"file_name": fileName,
+		"file_size": len(data),
+		"use_case":  "multimodal",
+	}
+	if isImage && width > 0 && height > 0 {
+		body["width"] = width
+		body["height"] = height
+	}
+	rawBody, _ := json.Marshal(body)
+	headers := browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Authorization"] = "Bearer " + a.accessToken
+	headers["Accept"] = "application/json"
+	headers["Content-Type"] = "application/json"
+	headers["X-OpenAI-Target-Path"] = path
+	headers["X-OpenAI-Target-Route"] = path
+	status, respBody, err := a.doHTTP("POST", strings.TrimRight(a.baseURL(), "/")+path, headers, rawBody, 60*time.Second)
+	if err != nil {
+		return uploadedAttachment{}, err
+	}
+	if status >= 400 {
+		return uploadedAttachment{}, fmt.Errorf("%s status %d: %s", path, status, truncateBody(respBody))
+	}
+	var meta struct {
+		FileID    string `json:"file_id"`
+		UploadURL string `json:"upload_url"`
+	}
+	if err := json.Unmarshal(respBody, &meta); err != nil {
+		return uploadedAttachment{}, fmt.Errorf("decode upload metadata: %w", err)
+	}
+	if meta.FileID == "" || meta.UploadURL == "" {
+		return uploadedAttachment{}, fmt.Errorf("invalid upload metadata: %s", truncateBody(respBody))
+	}
+	putHeaders := map[string]string{
+		"Content-Type":    mimeType,
+		"x-ms-blob-type":  "BlockBlob",
+		"x-ms-version":    "2020-04-08",
+		"Origin":          strings.TrimRight(a.baseURL(), "/"),
+		"Referer":         strings.TrimRight(a.baseURL(), "/") + "/",
+		"User-Agent":      defaultUserAgent,
+		"Accept":          "application/json, text/plain, */*",
+		"Accept-Language": "en-US,en;q=0.8",
+	}
+	status, respBody, err = a.doHTTP("PUT", meta.UploadURL, putHeaders, data, 120*time.Second)
+	if err != nil {
+		return uploadedAttachment{}, err
+	}
+	if status >= 400 {
+		return uploadedAttachment{}, fmt.Errorf("attachment upload status %d: %s", status, truncateBody(respBody))
+	}
+	uploadedPath := "/backend-api/files/" + url.PathEscape(meta.FileID) + "/uploaded"
+	headers = browserHeaderMap(a.deviceID, a.sessionID)
+	headers["Authorization"] = "Bearer " + a.accessToken
+	headers["Accept"] = "application/json"
+	headers["Content-Type"] = "application/json"
+	headers["X-OpenAI-Target-Path"] = uploadedPath
+	headers["X-OpenAI-Target-Route"] = uploadedPath
+	status, respBody, err = a.doHTTP("POST", strings.TrimRight(a.baseURL(), "/")+uploadedPath, headers, []byte("{}"), 60*time.Second)
+	if err != nil {
+		return uploadedAttachment{}, err
+	}
+	if status >= 400 {
+		return uploadedAttachment{}, fmt.Errorf("%s status %d: %s", uploadedPath, status, truncateBody(respBody))
+	}
+	return uploadedAttachment{
+		FileID:   meta.FileID,
+		FileName: fileName,
+		FileSize: len(data),
+		MimeType: mimeType,
+		Width:    width,
+		Height:   height,
+		IsImage:  isImage,
+	}, nil
+}
+
+func (a *Adaptor) resolveInlineOrRemoteData(source, fallbackMime, accept string) ([]byte, string, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil, "", fmt.Errorf("missing data")
+	}
+	if mimeType, encoded, ok := splitDataURI(source); ok {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid base64 data: %w", err)
+		}
+		if fallbackMime != "" && mimeType == "application/octet-stream" {
+			mimeType = fallbackMime
+		}
+		return data, mimeType, nil
+	}
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Scheme == "" {
+		return nil, "", fmt.Errorf("unsupported data source")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "", fmt.Errorf("unsupported URL scheme %q", parsed.Scheme)
+	}
+	if host := parsed.Hostname(); host == "" || net.ParseIP(host) == nil && !strings.Contains(host, ".") {
+		return nil, "", fmt.Errorf("invalid remote URL host")
+	}
+	req, err := http.NewRequest("GET", source, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("User-Agent", "chatgpt2api vision fetcher")
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("remote fetch status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > 32*1024*1024 {
+		return nil, "", fmt.Errorf("remote file exceeds 32MB limit")
+	}
+	mimeType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+	if mimeType == "" || strings.EqualFold(mimeType, "application/octet-stream") {
+		mimeType = fallbackMime
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return data, mimeType, nil
+}
+
+func splitDataURI(uri string) (mimeType, data string, ok bool) {
+	if !strings.HasPrefix(uri, "data:") {
+		return "", "", false
+	}
+	comma := strings.Index(uri, ",")
+	if comma < 0 {
+		return "", "", false
+	}
+	meta := uri[len("data:"):comma]
+	data = uri[comma+1:]
+	if data == "" {
+		return "", "", false
+	}
+	mimeType = "application/octet-stream"
+	if semi := strings.Index(meta, ";"); semi >= 0 {
+		if meta[:semi] != "" {
+			mimeType = meta[:semi]
+		}
+	} else if meta != "" {
+		mimeType = meta
+	}
+	return strings.ToLower(mimeType), data, true
+}
+
+func imageDimensions(data []byte) (int, int, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0, err
+	}
+	return cfg.Width, cfg.Height, nil
+}
+
+func extensionForMime(mimeType, fallback string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "application/pdf":
+		return ".pdf"
+	}
+	exts, _ := mime.ExtensionsByType(mimeType)
+	if len(exts) > 0 {
+		return exts[0]
+	}
+	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func roleString(role ir.Role) string {
@@ -476,10 +830,10 @@ func roleString(role ir.Role) string {
 }
 
 type requirements struct {
-	Token           string
-	ProofToken      string
-	SOToken         string
-	TurnstileToken  string
+	Token          string
+	ProofToken     string
+	SOToken        string
+	TurnstileToken string
 }
 
 func (a *Adaptor) bootstrap() error {

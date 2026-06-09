@@ -19,13 +19,20 @@ func NormalizeRequestSameProtocol(format Format, body []byte) ([]byte, error) {
 	return convert.NormalizeRequestSameProtocol(format, body)
 }
 
-func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte, adaptor Adaptor) ([]byte, error) {
+type credentialAwareAdaptor interface {
+	SetCredentials(credentials string)
+}
+
+func ConvertRequestWithAdaptor(clientFormat, upstreamFormat Format, body []byte, adaptor Adaptor, credentials ...string) ([]byte, error) {
 	req, err := convert.ToIR(clientFormat, body)
 	if err != nil {
 		return nil, fmt.Errorf("parse request %s: %w", clientFormat, err)
 	}
 	convert.PrepareRequestForTarget(req, clientFormat, upstreamFormat)
 	if adaptor != nil {
+		if aware, ok := adaptor.(credentialAwareAdaptor); ok && len(credentials) > 0 {
+			aware.SetCredentials(credentials[0])
+		}
 		return adaptor.FromIR(req)
 	}
 	return convert.ConvertRequest(clientFormat, upstreamFormat, body)
