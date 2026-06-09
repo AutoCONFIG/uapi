@@ -454,6 +454,42 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		HasTokens:    tokens != nil,
 		AuthMode:     jsonString(data, "auth_mode"),
 	}
+	// Also treat top-level id_token as having tokens (auth.json format)
+	if imp.HasTokens || imp.IDToken != "" {
+		imp.HasTokens = true
+	}
+
+	// Flexible: extract account_id from id_token JWT claims if missing
+	if imp.AccountID == "" && imp.IDToken != "" {
+		if claims := decodeJWTClaims(imp.IDToken); claims != nil {
+			if auth, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+				if id, ok := auth["chatgpt_account_id"].(string); ok && id != "" {
+					imp.AccountID = id
+				}
+			}
+			if imp.AccountID == "" {
+				if id, ok := claims["chatgpt_account_id"].(string); ok && id != "" {
+					imp.AccountID = id
+				}
+			}
+		}
+	}
+
+	// Flexible: extract auth_mode from JWT if missing
+	if imp.AuthMode == "" && imp.IDToken != "" {
+		if claims := decodeJWTClaims(imp.IDToken); claims != nil {
+			if auth, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+				if mode, ok := auth["auth_mode"].(string); ok && mode != "" {
+					imp.AuthMode = mode
+				}
+			}
+		}
+	}
+
+	// Auto-infer auth_mode for Codex tokens
+	if imp.AuthMode == "" && imp.HasTokens {
+		imp.AuthMode = "chatgpt"
+	}
 	if imp.CallbackURL != "" {
 		if parsed, err := url.Parse(imp.CallbackURL); err == nil {
 			values := parsed.Query()
@@ -479,6 +515,30 @@ func jsonObject(data map[string]interface{}, key string) map[string]interface{} 
 		return value
 	}
 	return nil
+}
+
+func decodeJWTClaims(jwt string) map[string]interface{} {
+	parts := strings.Split(jwt, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload := parts[1]
+	// Fix base64 padding
+	switch len(payload) % 4 {
+	case 2:
+		payload += "=="
+	case 3:
+		payload += "="
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return nil
+	}
+	return claims
 }
 
 func (h *Handler) applyOAuthJSONImport(state string, imp *oauthJSONImport) {

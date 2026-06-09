@@ -1633,8 +1633,6 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
         displayLabel = `Codex 每周窗口`;
       } else if (bucketType === "daily" && !label.includes("每日")) {
         displayLabel = `${label} (每日)`;
-      } else if (bucketType === "model" && !label.includes("模型")) {
-        displayLabel = `${label} (模型)`;
       }
 
       // Use context-aware reset time formatting
