@@ -2089,7 +2089,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 						attempt["affinity_account_id"] = accID
 					}
 					if modelOK && capabilityOK {
-						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID); err == nil {
+						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
 							attempt["selected"] = true
 							attempt["account_id"] = acc.ID.String()
 							appendRouteAttempt(attempts, attempt)
@@ -2113,7 +2113,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 					attempt["affinity_account_id"] = accID
 				}
 				if modelOK && capabilityOK {
-					if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID); err == nil {
+					if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
 						attempt["selected"] = true
 						attempt["account_id"] = acc.ID.String()
 						appendRouteAttempt(attempts, attempt)
@@ -2144,7 +2144,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 		for i := range channels {
 			attempt := r.routeAttemptInfo(channels[i], true, true)
 			attempt["source"] = "runtime"
-			if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+			if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 				attempt["selected"] = true
 				attempt["account_id"] = acc.ID.String()
 				appendRouteAttempt(attempts, attempt)
@@ -2180,7 +2180,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 	for i := range channels {
 		attempt := r.routeAttemptInfo(channels[i], true, true)
 		attempt["source"] = "priority"
-		if acc, adaptor, creds, err := r.pickAccount(channels[i]); err == nil {
+		if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 			attempt["selected"] = true
 			attempt["account_id"] = acc.ID.String()
 			appendRouteAttempt(attempts, attempt)
@@ -2608,7 +2608,7 @@ func preserveFresherRuntimeOAuth(incoming, existing db.Account) db.Account {
 	return incoming
 }
 
-func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, string, error) {
+func (r *Relayer) pickAccount(ch db.Channel, model string) (*db.Account, provider.Adaptor, string, error) {
 	adaptor := getAdaptorForChannel(&ch)
 	if adaptor == nil {
 		return nil, nil, "", fmt.Errorf("unsupported channel type")
@@ -2617,7 +2617,7 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 	if !ok {
 		return nil, nil, "", fmt.Errorf("channel pool not initialized")
 	}
-	account, ok := pool.Pick()
+	account, ok := pool.PickForModel(model, nil)
 	if !ok {
 		return nil, nil, "", fmt.Errorf("no available account")
 	}
@@ -2628,9 +2628,9 @@ func (r *Relayer) pickAccount(ch db.Channel) (*db.Account, provider.Adaptor, str
 	return account, adaptor, creds, nil
 }
 
-func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string) (*db.Account, provider.Adaptor, string, error) {
+func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model string) (*db.Account, provider.Adaptor, string, error) {
 	if strings.TrimSpace(accountID) == "" {
-		return r.pickAccount(ch)
+		return r.pickAccount(ch, model)
 	}
 	adaptor := getAdaptorForChannel(&ch)
 	if adaptor == nil {

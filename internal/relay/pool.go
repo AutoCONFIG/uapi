@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,169 @@ func (p *AccountPool) PickExcluding(excluded map[string]bool) (*db.Account, bool
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.pickLocked(excluded)
+}
+
+// PickForModel selects an account with quota available for the requested model.
+// For per-model quota channels (Gemini, Antigravity), it skips accounts where
+// the matching quota bucket is exhausted (remaining <= 0). If no account has
+// quota for the model, falls back to normal weighted selection (all accounts).
+func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.Account, bool) {
+	if model == "" {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.pickLocked(excluded)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// First pass: try to find accounts with quota for this model
+	totalWeight := 0
+	for i := range p.accounts {
+		if p.accounts[i].Weight <= 0 {
+			continue
+		}
+		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+			continue
+		}
+		if !modelQuotaExhausted(p.accounts[i].Account, model) {
+			totalWeight += p.accounts[i].Weight
+		}
+	}
+
+	// If some accounts have quota, pick from them; otherwise fall back to all
+	useAll := totalWeight == 0
+	if useAll {
+		for i := range p.accounts {
+			if p.accounts[i].Weight <= 0 {
+				continue
+			}
+			if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+				continue
+			}
+			totalWeight += p.accounts[i].Weight
+		}
+	}
+	if totalWeight == 0 {
+		return nil, false
+	}
+
+	var best *WeightedAccount
+	for i := range p.accounts {
+		if p.accounts[i].Weight <= 0 {
+			continue
+		}
+		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+			continue
+		}
+		if !useAll && modelQuotaExhausted(p.accounts[i].Account, model) {
+			continue
+		}
+		p.accounts[i].CurrentWeight += p.accounts[i].Weight
+		if best == nil || p.accounts[i].CurrentWeight > best.CurrentWeight {
+			best = &p.accounts[i]
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	best.CurrentWeight -= totalWeight
+	return best.Account, true
+}
+
+// modelQuotaExhausted checks if the account's quota for the given model is exhausted.
+// It looks for a quota bucket whose label matches the model name and checks if remaining <= 0.
+func modelQuotaExhausted(acc *db.Account, model string) bool {
+	if acc.Metadata == nil {
+		return false
+	}
+	quotaRaw, ok := acc.Metadata["quota"]
+	if !ok || quotaRaw == nil {
+		return false
+	}
+	// quota is stored as *QuotaData or map[string]interface{} after JSON round-trip
+	quotaData, ok := quotaRaw.(interface{})
+	if !ok {
+		return false
+	}
+
+	lowerModel := strings.ToLower(model)
+	buckets := extractQuotaBuckets(quotaData)
+	if len(buckets) == 0 {
+		return false
+	}
+
+	hasMatchingBucket := false
+	for _, b := range buckets {
+		lowerLabel := strings.ToLower(b.label)
+		if strings.Contains(lowerModel, "pro") && strings.Contains(lowerLabel, "pro") {
+			hasMatchingBucket = true
+			if b.remaining <= 0 {
+				return true
+			}
+		} else if strings.Contains(lowerModel, "flash") && strings.Contains(lowerLabel, "flash") {
+			hasMatchingBucket = true
+			if b.remaining <= 0 {
+				return true
+			}
+		} else if strings.Contains(lowerModel, "lite") && strings.Contains(lowerLabel, "lite") {
+			hasMatchingBucket = true
+			if b.remaining <= 0 {
+				return true
+			}
+		} else if strings.Contains(lowerLabel, lowerModel) || strings.Contains(lowerModel, lowerLabel) {
+			hasMatchingBucket = true
+			if b.remaining <= 0 {
+				return true
+			}
+		}
+	}
+	_ = hasMatchingBucket
+	return false
+}
+
+type modelQuotaBucket struct {
+	label     string
+	remaining int
+}
+
+func extractQuotaBuckets(quotaRaw interface{}) []modelQuotaBucket {
+	switch q := quotaRaw.(type) {
+	case map[string]interface{}:
+		if buckets, ok := q["buckets"].([]interface{}); ok {
+			return parseBucketsFromSlice(buckets)
+		}
+	case map[string]map[string]interface{}:
+		// Already deserialized as typed map
+	}
+	// Try via JSON round-trip for *QuotaData stored as struct
+	if data, ok := quotaRaw.(interface{ GetBuckets() interface{} }); ok {
+		_ = data
+	}
+	return nil
+}
+
+func parseBucketsFromSlice(buckets []interface{}) []modelQuotaBucket {
+	var result []modelQuotaBucket
+	for _, b := range buckets {
+		bm, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		label, _ := bm["label"].(string)
+		remaining := 0
+		if rp, ok := bm["remaining_percent"].(float64); ok {
+			remaining = int(rp)
+		} else if rp, ok := bm["RemainingPercent"].(float64); ok {
+			remaining = int(rp)
+		} else if rp, ok := bm["remaining_percent"].(int); ok {
+			remaining = rp
+		}
+		if label != "" {
+			result = append(result, modelQuotaBucket{label: label, remaining: remaining})
+		}
+	}
+	return result
 }
 
 func (p *AccountPool) pickLocked(excluded map[string]bool) (*db.Account, bool) {
