@@ -625,6 +625,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}
 
 	// 9. Dispatch
+	if debugTrace != nil {
+		debugTrace.SetRoutingInfo(routeAdminInfo)
+	}
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
 		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, requestType)
@@ -916,6 +919,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		defer releaseStreamingResponse(upResp)
 		defer r.releaseLocalConcurrency(token.ID.String(), claims)
 		defer stopIdleTimeout()
+		defer trace.WriteRoutingInfo()
 		result := streamAndForwardWithTrace(peekedBodyStream, reader, tracker, inputConvert, outputConvert, sendDone, trace)
 		if result.err != nil {
 			if errors.Is(result.err, io.ErrClosedPipe) {
@@ -1031,6 +1035,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			r.refundAndError(ctx, token.ID.String(), estTokens, "internal error", claims, ch, acc, model, start, tokenPlanID)
 		}
 	}()
+	defer trace.WriteRoutingInfo()
 
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
@@ -1444,6 +1449,7 @@ func (c *channelCache) get() []db.Channel {
 	}
 	c.channels = channels
 	c.expiry = time.Now().Add(c.ttl)
+	logger.Infof("relay.channel_cache", "channel cache refreshed", logger.F("count", len(channels)))
 	return channels
 }
 
@@ -1462,6 +1468,7 @@ func (r *Relayer) InvalidateChannelCache() {
 		return
 	}
 	r.chCache.invalidate()
+	logger.Infof("relay.channel_cache", "channel cache invalidated")
 }
 
 // handleBuffered: standard buffered request with retry.

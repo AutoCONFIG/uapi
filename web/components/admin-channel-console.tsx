@@ -640,6 +640,10 @@ export function AdminChannelConsole() {
     try {
       let accounts: Record<string, unknown>[] = [];
       const trimmed = batchJSON.trim();
+      if (!trimmed) {
+        setBatchError("请先粘贴 JSON 数据或选择文件");
+        return;
+      }
 
       // 尝试解析为标准JSON数组
       try {
@@ -663,7 +667,7 @@ export function AdminChannelConsole() {
       }
 
       if (!Array.isArray(accounts) || accounts.length === 0) {
-        setBatchError("未找到账号数据");
+        setBatchError("未找到账号数据。请确保 JSON 格式正确，或使用文件上传功能。");
         return;
       }
 
@@ -865,14 +869,20 @@ export function AdminChannelConsole() {
     } else {
       // API key / Reverse channel: use createAccount directly
       // Backend createAccount already handles reverse channels via parseReverseCredentialInput
+      const errors: string[] = [];
       for (const item of batchParsed) {
         try {
           const account = await adminApi.createAccount(token, { channel_id: selected.id, name: item.name, credentials: item.credentials, weight: item.weight, enabled: item.enabled });
           setAccounts((cur) => [account, ...cur]);
           success++;
         } catch (err) {
+          const msg = err instanceof Error ? err.message : "导入失败";
           console.warn("batch import failed for", item.name, err);
+          errors.push(`${item.name}: ${msg}`);
         }
+      }
+      if (errors.length > 0) {
+        setBatchError(`${errors.length} 个账号导入失败:\n${errors.join("\n")}`);
       }
     }
 
@@ -1555,14 +1565,44 @@ export function AdminChannelConsole() {
               <button className="btn" onClick={() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchError(""); setBatchSuccess(0); }} title="关闭" type="button"><X /></button>
             </div>
             <div className="drawer-body">
-              <p className="batch-hint">粘贴 JSON 数据。支持字段：name, credentials, weight/concurrency, enabled。</p>
+              <p className="batch-hint">粘贴 JSON 数据或上传文件。支持字段：name, credentials, weight/concurrency, enabled。</p>
               <textarea
                 className="input"
-                placeholder='[{"name": "account1", "credentials": {...}, "concurrency": 10}]'
+                placeholder='[{"name": "account1", "credentials": "...", "weight": 100}]'
                 rows={8}
                 value={batchJSON}
                 onChange={(e) => setBatchJSON(e.target.value)}
               />
+              <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <label className="btn ghost" style={{ cursor: "pointer", marginBottom: 0 }}>
+                  选择 JSON 文件
+                  <input
+                    type="file"
+                    accept=".json,.ndjson,.txt"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => {
+                        const text = ev.target?.result;
+                        if (typeof text === "string") {
+                          setBatchJSON(text);
+                          setBatchError("");
+                          setBatchSuccess(0);
+                        }
+                      };
+                      reader.readAsText(file);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+                {batchJSON.trim() && (
+                  <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>
+                    {batchJSON.length.toLocaleString()} 字符
+                  </span>
+                )}
+              </div>
               {batchParsed.length > 0 && (
                 <div className="batch-preview">
                   <strong>解析成功 {batchParsed.length} 个账号：</strong>
@@ -1571,7 +1611,7 @@ export function AdminChannelConsole() {
                   </ul>
                 </div>
               )}
-              {batchError && <p className="form-error">{batchError}</p>}
+              {batchError && <p className="form-error" style={{ whiteSpace: "pre-wrap" }}>{batchError}</p>}
               {batchSuccess > 0 && <p className="form-success">✅ 成功导入 {batchSuccess} 个账号</p>}
             </div>
             <div className="drawer-foot">

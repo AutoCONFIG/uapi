@@ -249,6 +249,9 @@ type relayDebugDumpSummary struct {
 	TokenID          string                                `json:"token_id,omitempty"`
 	AccountID        string                                `json:"account_id,omitempty"`
 	ChannelID        string                                `json:"channel_id,omitempty"`
+	ChannelName      string                                `json:"channel_name,omitempty"`
+	ChannelType      string                                `json:"channel_type,omitempty"`
+	APIFormat        string                                `json:"api_format,omitempty"`
 	GatewayRequest   string                                `json:"gateway_request,omitempty"`
 	ClientFormat     provider.Format                       `json:"client_format"`
 	UpstreamFormat   provider.Format                       `json:"upstream_format"`
@@ -261,6 +264,8 @@ type relayDebugDumpSummary struct {
 	CachePassthrough upstreamconfig.CachePassthroughPolicy `json:"cache_passthrough"`
 	Original         relayDebugRequestStats                `json:"original"`
 	Converted        relayDebugRequestStats                `json:"converted"`
+	RouteAttempts    []map[string]interface{}              `json:"route_attempts,omitempty"`
+	FallbackReasons  []string                              `json:"fallback_reasons,omitempty"`
 }
 
 type relayDebugRequestStats struct {
@@ -310,6 +315,29 @@ type relayDebugTrace struct {
 	// Null chunk dedup: track consecutive null chunks per stream name.
 	streamConsecutiveNulls map[string]int
 	streamLastWasNull      map[string]bool
+	routingInfo            map[string]interface{}
+}
+
+// SetRoutingInfo stores route attempts and fallback paths for the debug dump.
+func (t *relayDebugTrace) SetRoutingInfo(info map[string]interface{}) {
+	if t == nil {
+		return
+	}
+	t.routingInfo = info
+}
+
+// WriteRoutingInfo persists routing decisions to the debug dump directory.
+func (t *relayDebugTrace) WriteRoutingInfo() {
+	if t == nil || t.Dir == "" {
+		return
+	}
+	info := t.routingInfo
+	if info == nil {
+		info = map[string]interface{}{}
+	}
+	if raw, err := json.MarshalIndent(info, "", "  "); err == nil {
+		writeRelayDebugFile(t.Dir, "routing.json", raw)
+	}
 }
 
 func relayDebugDumpTimestamp(t time.Time) string {
@@ -363,6 +391,9 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 	}
 	if ch != nil {
 		summary.ChannelID = ch.ID.String()
+		summary.ChannelName = ch.Name
+		summary.ChannelType = ch.Type
+		summary.APIFormat = ch.APIFormat
 	}
 	if acc != nil {
 		summary.AccountID = acc.ID.String()
