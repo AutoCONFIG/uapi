@@ -358,6 +358,7 @@ func exportCodexAuthJSON(acc *db.Account, accessToken, refreshToken string) (map
 	return map[string]interface{}{
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
+		"last_refresh":   time.Now().UTC().Format(time.RFC3339),
 		"tokens": map[string]interface{}{
 			"id_token":      idToken,
 			"access_token":  accessToken,

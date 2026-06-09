@@ -7,6 +7,8 @@ import { adminApi } from "@/lib/api";
 import { apiKeyChannelPresets, apiKeyPresetForType, channelDefaults, channelPresets, defaultChannelPreset, isAPIKeyAPIFormat, isOAuthAPIFormat, isReverseAPIFormat, oauthProviderForChannel, presetForChannel, presetTitleLines, oauthChannelPresets, reverseChannelPresets, type ChannelPreset } from "@/lib/channel-presets";
 import type { Account, Channel, OAuthStatus } from "@/types/api";
 
+type ImportAccount = {name: string; credentials: string; weight: number; enabled: boolean; platform?: string};
+
 function createInitialDraft(preset: ChannelPreset = defaultChannelPreset) {
   return { name: "", preset: preset.id, type: preset.type, models: preset.models, modelAliases: preset.modelAliases || "", apiFormat: preset.apiFormat, priority: 100, weight: 100, forceStreamModels: preset.forceStreamModels || "" };
 }
@@ -255,6 +257,134 @@ function channelSettingsWithForceStreamModels(raw: string | undefined, models: s
   return JSON.stringify(settings);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringField(record: Record<string, unknown> | null | undefined, ...keys: string[]): string {
+  if (!record) return "";
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number") return String(value);
+  }
+  return "";
+}
+
+function isCredentialJSON(record: Record<string, unknown>): boolean {
+  return Boolean(
+    record.access_token ||
+    record.accessToken ||
+    record.refresh_token ||
+    record.refreshToken ||
+    record.id_token ||
+    record.idToken ||
+    record.tokens ||
+    record.token ||
+    record.auth_mode ||
+    record.callback_url ||
+    record.code ||
+    record.authorization_code ||
+    record.api_key ||
+    record.key,
+  );
+}
+
+function isAccountWrapper(record: Record<string, unknown>): boolean {
+  return Boolean(
+    record.name ||
+    record.platform ||
+    record.type ||
+    record.extra ||
+    record.concurrency ||
+    record.priority ||
+    record.weight ||
+    record.status ||
+    record.proxy_key ||
+    record.group_ids ||
+    record.credentials ||
+    record.credential ||
+    record.auth_json ||
+    record.authJson ||
+    record.oauth_json ||
+    record.oauthJson
+  );
+}
+
+function importCredentialValue(item: Record<string, unknown>): unknown {
+  for (const key of ["credentials", "credential", "auth_json", "authJson", "oauth_json", "oauthJson", "oauth", "auth"]) {
+    const value = item[key];
+    if (recordValue(value) || Array.isArray(value)) return value;
+    if (stringValue(value).trim() !== "") return value;
+  }
+  const token = recordValue(item.token);
+  if (token && isCredentialJSON(token)) return token;
+  const metadata = recordValue(item.metadata);
+  if (metadata && isCredentialJSON(metadata)) return metadata;
+  return item;
+}
+
+function inferImportAccountName(item: Record<string, unknown>, index: number): string {
+  const tokens = recordValue(item.tokens);
+  const credentials = recordValue(item.credentials);
+  return stringField(item, "name", "label", "file_name", "fileName", "filename", "file", "path", "id", "email", "username", "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+    stringField(credentials, "email", "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+    stringField(tokens, "email", "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+    `account-${index + 1}`;
+}
+
+function collectImportRecords(parsed: unknown): Record<string, unknown>[] {
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap(collectImportRecords);
+  }
+  const record = recordValue(parsed);
+  if (!record) return [];
+
+  for (const key of ["accounts", "items", "data", "records", "auths", "credentials"]) {
+    const value = record[key];
+    if (Array.isArray(value)) return value.flatMap(collectImportRecords);
+    const nested = recordValue(value);
+    if (nested && key === "data") {
+      const nestedRecords = collectImportRecords(nested);
+      if (nestedRecords.length > 0 && !isCredentialJSON(record)) return nestedRecords;
+    }
+  }
+
+  if (isAccountWrapper(record) || isCredentialJSON(record)) return [record];
+
+  const objectValues = Object.entries(record).flatMap(([key, value]) => {
+    const child = recordValue(value);
+    if (!child) return collectImportRecords(value);
+    if (!child.name && !child.label && !child.file_name && !child.filename && key.trim()) {
+      return collectImportRecords({ ...child, filename: key });
+    }
+    return collectImportRecords(child);
+  });
+  return objectValues.length > 0 ? objectValues : [record];
+}
+
+function jwtPayload(token: string): Record<string, unknown> | null {
+  const part = token.split(".")[1];
+  if (!part) return null;
+  try {
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, "=");
+    const decoded = atob(padded);
+    return recordValue(JSON.parse(decoded));
+  } catch {
+    return null;
+  }
+}
+
+function accountIDFromJWT(token: string): string {
+  const claims = jwtPayload(token);
+  const auth = recordValue(claims?.["https://api.openai.com/auth"]);
+  const organization = Array.isArray(claims?.organizations) ? recordValue(claims.organizations[0]) : null;
+  return stringField(auth, "chatgpt_account_id", "chatgptAccountId") ||
+    stringField(claims, "chatgpt_account_id", "chatgptAccountId") ||
+    stringField(organization, "id");
+}
+
 function antigravityRouteModelIDs(settings: AntigravitySettings): string[] {
   return modelValues(settings.tier_groups.flatMap((group) => [
     group.public_model,
@@ -322,7 +452,7 @@ export function AdminChannelConsole() {
   const [createKind, setCreateKind] = useState<"oauth" | "reverse" | "apikey">("oauth");
   const [batchImportOpen, setBatchImportOpen] = useState(false);
   const [batchJSON, setBatchJSON] = useState("");
-  const [batchParsed, setBatchParsed] = useState<Array<{name: string; credentials: string; weight: number; enabled: boolean}>>([]);
+  const [batchParsed, setBatchParsed] = useState<ImportAccount[]>([]);
   const [batchImporting, setBatchImporting] = useState(false);
   const [batchError, setBatchError] = useState("");
   const [batchSuccess, setBatchSuccess] = useState(0);
@@ -345,11 +475,6 @@ export function AdminChannelConsole() {
     const disabledReason = stringValue(meta.disabled_reason);
     if (!account.enabled && disabledReason) {
       return `认证失效，已禁用，可点击启用恢复 · ${disabledReason}`;
-    }
-    const authFailureReason = stringValue(meta.auth_failure_reason);
-    const authFailureAttempts = Number(meta.auth_failure_attempts || 0);
-    if (authFailureReason && authFailureAttempts > 0) {
-      return `认证失败重试 ${Math.min(authFailureAttempts, 3)}/3 · ${authFailureReason}`;
     }
     const autoReason = stringValue(meta.auto_disable_reason);
     if (autoReason === "quota_exhausted") {
@@ -658,20 +783,18 @@ export function AdminChannelConsole() {
         return;
       }
 
-      // 尝试解析为标准JSON数组
+      // 支持标准数组、{accounts:[...]}、单个账号 JSON，以及 NDJSON。
       try {
         const parsed = JSON.parse(trimmed);
-        accounts = Array.isArray(parsed) ? parsed : parsed.accounts || [];
+        accounts = collectImportRecords(parsed);
       } catch {
         // 如果标准JSON解析失败，尝试NDJSON格式（换行符分隔的JSON）
         if (trimmed.includes("\n")) {
           const lines = trimmed.split("\n").filter((line) => line.trim());
           for (const line of lines) {
             try {
-              const obj = JSON.parse(line.trim());
-              if (obj && typeof obj === "object") {
-                accounts.push(obj);
-              }
+              const obj = recordValue(JSON.parse(line.trim()));
+              if (obj) accounts.push(obj);
             } catch {
               // 跳过无法解析的行
             }
@@ -685,19 +808,31 @@ export function AdminChannelConsole() {
       }
 
       // 检测 platform
-      const firstWithPlatform = accounts.find((a: Record<string, unknown>) => a.platform);
-      const detectedPlatform = firstWithPlatform?.platform as string | undefined;
+      const firstWithPlatform = accounts.find((a: Record<string, unknown>) => a.platform || a.provider || a.type);
+      const detectedPlatform = stringValue(firstWithPlatform?.platform || firstWithPlatform?.provider || firstWithPlatform?.type);
 
       // 尝试匹配 channel
       let matchedChannel: Channel | null = null;
       if (detectedPlatform) {
         const platformMap: Record<string, string> = {
-          openai: "openai_oauth",
-          anthropic: "anthropic_oauth",
-          gemini: "gemini_oauth",
-          google: "gemini_oauth",
-          claude: "anthropic_oauth",
-          chatgpt: "openai_oauth",
+          openai: "codex",
+          openai_oauth: "codex",
+          openai_codex: "codex",
+          codex: "codex",
+          chatgpt: "codex",
+          chatgpt_oauth: "codex",
+          anthropic: "claude_code",
+          claude: "claude_code",
+          claude_code: "claude_code",
+          anthropic_oauth: "claude_code",
+          gemini: "gemini_code",
+          google: "gemini_code",
+          gemini_code: "gemini_code",
+          gemini_oauth: "gemini_code",
+          google_one: "gemini_code",
+          code_assist: "gemini_code",
+          antigravity: "antigravity",
+          antigravity_oauth: "antigravity",
         };
         const apiFormat = platformMap[detectedPlatform.toLowerCase()];
         if (apiFormat) {
@@ -705,17 +840,17 @@ export function AdminChannelConsole() {
         }
       }
 
-      const results: Array<{name: string; credentials: string; weight: number; enabled: boolean; platform?: string}> = [];
+      const results: ImportAccount[] = [];
       for (const item of accounts) {
-        const name = item.name || item.email || item.username || `account-${results.length}`;
-        const credentials = item.credentials || item.token || item.auth || item;
-        if (!credentials) continue;
+        const name = inferImportAccountName(item, results.length);
+        const credentialSource = importCredentialValue(item);
         const weight = item.weight || item.concurrency || item.priority || 100;
-        const enabled = item.enabled !== false;
-        const platform = item.platform as string | undefined;
+        const status = stringValue(item.status);
+        const enabled = item.enabled !== false && item.disabled !== true && status !== "inactive" && status !== "disabled";
+        const platform = stringValue(item.platform || item.provider || item.type) || undefined;
         results.push({
-          name: String(name),
-          credentials: typeof credentials === "string" ? credentials : JSON.stringify(credentials),
+          name,
+          credentials: typeof credentialSource === "string" ? credentialSource : JSON.stringify(credentialSource),
           weight: Number(weight) || 100,
           enabled,
           platform,
@@ -754,74 +889,81 @@ export function AdminChannelConsole() {
       }
     }
 
-    // Build standard auth.json format from simplified input
-    const accessToken = (input.access_token as string) || "";
-    const refreshToken = (input.refresh_token as string) || "";
+    // Do not synthesize a Codex auth.json from only access/refresh tokens.
+    // The upstream Codex client stores ChatGPT auth as auth_mode + tokens, and
+    // downstream Codex behavior depends on the id_token/account identity.
+    const inputTokens = recordValue(input.tokens) || recordValue(input.token);
+    const metadata = recordValue(input.metadata);
+    const accessToken = stringField(inputTokens, "access_token", "accessToken") ||
+      stringField(metadata, "access_token", "accessToken") ||
+      stringField(input, "access_token", "accessToken", "token");
+    const refreshToken = stringField(inputTokens, "refresh_token", "refreshToken") ||
+      stringField(metadata, "refresh_token", "refreshToken") ||
+      stringField(input, "refresh_token", "refreshToken");
+    const idToken = stringField(inputTokens, "id_token", "idToken") ||
+      stringField(metadata, "id_token", "idToken") ||
+      stringField(input, "id_token", "idToken");
 
-    if (!accessToken && !refreshToken) {
+    if (!accessToken && !refreshToken && !idToken) {
       return input;
     }
 
     // Extract account_id from various possible locations
-    const accountId = (input.account_id as string) ||
-      (input.chatgpt_account_id as string) ||
-      (input.tokens as Record<string, unknown>)?.account_id as string ||
-      (input.id_token as Record<string, unknown>)?.account_id as string ||
-      (input.id_token as Record<string, unknown>)?.chatgpt_account_id as string ||
-      "";
-
-    // Extract id_token if present
-    const idToken = (input.id_token as string) ||
-      (input.tokens as Record<string, unknown>)?.id_token as string || "";
+    const idTokenObject = recordValue(input.id_token) || recordValue(input.idToken);
+    const accountId = stringField(inputTokens, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+      stringField(metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+      stringField(input, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+      stringField(idTokenObject, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId") ||
+      accountIDFromJWT(idToken) ||
+      accountIDFromJWT(accessToken);
 
     // Extract user_id from various locations
-    const userId = (input.chatgpt_user_id as string) ||
-      (input.user_id as string) ||
-      "";
+    const userId = stringField(inputTokens, "chatgpt_user_id", "chatgptUserId", "user_id", "userId") ||
+      stringField(metadata, "chatgpt_user_id", "chatgptUserId", "user_id", "userId") ||
+      stringField(input, "chatgpt_user_id", "chatgptUserId", "user_id", "userId");
 
     // Extract organization_id
-    const orgId = (input.organization_id as string) ||
-      (input.org_id as string) ||
-      "";
+    const orgId = stringField(inputTokens, "organization_id", "organizationId", "org_id", "orgId") ||
+      stringField(metadata, "organization_id", "organizationId", "org_id", "orgId") ||
+      stringField(input, "organization_id", "organizationId", "org_id", "orgId");
 
     // Extract plan_type
-    const planType = (input.plan_type as string) ||
-      (input.plan as string) ||
-      "";
+    const planType = stringField(inputTokens, "chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType", "plan") ||
+      stringField(metadata, "chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType", "plan") ||
+      stringField(input, "chatgpt_plan_type", "chatgptPlanType", "plan_type", "planType", "plan");
 
     // Extract email
-    const email = (input.email as string) || "";
+    const email = stringField(inputTokens, "email") ||
+      stringField(metadata, "email") ||
+      stringField(input, "email");
 
-    // Build the tokens object with all extracted fields
+    if (!idToken || !accountId) {
+      return { ...input, auth_mode: input.auth_mode || "chatgpt" };
+    }
+
+    // Normalize flat token exports to the official Codex auth.json shape.
     const tokensObj: Record<string, unknown> = {
       access_token: accessToken,
       refresh_token: refreshToken,
+      id_token: idToken,
+      account_id: accountId,
     };
-
-    // Only add id_token and account_id if they exist
-    if (idToken) {
-      tokensObj.id_token = idToken;
-    }
-    if (accountId) {
-      tokensObj.account_id = accountId;
-    }
-
-    // Build result with all available metadata
     const result: Record<string, unknown> = {
       auth_mode: "chatgpt",
-      access_token: accessToken,
-      refresh_token: refreshToken,
       tokens: tokensObj,
     };
 
-    // Add optional metadata if available
+    if (input.last_refresh) result.last_refresh = input.last_refresh;
+    if (input.lastRefresh) result.last_refresh = input.lastRefresh;
+    if (input.OPENAI_API_KEY !== undefined) result.OPENAI_API_KEY = input.OPENAI_API_KEY;
     if (userId) tokensObj.chatgpt_user_id = userId;
     if (orgId) tokensObj.organization_id = orgId;
     if (planType) tokensObj.chatgpt_plan_type = planType;
-    if (email) {
-      result.email = email;
-      tokensObj.email = email;
-    }
+    if (email) tokensObj.email = email;
+    const tokenExpiry = stringField(inputTokens, "token_expiry", "tokenExpiry", "expires_at", "expiresAt", "expiry", "expiry_date", "expiryDate", "expired") ||
+      stringField(metadata, "token_expiry", "tokenExpiry", "expires_at", "expiresAt", "expiry", "expiry_date", "expiryDate", "expired") ||
+      stringField(input, "token_expiry", "tokenExpiry", "expires_at", "expiresAt", "expiry", "expiry_date", "expiryDate", "expired");
+    if (tokenExpiry) tokensObj.expires_at = tokenExpiry;
 
     return result;
   }
@@ -847,7 +989,7 @@ export function AdminChannelConsole() {
           const provider = oauthProviderForChannel(selected);
           const state = `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-          if (parsedCred && (parsedCred.access_token || parsedCred.id_token || parsedCred.tokens)) {
+          if (parsedCred && isCredentialJSON(parsedCred)) {
             // Convert Codex OAuth JSON to standard format
             const convertedCred = convertCodexOAuthJSON(parsedCred, provider);
             completeBody = { state, oauth_json: JSON.stringify(convertedCred), channel_id: selected.id, provider };
@@ -949,6 +1091,15 @@ export function AdminChannelConsole() {
     setCredLoading(true);
     setCredError("");
     try {
+      let oauthJSONForSubmit = oauthJSON.trim() || undefined;
+      if (oauthJSONForSubmit && channel && oauthProviderForChannel(channel) === "codex") {
+        try {
+          const parsed = recordValue(JSON.parse(oauthJSONForSubmit));
+          if (parsed) oauthJSONForSubmit = JSON.stringify(convertCodexOAuthJSON(parsed, "codex"));
+        } catch {
+          // Keep non-JSON input unchanged so the backend returns the canonical error.
+        }
+      }
       const status = channel && isReverseChannel(channel)
         ? await adminApi.completeChannelReverseAuth(token, {
           state: oauthState,
@@ -958,9 +1109,9 @@ export function AdminChannelConsole() {
         : await adminApi.completeChannelOAuth(token, {
           state: oauthState,
           callback_url: oauthCallbackURL.trim() || undefined,
-          oauth_json: oauthJSON.trim() || undefined,
+          oauth_json: oauthJSONForSubmit,
           channel_id: channel?.id,
-          provider: channel?.type,
+          provider: channel ? oauthProviderForChannel(channel) : undefined,
         });
       setOauthStatus(status);
       if (status.status === "completed") {
@@ -1453,7 +1604,7 @@ export function AdminChannelConsole() {
               <div className="credential-editor account-create-panel">
                 <div className="section-head">
                   <div><h2>新增账号</h2><p className="muted">账号添加后归入当前渠道，由 Gateway 统一调度。</p></div>
-                  <button className="btn ghost" onClick={() => setBatchImportOpen(true)} type="button">批量导入</button>
+                  <button className="btn ghost" onClick={() => setBatchImportOpen(true)} type="button">导入</button>
                   {(selected.type === "openai" || selected.type === "gemini" || selected.type === "anthropic") && !isOAuthChannel(selected) && !isReverseChannel(selected) ? (
                     <div className="segmented">
                       <button className={credentialMode === "apikey" ? "active" : ""} onClick={() => setCredentialMode("apikey")} type="button"><KeyRound /> {isReverseChannel(selected) ? "Access Token" : "密钥"}</button>
@@ -1569,16 +1720,16 @@ export function AdminChannelConsole() {
 
       {batchImportOpen && selected && (
         <div className="channel-modal-backdrop" onClick={() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchError(""); setBatchSuccess(0); }} role="presentation">
-          <section aria-label="批量导入账号" aria-modal="true" className="channel-modal" onClick={(event) => event.stopPropagation()} role="dialog">
+          <section aria-label="导入账号" aria-modal="true" className="channel-modal" onClick={(event) => event.stopPropagation()} role="dialog">
             <div className="drawer-head">
               <div>
-                <p className="eyebrow">批量导入</p>
-                <h2>批量导入账号到 {selected.name}</h2>
+                <p className="eyebrow">导入</p>
+                <h2>导入账号到 {selected.name}</h2>
               </div>
               <button className="btn" onClick={() => { setBatchImportOpen(false); setBatchJSON(""); setBatchParsed([]); setBatchError(""); setBatchSuccess(0); }} title="关闭" type="button"><X /></button>
             </div>
             <div className="drawer-body">
-              <p className="batch-hint">粘贴 JSON 数据或上传文件。支持字段：name, credentials, weight/concurrency, enabled。</p>
+              <p className="batch-hint">粘贴 JSON 数据或上传文件。支持单个 auth JSON、数组、NDJSON、sub2api 导出和 CLIProxyAPI auth 文件。</p>
               <textarea
                 className="input"
                 placeholder='[{"name": "account1", "credentials": "...", "weight": 100}]'
@@ -1619,7 +1770,7 @@ export function AdminChannelConsole() {
               {batchParsed.length > 0 && (
                 <div className="batch-preview">
                   <strong>解析成功 {batchParsed.length} 个账号：</strong>
-                  <ul>{batchParsed.slice(0, 5).map((item, i) => <li key={i}>{item.name} (权重: {item.weight})</li>)}
+                  <ul>{batchParsed.slice(0, 5).map((item, i) => <li key={i}>{item.name} (权重: {item.weight}, {item.enabled ? "启用" : "禁用"})</li>)}
                     {batchParsed.length > 5 && <li>...还有 {batchParsed.length - 5} 个</li>}
                   </ul>
                 </div>

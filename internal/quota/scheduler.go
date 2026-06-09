@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"errors"
 	"math/rand/v2"
 	"strings"
 	"sync"
@@ -21,8 +22,67 @@ const (
 
 type Scheduler struct {
 	db           *gorm.DB
-	mu           sync.Map // per-channel mutex: channelID -> *sync.Mutex
+	mu           sync.Map               // per-channel mutex: channelID -> *sync.Mutex
 	recoveryHook func(accountID string) // called when quota bucket resets to auto-recover exhausted account
+}
+
+type AccountError struct {
+	AccountID uuid.UUID
+	Err       error
+}
+
+func (e *AccountError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *AccountError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func AsAccountError(err error, target **AccountError) bool {
+	return errors.As(err, target)
+}
+
+func IsAuthFailureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, part := range []string{
+		"status 401",
+		"status 403",
+		"unauthorized",
+		"forbidden",
+		"invalid_grant",
+		"invalid token",
+		"invalid_token",
+		"token revoked",
+		"token_revoked",
+		"refresh_token_expired",
+		"account disabled",
+		"account_disabled",
+		"account suspended",
+		"account_suspended",
+		"account terminated",
+		"account_terminated",
+		"account forbidden",
+		"account_forbidden",
+		"account invalid",
+		"account_invalid",
+		"credential invalid",
+		"credential_invalid",
+	} {
+		if strings.Contains(msg, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func NewScheduler(database *gorm.DB) *Scheduler {
@@ -61,14 +121,14 @@ func (s *Scheduler) On429(accountID, channelID uuid.UUID) {
 	}()
 }
 
-// RefreshChannel refreshes all OAuth accounts under a channel in small batches with jitter.
+// RefreshChannel refreshes all accounts under a channel in small batches with jitter.
 func (s *Scheduler) RefreshChannel(channelID uuid.UUID) ([]*QuotaData, []error) {
 	mu := s.channelMu(channelID)
 	mu.Lock()
 	defer mu.Unlock()
 
 	var accounts []db.Account
-	if err := s.db.Where("channel_id = ? AND cred_type = ? AND deleted_at IS NULL", channelID, "oauth_token").Find(&accounts).Error; err != nil {
+	if err := s.db.Where("channel_id = ? AND deleted_at IS NULL", channelID).Find(&accounts).Error; err != nil {
 		return nil, []error{err}
 	}
 
@@ -99,7 +159,13 @@ func (s *Scheduler) RefreshChannel(channelID uuid.UUID) ([]*QuotaData, []error) 
 
 		for j, q := range batchResults {
 			if batchErrs[j] != nil {
-				errs = append(errs, batchErrs[j])
+				errs = append(errs, &AccountError{AccountID: batch[j].ID, Err: batchErrs[j]})
+			} else if q != nil && q.IsForbidden {
+				reason := q.ForbiddenReason
+				if strings.TrimSpace(reason) == "" {
+					reason = "account_forbidden"
+				}
+				errs = append(errs, &AccountError{AccountID: batch[j].ID, Err: errors.New(reason)})
 			} else if q != nil {
 				results = append(results, q)
 			}

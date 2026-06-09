@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,7 @@ type Handler struct {
 
 type AccountRecovery interface {
 	RecoverAccount(accountID, channelID string)
+	HandleAccountFailure(accountID, channelID string, statusCode int, body []byte, isQuota bool)
 }
 
 func (h *Handler) SetAccountRecovery(recovery AccountRecovery) {
@@ -409,7 +411,16 @@ func (h *Handler) HandleRefreshAccountQuota(ctx *fasthttp.RequestCtx) {
 	}
 	qd, err := h.quotaScheduler.RefreshAccount(accountID)
 	if err != nil {
+		if h.handleQuotaAuthFailure(accountID, err) {
+			h.jsonError(ctx, fasthttp.StatusUnauthorized, "认证失败：账号凭证无效或已过期，已按账号异常处理")
+			return
+		}
 		h.jsonError(ctx, fasthttp.StatusInternalServerError, err.Error())
+		return
+	}
+	if qd != nil && qd.IsForbidden {
+		h.handleQuotaForbidden(accountID, qd.ForbiddenReason)
+		h.jsonError(ctx, fasthttp.StatusUnauthorized, "认证失败：账号无效或无权访问额度接口，已按账号异常处理")
 		return
 	}
 	h.jsonResponse(ctx, fasthttp.StatusOK, qd)
@@ -437,15 +448,63 @@ func (h *Handler) HandleRefreshChannelQuota(ctx *fasthttp.RequestCtx) {
 		if err == nil {
 			continue
 		}
+		if h.handleQuotaAuthFailureFromError(err) {
+			errorMessages = append(errorMessages, "认证失败：账号凭证无效或已过期，已按账号异常处理")
+			continue
+		}
 		msg := err.Error()
 		if len(msg) > 300 {
 			msg = msg[:300] + "..."
 		}
 		errorMessages = append(errorMessages, msg)
 	}
+	authFailures := 0
+	for _, qd := range results {
+		if qd == nil || !qd.IsForbidden {
+			continue
+		}
+		authFailures++
+	}
+	if authFailures > 0 {
+		errorMessages = append(errorMessages, fmt.Sprintf("认证失败：%d 个账号无效或无权访问额度接口", authFailures))
+	}
 	h.jsonResponse(ctx, fasthttp.StatusOK, map[string]interface{}{
 		"refreshed":      len(results),
-		"errors":         len(errs),
+		"errors":         len(errs) + authFailures,
 		"error_messages": errorMessages,
 	})
+}
+
+func (h *Handler) handleQuotaAuthFailure(accountID uuid.UUID, err error) bool {
+	if !quota.IsAuthFailureError(err) {
+		return false
+	}
+	h.applyQuotaAccountFailure(accountID, fasthttp.StatusUnauthorized, []byte("credential_invalid: "+err.Error()), false)
+	return true
+}
+
+func (h *Handler) handleQuotaAuthFailureFromError(err error) bool {
+	var accountErr *quota.AccountError
+	if !quota.AsAccountError(err, &accountErr) {
+		return false
+	}
+	return h.handleQuotaAuthFailure(accountErr.AccountID, accountErr.Err)
+}
+
+func (h *Handler) handleQuotaForbidden(accountID uuid.UUID, reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "account_forbidden"
+	}
+	h.applyQuotaAccountFailure(accountID, fasthttp.StatusUnauthorized, []byte("credential_invalid: "+reason), false)
+}
+
+func (h *Handler) applyQuotaAccountFailure(accountID uuid.UUID, statusCode int, body []byte, isQuota bool) {
+	if h == nil || h.accountRecovery == nil || h.db == nil || accountID == uuid.Nil {
+		return
+	}
+	var acc db.Account
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", accountID).First(&acc).Error; err != nil {
+		return
+	}
+	h.accountRecovery.HandleAccountFailure(acc.ID.String(), acc.ChannelID.String(), statusCode, body, isQuota)
 }

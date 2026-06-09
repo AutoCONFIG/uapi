@@ -285,15 +285,15 @@ func (h *Handler) CompleteOAuth(ctx *fasthttp.RequestCtx) {
 				return
 			}
 			if session.Provider == "codex" {
-				// Codex: require auth_mode to be chatgpt, but allow simplified JSON formats
-				// that don't have full tokens object - just need access_token + refresh_token
 				if imported.AuthMode != "chatgpt" {
 					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json auth_mode must be chatgpt")
 					return
 				}
-				// If HasTokens is true, verify id_token and account_id exist
-				if imported.HasTokens && (imported.IDToken == "" || imported.AccountID == "") {
-					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json tokens requires id_token and account_id")
+				// Match the official Codex ChatGPT auth identity requirements. The
+				// access token sends requests, refresh_token renews it, and id_token
+				// carries account/workspace identity used by Codex-specific behavior.
+				if imported.IDToken == "" || imported.AccountID == "" {
+					h.jsonError(ctx, fasthttp.StatusBadRequest, "codex auth.json requires id_token plus account_id from tokens or token claims")
 					return
 				}
 			}
@@ -432,6 +432,19 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		return nil, fmt.Errorf("invalid oauth_json")
 	}
 	tokens := jsonObject(data, "tokens")
+	if tokens == nil {
+		tokens = jsonObject(data, "token")
+	}
+	if tokens == nil {
+		if metadata := jsonObject(data, "metadata"); metadata != nil {
+			if nested := jsonObject(metadata, "tokens"); nested != nil {
+				tokens = nested
+			} else if nested := jsonObject(metadata, "token"); nested != nil {
+				tokens = nested
+			}
+		}
+	}
+	metadata := jsonObject(data, "metadata")
 	imp := &oauthJSONImport{
 		State:        jsonString(data, "state", "oauth_state"),
 		Code:         jsonString(data, "code", "authorization_code", "auth_code"),
@@ -442,15 +455,15 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		ClientID:     jsonString(data, "client_id"),
 		ClientSecret: jsonString(data, "client_secret"),
 		TokenURL:     jsonString(data, "token_url"),
-		AccessToken:  firstNonEmpty(jsonString(tokens, "access_token"), jsonString(data, "access_token", "token")),
-		IDToken:      firstNonEmpty(jsonString(tokens, "id_token"), jsonString(data, "id_token")),
+		AccessToken:  firstNonEmpty(jsonString(tokens, "access_token", "accessToken"), jsonString(metadata, "access_token", "accessToken"), jsonString(data, "access_token", "accessToken", "token")),
+		IDToken:      firstNonEmpty(jsonString(tokens, "id_token", "idToken"), jsonString(metadata, "id_token", "idToken"), jsonString(data, "id_token", "idToken")),
 		APIKey:       jsonString(data, "api_key", "key"),
-		RefreshToken: firstNonEmpty(jsonString(tokens, "refresh_token"), jsonString(data, "refresh_token")),
-		Scope:        firstNonEmpty(jsonString(tokens, "scope"), jsonString(data, "scope")),
-		TokenType:    firstNonEmpty(jsonString(tokens, "token_type"), jsonString(data, "token_type")),
-		Expiry:       jsonExpiry(data),
-		AccountID:    firstNonEmpty(jsonString(tokens, "account_id", "chatgpt_account_id"), jsonString(data, "account_id", "chatgpt_account_id")),
-		FedRAMP:      jsonBool(tokens, "chatgpt_account_is_fedramp", "fedramp") || jsonBool(data, "chatgpt_account_is_fedramp", "fedramp"),
+		RefreshToken: firstNonEmpty(jsonString(tokens, "refresh_token", "refreshToken"), jsonString(metadata, "refresh_token", "refreshToken"), jsonString(data, "refresh_token", "refreshToken")),
+		Scope:        firstNonEmpty(jsonString(tokens, "scope"), jsonString(metadata, "scope"), jsonString(data, "scope")),
+		TokenType:    firstNonEmpty(jsonString(tokens, "token_type"), jsonString(metadata, "token_type"), jsonString(data, "token_type")),
+		Expiry:       firstExpiry(jsonExpiry(data), jsonExpiry(tokens), jsonExpiry(metadata)),
+		AccountID:    firstNonEmpty(jsonString(tokens, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"), jsonString(metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"), jsonString(data, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId")),
+		FedRAMP:      jsonBool(tokens, "chatgpt_account_is_fedramp", "chatgptAccountIsFedramp", "fedramp") || jsonBool(metadata, "chatgpt_account_is_fedramp", "chatgptAccountIsFedramp", "fedramp") || jsonBool(data, "chatgpt_account_is_fedramp", "chatgptAccountIsFedramp", "fedramp"),
 		HasTokens:    tokens != nil,
 		AuthMode:     jsonString(data, "auth_mode"),
 	}
@@ -461,18 +474,10 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 
 	// Flexible: extract account_id from id_token JWT claims if missing
 	if imp.AccountID == "" && imp.IDToken != "" {
-		if claims := decodeJWTClaims(imp.IDToken); claims != nil {
-			if auth, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
-				if id, ok := auth["chatgpt_account_id"].(string); ok && id != "" {
-					imp.AccountID = id
-				}
-			}
-			if imp.AccountID == "" {
-				if id, ok := claims["chatgpt_account_id"].(string); ok && id != "" {
-					imp.AccountID = id
-				}
-			}
-		}
+		imp.AccountID = accountIDFromJWT(imp.IDToken)
+	}
+	if imp.AccountID == "" && imp.AccessToken != "" {
+		imp.AccountID = accountIDFromJWT(imp.AccessToken)
 	}
 
 	// Flexible: extract auth_mode from JWT if missing
@@ -505,6 +510,29 @@ func parseOAuthJSON(raw string) (*oauthJSONImport, error) {
 		}
 	}
 	return imp, nil
+}
+
+func accountIDFromJWT(token string) string {
+	claims := decodeJWTClaims(token)
+	if claims == nil {
+		return ""
+	}
+	if auth, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+		if id, ok := auth["chatgpt_account_id"].(string); ok && id != "" {
+			return id
+		}
+	}
+	if id, ok := claims["chatgpt_account_id"].(string); ok && id != "" {
+		return id
+	}
+	if organizations, ok := claims["organizations"].([]interface{}); ok && len(organizations) > 0 {
+		if organization, ok := organizations[0].(map[string]interface{}); ok {
+			if id, ok := organization["id"].(string); ok && id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 func jsonObject(data map[string]interface{}, key string) map[string]interface{} {
@@ -595,6 +623,15 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func firstExpiry(values ...*time.Time) *time.Time {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
 func jsonBool(data map[string]interface{}, keys ...string) bool {
 	if data == nil {
 		return false
@@ -613,7 +650,7 @@ func jsonBool(data map[string]interface{}, keys ...string) bool {
 }
 
 func jsonExpiry(data map[string]interface{}) *time.Time {
-	for _, key := range []string{"token_expiry", "expires_at", "expiry", "expiry_date", "expires_in"} {
+	for _, key := range []string{"token_expiry", "tokenExpiry", "expires_at", "expiresAt", "expiry", "expiry_date", "expiryDate", "expired", "expires_in", "expiresIn"} {
 		v, ok := data[key]
 		if !ok {
 			continue

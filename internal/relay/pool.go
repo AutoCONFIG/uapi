@@ -70,8 +70,7 @@ func (p *AccountPool) PickExcluding(excluded map[string]bool) (*db.Account, bool
 
 // PickForModel selects an account with quota available for the requested model.
 // For per-model quota channels (Gemini, Antigravity), it skips accounts where
-// the matching quota bucket is exhausted (remaining <= 0). If no account has
-// quota for the model, falls back to normal weighted selection (all accounts).
+// the matching quota bucket is exhausted (remaining <= 0).
 func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.Account, bool) {
 	if model == "" {
 		p.mu.Lock()
@@ -82,7 +81,6 @@ func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// First pass: try to find accounts with quota for this model
 	totalWeight := 0
 	for i := range p.accounts {
 		if p.accounts[i].Weight <= 0 {
@@ -92,20 +90,6 @@ func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.
 			continue
 		}
 		if !modelQuotaExhausted(p.accounts[i].Account, model) {
-			totalWeight += p.accounts[i].Weight
-		}
-	}
-
-	// If some accounts have quota, pick from them; otherwise fall back to all
-	useAll := totalWeight == 0
-	if useAll {
-		for i := range p.accounts {
-			if p.accounts[i].Weight <= 0 {
-				continue
-			}
-			if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
-				continue
-			}
 			totalWeight += p.accounts[i].Weight
 		}
 	}
@@ -121,7 +105,7 @@ func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.
 		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
 			continue
 		}
-		if !useAll && modelQuotaExhausted(p.accounts[i].Account, model) {
+		if modelQuotaExhausted(p.accounts[i].Account, model) {
 			continue
 		}
 		p.accounts[i].CurrentWeight += p.accounts[i].Weight

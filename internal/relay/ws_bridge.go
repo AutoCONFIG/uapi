@@ -95,19 +95,15 @@ func (h *WSHandler) httpBridgeFallback(
 			bodyCopy := readUpstreamErrorBody(upResp)
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
-			failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(statusCode, bodyCopy)
-			transientFailover := false
-			if !accountFailover && statusCode >= 500 {
-				failoverReason = "upstream_status"
-				transientFailover = true
+			errClass := ClassifyUpstreamError(statusCode, bodyCopy)
+			if errClass == ErrServerSide || errClass == ErrConfigSide {
+				h.relayer.prepareChannelFailover(ch, statusCode, bodyCopy, model)
 			}
-			if (accountFailover || transientFailover) && attempt < maxAttempts-1 {
-				if accountFailover {
-					h.relayer.prepareAccountFailover(ch, currentAccount, statusCode, bodyCopy, isQuota)
-				} else {
-					transientExcluded = addExcludedAccount(transientExcluded, currentAccount)
-				}
-				next := h.relayer.pickNextExcluding(ch, poolFromChannel(h.relayer.pools, ch), transientExcluded)
+			if (errClass == ErrAccountSide || errClass == ErrAccountTerminal) && attempt < maxAttempts-1 {
+				failoverReason := errClass.String()
+				h.relayer.prepareAccountFailover(ch, currentAccount, statusCode, bodyCopy, isUpstreamQuotaExhausted(statusCode, bodyCopy))
+				transientExcluded = addExcludedAccount(transientExcluded, currentAccount)
+				next := h.relayer.pickNextForModelExcluding(ch, poolFromChannel(h.relayer.pools, ch), model, transientExcluded)
 				if next != nil {
 					logger.Debugf("relay.ws", "bridge switching account after upstream account error",
 						logger.F("channel_id", ch.ID.String()),
@@ -117,15 +113,6 @@ func (h *WSHandler) httpBridgeFallback(
 						logger.F("reason", failoverReason),
 					)
 					currentAccount = next
-					continue
-				}
-				if transientFailover {
-					logger.Debugf("relay.ws", "bridge retrying same account after transient upstream error",
-						logger.F("channel_id", ch.ID.String()),
-						logger.F("account_id", currentAccount.ID.String()),
-						logger.F("status", statusCode),
-						logger.F("reason", failoverReason),
-					)
 					continue
 				}
 			}
@@ -162,19 +149,15 @@ func (h *WSHandler) httpBridgeFallback(
 				bootstrapStatus = fasthttp.StatusBadGateway
 			}
 			bodyCopy := formatOpenAIError(bootstrapMessage)
-			failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(bootstrapStatus, bodyCopy)
-			if !accountFailover && bootstrapStatus >= 500 {
-				failoverReason = "upstream_stream_error"
-				transientExcluded = addExcludedAccount(transientExcluded, currentAccount)
+			errClass := ClassifyUpstreamError(bootstrapStatus, bodyCopy)
+			if errClass == ErrServerSide || errClass == ErrConfigSide {
+				h.relayer.prepareChannelFailover(ch, bootstrapStatus, bodyCopy, model)
 			}
-			transientFailover := !accountFailover && bootstrapStatus >= 500
-			if (accountFailover || transientFailover) && attempt < maxAttempts-1 {
-				if isQuota {
-					h.relayer.prepareAccountFailover(ch, currentAccount, bootstrapStatus, bodyCopy, true)
-				} else if accountFailover {
-					h.relayer.cooldownAndEvict(ch, currentAccount, h.relayer.cooldownPolicy.ComputeCooldown(ClassifyUpstreamError(bootstrapStatus, bodyCopy), bootstrapStatus, currentAccount.ID.String()))
-				}
-				next := h.relayer.pickNextExcluding(ch, poolFromChannel(h.relayer.pools, ch), transientExcluded)
+			if (errClass == ErrAccountSide || errClass == ErrAccountTerminal) && attempt < maxAttempts-1 {
+				failoverReason := errClass.String()
+				h.relayer.prepareAccountFailover(ch, currentAccount, bootstrapStatus, bodyCopy, isUpstreamQuotaExhausted(bootstrapStatus, bodyCopy))
+				transientExcluded = addExcludedAccount(transientExcluded, currentAccount)
+				next := h.relayer.pickNextForModelExcluding(ch, poolFromChannel(h.relayer.pools, ch), model, transientExcluded)
 				if next != nil {
 					logger.Debugf("relay.ws", "bridge switching account after stream bootstrap error",
 						logger.F("channel_id", ch.ID.String()),
@@ -189,20 +172,6 @@ func (h *WSHandler) httpBridgeFallback(
 					fasthttp.ReleaseRequest(upReq)
 					fasthttp.ReleaseResponse(upResp)
 					currentAccount = next
-					continue
-				}
-				if transientFailover {
-					logger.Debugf("relay.ws", "bridge retrying same account after transient stream bootstrap error",
-						logger.F("channel_id", ch.ID.String()),
-						logger.F("account_id", currentAccount.ID.String()),
-						logger.F("status", bootstrapStatus),
-						logger.F("reason", failoverReason),
-					)
-					if closer, ok := peekedBodyStream.(io.Closer); ok {
-						_ = closer.Close()
-					}
-					fasthttp.ReleaseRequest(upReq)
-					fasthttp.ReleaseResponse(upResp)
 					continue
 				}
 			}

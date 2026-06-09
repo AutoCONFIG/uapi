@@ -119,7 +119,7 @@
 - [ ] `handler.go:649` 收到 upstream 错误后调用 `ClassifyUpstreamError`
 - [ ] `ErrServerSide` 分支：`affinity.InvalidateChannel` + 不动账号 + channel 级 failover
 - [ ] `ErrAccountSide` 分支：`ComputeCooldown` → `pool.Cooldown` → `affinity.InvalidateAccount` → 同 channel 内 attemptCount++ 或升级
-- [ ] `ErrAccountTerminal` 分支：认证/令牌类错误先做定时重试，累计 3 次失败后调用 `disableAndEvict` 永久禁用账号
+- [ ] `ErrAccountTerminal` 分支：认证/令牌类错误立即调用 `disableAndEvict` 永久禁用账号，不再定时重试
 - [ ] `ErrConfigSide` 分支：`blocklist.Block` + `affinity.InvalidateChannel` + channel 级 failover
 - [ ] `ErrClientSide` 分支：直接返回错误给客户端，不重试
 - [ ] OAuth refresh 失败升级为 `ErrAccountTerminal`
@@ -150,8 +150,8 @@
 #### 3.8 终态错误 disableAndEvict
 - [ ] `handler.go` 新增 `disableAndEvict(acc, reason string)` 函数
 - [ ] 额度耗尽类错误不走永久禁用，依赖额度桶 reset/cooldown 自动恢复
-- [ ] 认证/令牌失效类错误记录 `auth_failure_attempts` / `auth_failure_reason` / `auth_failure_at`
-- [ ] 认证/令牌失效类错误前 2 次只 cooldown 并清亲和，第 3 次失败才永久禁用
+- [ ] 认证/令牌失效类错误立即写入 `disabled_reason` / `disabled_at` 并永久禁用
+- [ ] 认证/令牌失效类错误不写入 `auth_failure_attempts`，不进入 cooldown 重试
 - [ ] 调用 `pool.Disable(accountID)` 永久置 weight=0
 - [ ] `acc.Enabled = false` 持久化到 DB
 - [ ] 写入 `acc.Metadata["disabled_reason"]` 和 `disabled_at`
@@ -195,7 +195,7 @@
 #### 5.4 前端账号管理页
 - [ ] 区分三种账号状态：normal (绿) / temporary cooldown (黄) / permanently disabled (红)
 - [ ] 临时 cooldown 显示倒计时和触发状态码
-- [ ] 认证失败重试状态显示 `auth_failure_attempts`、失败原因、最多 3 次后禁用
+- [ ] 认证失败状态显示为已禁用，并提示可通过账号启用按钮恢复
 - [ ] 额度耗尽状态说明等待额度桶重置后自动恢复
 - [ ] 终态 disabled 显示 disabled_reason 和 disabled_at，并提示可点击现有“启用”按钮恢复
 - [ ] 不新增“立即恢复”按钮；现有启用按钮触发后端恢复语义

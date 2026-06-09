@@ -111,6 +111,86 @@ func TestParseOAuthJSONCodexAuthJSON(t *testing.T) {
 	}
 }
 
+func TestParseOAuthJSONCodexInfersAccountIDFromAccessToken(t *testing.T) {
+	idToken := fakeCodexIDToken(t, "")
+	accessToken := fakeCodexIDToken(t, "acct-from-access")
+	raw := fmt.Sprintf(`{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"id_token": %q,
+			"access_token": %q,
+			"refresh_token": "refresh-token"
+		}
+	}`, idToken, accessToken)
+
+	got, err := parseOAuthJSON(raw)
+	if err != nil {
+		t.Fatalf("parseOAuthJSON returned error: %v", err)
+	}
+	if got.AccountID != "acct-from-access" {
+		t.Fatalf("AccountID = %q", got.AccountID)
+	}
+}
+
+func TestParseOAuthJSONCodexCPAFlatAuthRequiresIDToken(t *testing.T) {
+	raw := `{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"account_id": "acct-flat",
+		"last_refresh": "2026-06-09T21:45:49+08:00",
+		"type": "codex",
+		"expired": "2026-06-19T21:45:48+08:00"
+	}`
+
+	got, err := parseOAuthJSON(raw)
+	if err != nil {
+		t.Fatalf("parseOAuthJSON returned error: %v", err)
+	}
+	if got.IDToken != "" {
+		t.Fatalf("IDToken = %q", got.IDToken)
+	}
+	if got.AccountID != "acct-flat" {
+		t.Fatalf("AccountID = %q", got.AccountID)
+	}
+	if got.Expiry == nil {
+		t.Fatal("Expiry was nil")
+	}
+}
+
+func TestParseOAuthJSONCodexCamelCaseAliases(t *testing.T) {
+	idToken := fakeCodexIDToken(t, "acct-camel")
+	raw := fmt.Sprintf(`{
+		"auth_mode": "chatgpt",
+		"tokens": {
+			"idToken": %q,
+			"accessToken": "access-token",
+			"refreshToken": "refresh-token",
+			"accountId": "acct-camel",
+			"expiresAt": "2026-06-19T21:45:48+08:00"
+		}
+	}`, idToken)
+
+	got, err := parseOAuthJSON(raw)
+	if err != nil {
+		t.Fatalf("parseOAuthJSON returned error: %v", err)
+	}
+	if got.IDToken != idToken {
+		t.Fatalf("IDToken = %q", got.IDToken)
+	}
+	if got.AccessToken != "access-token" {
+		t.Fatalf("AccessToken = %q", got.AccessToken)
+	}
+	if got.RefreshToken != "refresh-token" {
+		t.Fatalf("RefreshToken = %q", got.RefreshToken)
+	}
+	if got.AccountID != "acct-camel" {
+		t.Fatalf("AccountID = %q", got.AccountID)
+	}
+	if got.Expiry == nil {
+		t.Fatal("Expiry was nil")
+	}
+}
+
 func TestImportedMetadataCodexParsesIDTokenAndOfficialAccountID(t *testing.T) {
 	idToken := fakeCodexIDToken(t, "acct-from-token")
 	meta := importedMetadata(&oauthJSONImport{
@@ -162,6 +242,9 @@ func TestExportCodexAuthJSONUsesOfficialShape(t *testing.T) {
 	}
 	if _, ok := out["access_token"]; ok {
 		t.Fatal("top-level access_token should not be exported for Codex")
+	}
+	if out["last_refresh"] == "" {
+		t.Fatal("last_refresh should be exported for Codex auth.json compatibility")
 	}
 }
 

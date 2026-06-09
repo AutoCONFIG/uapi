@@ -756,8 +756,9 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		case ErrAccountSide:
 			// Account error: try next account on same channel, then escalate to channel
 			r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
+			transientExcluded = addExcludedAccount(transientExcluded, acc)
 			if quotaAttempts < r.accountAttemptLimit(ch) {
-				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
+				next := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
 					if credErr == nil {
@@ -771,10 +772,6 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseRequest(upReq)
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
-						if transientExcluded == nil {
-							transientExcluded = make(map[string]bool)
-						}
-						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, failoverReason, quotaAttempts+1)
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
@@ -804,6 +801,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			}
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			traceNoAlternativeChannel(trace, "stream_retry_no_alternative_channel", statusCode, ch, nextErr)
 			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -813,8 +811,9 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				logger.F("account_id", acc.ID.String()),
 			)
 			r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, false)
+			transientExcluded = addExcludedAccount(transientExcluded, acc)
 			if quotaAttempts < r.accountAttemptLimit(ch) {
-				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
+				next := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
 					if credErr == nil {
@@ -827,10 +826,6 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseRequest(upReq)
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
-						if transientExcluded == nil {
-							transientExcluded = make(map[string]bool)
-						}
-						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, "terminal_account_failover", quotaAttempts+1)
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
@@ -856,6 +851,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			}
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			traceNoAlternativeChannel(trace, "stream_terminal_no_alternative_channel", statusCode, ch, nextErr)
 			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -930,8 +926,9 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 		case ErrAccountSide:
 			r.prepareAccountFailover(ch, acc, bootstrapStatus, bodyCopy, isQuotaBoot)
+			transientExcluded = addExcludedAccount(transientExcluded, acc)
 			if quotaAttempts < r.accountAttemptLimit(ch) {
-				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
+				next := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
 					if credErr == nil {
@@ -945,10 +942,6 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseRequest(upReq)
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
-						if transientExcluded == nil {
-							transientExcluded = make(map[string]bool)
-						}
-						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, "account_failover", quotaAttempts+1)
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
@@ -979,6 +972,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			stopIdleTimeout()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			traceNoAlternativeChannel(trace, "stream_bootstrap_no_alternative_channel", bootstrapStatus, ch, nextErr)
 			r.refundOnError(ctx, token.ID.String(), estTokens, bootstrapStatus, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -988,8 +982,9 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				logger.F("account_id", acc.ID.String()),
 			)
 			r.prepareAccountFailover(ch, acc, bootstrapStatus, bodyCopy, false)
+			transientExcluded = addExcludedAccount(transientExcluded, acc)
 			if quotaAttempts < r.accountAttemptLimit(ch) {
-				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
+				next := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
 				if next != nil {
 					nextCreds, credErr := r.ensureCredentials(ch, next)
 					if credErr == nil {
@@ -1003,10 +998,6 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseRequest(upReq)
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
-						if transientExcluded == nil {
-							transientExcluded = make(map[string]bool)
-						}
-						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, "terminal_account_failover", quotaAttempts+1)
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
@@ -1036,6 +1027,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			stopIdleTimeout()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			traceNoAlternativeChannel(trace, "stream_bootstrap_terminal_no_alternative_channel", bootstrapStatus, ch, nextErr)
 			r.refundOnError(ctx, token.ID.String(), estTokens, bootstrapStatus, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -1273,14 +1265,16 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			}
 		}
 		if statusCode >= 400 {
-			failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(statusCode, bodyCopy)
-			transientFailover := false
-			if !accountFailover && (statusCode >= 500 || statusCode == fasthttp.StatusRequestTimeout) {
-				failoverReason = "upstream_status"
-				transientFailover = true
-			}
-			// Gateway-level error (5xx/408): skip the entire channel
-			if transientFailover {
+			errClass := ClassifyUpstreamError(statusCode, bodyCopy)
+			isQuota := isUpstreamQuotaExhausted(statusCode, bodyCopy)
+			failoverReason := fmt.Sprintf("status_%d", statusCode)
+			trace.Event("force_stream_error_classified",
+				logger.F("status", statusCode),
+				logger.F("error_class", errClass.String()),
+				logger.F("is_quota", isQuota),
+			)
+			switch errClass {
+			case ErrServerSide, ErrConfigSide:
 				r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
 				nextExcluded := addExcludedChannel(excludedChannels, ch)
 				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
@@ -1292,39 +1286,37 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						logger.F("from_channel_id", ch.ID.String()),
 						logger.F("channel_id", nextCh.ID.String()),
 						logger.F("account_id", nextAcc.ID.String()),
-						logger.F("quota_attempts", quotaAttempt+1),
 					)
-					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempt+1)
-					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, quotaAttempt+1)
+					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", 0)
+					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, 0)
 					return
 				}
 				r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 				return
-			}
-			// Account-level error: try up to N accounts on same channel
-			if accountFailover && quotaAttempt < r.accountAttemptLimit(ch) {
+			case ErrAccountSide, ErrAccountTerminal:
 				r.prepareAccountFailover(ch, acc, statusCode, bodyCopy, isQuota)
-				next := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
-				if next != nil {
-					nextCreds, credErr := r.ensureCredentials(ch, next)
-					if credErr == nil {
-						trace.Event("force_stream_retry_switch_account",
-							logger.F("status", statusCode),
-							logger.F("reason", failoverReason),
-							logger.F("from_account_id", acc.ID.String()),
-							logger.F("account_id", next.ID.String()),
-							logger.F("quota_attempts", quotaAttempt+1),
-						)
-						adaptor.Init(ch, next)
-						appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
-						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, excludedChannels, quotaAttempt+1)
-						return
+				transientExcluded = addExcludedAccount(transientExcluded, acc)
+				if quotaAttempt < r.accountAttemptLimit(ch) {
+					next := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
+					if next != nil {
+						nextCreds, credErr := r.ensureCredentials(ch, next)
+						if credErr == nil {
+							trace.Event("force_stream_retry_switch_account",
+								logger.F("status", statusCode),
+								logger.F("reason", failoverReason),
+								logger.F("from_account_id", acc.ID.String()),
+								logger.F("account_id", next.ID.String()),
+								logger.F("quota_attempts", quotaAttempt+1),
+							)
+							adaptor.Init(ch, next)
+							appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
+							r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, excludedChannels, quotaAttempt+1)
+							return
+						}
+						trace.Event("force_stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 					}
-					trace.Event("force_stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 				}
-			}
-			// Account retries exhausted: escalate to channel failover
-			if accountFailover {
+				// Account retries exhausted: escalate to channel failover
 				nextExcluded := addExcludedChannel(excludedChannels, ch)
 				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
 					token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
@@ -1335,12 +1327,15 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						logger.F("from_channel_id", ch.ID.String()),
 						logger.F("channel_id", nextCh.ID.String()),
 						logger.F("account_id", nextAcc.ID.String()),
-						logger.F("quota_attempts", quotaAttempt+1),
 					)
-					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_escalation", quotaAttempt+1)
-					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, quotaAttempt+1)
+					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_escalation", 0)
+					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, 0)
 					return
 				}
+				traceNoAlternativeChannel(trace, "force_stream_no_alternative_channel", statusCode, ch, nextErr)
+			default:
+				r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
+				return
 			}
 			r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
@@ -1841,7 +1836,8 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 		if shouldRetry {
 			previousAccount := currentAccount
 			fasthttp.ReleaseResponse(upResp)
-			nextAccount := r.pickNextExcluding(ch, poolFromChannel(r.pools, ch), transientExcluded)
+			transientExcluded = addExcludedAccount(transientExcluded, previousAccount)
+			nextAccount := r.pickNextForModelExcluding(ch, poolFromChannel(r.pools, ch), model, transientExcluded)
 			if nextAccount == nil {
 				// All accounts on this channel exhausted: escalate to channel failover
 				trace.Event("retry_account_unavailable", logger.F("mode", "buffered"), logger.F("retry", retry))
@@ -3169,9 +3165,6 @@ func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, status
 	// Terminal auth error → disable permanently, skip cooldown
 	if errClass == ErrAccountTerminal {
 		reason := terminalDisableReason(statusCode, body)
-		if r.deferTerminalAuthDisable(ch, acc, reason, statusCode) {
-			return
-		}
 		r.disableAndEvict(ch, acc, reason)
 		return
 	}
@@ -3232,73 +3225,6 @@ func terminalDisableReason(statusCode int, body []byte) string {
 		return "terminal_auth_error"
 	}
 	return "account_terminal"
-}
-
-const terminalAuthRetryLimit = 3
-
-func (r *Relayer) deferTerminalAuthDisable(ch *db.Channel, acc *db.Account, reason string, statusCode int) bool {
-	if acc == nil {
-		return false
-	}
-	if acc.Metadata == nil {
-		acc.Metadata = make(map[string]interface{})
-	}
-	attempt := metadataInt(acc.Metadata["auth_failure_attempts"]) + 1
-	now := time.Now().UTC()
-	acc.Metadata["auth_failure_attempts"] = attempt
-	acc.Metadata["auth_failure_reason"] = reason
-	acc.Metadata["auth_failure_at"] = now.Format(time.RFC3339)
-	acc.Metadata["auth_failure_next_action"] = "retry"
-	if statusCode > 0 {
-		acc.Metadata["auth_failure_status_code"] = statusCode
-	}
-	if attempt >= terminalAuthRetryLimit {
-		acc.Metadata["auth_failure_next_action"] = "disabled"
-		return false
-	}
-	duration := time.Minute
-	if r != nil && r.cooldownPolicy != nil {
-		duration = r.cooldownPolicy.ComputeCooldown(ErrAccountSide, statusCode, acc.ID.String())
-	}
-	if duration <= 0 {
-		duration = time.Minute
-	}
-	r.cooldownAndEvict(ch, acc, duration)
-	if r.db != nil {
-		if err := r.db.Model(&db.Account{}).
-			Where("id = ? AND deleted_at IS NULL", acc.ID).
-			Updates(map[string]interface{}{
-				"metadata":       acc.Metadata,
-				"cooldown_until": acc.CooldownUntil,
-			}).Error; err != nil {
-			logger.Warnf("relay.account", "persist auth retry state failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
-		}
-	}
-	logger.Warnf("relay.account", "account auth failure scheduled for retry",
-		logger.F("channel_id", channelIDForLog(ch)),
-		logger.F("account_id", acc.ID.String()),
-		logger.F("reason", reason),
-		logger.F("attempt", attempt),
-		logger.F("limit", terminalAuthRetryLimit),
-		logger.F("cooldown_ms", duration.Milliseconds()),
-	)
-	return true
-}
-
-func metadataInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case float64:
-		return int(v)
-	case json.Number:
-		n, _ := v.Int64()
-		return int(n)
-	default:
-		return 0
-	}
 }
 
 func (r *Relayer) disableAndEvict(ch *db.Channel, acc *db.Account, reason string) {
@@ -3369,6 +3295,29 @@ func (r *Relayer) RecoverAccount(accountID, channelID string) {
 			pool.RestoreAccount(accountID)
 		}
 	}
+}
+
+func (r *Relayer) HandleAccountFailure(accountID, channelID string, statusCode int, body []byte, isQuota bool) {
+	if r == nil || r.db == nil {
+		return
+	}
+	accID, err := uuid.Parse(strings.TrimSpace(accountID))
+	if err != nil || accID == uuid.Nil {
+		return
+	}
+	chID, err := uuid.Parse(strings.TrimSpace(channelID))
+	if err != nil || chID == uuid.Nil {
+		return
+	}
+	var ch db.Channel
+	if err := r.db.Where("id = ? AND deleted_at IS NULL", chID).First(&ch).Error; err != nil {
+		return
+	}
+	var acc db.Account
+	if err := r.db.Where("id = ? AND deleted_at IS NULL", accID).First(&acc).Error; err != nil {
+		return
+	}
+	r.prepareAccountFailover(&ch, &acc, statusCode, body, isQuota)
 }
 
 func channelIDForLog(ch *db.Channel) string {
@@ -3458,14 +3407,25 @@ func firstChannelExclusion(values ...map[string]bool) map[string]bool {
 	return nil
 }
 
-func (r *Relayer) pickNextExcluding(ch *db.Channel, pool *AccountPool, excluded map[string]bool) *db.Account {
+func traceNoAlternativeChannel(trace *relayDebugTrace, event string, statusCode int, ch *db.Channel, err error) {
+	if trace == nil {
+		return
+	}
+	fields := []logger.Field{
+		logger.F("status", statusCode),
+		logger.F("from_channel_id", channelIDForLog(ch)),
+	}
+	if err != nil {
+		fields = append(fields, logger.Err(err))
+	}
+	trace.Event(event, fields...)
+}
+
+func (r *Relayer) pickNextForModelExcluding(ch *db.Channel, pool *AccountPool, model string, excluded map[string]bool) *db.Account {
 	if pool == nil {
 		return nil
 	}
-	if len(excluded) == 0 {
-		return r.pickNext(ch, pool)
-	}
-	acc, ok := pool.PickExcluding(excluded)
+	acc, ok := pool.PickForModel(model, excluded)
 	if !ok {
 		return nil
 	}
@@ -3781,9 +3741,6 @@ func geminiStatusForHTTP(statusCode int) string {
 
 func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format, claims *internalauth.Claims, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	if IsTerminalAuthError(statusCode, respBody) {
-		r.disableAndEvict(ch, acc, terminalDisableReason(statusCode, respBody))
-	}
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.Response.Header.SetContentType("application/json")
