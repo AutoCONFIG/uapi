@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ const (
 	// the literal manifest value so OpenAI's backend does not see a
 	// development-only fingerprint. Bump this when upstream cuts a new
 	// stable release (see `git tag -l rust-v*` in codex-rs/).
-	CodexClientVersion = "0.136.0"
+	CodexClientVersion = "0.138.0"
 )
 
 var CodexUserAgent = buildCodexUserAgent()
@@ -112,10 +113,33 @@ func buildCodexUserAgent() string {
 	}
 	// Match upstream codex_cli_rs (login/src/auth/default_client.rs build_user_agent):
 	// "<originator>/<version> (<os name> <os version>; <arch>) <terminal>".
-	// We do not have a reliable way to detect the host terminal in a server
-	// context, so we mirror what the official client emits when TERM_PROGRAM
-	// is unset — the literal token "unknown" — instead of inventing one.
-	return fmt.Sprintf("%s/%s (%s unknown; %s) unknown", CodexOriginator, CodexClientVersion, osName, arch)
+	// Upstream uses os_info::get() which on Linux reads /etc/os-release or
+	// /proc/sys/kernel/osrelease; we follow the same pattern so the emitted
+	// UA carries a real kernel/OS version string rather than the literal
+	// "unknown" that strongly fingerprints us as a non-official client.
+	// Terminal is "unknown" when TERM_PROGRAM is unset, which matches a
+	// headless server environment exactly — keep that literal.
+	osVersion := detectOSVersion()
+	if osVersion == "" {
+		osVersion = "unknown"
+	}
+	return fmt.Sprintf("%s/%s (%s %s; %s) unknown", CodexOriginator, CodexClientVersion, osName, osVersion, arch)
+}
+
+// detectOSVersion returns a best-effort OS version token mirroring how
+// upstream codex_cli_rs derives the version segment of its User-Agent. We
+// only target Linux because UAPI ships as a server-side relay; on any other
+// platform the caller substitutes a stable "unknown" placeholder.
+func detectOSVersion() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		if v := strings.TrimSpace(string(data)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // BuildAuthURL constructs the authorization URL with PKCE

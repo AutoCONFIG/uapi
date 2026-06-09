@@ -54,17 +54,35 @@ func openAIPassthroughPath(path string) bool {
 }
 
 func (a *OpenAIAdaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) error {
-	req.Header.Set("Authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
-	if a.channel != nil && isCodexResponsesAPIFormat(a.channel.APIFormat) {
+	isCodex := a.channel != nil && isCodexResponsesAPIFormat(a.channel.APIFormat)
+	if isCodex {
+		// Match the wire-level byte layout of upstream codex_cli_rs, which
+		// uses reqwest/hyper. On HTTP/1.1 hyper preserves whatever case the
+		// caller registered with HeaderName; reqwest registers all of the
+		// Codex headers in lowercase (see codex-rs/login/src/auth/default_client.rs
+		// and codex-rs/codex-api/src/requests/headers.rs). fasthttp by default
+		// canonicalises header names to "Title-Case", which leaves a distinctive
+		// fingerprint compared to the official client. Disable normalisation
+		// before setting any header so the rest of the codex relay path can
+		// emit lowercase header names verbatim.
+		req.Header.DisableNormalizing()
+		req.Header.Set("authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
 		req.Header.Set("originator", CodexOriginator)
-		req.Header.Set("User-Agent", CodexUserAgent)
+		req.Header.Set("user-agent", CodexUserAgent)
 		if accountID := metadataString(a.account, "chatgpt_account_id"); accountID != "" {
-			req.Header.Set("ChatGPT-Account-ID", accountID)
+			req.Header.Set("chatgpt-account-id", accountID)
 		}
 		if metadataBool(a.account, "chatgpt_account_is_fedramp") {
-			req.Header.Set("X-OpenAI-Fedramp", "true")
+			// Codex /responses traffic goes through the core HTTP client which
+			// uses x-openai-internal-codex-residency (see codex-rs/login/src/auth/default_client.rs:38).
+			req.Header.Set("x-openai-internal-codex-residency", "us")
 		}
+		if len(req.Header.ContentType()) == 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return nil
 	}
+	req.Header.Set("Authorization", "Bearer "+provider.ExtractCredentialKey(credentials))
 	if len(req.Header.Peek("Content-Type")) == 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}

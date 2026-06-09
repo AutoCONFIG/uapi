@@ -65,13 +65,18 @@ func TestCodexSetupRequestHeaderUsesNativeContract(t *testing.T) {
 	if err := adaptor.SetupRequestHeader(&req, "sk-test"); err != nil {
 		t.Fatalf("SetupRequestHeader: %v", err)
 	}
+	// Codex path emits headers with lowercase names to align byte-for-byte
+	// with upstream codex_cli_rs (reqwest/hyper). fasthttp hard-codes the
+	// canonical form for User-Agent and Content-Type regardless of the
+	// DisableNormalizing flag — that is the same constraint Go's net/http
+	// imposes on competitor relays (CLIProxyAPI etc.), so we accept it.
 	wants := map[string]string{
-		"Authorization":      "Bearer sk-test",
-		"originator":         CodexOriginator,
-		"User-Agent":         CodexUserAgent,
-		"ChatGPT-Account-ID": "acc_123",
-		"X-OpenAI-Fedramp":   "true",
-		"Content-Type":       "application/json",
+		"authorization":                     "Bearer sk-test",
+		"originator":                        CodexOriginator,
+		"User-Agent":                        CodexUserAgent,
+		"chatgpt-account-id":                "acc_123",
+		"x-openai-internal-codex-residency": "us",
+		"Content-Type":                      "application/json",
 	}
 	for header, want := range wants {
 		if got := string(req.Header.Peek(header)); got != want {

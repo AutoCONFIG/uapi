@@ -333,11 +333,12 @@ func TestApplyCodexMetadataHeadersUsesWindowMetadata(t *testing.T) {
 	if got := string(req.Header.Peek("Conversation_id")); got != "" {
 		t.Fatalf("Conversation_id must not be emitted (official client never sends it), got %q", got)
 	}
-	// model-provider-info/src/lib.rs:336 — every Codex request carries the
-	// `version` header. Empty-valued fingerprint headers (X-Codex-Turn-State,
-	// X-ResponsesAPI-Include-Timing-Metrics) are no longer pre-seeded.
-	if !testHeaderPresent(&req, "version") {
-		t.Fatalf("version header should be present")
+	// Official codex_cli_rs client does NOT emit a `version` HTTP header.
+	// The cargo workspace `version = "0.0.0"` is the package version, not a header.
+	// Empty-valued fingerprint headers (X-Codex-Turn-State,
+	// X-ResponsesAPI-Include-Timing-Metrics) are also not pre-seeded.
+	if testHeaderPresent(&req, "version") {
+		t.Fatalf("version header should not be emitted (official client never sends it)")
 	}
 	for _, header := range []string{"X-Codex-Turn-State", "X-ResponsesAPI-Include-Timing-Metrics"} {
 		if testHeaderPresent(&req, header) {

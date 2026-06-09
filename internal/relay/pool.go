@@ -281,6 +281,32 @@ func (p *AccountPool) PickByID(accountID string) (*db.Account, bool) {
 	return nil, false
 }
 
+// PickByIDForModel selects a specific account by ID with model quota check.
+// Unlike PickByID (which only checks Weight), this also verifies model-specific
+// quota availability, ensuring the affinity-cached account is still viable.
+func (p *AccountPool) PickByIDForModel(accountID string, model string) (*db.Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.totalWeight == 0 {
+		return nil, false
+	}
+	for i := range p.accounts {
+		if p.accounts[i].Account.ID.String() != accountID {
+			continue
+		}
+		// Weight <= 0 covers: cooldown active, disabled, or exhausted
+		if p.accounts[i].Weight <= 0 {
+			return nil, false
+		}
+		// Model-specific quota check
+		if model != "" && modelQuotaExhausted(p.accounts[i].Account, model) {
+			return nil, false
+		}
+		return p.accounts[i].Account, true
+	}
+	return nil, false
+}
+
 func (p *AccountPool) AvailableCount() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
