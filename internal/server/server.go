@@ -55,6 +55,36 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		affinity: affinity,
 	}
 	s.quotaScheduler = quota.NewScheduler(database)
+	// Set up quota bucket reset auto-recovery hook
+	s.quotaScheduler.SetRecoveryHook(func(accountID string) {
+		// Clear quota_exhausted auto-disable reason and refresh pool
+		var acc db.Account
+		if s.db.Where("id = ?", accountID).First(&acc).Error != nil {
+			return
+		}
+		if acc.Metadata == nil {
+			return
+		}
+		// Only clear if it's quota_exhausted (not terminal auth errors)
+		if reason, _ := acc.Metadata["auto_disable_reason"].(string); reason == "quota_exhausted" {
+			delete(acc.Metadata, "auto_disable_reason")
+			delete(acc.Metadata, "auto_disable_time")
+			s.db.Model(&acc).Update("metadata", acc.Metadata)
+			// Refresh pool to re-enable the account - reload from DB
+			if pools != nil {
+				channelID := acc.ChannelID.String()
+				if old, ok := pools.GetPool(channelID); ok {
+					old.Close()
+				}
+				var accounts []*db.Account
+				s.db.Where("channel_id = ? AND enabled = true AND deleted_at IS NULL", channelID).Find(&accounts)
+				pools.SetPool(channelID, relay.NewAccountPool(accounts))
+				logger.Infof("quota.recovery", "account auto-recovered after quota bucket reset",
+					logger.F("account_id", accountID),
+					logger.F("channel_id", channelID))
+			}
+		}
+	})
 	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
 		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies), relay.WithStreamIdleTimeout(time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second))
 		s.relayer.SetQuotaScheduler(s.quotaScheduler)

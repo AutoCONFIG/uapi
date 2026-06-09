@@ -20,12 +20,19 @@ const (
 )
 
 type Scheduler struct {
-	db *gorm.DB
-	mu sync.Map // per-channel mutex: channelID -> *sync.Mutex
+	db           *gorm.DB
+	mu           sync.Map // per-channel mutex: channelID -> *sync.Mutex
+	recoveryHook func(accountID string) // called when quota bucket resets to auto-recover exhausted account
 }
 
 func NewScheduler(database *gorm.DB) *Scheduler {
 	return &Scheduler{db: database}
+}
+
+// SetRecoveryHook sets a callback to be invoked when an account's quota bucket resets
+// and the account should be auto-recovered from quota_exhausted state.
+func (s *Scheduler) SetRecoveryHook(hook func(accountID string)) {
+	s.recoveryHook = hook
 }
 
 func (s *Scheduler) channelMu(channelID uuid.UUID) *sync.Mutex {
@@ -190,6 +197,10 @@ func (s *Scheduler) refreshOne(acc db.Account, ch db.Channel) (*QuotaData, error
 	if err := s.db.Model(&db.Account{}).Where("id = ?", acc.ID).Update("metadata", acc.Metadata).Error; err != nil {
 		return nil, err
 	}
+
+	// Schedule auto-recovery if quota was exhausted and bucket has future reset time
+	s.scheduleQuotaRecovery(&acc, qd)
+
 	return qd, nil
 }
 
@@ -215,4 +226,75 @@ func cloudCodeMetadataIncomplete(apiFormat string, metadata map[string]interface
 	}
 	projectID, _ := metadata["project_id"].(string)
 	return strings.TrimSpace(projectID) == ""
+}
+
+// scheduleQuotaRecovery checks if the account was marked as quota_exhausted and has
+// a bucket with future reset time. If so, schedules auto-recovery when the bucket resets.
+func (s *Scheduler) scheduleQuotaRecovery(acc *db.Account, qd *QuotaData) {
+	if s.recoveryHook == nil {
+		return // no hook configured, skip
+	}
+	if acc == nil || acc.Metadata == nil {
+		return
+	}
+
+	// Check if account is in quota_exhausted state
+	disableReason, _ := acc.Metadata["auto_disable_reason"].(string)
+	if disableReason != "quota_exhausted" {
+		return // not a quota-exhausted account, no recovery needed
+	}
+
+	// Find earliest bucket reset time in the future
+	var earliestReset time.Time
+	for _, b := range qd.Buckets {
+		if b.ResetTime == "" {
+			continue
+		}
+		resetTime, err := time.Parse(time.RFC3339, b.ResetTime)
+		if err != nil {
+			continue
+		}
+		now := time.Now().UTC()
+		if resetTime.Before(now) {
+			continue // already reset, should have been recovered by now
+		}
+		if earliestReset.IsZero() || resetTime.Before(earliestReset) {
+			earliestReset = resetTime
+		}
+	}
+
+	if earliestReset.IsZero() {
+		// No future reset time found, check if buckets now have remaining quota
+		// If so, recover immediately
+		hasRemaining := false
+		for _, b := range qd.Buckets {
+			if b.RemainingPercent > 0 {
+				hasRemaining = true
+				break
+			}
+		}
+		if hasRemaining {
+			logger.Infof("quota.recovery", "quota bucket restored, auto-recovering account",
+				logger.F("account_id", acc.ID.String()))
+			s.recoveryHook(acc.ID.String())
+		}
+		return
+	}
+
+	// Schedule recovery at reset time
+	duration := time.Until(earliestReset)
+	if duration <= 0 {
+		return // already past, should recover on next refresh
+	}
+
+	logger.Infof("quota.recovery", "scheduling quota bucket reset auto-recovery",
+		logger.F("account_id", acc.ID.String()),
+		logger.F("reset_at", earliestReset.Format(time.RFC3339)),
+		logger.F("delay_sec", duration.Seconds()))
+
+	time.AfterFunc(duration, func() {
+		logger.Infof("quota.recovery", "quota bucket reset reached, auto-recovering account",
+			logger.F("account_id", acc.ID.String()))
+		s.recoveryHook(acc.ID.String())
+	})
 }
