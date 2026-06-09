@@ -499,7 +499,11 @@ func (a *Adaptor) bootstrap() error {
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Sec-Fetch-User", "?1")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	if err := fasthttp.DoTimeout(req, resp, 30*time.Second); err != nil {
+	// Use a larger read buffer to handle chatgpt.com's large response headers
+	client := &fasthttp.Client{
+		ReadBufferSize: 32768, // 32KB to handle CSP and other security headers
+	}
+	if err := client.DoTimeout(req, resp, 30*time.Second); err != nil {
 		return fmt.Errorf("chatgpt reverse bootstrap failed: %w", err)
 	}
 	if resp.StatusCode() >= 400 {
