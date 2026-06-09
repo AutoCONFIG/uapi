@@ -33,6 +33,16 @@ const (
 	DeviceRedirectURI = "https://auth.openai.com/deviceauth/callback"
 	CodexUsageURL     = "https://chatgpt.com/backend-api/wham/usage"
 	CodexAPIBaseURL   = "https://chatgpt.com/backend-api/codex"
+	// CodexClientVersion mirrors the codex_cli_rs workspace cargo version that
+	// the official client embeds via env!("CARGO_PKG_VERSION") in
+	// model-provider-info/src/lib.rs:336 and emits as the `version` HTTP
+	// header on every Codex request. The upstream Cargo.toml ships the
+	// placeholder "0.0.0" in git and release-please rewrites it at build
+	// time; we therefore track the latest published rust-v* tag instead of
+	// the literal manifest value so OpenAI's backend does not see a
+	// development-only fingerprint. Bump this when upstream cuts a new
+	// stable release (see `git tag -l rust-v*` in codex-rs/).
+	CodexClientVersion = "0.136.0"
 )
 
 var CodexUserAgent = buildCodexUserAgent()
@@ -100,7 +110,12 @@ func buildCodexUserAgent() string {
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	return fmt.Sprintf("%s/0.0.0 (%s unknown; %s) unknown", CodexOriginator, osName, arch)
+	// Match upstream codex_cli_rs (login/src/auth/default_client.rs build_user_agent):
+	// "<originator>/<version> (<os name> <os version>; <arch>) <terminal>".
+	// We do not have a reliable way to detect the host terminal in a server
+	// context, so we mirror what the official client emits when TERM_PROGRAM
+	// is unset — the literal token "unknown" — instead of inventing one.
+	return fmt.Sprintf("%s/%s (%s unknown; %s) unknown", CodexOriginator, CodexClientVersion, osName, arch)
 }
 
 // BuildAuthURL constructs the authorization URL with PKCE
@@ -229,19 +244,26 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*
 }
 
 func NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret string) (*http.Request, error) {
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {refreshToken},
-		"client_id":     {clientID},
+	// Match upstream codex_cli_rs (login/src/auth/manager.rs:900-915): send refresh
+	// request as JSON with Content-Type: application/json. The OpenAI token server
+	// accepts form-urlencoded too, but the official client uses JSON, so mirror it.
+	payload := map[string]string{
+		"client_id":     clientID,
+		"grant_type":    "refresh_token",
+		"refresh_token": refreshToken,
 	}
 	if clientSecret != "" {
-		data.Set("client_secret", clientSecret)
+		payload["client_secret"] = clientSecret
 	}
-	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("originator", CodexOriginator)
 	req.Header.Set("User-Agent", CodexUserAgent)
 	return req, nil

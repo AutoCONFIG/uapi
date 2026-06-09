@@ -313,27 +313,42 @@ func TestApplyCodexMetadataHeadersUsesWindowMetadata(t *testing.T) {
 	var req fasthttp.Request
 	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"prompt_cache_key":"thread-1","client_metadata":{"x-codex-window-id":"thread-1:0","x-codex-turn-metadata":"{\"prompt_cache_key\":\"thread-1\",\"turn_id\":\"turn-1\",\"window_id\":\"thread-1:0\"}"}}`))
 
-	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
-		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
+	// Upstream codex_cli_rs (core/src/client.rs:654-655, 1729-1731) emits these
+	// x-codex-* headers in lowercase only.
+	if got := string(req.Header.Peek("x-codex-window-id")); got != "thread-1:0" {
+		t.Fatalf("x-codex-window-id = %q, want thread-1:0", got)
 	}
-	if got := string(req.Header.Peek("X-Codex-Turn-Metadata")); !strings.Contains(got, `"prompt_cache_key":"thread-1"`) {
-		t.Fatalf("X-Codex-Turn-Metadata = %q, want prompt_cache_key", got)
+	if got := string(req.Header.Peek("x-codex-turn-metadata")); !strings.Contains(got, `"prompt_cache_key":"thread-1"`) {
+		t.Fatalf("x-codex-turn-metadata = %q, want prompt_cache_key", got)
 	}
-	for _, header := range []string{"Session_id", "Conversation_id", "X-Client-Request-Id", "Thread-Id"} {
+	// codex-api/src/requests/headers.rs:5-13 — session-id / thread-id are
+	// lowercase hyphenated. x-client-request-id is the ChatGPT backend's
+	// canonical request id we mirror for trace correlation. The official
+	// client does NOT emit a Conversation_id header, so it must be absent.
+	for _, header := range []string{"session-id", "thread-id", "x-client-request-id"} {
 		if got := string(req.Header.Peek(header)); got != "thread-1" {
 			t.Fatalf("%s = %q, want thread-1", header, got)
 		}
 	}
-	for _, header := range []string{"Version", "X-Codex-Turn-State", "X-ResponsesAPI-Include-Timing-Metrics"} {
-		if !testHeaderPresent(&req, header) {
-			t.Fatalf("%s should be present", header)
+	if got := string(req.Header.Peek("Conversation_id")); got != "" {
+		t.Fatalf("Conversation_id must not be emitted (official client never sends it), got %q", got)
+	}
+	// model-provider-info/src/lib.rs:336 — every Codex request carries the
+	// `version` header. Empty-valued fingerprint headers (X-Codex-Turn-State,
+	// X-ResponsesAPI-Include-Timing-Metrics) are no longer pre-seeded.
+	if !testHeaderPresent(&req, "version") {
+		t.Fatalf("version header should be present")
+	}
+	for _, header := range []string{"X-Codex-Turn-State", "X-ResponsesAPI-Include-Timing-Metrics"} {
+		if testHeaderPresent(&req, header) {
+			t.Fatalf("%s should not be pre-seeded (official client only emits when valued)", header)
 		}
 	}
 
 	var nonCodexReq fasthttp.Request
 	applyCodexMetadataHeaders(&nonCodexReq, provider.FormatOpenAIResponses, []byte(`{"client_metadata":{"x-codex-window-id":"thread-1:0"}}`))
-	if got := string(nonCodexReq.Header.Peek("X-Codex-Window-Id")); got != "" {
-		t.Fatalf("non-Codex request should not receive X-Codex-Window-Id, got %q", got)
+	if got := string(nonCodexReq.Header.Peek("x-codex-window-id")); got != "" {
+		t.Fatalf("non-Codex request should not receive x-codex-window-id, got %q", got)
 	}
 }
 
@@ -341,8 +356,8 @@ func TestApplyCodexMetadataHeadersSynthesizesWindowFromPromptCacheKey(t *testing
 	var req fasthttp.Request
 	applyCodexMetadataHeaders(&req, provider.FormatCodexResponses, []byte(`{"prompt_cache_key":"thread-1"}`))
 
-	if got := string(req.Header.Peek("X-Codex-Window-Id")); got != "thread-1:0" {
-		t.Fatalf("X-Codex-Window-Id = %q, want thread-1:0", got)
+	if got := string(req.Header.Peek("x-codex-window-id")); got != "thread-1:0" {
+		t.Fatalf("x-codex-window-id = %q, want thread-1:0", got)
 	}
 }
 

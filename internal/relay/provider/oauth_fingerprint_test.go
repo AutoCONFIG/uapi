@@ -41,7 +41,7 @@ func TestCodexVerifierAndUserAgentFingerprint(t *testing.T) {
 	if len(verifier) != 86 {
 		t.Fatalf("Codex verifier should be 64 random bytes base64url length 86, got %d", len(verifier))
 	}
-	if !strings.HasPrefix(openai.CodexUserAgent, openai.CodexOriginator+"/0.0.0 (") ||
+	if !strings.HasPrefix(openai.CodexUserAgent, openai.CodexOriginator+"/"+openai.CodexClientVersion+" (") ||
 		!strings.HasSuffix(openai.CodexUserAgent, ") unknown") {
 		t.Fatalf("unexpected Codex UA: %s", openai.CodexUserAgent)
 	}

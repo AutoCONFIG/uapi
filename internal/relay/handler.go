@@ -3708,33 +3708,41 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 	}
 	promptCacheKey, _ := bodyMap["prompt_cache_key"].(string)
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	// Mirror upstream codex_cli_rs core/src/client.rs:654-655 which emits
+	// x-codex-window-id as an HTTP header on /responses requests.
 	if windowID, _ := clientMetadata["x-codex-window-id"].(string); strings.TrimSpace(windowID) != "" {
-		req.Header.Set("X-Codex-Window-Id", strings.TrimSpace(windowID))
+		req.Header.Set("x-codex-window-id", strings.TrimSpace(windowID))
 	} else if promptCacheKey != "" {
-		req.Header.Set("X-Codex-Window-Id", promptCacheKey+":0")
+		req.Header.Set("x-codex-window-id", promptCacheKey+":0")
 	}
+	// Mirror upstream codex_cli_rs core/src/client.rs:1729-1731 — only emit
+	// x-codex-turn-metadata when the value is actually present.
 	if turnMetadata, _ := clientMetadata["x-codex-turn-metadata"].(string); strings.TrimSpace(turnMetadata) != "" {
-		req.Header.Set("X-Codex-Turn-Metadata", strings.TrimSpace(turnMetadata))
+		req.Header.Set("x-codex-turn-metadata", strings.TrimSpace(turnMetadata))
 	}
 	if promptCacheKey != "" {
-		req.Header.Set("Session_id", promptCacheKey)
-		req.Header.Set("Conversation_id", promptCacheKey)
-		req.Header.Set("X-Client-Request-Id", promptCacheKey)
-		req.Header.Set("Thread-Id", promptCacheKey)
+		// Mirror codex-api/src/requests/headers.rs:5-13: session-id / thread-id
+		// use lowercase hyphens. The upstream client does not emit a
+		// Conversation_id header, so we drop it.
+		req.Header.Set("session-id", promptCacheKey)
+		req.Header.Set("thread-id", promptCacheKey)
+		// x-client-request-id is the canonical request id header used by the
+		// ChatGPT backend infrastructure; keep it populated so retries and
+		// support traces correlate with our prompt cache key.
+		req.Header.Set("x-client-request-id", promptCacheKey)
 	}
 }
 
+// ensureCodexOfficialHeaders adds the unconditional fingerprint headers that
+// every codex_cli_rs request carries. Upstream officially sends `version`
+// (cargo package version, currently 0.0.0 per the workspace manifest) on every
+// request; the remaining x-codex-* headers are emitted by official clients only
+// when they hold real values, so we deliberately do NOT pre-seed them with
+// empty strings here (empty-valued headers are a stronger fingerprint of a
+// non-official client than missing ones).
 func ensureCodexOfficialHeaders(req *fasthttp.Request) {
-	for _, header := range []string{
-		"Version",
-		"X-Codex-Turn-State",
-		"X-Codex-Turn-Metadata",
-		"X-Client-Request-Id",
-		"X-ResponsesAPI-Include-Timing-Metrics",
-	} {
-		if len(req.Header.Peek(header)) == 0 {
-			req.Header.Set(header, "")
-		}
+	if len(req.Header.Peek("version")) == 0 {
+		req.Header.Set("version", openai.CodexClientVersion)
 	}
 }
 
