@@ -355,6 +355,9 @@ func (p *AccountPool) CooldownUntil(accountID string, until time.Time) {
 				}
 				for j := range p.accounts {
 					if p.accounts[j].Account.ID.String() == cooldownID {
+						if !p.accounts[j].Account.Enabled || p.accounts[j].Weight > 0 {
+							return
+						}
 						p.accounts[j].Weight = cooldownWeight
 						p.totalWeight += cooldownWeight
 						break
@@ -379,6 +382,23 @@ func (p *AccountPool) Disable(accountID string) {
 		p.accounts[i].Weight = 0
 		p.accounts[i].CurrentWeight = 0
 		p.accounts[i].Account.Enabled = false
+		return
+	}
+}
+
+func (p *AccountPool) RestoreAccount(accountID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account.ID.String() != accountID {
+			continue
+		}
+		p.accounts[i].Account.Enabled = true
+		p.accounts[i].Account.CooldownUntil = nil
+		if p.accounts[i].Weight <= 0 && p.accounts[i].OriginalWeight > 0 {
+			p.accounts[i].Weight = p.accounts[i].OriginalWeight
+			p.totalWeight += p.accounts[i].Weight
+		}
 		return
 	}
 }

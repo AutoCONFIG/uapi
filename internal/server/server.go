@@ -111,7 +111,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		}))
 		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
 		if s.relayer != nil {
-			s.adminHandler.SetChannelModelBlock(s.relayer.ChannelModelBlock())
+			s.adminHandler.SetAccountRecovery(s.relayer)
 		}
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
@@ -261,9 +261,7 @@ func (s *Server) setupRoutes() {
 	r.DELETE("/api/admin/channels", s.handleAdminAuth(s.adminHandler.HandleChannels))
 	r.POST("/api/admin/accounts/export", s.handleAdminAuth(s.adminHandler.HandleAccountCredentialExport))
 	r.POST("/api/admin/accounts/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshAccountQuota))
-	r.POST("/api/admin/accounts/:id/clear-cooldown", s.handleAdminAuth(s.adminHandler.HandleClearAccountCooldown))
 	r.POST("/api/admin/channels/:id/refresh-quota", s.handleAdminAuth(s.adminHandler.HandleRefreshChannelQuota))
-	r.POST("/api/admin/channels/:id/clear-failure", s.handleAdminAuth(s.adminHandler.HandleClearChannelFailure))
 	r.GET("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.POST("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))
 	r.PUT("/api/admin/accounts", s.handleAdminAuth(s.adminHandler.HandleAccounts))

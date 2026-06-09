@@ -497,8 +497,14 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
+		if *req.Enabled {
+			updates["cooldown_until"] = nil
+			metadata := cloneMetadata(existing.Metadata)
+			clearAccountFailureMetadata(metadata)
+			updates["metadata"] = metadata
+		}
 	}
-	if req.CooldownUntil != nil {
+	if req.CooldownUntil != nil && !(req.Enabled != nil && *req.Enabled) {
 		updates["cooldown_until"] = req.CooldownUntil
 	}
 	updates["updated_at"] = time.Now()
@@ -519,11 +525,38 @@ func (h *Handler) updateAccount(ctx *fasthttp.RequestCtx) {
 			h.RefreshPool(existing.ChannelID.String())
 		}
 	}
+	if req.Enabled != nil && *req.Enabled && h.accountRecovery != nil {
+		h.accountRecovery.RecoverAccount(existing.ID.String(), existing.ChannelID.String())
+	}
 	if h.OAuthIdle != nil {
 		h.OAuthIdle.ScheduleAccount(&existing)
 	}
 	auditUpdateCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, updates)
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func cloneMetadata(metadata map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(metadata))
+	for k, v := range metadata {
+		out[k] = v
+	}
+	return out
+}
+
+func clearAccountFailureMetadata(metadata map[string]interface{}) {
+	delete(metadata, "disabled_reason")
+	delete(metadata, "disabled_at")
+	delete(metadata, "auto_disable_reason")
+	delete(metadata, "auto_disable_time")
+	delete(metadata, "last_terminal_error_reason")
+	delete(metadata, "last_terminal_error_at")
+	delete(metadata, "last_terminal_error_status_code")
+	delete(metadata, "last_terminal_error_channel_id")
+	delete(metadata, "auth_failure_attempts")
+	delete(metadata, "auth_failure_reason")
+	delete(metadata, "auth_failure_at")
+	delete(metadata, "auth_failure_status_code")
+	delete(metadata, "auth_failure_next_action")
 }
 
 func accountEndpointOrDefault(ch db.Channel, endpoint string) string {
@@ -562,50 +595,4 @@ func (h *Handler) deleteAccount(ctx *fasthttp.RequestCtx) {
 	}
 	auditDeleteCtx(h.db, "account", id, h.getAdminUser(ctx), ctx, nil)
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
-}
-
-// HandleClearAccountCooldown clears cooldown and auto-disable state for an account,
-// allowing it to be reused immediately. Route: POST /api/admin/accounts/:id/clear-cooldown
-func (h *Handler) HandleClearAccountCooldown(ctx *fasthttp.RequestCtx) {
-	idStr := ctx.UserValue("id").(string)
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid account id")
-		return
-	}
-	// Clear cooldown_until and auto-disable metadata
-	updates := map[string]interface{}{
-		"cooldown_until": nil,
-	}
-	result := h.db.Model(&db.Account{}).
-		Where("id = ? AND deleted_at IS NULL", id).
-		Updates(updates)
-	if result.Error != nil {
-		h.jsonError(ctx, fasthttp.StatusInternalServerError, "clear cooldown failed")
-		return
-	}
-	if result.RowsAffected == 0 {
-		h.jsonError(ctx, fasthttp.StatusNotFound, "account not found")
-		return
-	}
-	// Also clear auto-disable metadata fields
-	var acc db.Account
-	if h.db.Where("id = ? AND deleted_at IS NULL", id).First(&acc).Error == nil {
-		if acc.Metadata != nil {
-			delete(acc.Metadata, "auto_disable_reason")
-			delete(acc.Metadata, "auto_disable_time")
-			delete(acc.Metadata, "last_terminal_error_reason")
-			delete(acc.Metadata, "last_terminal_error_at")
-			h.db.Model(&acc).Update("metadata", acc.Metadata)
-		}
-	}
-	// Refresh pool to re-enable the account
-	if h.RefreshPool != nil {
-		h.RefreshPool(acc.ChannelID.String())
-	}
-	h.jsonResponse(ctx, 200, map[string]interface{}{
-		"cleared":  true,
-		"account_id": id.String(),
-		"channel_id": acc.ChannelID.String(),
-	})
 }

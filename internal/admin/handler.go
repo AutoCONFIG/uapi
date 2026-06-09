@@ -29,28 +29,26 @@ type QuotaScheduler interface {
 // Handler is the main admin handler that holds shared state and provides
 // authentication, setup, login, and dashboard endpoints.
 type Handler struct {
-	db               *gorm.DB
-	cfg              *config.Config
-	cfgPath          string
-	RefreshPool      func(channelID string)
-	RemovePool       func(channelID string)
-	OAuthIdle        *OAuthIdleMaintainer
-	quotaScheduler   QuotaScheduler
-	channelModelBlock ChannelModelBlockLister
-	setupMu          sync.Mutex
-	setupDone        bool
-	oauthMu          sync.Mutex
-	oauthSessions    map[string]*oauthSession
+	db              *gorm.DB
+	cfg             *config.Config
+	cfgPath         string
+	RefreshPool     func(channelID string)
+	RemovePool      func(channelID string)
+	OAuthIdle       *OAuthIdleMaintainer
+	quotaScheduler  QuotaScheduler
+	accountRecovery AccountRecovery
+	setupMu         sync.Mutex
+	setupDone       bool
+	oauthMu         sync.Mutex
+	oauthSessions   map[string]*oauthSession
 }
 
-// ChannelModelBlockLister is the interface for clearing channel-model blocks.
-type ChannelModelBlockLister interface {
-	ClearChannel(channelID string) int
+type AccountRecovery interface {
+	RecoverAccount(accountID, channelID string)
 }
 
-// SetChannelModelBlock sets the channel-model blocklist for admin operations.
-func (h *Handler) SetChannelModelBlock(blocker ChannelModelBlockLister) {
-	h.channelModelBlock = blocker
+func (h *Handler) SetAccountRecovery(recovery AccountRecovery) {
+	h.accountRecovery = recovery
 }
 
 // NewHandler creates a new admin Handler.

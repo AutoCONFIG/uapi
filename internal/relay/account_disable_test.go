@@ -135,25 +135,39 @@ func TestAccountPoolPickExcludingSkipsOnlyForCurrentRequest(t *testing.T) {
 	}
 }
 
-func TestTerminalAccountErrorCoolsDownWithoutDisabling(t *testing.T) {
+func TestTerminalAccountErrorDisablesAndEvicts(t *testing.T) {
 	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, APIFormat: "codex"}
 	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
 	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
 	pool := NewAccountPool([]*db.Account{acc1, acc2})
 	pools := NewPoolManager()
 	pools.SetPool(ch.ID.String(), pool)
-	relayer := &Relayer{pools: pools}
+	affinity := NewAffinityCache()
+	affinity.Set("token", "model", "scope", ch.ID.String(), acc1.ID.String(), 60)
+	policy := NewCooldownPolicy()
+	defer policy.Close()
+	policy.ComputeCooldown(ErrAccountSide, fasthttp.StatusTooManyRequests, acc1.ID.String())
+	relayer := &Relayer{pools: pools, affinity: affinity, cooldownPolicy: policy}
 
-	relayer.cooldownAccountOnTerminalUpstreamError(ch, acc1, fasthttp.StatusForbidden, []byte(`{"error":{"status":"PERMISSION_DENIED","message":"permission denied"}}`))
+	relayer.disableAndEvict(ch, acc1, "permission_denied")
 
-	if !acc1.Enabled {
-		t.Fatalf("terminal account error must not hard-disable the account")
+	if acc1.Enabled {
+		t.Fatalf("terminal account error must hard-disable the account")
+	}
+	if got, _ := acc1.Metadata["disabled_reason"].(string); got != "permission_denied" {
+		t.Fatalf("disabled_reason = %q, want permission_denied", got)
 	}
 	if got, _ := acc1.Metadata["auto_disable_reason"].(string); got != "permission_denied" {
 		t.Fatalf("auto_disable_reason = %q, want permission_denied", got)
 	}
+	if _, ok := affinity.Get("token", "model", "scope"); ok != "" {
+		t.Fatalf("terminal disable must clear account affinity")
+	}
+	if len(policy.Snapshot()) != 0 {
+		t.Fatalf("terminal disable must reset cooldown policy state")
+	}
 	if _, ok := pool.PickByID(acc1.ID.String()); ok {
-		t.Fatalf("cooled-down terminal-error account must not be selected")
+		t.Fatalf("disabled terminal-error account must not be selected")
 	}
 	if got, ok := pool.PickByID(acc2.ID.String()); !ok || got.ID != acc2.ID {
 		t.Fatalf("healthy account should remain selectable")

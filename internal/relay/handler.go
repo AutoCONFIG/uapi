@@ -319,8 +319,15 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		go r.finishFailureUsage(claims, token.ID, internalClaims.ChannelID, internalClaims.AccountID, model, false, start, status, earlyEstimatedTokens)
 	}
 	if !gatewayAuthenticated {
-		if !r.concLimiter.Acquire(ctx, tokenID) {
-			ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
+		if status := r.concLimiter.AcquireDetailed(ctx, tokenID); status != AcquireOK {
+			switch status {
+			case AcquireTimeout:
+				ctx.Error(`{"error":"concurrency queue wait timeout"}`, fasthttp.StatusServiceUnavailable)
+			case AcquireQueueFull:
+				ctx.Error(`{"error":"concurrency queue full"}`, fasthttp.StatusTooManyRequests)
+			default:
+				ctx.Error(`{"error":"concurrent request cancelled"}`, 499)
+			}
 			return
 		}
 	}
@@ -639,7 +646,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, requestType)
 	} else if forceStreamActive {
 		streaming = true
-		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, nil)
+		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, nil, nil)
 	} else {
 		streaming = true // handleBuffered manages its own concurrency release
 		r.handleBuffered(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, 0)
@@ -649,10 +656,10 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
 func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, requestType relayRequestType) {
-	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, "", requestType)
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nil, trace, adminInfo, "", requestType)
 }
 
-func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
+func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, excludedChannels map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 
@@ -704,7 +711,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
 				appendRouteFallback(adminInfo, "stream", ch, acc, acc, statusCode, "oauth_refresh", quotaAttempts)
-				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, transientExcluded, trace, adminInfo, affinityScope, requestType)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 				return
 			}
 		}
@@ -722,25 +729,24 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		switch errClass {
 		case ErrServerSide, ErrConfigSide:
 			// Gateway/config error: channel failover, NO account cooldown
-			if quotaAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("stream_retry_switch_channel",
-						logger.F("status", statusCode),
-						logger.F("reason", failoverReason),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-						logger.F("account_id", nextAcc.ID.String()),
-					)
-					fasthttp.ReleaseRequest(upReq)
-					fasthttp.ReleaseResponse(upResp)
-					appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", 0)
-					// Cross-channel: reset attempt counter and exclusion map
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, affinityScope, requestType)
-					return
-				}
+			r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_retry_switch_channel",
+					logger.F("status", statusCode),
+					logger.F("reason", failoverReason),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+				)
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", 0)
+				// Cross-channel: reset attempt counter and exclusion map
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
+				return
 			}
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
@@ -770,32 +776,31 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						}
 						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, failoverReason, quotaAttempts+1)
-						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
 					trace.Event("stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 				}
 			}
 			// Account retries exhausted → escalate to channel failover
-			if quotaAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("stream_retry_escalate_channel",
-						logger.F("status", statusCode),
-						logger.F("reason", failoverReason),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-						logger.F("account_id", nextAcc.ID.String()),
-					)
-					fasthttp.ReleaseRequest(upReq)
-					fasthttp.ReleaseResponse(upResp)
-					appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_escalation", 0)
-					// Cross-channel: reset attempt counter and exclusion map
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, affinityScope, requestType)
-					return
-				}
+			r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_retry_escalate_channel",
+					logger.F("status", statusCode),
+					logger.F("reason", failoverReason),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+				)
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_escalation", 0)
+				// Cross-channel: reset attempt counter and exclusion map
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
+				return
 			}
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
@@ -858,24 +863,23 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 		switch errClassBoot {
 		case ErrServerSide, ErrConfigSide:
-			if quotaAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy, model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("stream_bootstrap_retry_switch_channel",
-						logger.F("status", bootstrapStatus),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-					)
-					_ = bodyStream.Close()
-					stopIdleTimeout()
-					fasthttp.ReleaseRequest(upReq)
-					fasthttp.ReleaseResponse(upResp)
-					appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", 0)
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, affinityScope, requestType)
-					return
-				}
+			r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy, model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_bootstrap_retry_switch_channel",
+					logger.F("status", bootstrapStatus),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+				)
+				_ = bodyStream.Close()
+				stopIdleTimeout()
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", 0)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
+				return
 			}
 			_ = bodyStream.Close()
 			stopIdleTimeout()
@@ -906,31 +910,30 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						}
 						transientExcluded[acc.ID.String()] = true
 						appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, "account_failover", quotaAttempts+1)
-						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, trace, adminInfo, affinityScope, requestType)
+						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
 					trace.Event("stream_bootstrap_retry_credentials_failed", logger.Err(credErr))
 				}
 			}
 			// Account retries exhausted → escalate to channel
-			if quotaAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy, model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("stream_bootstrap_retry_escalate_channel",
-						logger.F("status", bootstrapStatus),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-					)
-					_ = bodyStream.Close()
-					stopIdleTimeout()
-					fasthttp.ReleaseRequest(upReq)
-					fasthttp.ReleaseResponse(upResp)
-					appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_escalation", 0)
-					r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, trace, adminInfo, affinityScope, requestType)
-					return
-				}
+			r.prepareChannelFailover(ch, bootstrapStatus, bodyCopy, model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("stream_bootstrap_retry_escalate_channel",
+					logger.F("status", bootstrapStatus),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+				)
+				_ = bodyStream.Close()
+				stopIdleTimeout()
+				fasthttp.ReleaseRequest(upReq)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_escalation", 0)
+				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
+				return
 			}
 			_ = bodyStream.Close()
 			stopIdleTimeout()
@@ -1044,12 +1047,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
-		{
-			// Record affinity only on successful stream completion
-			if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
-				r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
-			}
-		}
+		r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasRouteFallback(adminInfo) || quotaAttempts > 0)
 		pt, ct, parseFailed := tracker.Result()
 		cacheCreationTokens := tracker.CacheCreationTokens()
 		cacheReadTokens := tracker.CacheReadTokens()
@@ -1099,7 +1097,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
-func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, transientExcluded map[string]bool, quotaAttempts ...int) {
+func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, transientExcluded map[string]bool, excludedChannels map[string]bool, quotaAttempts ...int) {
 	quotaAttempt := firstInt(quotaAttempts...)
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -1199,23 +1197,22 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 			}
 			// Gateway-level error (5xx/408): skip the entire channel
 			if transientFailover {
-				if quotaAttempt < r.channelAttemptLimit() {
-					r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
-					nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-						token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-					if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-						trace.Event("force_stream_retry_switch_channel",
-							logger.F("status", statusCode),
-							logger.F("reason", failoverReason),
-							logger.F("from_channel_id", ch.ID.String()),
-							logger.F("channel_id", nextCh.ID.String()),
-							logger.F("account_id", nextAcc.ID.String()),
-							logger.F("quota_attempts", quotaAttempt+1),
-						)
-						appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempt+1)
-						r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
-						return
-					}
+				r.prepareChannelFailover(ch, statusCode, bodyCopy, model)
+				nextExcluded := addExcludedChannel(excludedChannels, ch)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+					token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("force_stream_retry_switch_channel",
+						logger.F("status", statusCode),
+						logger.F("reason", failoverReason),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("quota_attempts", quotaAttempt+1),
+					)
+					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", quotaAttempt+1)
+					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, quotaAttempt+1)
+					return
 				}
 				r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 				return
@@ -1236,16 +1233,17 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
-						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
+						r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, excludedChannels, quotaAttempt+1)
 						return
 					}
 					trace.Event("force_stream_retry_credentials_failed", logger.Err(credErr), logger.F("account_id", next.ID.String()))
 				}
 			}
 			// Account retries exhausted: escalate to channel failover
-			if accountFailover && quotaAttempt < r.channelAttemptLimit() {
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
+			if accountFailover {
+				nextExcluded := addExcludedChannel(excludedChannels, ch)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+					token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
 				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
 					trace.Event("force_stream_retry_escalate_channel",
 						logger.F("status", statusCode),
@@ -1256,7 +1254,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						logger.F("quota_attempts", quotaAttempt+1),
 					)
 					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_escalation", quotaAttempt+1)
-					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, quotaAttempt+1)
+					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, quotaAttempt+1)
 					return
 				}
 			}
@@ -1333,9 +1331,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
-		r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
-	}
+	r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasRouteFallback(adminInfo) || quotaAttempt > 0)
 
 	logger.Debugf("relay.stream", "force stream request completed",
 		logger.F("token_id", token.ID.String()),
@@ -1579,7 +1575,8 @@ func (r *Relayer) ChannelModelBlock() *ChannelModelBlocklist {
 }
 
 // handleBuffered: standard buffered request with retry.
-func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, channelAttempts int) {
+func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, channelAttempts int, excludedChannelArgs ...map[string]bool) {
+	excludedChannels := firstChannelExclusion(excludedChannelArgs...)
 	var respBody []byte
 	var statusCode int
 	var respHeaders fasthttp.ResponseHeader
@@ -1589,9 +1586,6 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	refreshedAuthAccounts := make(map[uuid.UUID]bool)
 	transientExcluded := make(map[string]bool)
 	maxAttempts := r.accountAttemptLimit(ch)
-	if maxAttempts < 3 {
-		maxAttempts = 3
-	}
 
 	for retry := 0; retry < maxAttempts; retry++ {
 		upReq := fasthttp.AcquireRequest()
@@ -1619,22 +1613,21 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			logger.Warnf("relay.upstream", "buffered request failed, switching channel", logger.F("retry", retry), logger.Err(err))
 			fasthttp.ReleaseResponse(upResp)
 			// Network error is a gateway-level failure: try channel failover
-			if channelAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, fasthttp.StatusBadGateway, []byte(err.Error()), model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("buffered_retry_switch_channel",
-						logger.F("reason", "upstream_request_error"),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-						logger.F("account_id", nextAcc.ID.String()),
-						logger.F("channel_attempts", channelAttempts+1),
-					)
-					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, fasthttp.StatusBadGateway, "channel_failover", channelAttempts+1)
-					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
-					return
-				}
+			r.prepareChannelFailover(ch, fasthttp.StatusBadGateway, []byte(err.Error()), model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("buffered_retry_switch_channel",
+					logger.F("reason", "upstream_request_error"),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+					logger.F("channel_attempts", channelAttempts+1),
+				)
+				appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, fasthttp.StatusBadGateway, "channel_failover", channelAttempts+1)
+				r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
+				return
 			}
 			// No alternative channel: surface error
 			trace.Event("buffered_no_alternative_channel", logger.F("reason", "upstream_request_error"), logger.F("channel_attempts", channelAttempts))
@@ -1734,24 +1727,23 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				logger.F("body_preview", compactLogBody(respBody)),
 			)
 			// Gateway-level error (5xx/408): skip entire channel, do NOT retry accounts within same channel
-			if channelAttempts < r.channelAttemptLimit() {
-				r.prepareChannelFailover(ch, statusCode, respBody, model)
-				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-					token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-					trace.Event("buffered_retry_switch_channel",
-						logger.F("status", statusCode),
-						logger.F("reason", "channel_failover"),
-						logger.F("from_channel_id", ch.ID.String()),
-						logger.F("channel_id", nextCh.ID.String()),
-						logger.F("account_id", nextAcc.ID.String()),
-						logger.F("channel_attempts", channelAttempts+1),
-					)
-					fasthttp.ReleaseResponse(upResp)
-					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_failover", channelAttempts+1)
-					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
-					return
-				}
+			r.prepareChannelFailover(ch, statusCode, respBody, model)
+			nextExcluded := addExcludedChannel(excludedChannels, ch)
+			nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+				token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+			if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+				trace.Event("buffered_retry_switch_channel",
+					logger.F("status", statusCode),
+					logger.F("reason", "channel_failover"),
+					logger.F("from_channel_id", ch.ID.String()),
+					logger.F("channel_id", nextCh.ID.String()),
+					logger.F("account_id", nextAcc.ID.String()),
+					logger.F("channel_attempts", channelAttempts+1),
+				)
+				fasthttp.ReleaseResponse(upResp)
+				appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_failover", channelAttempts+1)
+				r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
+				return
 			}
 			// No alternative channel available: surface the upstream error directly
 			fasthttp.ReleaseResponse(upResp)
@@ -1769,21 +1761,20 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			if nextAccount == nil {
 				// All accounts on this channel exhausted: escalate to channel failover
 				trace.Event("retry_account_unavailable", logger.F("mode", "buffered"), logger.F("retry", retry))
-				if channelAttempts < r.channelAttemptLimit() {
-					nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttempts(
-						token.ID.String(), model, affinityScope, nil, channelcap.AnalyzeJSON(string(requestType), body))
-					if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
-						trace.Event("buffered_retry_escalate_channel",
-							logger.F("reason", retryReason),
-							logger.F("from_channel_id", ch.ID.String()),
-							logger.F("channel_id", nextCh.ID.String()),
-							logger.F("account_id", nextAcc.ID.String()),
-							logger.F("channel_attempts", channelAttempts+1),
-						)
-						appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_escalation", channelAttempts+1)
-						r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1)
-						return
-					}
+				nextExcluded := addExcludedChannel(excludedChannels, ch)
+				nextCh, nextAcc, nextAdaptor, nextCreds, nextErr := r.resolveChannelAndAccountWithAttemptsExcluded(
+					token.ID.String(), model, affinityScope, nil, nextExcluded, channelcap.AnalyzeJSON(string(requestType), body))
+				if nextErr == nil && nextCh != nil && nextCh.ID.String() != ch.ID.String() {
+					trace.Event("buffered_retry_escalate_channel",
+						logger.F("reason", retryReason),
+						logger.F("from_channel_id", ch.ID.String()),
+						logger.F("channel_id", nextCh.ID.String()),
+						logger.F("account_id", nextAcc.ID.String()),
+						logger.F("channel_attempts", channelAttempts+1),
+					)
+					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_escalation", channelAttempts+1)
+					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
+					return
 				}
 				break
 			}
@@ -1917,9 +1908,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	if scope := requestAffinityScope(ctx, body); scope != "" && ch.AffinityTTL > 0 {
-		r.affinity.Set(token.ID.String(), model, scope, ch.ID.String(), respAccount.ID.String(), ch.AffinityTTL)
-	}
+	r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, respAccount, hasRouteFallback(adminInfo) || channelAttempts > 0)
 
 	logger.Debugf("relay.buffered", "buffered request completed",
 		logger.F("token_id", token.ID.String()),
@@ -2253,13 +2242,44 @@ func (r *Relayer) resolveChannelAndAccount(tokenID, model string, capabilityReq 
 }
 
 func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityScope string, attempts *[]map[string]interface{}, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
+	return r.resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, affinityScope, attempts, nil, capabilityReq...)
+}
+
+func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, affinityScope string, attempts *[]map[string]interface{}, excludedChannels map[string]bool, capabilityReq ...channelcap.Request) (*db.Channel, *db.Account, provider.Adaptor, string, error) {
 	// Try affinity cache first
 	if affinityScope != "" && r.affinity != nil {
 		if chID, accID := r.affinity.Get(tokenID, model, affinityScope); chID != "" {
-			if r.db != nil {
-				var ch db.Channel
-				if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
-					modelOK := channelSupportsModel(ch, model)
+			if excludedChannels != nil && excludedChannels[chID] {
+				r.affinity.InvalidateChannel(chID)
+			} else {
+				if r.db != nil {
+					var ch db.Channel
+					if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chID).First(&ch).Error; err == nil {
+						modelOK := r.channelSupportsModel(ch, model)
+						capabilityOK := channelSupportsCapability(ch, capabilityReq...)
+						attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
+						attempt["source"] = "affinity"
+						if accID != "" {
+							attempt["affinity_account_id"] = accID
+						}
+						if modelOK && capabilityOK {
+							if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
+								attempt["selected"] = true
+								attempt["account_id"] = acc.ID.String()
+								appendRouteAttempt(attempts, attempt)
+								return &ch, acc, adaptor, creds, nil
+							} else {
+								attempt["skip_reason"] = err.Error()
+							}
+						} else if !modelOK {
+							attempt["skip_reason"] = "unsupported_model"
+						} else {
+							attempt["skip_reason"] = "unsupported_capability"
+						}
+						appendRouteAttempt(attempts, attempt)
+					}
+				} else if ch, ok := r.runtimeChannelByID(chID); ok {
+					modelOK := r.channelSupportsModel(ch, model)
 					capabilityOK := channelSupportsCapability(ch, capabilityReq...)
 					attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
 					attempt["source"] = "affinity"
@@ -2282,29 +2302,6 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 					}
 					appendRouteAttempt(attempts, attempt)
 				}
-			} else if ch, ok := r.runtimeChannelByID(chID); ok {
-				modelOK := channelSupportsModel(ch, model)
-				capabilityOK := channelSupportsCapability(ch, capabilityReq...)
-				attempt := r.routeAttemptInfo(ch, modelOK, capabilityOK)
-				attempt["source"] = "affinity"
-				if accID != "" {
-					attempt["affinity_account_id"] = accID
-				}
-				if modelOK && capabilityOK {
-					if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
-						attempt["selected"] = true
-						attempt["account_id"] = acc.ID.String()
-						appendRouteAttempt(attempts, attempt)
-						return &ch, acc, adaptor, creds, nil
-					} else {
-						attempt["skip_reason"] = err.Error()
-					}
-				} else if !modelOK {
-					attempt["skip_reason"] = "unsupported_model"
-				} else {
-					attempt["skip_reason"] = "unsupported_capability"
-				}
-				appendRouteAttempt(attempts, attempt)
 			}
 		}
 	}
@@ -2313,12 +2310,16 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 		r.runtimeMu.RLock()
 		channels := make([]db.Channel, 0, len(r.runtimeChannels))
 		for _, ch := range r.runtimeChannels {
-			if ch.Enabled {
-				channels = append(channels, ch)
+			if !ch.Enabled {
+				continue
 			}
+			if excludedChannels != nil && excludedChannels[ch.ID.String()] {
+				continue
+			}
+			channels = append(channels, ch)
 		}
 		r.runtimeMu.RUnlock()
-		channels = channelCandidatesForModelAndCapability(channels, model, capabilityReq, rand.Intn)
+		channels = r.channelCandidatesForModelAndCapability(channels, model, capabilityReq, rand.Intn)
 		for i := range channels {
 			attempt := r.routeAttemptInfo(channels[i], true, true)
 			attempt["source"] = "runtime"
@@ -2337,9 +2338,18 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 
 	// Priority-based selection (with caching)
 	allChannels := r.chCache.get()
+	if len(excludedChannels) > 0 {
+		filtered := make([]db.Channel, 0, len(allChannels))
+		for i := range allChannels {
+			if !excludedChannels[allChannels[i].ID.String()] {
+				filtered = append(filtered, allChannels[i])
+			}
+		}
+		allChannels = filtered
+	}
 	if attempts != nil {
 		for i := range allChannels {
-			modelOK := channelSupportsModel(allChannels[i], model)
+			modelOK := r.channelSupportsModel(allChannels[i], model)
 			capabilityOK := channelSupportsCapability(allChannels[i], capabilityReq...)
 			if modelOK && capabilityOK {
 				continue
@@ -2354,7 +2364,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttempts(tokenID, model, affinityS
 			appendRouteAttempt(attempts, attempt)
 		}
 	}
-	channels := channelCandidatesForModelAndCapability(allChannels, model, capabilityReq, rand.Intn)
+	channels := r.channelCandidatesForModelAndCapability(allChannels, model, capabilityReq, rand.Intn)
 	for i := range channels {
 		attempt := r.routeAttemptInfo(channels[i], true, true)
 		attempt["source"] = "priority"
@@ -2384,6 +2394,25 @@ func (r *Relayer) recordSelectedAffinity(tokenID, model, scope string, ch *db.Ch
 	}
 	// Use SetIfAbsent: first successful binding wins; don't overwrite a working affinity.
 	r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+}
+
+func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account, force bool) {
+	if r == nil || r.affinity == nil || ch == nil || acc == nil || strings.TrimSpace(scope) == "" || ch.AffinityTTL <= 0 {
+		return
+	}
+	if force {
+		r.affinity.ForceSet(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+		return
+	}
+	r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+}
+
+func hasRouteFallback(info map[string]interface{}) bool {
+	if info == nil {
+		return false
+	}
+	path, _ := info["fallback_path"].([]map[string]interface{})
+	return len(path) > 0
 }
 
 func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) map[string]interface{} {
@@ -2539,7 +2568,7 @@ func (r *Relayer) routeFailureDiagnostics(model string, capabilityReq ...channel
 	out := make([]map[string]interface{}, 0, len(channels))
 	for i := range channels {
 		ch := channels[i]
-		modelOK := channelSupportsModel(ch, model)
+		modelOK := r.channelSupportsModel(ch, model)
 		capabilityOK := channelSupportsCapability(ch, capabilityReq...)
 		if !modelOK && !capabilityOK {
 			continue
@@ -2578,6 +2607,16 @@ func channelCandidatesForModel(channels []db.Channel, model string, randomInt fu
 	return channelCandidatesForModelAndCapability(channels, model, nil, randomInt)
 }
 
+func (r *Relayer) channelCandidatesForModelAndCapability(channels []db.Channel, model string, capabilityReq []channelcap.Request, randomInt func(int) int) []db.Channel {
+	candidates := make([]db.Channel, 0, len(channels))
+	for i := range channels {
+		if r.channelSupportsModel(channels[i], model) && channelSupportsCapability(channels[i], capabilityReq...) {
+			candidates = append(candidates, channels[i])
+		}
+	}
+	return orderChannelCandidates(candidates, randomInt)
+}
+
 func channelCandidatesForModelAndCapability(channels []db.Channel, model string, capabilityReq []channelcap.Request, randomInt func(int) int) []db.Channel {
 	candidates := make([]db.Channel, 0, len(channels))
 	for i := range channels {
@@ -2585,6 +2624,10 @@ func channelCandidatesForModelAndCapability(channels []db.Channel, model string,
 			candidates = append(candidates, channels[i])
 		}
 	}
+	return orderChannelCandidates(candidates, randomInt)
+}
+
+func orderChannelCandidates(candidates []db.Channel, randomInt func(int) int) []db.Channel {
 	if len(candidates) < 2 || randomInt == nil {
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return candidates[i].Priority > candidates[j].Priority
@@ -2645,7 +2688,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 		return nil, nil, nil, "", fmt.Errorf("invalid selected account")
 	}
 	if ch, acc, ok := r.runtimeSelected(chUUID, accUUID); ok {
-		if !channelSupportsModel(*ch, model) {
+		if !r.channelSupportsModel(*ch, model) {
 			return nil, nil, nil, "", fmt.Errorf("selected channel does not support model")
 		}
 		adaptor := getAdaptorForChannel(ch)
@@ -2665,7 +2708,7 @@ func (r *Relayer) resolveSelectedChannelAndAccount(channelID, accountID, model s
 	if err := r.db.Where("id = ? AND enabled = true AND deleted_at IS NULL", chUUID).First(&ch).Error; err != nil {
 		return nil, nil, nil, "", fmt.Errorf("selected channel not available")
 	}
-	if !channelSupportsModel(ch, model) {
+	if !r.channelSupportsModel(ch, model) {
 		return nil, nil, nil, "", fmt.Errorf("selected channel does not support model")
 	}
 	var acc db.Account
@@ -2821,7 +2864,10 @@ func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model 
 	}
 	account, ok := pool.PickByIDForModel(accountID, model)
 	if !ok {
-		return nil, nil, "", fmt.Errorf("affinity account unavailable (quota/cooldown/model mismatch)")
+		if r.affinity != nil {
+			r.affinity.InvalidateAccount(accountID)
+		}
+		return r.pickAccount(ch, model)
 	}
 	creds, err := r.ensureCredentials(&ch, account)
 	if err != nil {
@@ -3038,7 +3084,11 @@ func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, status
 
 	// Terminal auth error → disable permanently, skip cooldown
 	if errClass == ErrAccountTerminal {
-		r.cooldownAccountOnTerminalUpstreamError(ch, acc, statusCode, body)
+		reason := terminalDisableReason(statusCode, body)
+		if r.deferTerminalAuthDisable(ch, acc, reason, statusCode) {
+			return
+		}
+		r.disableAndEvict(ch, acc, reason)
 		return
 	}
 
@@ -3090,55 +3140,151 @@ func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
 	}
 }
 
-func (r *Relayer) cooldownAccountOnTerminalUpstreamError(ch *db.Channel, acc *db.Account, statusCode int, body []byte) {
+func terminalDisableReason(statusCode int, body []byte) string {
+	if reason, ok := terminalAccountDisableReason(statusCode, body); ok {
+		return reason
+	}
+	if IsTerminalAuthError(statusCode, body) {
+		return "terminal_auth_error"
+	}
+	return "account_terminal"
+}
+
+const terminalAuthRetryLimit = 3
+
+func (r *Relayer) deferTerminalAuthDisable(ch *db.Channel, acc *db.Account, reason string, statusCode int) bool {
+	if acc == nil {
+		return false
+	}
+	if acc.Metadata == nil {
+		acc.Metadata = make(map[string]interface{})
+	}
+	attempt := metadataInt(acc.Metadata["auth_failure_attempts"]) + 1
+	now := time.Now().UTC()
+	acc.Metadata["auth_failure_attempts"] = attempt
+	acc.Metadata["auth_failure_reason"] = reason
+	acc.Metadata["auth_failure_at"] = now.Format(time.RFC3339)
+	acc.Metadata["auth_failure_next_action"] = "retry"
+	if statusCode > 0 {
+		acc.Metadata["auth_failure_status_code"] = statusCode
+	}
+	if attempt >= terminalAuthRetryLimit {
+		acc.Metadata["auth_failure_next_action"] = "disabled"
+		return false
+	}
+	duration := time.Minute
+	if r != nil && r.cooldownPolicy != nil {
+		duration = r.cooldownPolicy.ComputeCooldown(ErrAccountSide, statusCode, acc.ID.String())
+	}
+	if duration <= 0 {
+		duration = time.Minute
+	}
+	r.cooldownAndEvict(ch, acc, duration)
+	if r.db != nil {
+		if err := r.db.Model(&db.Account{}).
+			Where("id = ? AND deleted_at IS NULL", acc.ID).
+			Updates(map[string]interface{}{
+				"metadata":       acc.Metadata,
+				"cooldown_until": acc.CooldownUntil,
+			}).Error; err != nil {
+			logger.Warnf("relay.account", "persist auth retry state failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
+		}
+	}
+	logger.Warnf("relay.account", "account auth failure scheduled for retry",
+		logger.F("channel_id", channelIDForLog(ch)),
+		logger.F("account_id", acc.ID.String()),
+		logger.F("reason", reason),
+		logger.F("attempt", attempt),
+		logger.F("limit", terminalAuthRetryLimit),
+		logger.F("cooldown_ms", duration.Milliseconds()),
+	)
+	return true
+}
+
+func metadataInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func (r *Relayer) disableAndEvict(ch *db.Channel, acc *db.Account, reason string) {
 	if r == nil || acc == nil || acc.ID == uuid.Nil {
 		return
 	}
-	reason, ok := terminalAccountDisableReason(statusCode, body)
-	if !ok {
-		return
+	if strings.TrimSpace(reason) == "" {
+		reason = "account_terminal"
 	}
-	// Terminal auth errors → cooldown only (no auto-recovery until bucket reset), keep Enabled=true for manual re-enable
 	if acc.Metadata == nil {
 		acc.Metadata = make(map[string]interface{})
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	acc.Enabled = false
+	acc.CooldownUntil = nil
+	acc.Metadata["disabled_reason"] = reason
+	acc.Metadata["disabled_at"] = now
+	acc.Metadata["auth_failure_next_action"] = "disabled"
 	acc.Metadata["auto_disable_reason"] = reason
 	acc.Metadata["auto_disable_time"] = now
 	acc.Metadata["last_terminal_error_reason"] = reason
 	acc.Metadata["last_terminal_error_at"] = now
-	if statusCode > 0 {
-		acc.Metadata["last_terminal_error_status_code"] = statusCode
-	}
 	if ch != nil {
 		acc.Metadata["last_terminal_error_channel_id"] = ch.ID.String()
+	}
+	if r.pools != nil && ch != nil {
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
+			pool.Disable(acc.ID.String())
+		}
 	}
 	if r.db != nil {
 		err := r.db.Model(&db.Account{}).
 			Where("id = ? AND deleted_at IS NULL", acc.ID).
-			Update("metadata", acc.Metadata).Error
+			Updates(map[string]interface{}{
+				"enabled":        false,
+				"cooldown_until": nil,
+				"metadata":       acc.Metadata,
+			}).Error
 		if err != nil {
-			logger.Warnf("relay.account", "mark terminal account error failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
+			logger.Warnf("relay.account", "disable terminal account failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
 		}
 	}
-	// Cooldown account on terminal error (no auto-recovery until quota bucket reset), keep Enabled=true for manual re-enable
-	if r.pools != nil && ch != nil {
-		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
-			// Use long cooldown - terminal errors don't recover automatically
-			pool.Cooldown(acc.ID.String(), 24*time.Hour)
-		}
-	}
-	// Evict all affinity bindings for this account across all channels
 	if r.affinity != nil {
-		r.affinity.EvictAccount(acc.ID.String())
+		r.affinity.InvalidateAccount(acc.ID.String())
+	}
+	if r.cooldownPolicy != nil {
+		r.cooldownPolicy.Reset(acc.ID.String())
 	}
 	logger.Warnf("relay.account", "account disabled after terminal upstream error",
 		logger.F("channel_id", channelIDForLog(ch)),
 		logger.F("account_id", acc.ID.String()),
-		logger.F("status", statusCode),
 		logger.F("reason", reason),
-		logger.F("response", compactLogBody(body)),
 	)
+}
+
+func (r *Relayer) RecoverAccount(accountID, channelID string) {
+	if r == nil {
+		return
+	}
+	if r.cooldownPolicy != nil {
+		r.cooldownPolicy.Reset(accountID)
+	}
+	if r.affinity != nil {
+		r.affinity.InvalidateAccount(accountID)
+	}
+	if r.pools != nil && channelID != "" {
+		if pool, ok := r.pools.GetPool(channelID); ok {
+			pool.RestoreAccount(accountID)
+		}
+	}
 }
 
 func channelIDForLog(ch *db.Channel) string {
@@ -3208,6 +3354,26 @@ func addExcludedAccount(excluded map[string]bool, acc *db.Account) map[string]bo
 	return excluded
 }
 
+func addExcludedChannel(excluded map[string]bool, ch *db.Channel) map[string]bool {
+	if ch == nil {
+		return excluded
+	}
+	if excluded == nil {
+		excluded = make(map[string]bool)
+	}
+	excluded[ch.ID.String()] = true
+	return excluded
+}
+
+func firstChannelExclusion(values ...map[string]bool) map[string]bool {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
 func (r *Relayer) pickNextExcluding(ch *db.Channel, pool *AccountPool, excluded map[string]bool) *db.Account {
 	if pool == nil {
 		return nil
@@ -3267,7 +3433,7 @@ func (r *Relayer) prepareChannelFailover(ch *db.Channel, statusCode int, body []
 		r.affinity.EvictChannel(ch.ID.String())
 	}
 	// 404 with model keyword → block (channel, model) pair for 5 minutes
-	if statusCode == 404 && model != "" && r.channelModelBlock != nil {
+	if ClassifyUpstreamError(statusCode, body) == ErrConfigSide && model != "" && r.channelModelBlock != nil {
 		r.channelModelBlock.Block(ch.ID.String(), model)
 	}
 }
@@ -3531,7 +3697,9 @@ func geminiStatusForHTTP(statusCode int) string {
 
 func (r *Relayer) refundOnError(ctx *fasthttp.RequestCtx, tokenID string, estTokens int, statusCode int, respBody []byte, ch *db.Channel, acc *db.Account, model string, isStream bool, start time.Time, clientFormat provider.Format, claims *internalauth.Claims, tokenPlanIDs ...uuid.UUID) {
 	r.releaseLocalConcurrency(tokenID, claims)
-	r.cooldownAccountOnTerminalUpstreamError(ch, acc, statusCode, respBody)
+	if IsTerminalAuthError(statusCode, respBody) {
+		r.disableAndEvict(ch, acc, terminalDisableReason(statusCode, respBody))
+	}
 	ctx.SetStatusCode(statusCode)
 	normalizedBody := normalizeErrorResponse(respBody, clientFormat, statusCode)
 	ctx.Response.Header.SetContentType("application/json")
@@ -4367,6 +4535,13 @@ func (r *Relayer) loadRelayPolicy(token db.Token) (db.AccessPolicy, bool, error)
 		return db.AccessPolicy{}, true, err
 	}
 	return policy, true, nil
+}
+
+func (r *Relayer) channelSupportsModel(ch db.Channel, model string) bool {
+	if r != nil && r.channelModelBlock != nil && r.channelModelBlock.IsBlocked(ch.ID.String(), model) {
+		return false
+	}
+	return channelSupportsModel(ch, model)
 }
 
 func channelSupportsModel(ch db.Channel, model string) bool {

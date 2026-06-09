@@ -31,7 +31,7 @@
 | H | 删除请求前预写 | 只在响应成功后写 affinity，不留僵尸记录 |
 | I | tokenID fallback scope | 无 session 标识时用 token 作 scope |
 | J | 动态并发队列 | 超过套餐并发上限时排队而非拒绝，支持取消 |
-| K | 管理员手动恢复 | reactivate 接口 + 前端按钮，区分临时 cooldown 与终态 disable |
+| K | 管理员手动恢复 | 复用账号启用按钮恢复，区分临时 cooldown / 认证重试 / 终态 disable |
 
 ---
 
@@ -119,16 +119,18 @@
 - [ ] `handler.go:649` 收到 upstream 错误后调用 `ClassifyUpstreamError`
 - [ ] `ErrServerSide` 分支：`affinity.InvalidateChannel` + 不动账号 + channel 级 failover
 - [ ] `ErrAccountSide` 分支：`ComputeCooldown` → `pool.Cooldown` → `affinity.InvalidateAccount` → 同 channel 内 attemptCount++ 或升级
-- [ ] `ErrAccountTerminal` 分支：调用 `disableAndEvict`（不 cooldown）→ 升级到下一个账号
+- [ ] `ErrAccountTerminal` 分支：认证/令牌类错误先做定时重试，累计 3 次失败后调用 `disableAndEvict` 永久禁用账号
 - [ ] `ErrConfigSide` 分支：`blocklist.Block` + `affinity.InvalidateChannel` + channel 级 failover
 - [ ] `ErrClientSide` 分支：直接返回错误给客户端，不重试
 - [ ] OAuth refresh 失败升级为 `ErrAccountTerminal`
 
-#### 3.4 账号尝试上限改 min(3, available) + 跨 channel 清零
+#### 3.4 账号尝试上限改 min(3, available) + 渠道遍历到耗尽
 - [ ] `accountAttemptLimit` 计算改为 `min(3, pool.AvailableCount())`
 - [ ] 跨到新 channel 时 `accountAttempts` 重置为 0
 - [ ] 跨 channel 时 `excludeAccs` 重置（新 channel 新世界）
-- [ ] channel 级 failover 上限 3 次兜底
+- [ ] 服务器侧错误直接放弃当前 channel，尝试下一个未失败 channel
+- [ ] 账号侧错误在当前 channel 内最多尝试 3 个未标记异常账号；当前 channel 账号耗尽后切换下一个未失败 channel
+- [ ] channel 级 failover 不再固定 3 次上限，而是遍历候选 channel 直到耗尽；所有 channel 不可用才返回异常
 
 #### 3.5 prepareChannelFailover 加 affinity 清除
 - [ ] `handler.go:3164` `prepareChannelFailover` 增加 `r.affinity.InvalidateChannel(ch.ID.String())`
@@ -147,6 +149,9 @@
 
 #### 3.8 终态错误 disableAndEvict
 - [ ] `handler.go` 新增 `disableAndEvict(acc, reason string)` 函数
+- [ ] 额度耗尽类错误不走永久禁用，依赖额度桶 reset/cooldown 自动恢复
+- [ ] 认证/令牌失效类错误记录 `auth_failure_attempts` / `auth_failure_reason` / `auth_failure_at`
+- [ ] 认证/令牌失效类错误前 2 次只 cooldown 并清亲和，第 3 次失败才永久禁用
 - [ ] 调用 `pool.Disable(accountID)` 永久置 weight=0
 - [ ] `acc.Enabled = false` 持久化到 DB
 - [ ] 写入 `acc.Metadata["disabled_reason"]` 和 `disabled_at`
@@ -161,7 +166,7 @@
 - [ ] 每用户独立 FIFO 队列
 - [ ] 使用 `select on ctx.Done()` 检测客户端取消
 - [ ] 客户端取消时主动出队，不占配额
-- [ ] 队列等待超时 5min，超时返回 503
+- [ ] 队列等待超时 30min，超时返回 503
 - [ ] 单用户队列长度上限 50，超出返回 429
 - [ ] `defer` 保证（含 panic 路径）信号量必释放
 - [ ] 在 `HandleRelay` 中正确接入，排队期间不占用 channel/account
@@ -173,31 +178,30 @@
 - [ ] `requestAffinityScope`（handler.go:3174）在所有探测路径返回空时 fallback 到 `"token:" + tokenID`
 - [ ] tokenID 也为空的极端情况才返回 ""
 
-#### 5.2 后端 reactivate 接口
-- [ ] `POST /api/admin/accounts/:id/reactivate` 接口存在
-- [ ] 重置 `CooldownUntil = nil`、`Enabled = true`
-- [ ] 清除 metadata 中 `disabled_reason` / `disabled_at` / `auto_disable_reason`
-- [ ] 调用 `CooldownPolicy.Reset`
-- [ ] 调用 `pool.RestoreAccount`（pool 中新增）
-- [ ] 调用 `AffinityCache.InvalidateAccount`
+#### 5.2 后端账号启用即恢复
+- [ ] 不新增 reactivate 兼容接口；复用现有 `PUT /api/admin/accounts?id=...` 的 `enabled=true`
+- [ ] 启用账号时重置 `CooldownUntil = nil`、`Enabled = true`
+- [ ] 启用账号时清除 metadata 中 `disabled_reason` / `disabled_at` / `auto_disable_reason` / `auth_failure_*` / `last_terminal_error_*`
+- [ ] 启用账号时调用 `CooldownPolicy.Reset`
+- [ ] 启用账号时调用 `pool.RestoreAccount` 或刷新 pool
+- [ ] 启用账号时调用 `AffinityCache.InvalidateAccount`
 - [ ] admin 鉴权中间件保护
 - [ ] 并发安全（手动恢复与 time.AfterFunc 不冲突）
 
-#### 5.3 后端 channel clear-failure-state 接口
-- [ ] `POST /api/admin/channels/:id/clear-failure-state` 接口存在
-- [ ] 调用 `AffinityCache.InvalidateChannel`
-- [ ] 调用 `ChannelModelBlocklist.ClearChannel`
-- [ ] admin 鉴权中间件保护
+#### 5.3 后端 channel failure state
+- [ ] 不保留旧 `clear-failure` 兼容接口
+- [ ] 不要求前端/后端手动清除失败状态接口；`ChannelModelBlocklist` 依赖 5min TTL 自动恢复
 
 #### 5.4 前端账号管理页
 - [ ] 区分三种账号状态：normal (绿) / temporary cooldown (黄) / permanently disabled (红)
 - [ ] 临时 cooldown 显示倒计时和触发状态码
-- [ ] 终态 disabled 显示 disabled_reason 和 disabled_at
-- [ ] "立即恢复" / "重新启用"按钮统一调用 reactivate 接口
-- [ ] 终态 disabled 的按钮有二次确认弹窗
+- [ ] 认证失败重试状态显示 `auth_failure_attempts`、失败原因、最多 3 次后禁用
+- [ ] 额度耗尽状态说明等待额度桶重置后自动恢复
+- [ ] 终态 disabled 显示 disabled_reason 和 disabled_at，并提示可点击现有“启用”按钮恢复
+- [ ] 不新增“立即恢复”按钮；现有启用按钮触发后端恢复语义
 
 #### 5.5 前端渠道管理页
-- [ ] "清除失败状态"按钮调用 clear-failure-state 接口
+- [ ] 不要求“清除失败状态”按钮
 - [ ] 显示该渠道下账号 cooldown 汇总
 
 ### Phase 6 - 观察性
@@ -240,7 +244,7 @@
 - [ ] OAuth refresh 并发：同账号只触发一次 refresh
 
 ### 回归检查
-- [ ] 现有 `isUpstreamQuotaExhausted` / `upstreamAccountFailoverReason` / `terminalAccountDisableReason` 等函数仍正确工作（兼容期保留）
+- [ ] 现有 `isUpstreamQuotaExhausted` / `terminalAccountDisableReason` 等辅助函数仍正确工作；不要求保留旧兼容接口/旧 failover 主路径
 - [ ] 现有单元测试全部通过
 - [ ] `debug-dumps` 中的历史失败 case 能成功 replay
 

@@ -72,6 +72,7 @@ func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 		"GET /api/user/models",
 		"GET /api/user/plans",
 		"GET /api/user/profile",
+		"GET /api/user/queue-status",
 		"GET /api/user/subscription",
 		"GET /api/user/usage",
 		"GET /api/user/usage/logs",

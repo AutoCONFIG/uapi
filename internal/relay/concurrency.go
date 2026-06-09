@@ -3,12 +3,27 @@ package relay
 import (
 	"context"
 	"sync"
+	"time"
+)
+
+const (
+	DefaultConcurrencyQueueTimeout = 30 * time.Minute
+	DefaultConcurrencyQueueLimit   = 50
+)
+
+type AcquireStatus int
+
+const (
+	AcquireOK AcquireStatus = iota
+	AcquireCancelled
+	AcquireTimeout
+	AcquireQueueFull
 )
 
 // waiter represents a goroutine waiting for a concurrency slot.
 type waiter struct {
-	ch      chan struct{} // buffered(1): Release or Cancel sends here
-	key     string
+	ch        chan struct{} // buffered(1): Release or Cancel sends here
+	key       string
 	cancelled bool
 }
 
@@ -16,48 +31,72 @@ type waiter struct {
 // When the limit is reached, new requests block in a queue until a slot opens.
 // Queued requests can be cancelled via context (e.g., client disconnect).
 type ConcurrencyLimiter struct {
-	mu      sync.Mutex
-	counts  map[string]int    // key → active count
-	queues  map[string][]*waiter // key → FIFO wait queue
-	limit   int
+	mu           sync.Mutex
+	counts       map[string]int       // key → active count
+	queues       map[string][]*waiter // key → FIFO wait queue
+	limit        int
+	queueTimeout time.Duration
+	queueLimit   int
 }
 
 func NewConcurrencyLimiter(limit int) *ConcurrencyLimiter {
 	return &ConcurrencyLimiter{
-		counts: make(map[string]int),
-		queues: make(map[string][]*waiter),
-		limit:  limit,
+		counts:       make(map[string]int),
+		queues:       make(map[string][]*waiter),
+		limit:        limit,
+		queueTimeout: DefaultConcurrencyQueueTimeout,
+		queueLimit:   DefaultConcurrencyQueueLimit,
 	}
 }
 
 // Acquire reserves a slot for the given key, blocking if at capacity.
 // Returns true when a slot is acquired, false if the context is cancelled while waiting.
 func (cl *ConcurrencyLimiter) Acquire(ctx context.Context, key string) bool {
-	return cl.AcquireWithLimit(ctx, key, cl.limit)
+	return cl.AcquireDetailed(ctx, key) == AcquireOK
 }
 
 // AcquireWithLimit reserves a slot using a per-call limit.
 func (cl *ConcurrencyLimiter) AcquireWithLimit(ctx context.Context, key string, limit int) bool {
+	return cl.AcquireDetailedWithLimit(ctx, key, limit) == AcquireOK
+}
+
+func (cl *ConcurrencyLimiter) AcquireDetailed(ctx context.Context, key string) AcquireStatus {
+	return cl.AcquireDetailedWithLimit(ctx, key, cl.limit)
+}
+
+func (cl *ConcurrencyLimiter) AcquireDetailedWithLimit(ctx context.Context, key string, limit int) AcquireStatus {
 	if limit <= 0 {
-		return true
+		return AcquireOK
 	}
 
 	cl.mu.Lock()
 	if cl.counts[key] < limit {
 		cl.counts[key]++
 		cl.mu.Unlock()
-		return true
+		return AcquireOK
+	}
+	if cl.queueLimit > 0 && len(cl.queues[key]) >= cl.queueLimit {
+		cl.mu.Unlock()
+		return AcquireQueueFull
 	}
 	// At capacity: enqueue and wait
 	w := &waiter{ch: make(chan struct{}, 1), key: key}
 	cl.queues[key] = append(cl.queues[key], w)
 	cl.mu.Unlock()
 
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if cl.queueTimeout > 0 {
+		timer = time.NewTimer(cl.queueTimeout)
+		timeout = timer.C
+		defer timer.Stop()
+	}
+
 	// Block until signaled (Release) or context cancelled
 	select {
 	case <-w.ch:
 		// Woken by Release — slot acquired
-		return true
+		return AcquireOK
 	case <-ctx.Done():
 		// Cancelled — remove from queue if still enqueued
 		cl.mu.Lock()
@@ -66,7 +105,15 @@ func (cl *ConcurrencyLimiter) AcquireWithLimit(ctx context.Context, key string, 
 			cl.removeWaiterLocked(key, w)
 		}
 		cl.mu.Unlock()
-		return false
+		return AcquireCancelled
+	case <-timeout:
+		cl.mu.Lock()
+		if !w.cancelled {
+			w.cancelled = true
+			cl.removeWaiterLocked(key, w)
+		}
+		cl.mu.Unlock()
+		return AcquireTimeout
 	}
 }
 
@@ -86,6 +133,7 @@ func (cl *ConcurrencyLimiter) Release(key string) {
 		}
 		toSignal = q[0]
 		cl.queues[key] = q[1:]
+		cl.counts[key]++
 		break
 	}
 	if len(cl.queues[key]) == 0 {

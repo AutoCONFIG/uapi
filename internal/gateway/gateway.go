@@ -283,13 +283,13 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	limitKey := tokenID
 	if authInfo.hasPolicy && authInfo.policy.MaxConcurrency > 0 {
 		limitKey = authInfo.policy.ID.String()
-		if !g.limiter.AcquireWithLimit(ctx, limitKey, authInfo.policy.MaxConcurrency) {
-			ctx.Error(`{"error":"concurrent request limit exceeded"}`, fasthttp.StatusTooManyRequests)
+		if status := g.limiter.AcquireDetailedWithLimit(ctx, limitKey, authInfo.policy.MaxConcurrency); status != relay.AcquireOK {
+			writeConcurrencyAcquireError(ctx, status)
 			return
 		}
 	} else {
-		if !g.limiter.Acquire(ctx, tokenID) {
-			ctx.Error(`{"error":"concurrent request limit exceeded"}`, fasthttp.StatusTooManyRequests)
+		if status := g.limiter.AcquireDetailed(ctx, tokenID); status != relay.AcquireOK {
+			writeConcurrencyAcquireError(ctx, status)
 			return
 		}
 	}
@@ -971,6 +971,17 @@ func pathCarriesOpenAIModel(path string) bool {
 		strings.HasPrefix(path, "/v1/realtime/") ||
 		strings.HasPrefix(path, "/v1/videos") ||
 		strings.HasPrefix(path, "/v1/video/")
+}
+
+func writeConcurrencyAcquireError(ctx *fasthttp.RequestCtx, status relay.AcquireStatus) {
+	switch status {
+	case relay.AcquireTimeout:
+		ctx.Error(`{"error":"concurrency queue wait timeout"}`, fasthttp.StatusServiceUnavailable)
+	case relay.AcquireQueueFull:
+		ctx.Error(`{"error":"concurrency queue full"}`, fasthttp.StatusTooManyRequests)
+	default:
+		ctx.Error(`{"error":"concurrent request cancelled"}`, 499)
+	}
 }
 
 func logProxy(node string, start time.Time, status int) {

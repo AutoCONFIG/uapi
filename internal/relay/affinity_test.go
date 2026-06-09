@@ -15,9 +15,9 @@ func TestSetIfAbsent_PreservesExistingEntry(t *testing.T) {
 	c.SetIfAbsent("t", "m", "s", "ch-first", "acc-first", 60)
 
 	// Second SetIfAbsent with different channel/account must NOT overwrite
-	ok := c.SetIfAbsent("t", "m", "s", "ch-second", "acc-second", 60)
-	if ok {
-		t.Fatal("SetIfAbsent should return false when entry already exists")
+	chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch-second", "acc-second", 60)
+	if !existed || chID != "ch-first" || accID != "acc-first" {
+		t.Fatalf("SetIfAbsent existing = %s/%s existed=%v, want original binding with existed=true", chID, accID, existed)
 	}
 	ch, acc := c.Get("t", "m", "s")
 	if ch != "ch-first" || acc != "acc-first" {
@@ -27,9 +27,9 @@ func TestSetIfAbsent_PreservesExistingEntry(t *testing.T) {
 
 func TestSetIfAbsent_SetsWhenEmpty(t *testing.T) {
 	c := NewAffinityCache()
-	ok := c.SetIfAbsent("t", "m", "s", "ch1", "acc1", 60)
-	if !ok {
-		t.Fatal("SetIfAbsent should return true when no entry exists")
+	chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch1", "acc1", 60)
+	if existed || chID != "ch1" || accID != "acc1" {
+		t.Fatalf("SetIfAbsent new = %s/%s existed=%v, want ch1/acc1 existed=false", chID, accID, existed)
 	}
 	ch, acc := c.Get("t", "m", "s")
 	if ch != "ch1" || acc != "acc1" {
@@ -43,9 +43,9 @@ func TestSetIfAbsent_SetsAfterExpiry(t *testing.T) {
 	c.ForceSet("t", "m", "s", "ch-old", "acc-old", 1)
 	time.Sleep(1100 * time.Millisecond)
 
-	ok := c.SetIfAbsent("t", "m", "s", "ch-new", "acc-new", 60)
-	if !ok {
-		t.Fatal("SetIfAbsent should succeed after old entry expired")
+	chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch-new", "acc-new", 60)
+	if existed || chID != "ch-new" || accID != "acc-new" {
+		t.Fatalf("SetIfAbsent expired = %s/%s existed=%v, want ch-new/acc-new existed=false", chID, accID, existed)
 	}
 	ch, acc := c.Get("t", "m", "s")
 	if ch != "ch-new" || acc != "acc-new" {
@@ -56,21 +56,21 @@ func TestSetIfAbsent_SetsAfterExpiry(t *testing.T) {
 func TestSetIfAbsent_RejectsInvalidFields(t *testing.T) {
 	c := NewAffinityCache()
 	// Empty scope is valid (unscoped affinity)
-	if c.SetIfAbsent("t", "m", "", "ch", "acc", 60) != true {
+	if chID, accID, existed := c.SetIfAbsent("t", "m", "", "ch", "acc", 60); existed || chID != "ch" || accID != "acc" {
 		t.Fatal("empty scope should be accepted")
 	}
 	c.Clear()
 
-	if c.SetIfAbsent("t", "m", "s", "", "acc", 60) {
+	if chID, accID, existed := c.SetIfAbsent("t", "m", "s", "", "acc", 60); existed || chID != "" || accID != "" {
 		t.Fatal("should reject empty channelID")
 	}
-	if c.SetIfAbsent("t", "m", "s", "ch", "", 60) {
+	if chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch", "", 60); existed || chID != "" || accID != "" {
 		t.Fatal("should reject empty accountID")
 	}
-	if c.SetIfAbsent("t", "m", "s", "ch", "acc", 0) {
+	if chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch", "acc", 0); existed || chID != "" || accID != "" {
 		t.Fatal("should reject ttl <= 0")
 	}
-	if c.SetIfAbsent("t", "m", "s", "ch", "acc", -1) {
+	if chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch", "acc", -1); existed || chID != "" || accID != "" {
 		t.Fatal("should reject negative ttl")
 	}
 }
@@ -433,7 +433,7 @@ func TestConcurrentSetIfAbsent_NoDoubleWrite(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if c.SetIfAbsent("t", "m", "s", "ch", "acc", 60) {
+			if _, _, existed := c.SetIfAbsent("t", "m", "s", "ch", "acc", 60); !existed {
 				mu.Lock()
 				successCount++
 				mu.Unlock()

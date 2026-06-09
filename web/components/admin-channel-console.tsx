@@ -342,6 +342,19 @@ export function AdminChannelConsole() {
 
   function accountMetaSummary(account: Account): string {
     const meta = account.metadata || {};
+    const disabledReason = stringValue(meta.disabled_reason);
+    if (!account.enabled && disabledReason) {
+      return `认证失效，已禁用，可点击启用恢复 · ${disabledReason}`;
+    }
+    const authFailureReason = stringValue(meta.auth_failure_reason);
+    const authFailureAttempts = Number(meta.auth_failure_attempts || 0);
+    if (authFailureReason && authFailureAttempts > 0) {
+      return `认证失败重试 ${Math.min(authFailureAttempts, 3)}/3 · ${authFailureReason}`;
+    }
+    const autoReason = stringValue(meta.auto_disable_reason);
+    if (autoReason === "quota_exhausted") {
+      return "额度耗尽，等待额度桶重置后自动恢复";
+    }
     const email = typeof meta.email === "string" ? meta.email : typeof meta.email_address === "string" ? meta.email_address : googleEmailFromMetadata(meta);
     const plan = typeof meta.chatgpt_plan_type === "string" ? meta.chatgpt_plan_type : typeof meta.subscription_type === "string" ? meta.subscription_type : "";
     const project = typeof meta.project_id === "string" ? meta.project_id : "";

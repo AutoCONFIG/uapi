@@ -136,17 +136,20 @@ func (ac *AffinityCache) GetHit(tokenID, model, scope string) (string, string, b
 }
 
 // SetIfAbsent records an affinity mapping only if the key has no unexpired entry.
-// Returns true if the entry was set, false if an existing entry was preserved.
+// Returns the preserved or written channel/account and whether an unexpired entry already existed.
 // Use this for "first successful request" recording — don't overwrite a working binding.
-func (ac *AffinityCache) SetIfAbsent(tokenID, model, scope, channelID, accountID string, ttlSeconds int) bool {
+func (ac *AffinityCache) SetIfAbsent(tokenID, model, scope, channelID, accountID string, ttlSeconds int) (chID, accID string, existed bool) {
 	if ttlSeconds <= 0 || channelID == "" || accountID == "" {
-		return false
+		return "", "", false
 	}
 	k := ac.key(tokenID, model, scope)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
-	if e, ok := ac.entries[k]; ok && time.Now().Before(e.expiresAt) {
-		return false // already bound, preserve existing
+	if old, ok := ac.entries[k]; ok {
+		if time.Now().Before(old.expiresAt) {
+			return old.channelID, old.accountID, true // already bound, preserve existing
+		}
+		ac.removeIndex(k, old.channelID, old.accountID)
 	}
 	ac.entries[k] = affinityEntry{
 		channelID: channelID,
@@ -154,7 +157,7 @@ func (ac *AffinityCache) SetIfAbsent(tokenID, model, scope, channelID, accountID
 		expiresAt: time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 	}
 	ac.addIndex(k, channelID, accountID)
-	return true
+	return channelID, accountID, false
 }
 
 // ForceSet unconditionally records an affinity mapping, overwriting any existing entry.
