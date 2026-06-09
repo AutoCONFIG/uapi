@@ -701,7 +701,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		}
 		failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(statusCode, bodyCopy)
 		transientFailover := false
-		if !accountFailover && statusCode >= 500 {
+		if !accountFailover && (statusCode >= 500 || statusCode == fasthttp.StatusRequestTimeout) {
 			failoverReason = "upstream_status"
 			transientFailover = true
 		}
@@ -1093,7 +1093,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 		if statusCode >= 400 {
 			failoverReason, isQuota, accountFailover := upstreamAccountFailoverReason(statusCode, bodyCopy)
 			transientFailover := false
-			if !accountFailover && statusCode >= 500 {
+			if !accountFailover && (statusCode >= 500 || statusCode == fasthttp.StatusRequestTimeout) {
 				failoverReason = "upstream_status"
 				transientFailover = true
 				transientExcluded = addExcludedAccount(transientExcluded, acc)
@@ -3893,7 +3893,7 @@ func isAPIKeyChannel(ch *db.Channel) bool {
 }
 
 func isUpstreamQuotaExhausted(statusCode int, body []byte) bool {
-	if statusCode == fasthttp.StatusTooManyRequests {
+	if statusCode == fasthttp.StatusTooManyRequests || statusCode == fasthttp.StatusPaymentRequired {
 		return true
 	}
 	fields := collectErrorFields(body)
