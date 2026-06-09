@@ -199,6 +199,19 @@ func (s *Service) UpdateEmail(userID string, req *UpdateEmailRequest) error {
 	})
 }
 
+// GetUserTokenIDs returns all non-deleted token IDs for a user.
+func (s *Service) GetUserTokenIDs(userID string) ([]string, error) {
+	var tokens []db.Token
+	if err := s.db.Where("user_id = ? AND deleted_at IS NULL", userID).Select("id").Find(&tokens).Error; err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(tokens))
+	for i, t := range tokens {
+		ids[i] = t.ID.String()
+	}
+	return ids, nil
+}
+
 func (s *Service) ListKeys(userID string) ([]KeyResponse, error) {
 	var tokens []db.Token
 	if err := s.db.Where("user_id = ? AND deleted_at IS NULL", userID).Find(&tokens).Error; err != nil {

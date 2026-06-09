@@ -89,6 +89,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 			s.relayer.SetOAuthRefreshHook(s.oauthIdle.ScheduleAccountID)
 		}
 		s.userHandler = user.NewHandler(userSvc)
+		s.userHandler.SetQueueStatusFunc(concLimiter.PerTokenStats)
 	}
 	if cfg.Server.Mode == "all" && s.relayer != nil && database != nil {
 		s.wsHandler = relay.NewWSHandler(database, billing, s.relayer, cfg.WS)
@@ -277,6 +278,7 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/user/usage", userAuth(s.userHandler.GetUsage))
 	r.GET("/api/user/usage/logs", userAuth(s.userHandler.GetUsageLogs))
 	r.GET("/api/user/subscription", userAuth(s.userHandler.GetSubscription))
+	r.GET("/api/user/queue-status", userAuth(s.userHandler.GetQueueStatus))
 	r.GET("/api/user/plans", userAuth(s.userHandler.ListPlans))
 	r.GET("/api/user/models", userAuth(s.userHandler.AvailableModels))
 	r.POST("/api/user/redeem", userAuth(s.userHandler.RedeemCode))

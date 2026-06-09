@@ -3098,7 +3098,7 @@ func (r *Relayer) cooldownAccountOnTerminalUpstreamError(ch *db.Channel, acc *db
 	if !ok {
 		return
 	}
-	// Terminal auth errors → disable permanently, no auto-recovery
+	// Terminal auth errors → cooldown only (no auto-recovery until bucket reset), keep Enabled=true for manual re-enable
 	if acc.Metadata == nil {
 		acc.Metadata = make(map[string]interface{})
 	}
@@ -3121,10 +3121,11 @@ func (r *Relayer) cooldownAccountOnTerminalUpstreamError(ch *db.Channel, acc *db
 			logger.Warnf("relay.account", "mark terminal account error failed", logger.F("account_id", acc.ID.String()), logger.Err(err))
 		}
 	}
-	// Disable account in pool (weight=0, no cooldown timer — terminal means manual re-enable only)
+	// Cooldown account on terminal error (no auto-recovery until quota bucket reset), keep Enabled=true for manual re-enable
 	if r.pools != nil && ch != nil {
 		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
-			pool.Disable(acc.ID.String())
+			// Use long cooldown - terminal errors don't recover automatically
+			pool.Cooldown(acc.ID.String(), 24*time.Hour)
 		}
 	}
 	// Evict all affinity bindings for this account across all channels

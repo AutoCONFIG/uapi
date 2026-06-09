@@ -129,3 +129,10 @@ func (cl *ConcurrencyLimiter) ActiveCount(key string) int {
 	defer cl.mu.Unlock()
 	return cl.counts[key]
 }
+
+// PerTokenStats returns active and queued counts for a specific token.
+func (cl *ConcurrencyLimiter) PerTokenStats(tokenID string) (active int, queued int) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.counts[tokenID], len(cl.queues[tokenID])
+}

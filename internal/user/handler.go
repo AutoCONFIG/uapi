@@ -9,11 +9,17 @@ import (
 )
 
 type Handler struct {
-	service *Service
+	service          *Service
+	queueStatusFunc  func(tokenID string) (active int, queued int) // per-token queue stats
 }
 
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+// SetQueueStatusFunc injects the per-token concurrency queue status lookup.
+func (h *Handler) SetQueueStatusFunc(fn func(tokenID string) (active int, queued int)) {
+	h.queueStatusFunc = fn
 }
 
 func (h *Handler) Register(ctx *fasthttp.RequestCtx) {
@@ -294,6 +300,36 @@ func getUserID(ctx *fasthttp.RequestCtx) string {
 		return claims.UserID
 	}
 	return ""
+}
+
+// GetQueueStatus returns per-key concurrency queue status for the current user.
+// Response: { keys: [{ id, active, queued }, ...] }
+func (h *Handler) GetQueueStatus(ctx *fasthttp.RequestCtx) {
+	userID := getUserID(ctx)
+	if userID == "" {
+		sendError(ctx, 401, "unauthorized")
+		return
+	}
+	if h.queueStatusFunc == nil {
+		sendSuccess(ctx, map[string]interface{}{"keys": []interface{}{}})
+		return
+	}
+	tokenIDs, err := h.service.GetUserTokenIDs(userID)
+	if err != nil {
+		sendError(ctx, 500, err.Error())
+		return
+	}
+	type keyQueue struct {
+		ID     string `json:"id"`
+		Active int    `json:"active"`
+		Queued int    `json:"queued"`
+	}
+	keys := make([]keyQueue, 0, len(tokenIDs))
+	for _, id := range tokenIDs {
+		active, queued := h.queueStatusFunc(id)
+		keys = append(keys, keyQueue{ID: id, Active: active, Queued: queued})
+	}
+	sendSuccess(ctx, map[string]interface{}{"keys": keys})
 }
 
 func sendSuccess(ctx *fasthttp.RequestCtx, data interface{}) {
