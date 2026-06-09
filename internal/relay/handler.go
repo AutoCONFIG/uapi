@@ -2954,7 +2954,7 @@ func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account) {
 		}
 	}
 	if r.affinity != nil {
-		r.affinity.EvictAccount(ch.ID.String(), acc.ID.String())
+		r.affinity.EvictAccount(acc.ID.String())
 	}
 }
 
@@ -2972,8 +2972,8 @@ func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, status
 	// For API key channels, at least evict affinity cache and apply short pool cooldown
 	// (but don't persist cooldown to DB since API key channels are stateless)
 	if isAPIKeyChannel(ch) {
-		if isQuota && r.affinity != nil && ch != nil && acc != nil {
-			r.affinity.EvictAccount(ch.ID.String(), acc.ID.String())
+		if isQuota && r.affinity != nil && acc != nil {
+			r.affinity.EvictAccount(acc.ID.String())
 		}
 		return
 	}
@@ -3697,7 +3697,6 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 	if req == nil || upstreamFormat != provider.FormatCodexResponses {
 		return
 	}
-	ensureCodexOfficialHeaders(req)
 	var bodyMap map[string]interface{}
 	if err := provider.DecodeJSONUseNumber(body, &bodyMap); err != nil {
 		return
@@ -3730,19 +3729,6 @@ func applyCodexMetadataHeaders(req *fasthttp.Request, upstreamFormat provider.Fo
 		// ChatGPT backend infrastructure; keep it populated so retries and
 		// support traces correlate with our prompt cache key.
 		req.Header.Set("x-client-request-id", promptCacheKey)
-	}
-}
-
-// ensureCodexOfficialHeaders adds the unconditional fingerprint headers that
-// every codex_cli_rs request carries. Upstream officially sends `version`
-// (cargo package version, currently 0.0.0 per the workspace manifest) on every
-// request; the remaining x-codex-* headers are emitted by official clients only
-// when they hold real values, so we deliberately do NOT pre-seed them with
-// empty strings here (empty-valued headers are a stronger fingerprint of a
-// non-official client than missing ones).
-func ensureCodexOfficialHeaders(req *fasthttp.Request) {
-	if len(req.Header.Peek("version")) == 0 {
-		req.Header.Set("version", openai.CodexClientVersion)
 	}
 }
 

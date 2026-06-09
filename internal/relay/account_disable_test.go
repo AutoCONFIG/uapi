@@ -182,15 +182,16 @@ func TestAffinityCacheEvictsOnlyFailedAccount(t *testing.T) {
 	cache.Set("token-1", "gpt-5.5", "session-b", "channel-1", "account-2", 60)
 	cache.Set("token-1", "gpt-5.5", "session-c", "channel-2", "account-1", 60)
 
-	cache.EvictAccount("channel-1", "account-1")
+	// EvictAccount now takes only accountID; removes ALL entries for that account across channels
+	cache.EvictAccount("account-1")
 
 	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-a"); ch != "" || acc != "" {
-		t.Fatalf("failed account affinity should be evicted, got (%q,%q)", ch, acc)
+		t.Fatalf("failed account affinity on ch1 should be evicted, got (%q,%q)", ch, acc)
 	}
 	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-b"); ch != "channel-1" || acc != "account-2" {
 		t.Fatalf("other account affinity = (%q,%q), want channel-1/account-2", ch, acc)
 	}
-	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-c"); ch != "channel-2" || acc != "account-1" {
-		t.Fatalf("same account on another channel = (%q,%q), want channel-2/account-1", ch, acc)
+	if ch, acc := cache.Get("token-1", "gpt-5.5", "session-c"); ch != "" || acc != "" {
+		t.Fatalf("same account on another channel should also be evicted, got (%q,%q)", ch, acc)
 	}
 }
