@@ -172,7 +172,7 @@ func (h *WSHandler) httpBridgeFallback(
 				if isQuota {
 					h.relayer.prepareAccountFailover(ch, currentAccount, bootstrapStatus, bodyCopy, true)
 				} else if accountFailover {
-					h.relayer.cooldownAndEvict(ch, currentAccount)
+					h.relayer.cooldownAndEvict(ch, currentAccount, h.relayer.cooldownPolicy.ComputeCooldown(ClassifyUpstreamError(bootstrapStatus, bodyCopy), bootstrapStatus, currentAccount.ID.String()))
 				}
 				next := h.relayer.pickNextExcluding(ch, poolFromChannel(h.relayer.pools, ch), transientExcluded)
 				if next != nil {
