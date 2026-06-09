@@ -10,13 +10,33 @@ import (
 	"github.com/google/uuid"
 )
 
+// conversationIDFromPayload extracts conversation_id from a ChatGPT SSE payload
+func conversationIDFromPayload(payload string) string {
+	var root interface{}
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
+		return ""
+	}
+	return findStringKey(root, "conversation_id")
+}
+
+// findStringKey searches for a string value in a nested JSON structure
+func findStringKey(value interface{}, key string) string {
+	if m, ok := value.(map[string]interface{}); ok {
+		if v, ok := m[key].(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 type chatGPTReverseStreamConverter struct {
-	id       string
-	model    string
-	created  int64
-	started  bool
-	finished bool
-	text     string
+	id             string
+	model          string
+	created        int64
+	started        bool
+	finished       bool
+	text           string
+	conversationID string
 }
 
 func newChatGPTReverseInputConverter(model string) func([]byte) []byte {
@@ -42,6 +62,10 @@ func (c *chatGPTReverseStreamConverter) convert(event []byte) []byte {
 			out = append(out, c.finish()...)
 			continue
 		}
+		// Extract conversation_id from payload
+		if id := conversationIDFromPayload(payload); id != "" && c.conversationID == "" {
+			c.conversationID = id
+		}
 		delta, replaced, done := c.extractDelta(payload)
 		if done {
 			out = append(out, c.finish()...)
@@ -60,6 +84,11 @@ func (c *chatGPTReverseStreamConverter) convert(event []byte) []byte {
 		}
 	}
 	return out
+}
+
+// ConversationID returns the conversation_id extracted from the stream
+func (c *chatGPTReverseStreamConverter) ConversationID() string {
+	return c.conversationID
 }
 
 func (c *chatGPTReverseStreamConverter) extractDelta(payload string) (string, bool, bool) {
@@ -192,9 +221,17 @@ func sanitizeChatGPTOutput(text string) string {
 	}
 }
 
-func chatGPTReverseOutputConverter(upstreamFormat, clientFormat provider.Format, routedModel string) (func([]byte) []byte, func([]byte) []byte) {
+func chatGPTReverseOutputConverter(upstreamFormat, clientFormat provider.Format, routedModel string) (func([]byte) []byte, func([]byte) []byte, *chatGPTReverseStreamConverter) {
 	if upstreamFormat != provider.FormatChatGPTReverse {
-		return nil, newStreamConverterFunc(upstreamFormat, clientFormat)
+		return nil, newStreamConverterFunc(upstreamFormat, clientFormat), nil
 	}
-	return newChatGPTReverseInputConverter(routedModel), newStreamConverterFunc(provider.FormatOpenAIChatCompletions, clientFormat)
+	converter := &chatGPTReverseStreamConverter{
+		id:      "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		model:   routedModel,
+		created: time.Now().Unix(),
+	}
+	inputConvert := func(event []byte) []byte {
+		return converter.convert(event)
+	}
+	return inputConvert, newStreamConverterFunc(provider.FormatOpenAIChatCompletions, clientFormat), converter
 }

@@ -2627,6 +2627,14 @@ h3 {
 .quota-compact-reset.reset-waiting { color: var(--amber); }
 .quota-compact-reset.reset-later { color: var(--muted-2); }
 
+.quota-compact-mode {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .quota-forbidden { color: var(--red); font-size: 12px; font-weight: 700; padding: 4px 0; }
 .quota-error { color: var(--amber); font-size: 12px; font-weight: 700; padding: 4px 0; }
 

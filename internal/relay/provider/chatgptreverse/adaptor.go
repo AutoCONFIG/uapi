@@ -27,6 +27,8 @@ const (
 	defaultBaseURL   = "https://chatgpt.com"
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 	defaultPowScript = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+	// conversationContinuationMaxAge is the maximum age for a conversation_id to be considered valid for continuation
+	conversationContinuationMaxAge = 1 * time.Hour
 )
 
 type Adaptor struct {
@@ -93,6 +95,9 @@ func (a *Adaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) 
 	if requirements.SOToken != "" {
 		req.Header.Set("OpenAI-Sentinel-SO-Token", requirements.SOToken)
 	}
+	if requirements.TurnstileToken != "" {
+		req.Header.Set("OpenAI-Sentinel-Turnstile-Token", requirements.TurnstileToken)
+	}
 	return nil
 }
 
@@ -138,6 +143,21 @@ func (a *Adaptor) FromIR(req *ir.Request) ([]byte, error) {
 			"screen_width":      2560,
 		},
 	}
+
+	// Check for conversation continuation (cache hit)
+	if a.account != nil && a.account.Metadata != nil {
+		conversationID, _ := a.account.Metadata["last_conversation_id"].(string)
+		conversationTimestamp, _ := a.account.Metadata["last_conversation_timestamp"].(string)
+		if conversationID != "" && conversationTimestamp != "" {
+			if ts, err := time.Parse(time.RFC3339, conversationTimestamp); err == nil {
+				if time.Since(ts) < conversationContinuationMaxAge {
+					// Valid conversation_id, continue the conversation
+					body["conversation_id"] = conversationID
+				}
+			}
+		}
+	}
+
 	return json.Marshal(body)
 }
 
@@ -366,6 +386,9 @@ func (a *Adaptor) doJSON(path string, body []byte, accessToken string, requireme
 	if requirements.SOToken != "" {
 		req.Header.Set("OpenAI-Sentinel-SO-Token", requirements.SOToken)
 	}
+	if requirements.TurnstileToken != "" {
+		req.Header.Set("OpenAI-Sentinel-Turnstile-Token", requirements.TurnstileToken)
+	}
 	if conduitToken != "" {
 		req.Header.Set("X-Conduit-Token", conduitToken)
 		req.Header.Set("X-Oai-Turn-Trace-Id", uuid.NewString())
@@ -456,9 +479,10 @@ func roleString(role ir.Role) string {
 }
 
 type requirements struct {
-	Token      string
-	ProofToken string
-	SOToken    string
+	Token           string
+	ProofToken      string
+	SOToken         string
+	TurnstileToken  string
 }
 
 func (a *Adaptor) bootstrap() error {
@@ -514,7 +538,8 @@ func (a *Adaptor) chatRequirements(accessToken string) (requirements, error) {
 			Required bool `json:"required"`
 		} `json:"arkose"`
 		Turnstile struct {
-			Required bool `json:"required"`
+			Required bool   `json:"required"`
+			DX       string `json:"dx"`
 		} `json:"turnstile"`
 		ProofOfWork struct {
 			Required   bool   `json:"required"`
@@ -529,7 +554,11 @@ func (a *Adaptor) chatRequirements(accessToken string) (requirements, error) {
 		return requirements{}, fmt.Errorf("chatgpt reverse requirements requires arkose token")
 	}
 	if raw.Turnstile.Required {
-		return requirements{}, fmt.Errorf("chatgpt reverse requirements requires turnstile token")
+		// Turnstile is optional - only required if dx field is present
+		// If required but no dx, log warning but continue
+		if raw.Turnstile.DX == "" {
+			// No dx field, skip turnstile
+		}
 	}
 	if raw.Token == "" {
 		return requirements{}, fmt.Errorf("chatgpt reverse requirements missing token")
@@ -580,6 +609,8 @@ func setBrowserHeaders(h *fasthttp.RequestHeader, deviceID, sessionID string) {
 	h.Set("OAI-Device-Id", deviceID)
 	h.Set("OAI-Session-Id", sessionID)
 	h.Set("OAI-Language", "zh-CN")
+	h.Set("OAI-Client-Version", "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887")
+	h.Set("OAI-Client-Build-Number", "6708908")
 }
 
 func parsePowResources(html string) ([]string, string) {

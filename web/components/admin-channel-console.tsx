@@ -1172,6 +1172,11 @@ export function AdminChannelConsole() {
                                 <div className={`quota-compact-bar ${quotaTone(item.remainingPercent)}`} style={{ width: `${item.displayPercent}%` }} />
                               </div>
                               {item.resetText ? <span className={`quota-compact-reset ${item.resetTone || ""}`}>{item.resetText}</span> : null}
+                              {item.displayMode === "used" ? (
+                                <span className="quota-compact-mode">已用</span>
+                              ) : (
+                                <span className="quota-compact-mode">剩余</span>
+                              )}
                             </div>
                           ))}
                           {quotaItems.length > 3 && !expandedQuotaIds.has(account.id) ? (
@@ -1589,17 +1594,37 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
       if (pct === null) continue;
       const remainingPercent = Math.round(clampPercent(pct));
       const label = stringValue(b.label);
-      const fallbackUsedPercent = quotaUsesUpstreamUsedDisplay(label) ? 100 - remainingPercent : null;
+      const bucketType = getQuotaBucketType(label);
+
+      // Determine display mode based on bucket type and channel
+      const usesUsedDisplay = quotaUsesUpstreamUsedDisplay(label);
+      const fallbackUsedPercent = usesUsedDisplay ? 100 - remainingPercent : null;
       const usedPercent = numberValue(b.used_percent) ?? fallbackUsedPercent;
       const displayMode = usedPercent !== null ? "used" : "remaining";
       const displayPercent = displayMode === "used" ? Math.round(clampPercent(usedPercent ?? 0)) : remainingPercent;
+
+      // Generate appropriate label based on bucket type
+      let displayLabel = label || `额度 ${i + 1}`;
+      if (bucketType === "5hour" && !label.includes("5小时")) {
+        displayLabel = `Codex 5小时窗口`;
+      } else if (bucketType === "weekly" && !label.includes("每周")) {
+        displayLabel = `Codex 每周窗口`;
+      } else if (bucketType === "daily" && !label.includes("每日")) {
+        displayLabel = `${label} (每日)`;
+      } else if (bucketType === "model" && !label.includes("模型")) {
+        displayLabel = `${label} (模型)`;
+      }
+
+      // Use context-aware reset time formatting
+      const resetText = formatResetTimeWithContext(stringValue(b.reset_time), bucketType);
+
       items.push({
         key: `quota-${i}`,
-        label: label || `额度 ${i + 1}`,
+        label: displayLabel,
         remainingPercent,
         displayPercent,
         displayMode,
-        resetText: formatResetTimeShort(stringValue(b.reset_time)),
+        resetText,
         resetTone: resetTimeTone(stringValue(b.reset_time)),
         detail: [displayMode === "used" ? `已用 ${displayPercent}%` : `剩余 ${remainingPercent}%`, displayMode === "used" ? `剩余 ${remainingPercent}%` : "", stringValue(b.reset_time) ? `重置 ${stringValue(b.reset_time)}` : ""].filter(Boolean).join(" · "),
       });
@@ -1626,11 +1651,41 @@ function buildQuotaDisplayItems(account: Account): QuotaDisplayItem[] {
 
 function quotaUsesUpstreamUsedDisplay(label: string): boolean {
   const normalized = label.toLowerCase();
+  // Codex and Claude use "used" display mode (showing consumption percentage)
+  // Other channels like Gemini, Antigravity use "remaining" display mode
   return normalized.includes("codex") || normalized.includes("claude");
+}
+
+function getQuotaBucketType(label: string): "5hour" | "weekly" | "daily" | "model" | "credits" | "unknown" {
+  const normalized = label.toLowerCase();
+  if (normalized.includes("5小时") || normalized.includes("5 hour") || normalized.includes("primary")) {
+    return "5hour";
+  }
+  if (normalized.includes("每周") || normalized.includes("weekly") || normalized.includes("secondary")) {
+    return "weekly";
+  }
+  if (normalized.includes("每日") || normalized.includes("daily") || normalized.includes("day")) {
+    return "daily";
+  }
+  if (normalized.includes("model") || normalized.includes("模型")) {
+    return "model";
+  }
+  if (normalized.includes("credits") || normalized.includes("积分")) {
+    return "credits";
+  }
+  return "unknown";
 }
 
 function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {
   return items.sort((left, right) => {
+    // First sort by bucket type priority
+    const leftType = getQuotaBucketType(left.label);
+    const rightType = getQuotaBucketType(right.label);
+    const typePriority = { "5hour": 0, "weekly": 1, "daily": 2, "model": 3, "credits": 4, "unknown": 5 };
+    const typeDiff = (typePriority[leftType] ?? 5) - (typePriority[rightType] ?? 5);
+    if (typeDiff !== 0) return typeDiff;
+
+    // Then sort by severity (remaining percentage or used percentage)
     const leftSeverity = left.displayMode === "used" ? 100 - left.displayPercent : left.remainingPercent;
     const rightSeverity = right.displayMode === "used" ? 100 - right.displayPercent : right.remainingPercent;
     const byRemaining = leftSeverity - rightSeverity;
@@ -1642,7 +1697,13 @@ function sortQuotaDisplayItems(items: QuotaDisplayItem[]): QuotaDisplayItem[] {
 function accountLowestQuotaRemaining(account: Account): number {
   const quotaItems = buildQuotaDisplayItems(account);
   if (quotaItems.length === 0) return Number.POSITIVE_INFINITY;
-  return Math.min(...quotaItems.map((item) => item.remainingPercent));
+  // For "used" mode, calculate remaining from used percentage
+  return Math.min(...quotaItems.map((item) => {
+    if (item.displayMode === "used") {
+      return 100 - item.displayPercent;
+    }
+    return item.remainingPercent;
+  }));
 }
 
 function accountTier(account: Account): { label: string; className: string } | null {
@@ -1664,10 +1725,26 @@ function accountTier(account: Account): { label: string; className: string } | n
   return { label: rawTier.trim(), className: "tier-free" };
 }
 
+// Get channel type from account metadata
+function getChannelType(account: Account): string {
+  const meta = account.metadata || {};
+  return stringValue(meta.channel_type) || stringValue(meta.type) || "unknown";
+}
+
 function quotaTone(percent: number): string {
+  // Different thresholds for different channel types
   if (percent >= 50) return "high";
   if (percent >= 20) return "medium";
   return "low";
+}
+
+// Get quota warning level based on channel type
+function getQuotaWarningLevel(account: Account): "normal" | "warning" | "critical" {
+  const lowest = accountLowestQuotaRemaining(account);
+  if (lowest === Number.POSITIVE_INFINITY) return "normal";
+  if (lowest <= 10) return "critical";
+  if (lowest <= 30) return "warning";
+  return "normal";
 }
 
 function clampPercent(value: number): number {
@@ -1686,6 +1763,23 @@ function formatResetTimeShort(isoStr: string | null | undefined): string {
   if (days > 0) return `${days}d ${hours % 24}h`;
   if (hours > 0) return `${hours}h ${mins % 60}m`;
   return `${mins}m`;
+}
+
+// Format reset time with channel-specific context
+function formatResetTimeWithContext(isoStr: string | null | undefined, bucketType: string): string {
+  if (!isoStr) return "";
+  const baseText = formatResetTimeShort(isoStr);
+  if (!baseText) return "";
+  switch (bucketType) {
+    case "5hour":
+      return `5小时窗口 ${baseText}`;
+    case "weekly":
+      return `每周窗口 ${baseText}`;
+    case "daily":
+      return `每日窗口 ${baseText}`;
+    default:
+      return baseText;
+  }
 }
 
 function resetTimeTone(isoStr: string | null | undefined): string {

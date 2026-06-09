@@ -853,7 +853,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 
 	tracker := newStreamTracker(adaptor)
 
-	inputConvert, outputConvert := chatGPTReverseOutputConverter(upstreamFormat, clientFormat, routedModel)
+	inputConvert, outputConvert, reverseConverter := chatGPTReverseOutputConverter(upstreamFormat, clientFormat, routedModel)
 	sendDone := clientFormat == provider.FormatOpenAIChatCompletions
 
 	// Producer goroutine: owns upReq/upResp lifecycle, releases when done
@@ -959,6 +959,19 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			logger.F("completion_tokens", ct),
 			logger.F("latency_ms", time.Since(start).Milliseconds()),
 		)
+		// Update conversation_id in account metadata for ChatGPT Reverse channel
+		if reverseConverter != nil && reverseConverter.ConversationID() != "" {
+			if acc.Metadata == nil {
+				acc.Metadata = make(map[string]interface{})
+			}
+			acc.Metadata["last_conversation_id"] = reverseConverter.ConversationID()
+			acc.Metadata["last_conversation_timestamp"] = time.Now().Format(time.RFC3339)
+			go func() {
+				if err := r.db.Model(&db.Account{}).Where("id = ?", acc.ID).Update("metadata", acc.Metadata).Error; err != nil {
+					logger.Warnf("relay.stream", "failed to update conversation_id in account metadata", logger.Err(err))
+				}
+			}()
+		}
 		go r.finishUsageWithRoutedModelFormatsCacheAndAdmin(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, statusCode, estTokens, adminInfo, r.clientIPForDirectRequest(ctx, claims))
 	}()
 }
