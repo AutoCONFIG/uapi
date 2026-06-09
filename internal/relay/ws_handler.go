@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,7 +149,7 @@ func (h *WSHandler) HandleUpgrade(ctx *fasthttp.RequestCtx) {
 
 	// 4. Concurrency check for upgrade
 	tokenID := token.ID.String()
-	if !h.concLimiter.Acquire(tokenID) {
+	if !h.concLimiter.Acquire(ctx, tokenID) {
 		ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
 		return
 	}
@@ -322,7 +323,7 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 		}
 		if sess.policy.maxConcurrency > 0 {
 			limitKey := "policy:" + sess.policy.id
-			if !h.concLimiter.AcquireWithLimit(limitKey, sess.policy.maxConcurrency) {
+			if !h.concLimiter.AcquireWithLimit(context.Background(), limitKey, sess.policy.maxConcurrency) {
 				WriteWSErrorSession(sess, 429, "policy_concurrency", "policy concurrent request limit exceeded")
 				return
 			}

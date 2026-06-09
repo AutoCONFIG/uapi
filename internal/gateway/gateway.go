@@ -283,12 +283,12 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	limitKey := tokenID
 	if authInfo.hasPolicy && authInfo.policy.MaxConcurrency > 0 {
 		limitKey = authInfo.policy.ID.String()
-		if !g.limiter.AcquireWithLimit(limitKey, authInfo.policy.MaxConcurrency) {
+		if !g.limiter.AcquireWithLimit(ctx, limitKey, authInfo.policy.MaxConcurrency) {
 			ctx.Error(`{"error":"concurrent request limit exceeded"}`, fasthttp.StatusTooManyRequests)
 			return
 		}
 	} else {
-		if !g.limiter.Acquire(tokenID) {
+		if !g.limiter.Acquire(ctx, tokenID) {
 			ctx.Error(`{"error":"concurrent request limit exceeded"}`, fasthttp.StatusTooManyRequests)
 			return
 		}

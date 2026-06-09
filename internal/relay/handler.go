@@ -319,7 +319,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		go r.finishFailureUsage(claims, token.ID, internalClaims.ChannelID, internalClaims.AccountID, model, false, start, status, earlyEstimatedTokens)
 	}
 	if !gatewayAuthenticated {
-		if !r.concLimiter.Acquire(tokenID) {
+		if !r.concLimiter.Acquire(ctx, tokenID) {
 			ctx.Error(`{"error":"concurrent request limit exceeded"}`, 429)
 			return
 		}
@@ -711,6 +711,13 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		errClass := ClassifyUpstreamError(statusCode, bodyCopy)
 		isQuota := isUpstreamQuotaExhausted(statusCode, bodyCopy)
 		failoverReason := fmt.Errorf("status_%d", statusCode).Error()
+		trace.Event("upstream_error_classified",
+			logger.F("status", statusCode),
+			logger.F("error_class", errClass.String()),
+			logger.F("is_quota", isQuota),
+			logger.F("from_channel_id", ch.ID.String()),
+			logger.F("from_account_id", acc.ID.String()),
+		)
 
 		switch errClass {
 		case ErrServerSide, ErrConfigSide:
