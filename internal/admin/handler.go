@@ -119,8 +119,10 @@ func (h *Handler) parsePagination(ctx *fasthttp.RequestCtx) (page, limit int) {
 		page = 1
 	}
 	limit, _ = strconv.Atoi(limitStr)
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 20
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	return page, limit
 }
