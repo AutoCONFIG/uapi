@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/url"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -675,12 +676,11 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 	}
 	applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
-	trace.Event("upstream_request_started",
-		logger.F("mode", "stream"),
+	fields := relayDebugUpstreamRequestFields("stream", ch, acc, upReq,
 		logger.F("auth_retried", authRetried),
-		logger.F("headers", relayDebugRequestHeaders(upReq)),
 		logger.F("body_stream", requestJSONBool(body, "stream")),
 	)
+	trace.Event("upstream_request_started", fields...)
 	// The streaming request returns after receiving headers; the body is read from BodyStream.
 	if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 		trace.Event("upstream_request_failed", logger.Err(err), logger.F("auth_retried", authRetried))
@@ -1198,11 +1198,10 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	}
 	applyCodexMetadataHeaders(upReq, upstreamFormat, body)
 
-	trace.Event("upstream_request_started",
-		logger.F("mode", "force_stream"),
-		logger.F("headers", relayDebugRequestHeaders(upReq)),
+	fields := relayDebugUpstreamRequestFields("force_stream", ch, acc, upReq,
 		logger.F("body_stream", requestJSONBool(body, "stream")),
 	)
+	trace.Event("upstream_request_started", fields...)
 	if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 		trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream"))
 		logger.Warnf("relay.upstream", "force stream request failed", logger.Err(err))
@@ -1238,9 +1237,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 				return
 			}
 			applyCodexMetadataHeaders(upReq, upstreamFormat, body)
-			trace.Event("upstream_request_started",
-				logger.F("mode", "force_stream_retry"),
-			)
+			trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("force_stream_retry", ch, acc, upReq)...)
 			if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 				trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream_retry"))
 				logger.Warnf("relay.upstream", "force stream request failed after oauth refresh", logger.Err(err))
@@ -1682,6 +1679,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			return
 		}
 		applyCodexMetadataHeaders(upReq, upstreamFormat, body)
+		trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("buffered", ch, currentAccount, upReq, logger.F("retry", retry))...)
 
 		err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp)
 		fasthttp.ReleaseRequest(upReq)
@@ -4470,6 +4468,72 @@ func relayDebugRequestHeaders(req *fasthttp.Request) map[string]string {
 		}
 	})
 	return headers
+}
+
+func relayDebugUpstreamRequestFields(mode string, ch *db.Channel, acc *db.Account, req *fasthttp.Request, extra ...logger.Field) []logger.Field {
+	fields := []logger.Field{
+		logger.F("mode", mode),
+		logger.F("method", string(req.Header.Method())),
+		logger.F("url", relayDebugRedactedURL(string(req.URI().FullURI()))),
+		logger.F("headers", relayDebugRequestHeaders(req)),
+	}
+	if ch != nil {
+		fields = append(fields,
+			logger.F("channel_id", ch.ID.String()),
+			logger.F("channel_type", ch.Type),
+			logger.F("api_format", ch.APIFormat),
+		)
+	}
+	if acc != nil {
+		fields = append(fields,
+			logger.F("account_id", acc.ID.String()),
+			logger.F("account_cred_type", acc.CredType),
+			logger.F("oauth_account", acc.CredType == "oauth_token"),
+		)
+		if acc.CredType == "oauth_token" {
+			fields = append(fields, relayDebugOAuthMetadataFields(acc.Metadata)...)
+		}
+	}
+	fields = append(fields, extra...)
+	return fields
+}
+
+func relayDebugOAuthMetadataFields(metadata map[string]interface{}) []logger.Field {
+	if metadata == nil {
+		return nil
+	}
+	fields := make([]logger.Field, 0, 5)
+	if plan, _ := metadata["chatgpt_plan_type"].(string); plan != "" {
+		fields = append(fields, logger.F("oauth_chatgpt_plan_type", plan))
+	}
+	if accountID, _ := metadata["chatgpt_account_id"].(string); accountID != "" {
+		fields = append(fields, logger.F("oauth_chatgpt_account_id_present", true))
+	}
+	if fedramp, ok := metadata["chatgpt_account_is_fedramp"].(bool); ok {
+		fields = append(fields, logger.F("oauth_chatgpt_fedramp", fedramp))
+	}
+	if projectID, _ := metadata["project_id"].(string); projectID != "" {
+		fields = append(fields, logger.F("oauth_project_id_present", true))
+	}
+	if authMode, _ := metadata["auth_mode"].(string); authMode != "" {
+		fields = append(fields, logger.F("oauth_auth_mode", authMode))
+	}
+	return fields
+}
+
+func relayDebugRedactedURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return logger.Redact(raw)
+	}
+	query := parsed.Query()
+	for _, key := range []string{"key", "api_key", "apikey", "access_token", "refresh_token", "id_token", "client_secret"} {
+		if _, ok := query[key]; ok {
+			query.Set(key, "[redacted]")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return logger.Redact(parsed.String())
 }
 
 func nonStreamCacheTokens(respBody []byte) (int, int) {

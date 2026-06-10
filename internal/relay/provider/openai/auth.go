@@ -79,6 +79,24 @@ type DeviceTokenResponse struct {
 	CodeVerifier      string `json:"code_verifier"`
 }
 
+type CodexUsageDebug struct {
+	Request  CodexUsageDebugRequest  `json:"request"`
+	Response CodexUsageDebugResponse `json:"response"`
+}
+
+type CodexUsageDebugRequest struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+type CodexUsageDebugResponse struct {
+	StatusCode int                 `json:"status_code,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
+	BodyBytes  int                 `json:"body_bytes,omitempty"`
+	Body       string              `json:"body,omitempty"`
+}
+
 // GenerateCodeVerifier creates a PKCE code verifier
 func GenerateCodeVerifier() (string, error) {
 	b := make([]byte, 64)
@@ -294,9 +312,14 @@ func NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret strin
 }
 
 func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]interface{}, error) {
+	usage, _, err := FetchCodexUsageWithDebug(accessToken, accountID, fedramp)
+	return usage, err
+}
+
+func FetchCodexUsageWithDebug(accessToken, accountID string, fedramp bool) (map[string]interface{}, *CodexUsageDebug, error) {
 	req, err := http.NewRequest(http.MethodGet, CodexUsageURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
@@ -308,21 +331,32 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 	if fedramp {
 		req.Header.Set("X-OpenAI-Fedramp", "true")
 	}
+	debugInfo := &CodexUsageDebug{
+		Request: CodexUsageDebugRequest{
+			Method:  req.Method,
+			URL:     req.URL.String(),
+			Headers: redactedRequestHeaders(req.Header),
+		},
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("codex usage request failed: %w", err)
+		return nil, debugInfo, fmt.Errorf("codex usage request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	debugInfo.Response.StatusCode = resp.StatusCode
+	debugInfo.Response.Headers = redactedResponseHeaders(resp.Header)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read codex usage response: %w", err)
+		return nil, debugInfo, fmt.Errorf("read codex usage response: %w", err)
 	}
+	debugInfo.Response.BodyBytes = len(body)
+	debugInfo.Response.Body = compactBodyWithLimit(body, 10000)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("codex usage failed: status %d: %s", resp.StatusCode, compactBody(body))
+		return nil, debugInfo, fmt.Errorf("codex usage failed: status %d: %s", resp.StatusCode, compactBody(body))
 	}
 	var usage map[string]interface{}
 	if err := json.Unmarshal(body, &usage); err != nil {
-		return nil, fmt.Errorf("parse codex usage response: %w", err)
+		return nil, debugInfo, fmt.Errorf("parse codex usage response: %w", err)
 	}
 	// Debug: log codex usage response
 	logger.Debugf("relay.codex_usage", "codex usage response",
@@ -330,20 +364,48 @@ func FetchCodexUsage(accessToken, accountID string, fedramp bool) (map[string]in
 		logger.F("body_length", len(body)),
 		logger.F("body_preview", string(body[:min(500, len(body))])),
 	)
-	return usage, nil
+	return usage, debugInfo, nil
 }
 
 func compactBody(body []byte) string {
+	return compactBodyWithLimit(body, 300)
+}
+
+func compactBodyWithLimit(body []byte, limit int) string {
 	text := strings.TrimSpace(string(body))
 	text = strings.Join(strings.Fields(text), " ")
 	text = redactOAuthBody(text)
-	if len(text) > 300 {
-		return text[:300] + "..."
+	if limit > 0 && len(text) > limit {
+		return text[:limit] + "..."
 	}
 	if text == "" {
 		return "empty response"
 	}
 	return text
+}
+
+func redactedRequestHeaders(headers http.Header) map[string]string {
+	out := make(map[string]string, len(headers))
+	for key, values := range headers {
+		if strings.EqualFold(key, "Authorization") {
+			out[key] = "[redacted]"
+			continue
+		}
+		out[key] = logger.Redact(strings.Join(values, ", "))
+	}
+	return out
+}
+
+func redactedResponseHeaders(headers http.Header) map[string][]string {
+	out := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		copied := make([]string, len(values))
+		for i, value := range values {
+			copied[i] = logger.Redact(value)
+		}
+		out[key] = copied
+	}
+	return out
 }
 
 func redactOAuthBody(text string) string {

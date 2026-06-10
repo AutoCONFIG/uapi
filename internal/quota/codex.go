@@ -19,17 +19,22 @@ func (c *codexFetcher) FetchQuota(accessToken string, metadata map[string]interf
 	accountID := codexAccountID(metadata)
 	fedramp := codexFedramp(metadata)
 
-	usage, err := openai.FetchCodexUsage(accessToken, accountID, fedramp)
+	usage, debugInfo, err := openai.FetchCodexUsageWithDebug(accessToken, accountID, fedramp)
 	if err != nil {
 		if strings.Contains(err.Error(), "status 403") {
-			return &QuotaData{
+			qd := &QuotaData{
 				IsForbidden:     true,
 				ForbiddenReason: "account_forbidden",
-			}, nil
+			}
+			writeQuotaDebugDump("codex", metadata, debugInfo, qd, err)
+			return qd, nil
 		}
+		writeQuotaDebugDump("codex", metadata, debugInfo, nil, err)
 		return nil, err
 	}
-	return convertCodexUsage(usage), nil
+	qd := convertCodexUsage(usage)
+	writeQuotaDebugDump("codex", metadata, debugInfo, qd, nil)
+	return qd, nil
 }
 
 func codexAccountID(metadata map[string]interface{}) string {
