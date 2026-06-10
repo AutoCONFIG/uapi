@@ -69,6 +69,63 @@ func TestStreamAndForwardRawPreservesMultiLineSSEEvent(t *testing.T) {
 	}
 }
 
+func TestPeekStreamBootstrapErrorContinuesPastEmptyRoleChunk(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"index\":0}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"index\":0}]}\n\n"
+
+	stream, message, failed, err := peekStreamBootstrapError(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("peekStreamBootstrapError error: %v", err)
+	}
+	if failed || message != "" {
+		t.Fatalf("peekStreamBootstrapError reported failure failed=%v message=%q", failed, message)
+	}
+	got, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("read wrapped stream: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("wrapped stream did not preserve prefix\ngot:  %q\nwant: %q", string(got), body)
+	}
+}
+
+func TestPeekStreamBootstrapErrorReturnsReadErrorBeforeMeaningfulChunk(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"index\":0}]}\n\n"
+	wantErr := errors.New("empty hex number")
+
+	_, message, failed, err := peekStreamBootstrapError(&errAfterReader{data: []byte(body), err: wantErr})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("peekStreamBootstrapError error = %v, want %v", err, wantErr)
+	}
+	if failed || message != "" {
+		t.Fatalf("peekStreamBootstrapError should not classify transport read error as stream error failed=%v message=%q", failed, message)
+	}
+}
+
+func TestPeekStreamBootstrapErrorTreatsToolCallStartAsMeaningful(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]},\"index\":0}]}\n\n" +
+		"event: error\n" +
+		"data: {\"type\":\"error\",\"message\":\"late failure\"}\n\n"
+
+	if !isNonEmptyChunk([]byte(body[:strings.Index(body, "\n\n")+2])) {
+		t.Fatalf("tool call start chunk must be treated as meaningful")
+	}
+	stream, message, failed, err := peekStreamBootstrapError(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("peekStreamBootstrapError error: %v", err)
+	}
+	if failed || message != "" {
+		t.Fatalf("peekStreamBootstrapError reported failure after meaningful tool call failed=%v message=%q", failed, message)
+	}
+	got, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("read wrapped stream: %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("wrapped stream did not preserve prefix\ngot:  %q\nwant: %q", string(got), body)
+	}
+}
+
 func TestRetryableStreamingRequestErrorClassification(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1192,8 +1249,8 @@ func TestPeekStreamBootstrapErrorSkipsHeartbeatBeforeError(t *testing.T) {
 }
 
 func TestPeekStreamBootstrapErrorReplaysValidFirstEvent(t *testing.T) {
-	body := "event: message_start\n" +
-		"data: {\"type\":\"message_start\"}\n\n" +
+	body := "event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
 		"event: error\n" +
 		"data: {\"type\":\"error\",\"message\":\"late failure\"}\n\n"
 

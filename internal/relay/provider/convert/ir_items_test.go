@@ -234,6 +234,39 @@ func TestResponsesSameProtocolFlattensRawFunctionCallOutputTextBlocksForOpenAIWi
 	}
 }
 
+func TestResponsesSameProtocolPreservesRawFunctionCallOutputPDFFileBlock(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"function_call_output","call_id":"call_1","output":[
+				{"type":"input_text","text":"PDF read successfully"},
+				{"type":"input_file","filename":"paper.pdf","file_data":"data:application/pdf;base64,AA==","file_type":"application/pdf"}
+			]}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIResponses, FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	output := input[0].(map[string]interface{})
+	blocks, ok := output["output"].([]interface{})
+	if !ok {
+		t.Fatalf("function_call_output.output = %#v, want structured blocks; body=%s", output["output"], converted)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("function_call_output.output blocks = %d, want 2; body=%s", len(blocks), converted)
+	}
+	fileBlock := blocks[1].(map[string]interface{})
+	if fileBlock["type"] != "input_file" || fileBlock["file_data"] != "data:application/pdf;base64,AA==" {
+		t.Fatalf("PDF input_file block not preserved: %#v; body=%s", fileBlock, converted)
+	}
+}
+
 func TestResponsesSameProtocolNormalizeRequestUsesStandardOpenAIWire(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5",

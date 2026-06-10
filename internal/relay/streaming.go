@@ -90,8 +90,8 @@ func isNonEmptyChunk(sseData []byte) bool {
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content   *string `json:"content"`
-				ToolCalls *string `json:"tool_calls"`
+				Content   *string         `json:"content"`
+				ToolCalls json.RawMessage `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
@@ -108,11 +108,14 @@ func isNonEmptyChunk(sseData []byte) bool {
 		if c.Delta.Content != nil && *c.Delta.Content != "" {
 			return true
 		}
-		if c.Delta.ToolCalls != nil && *c.Delta.ToolCalls != "null" && *c.Delta.ToolCalls != "" {
+		if len(bytes.TrimSpace(c.Delta.ToolCalls)) > 0 && !bytes.Equal(bytes.TrimSpace(c.Delta.ToolCalls), []byte("null")) {
 			return true
 		}
 	}
 	if len(chunk.Usage) > 0 {
+		return true
+	}
+	if estimateStreamOutputTokens(payload) > 0 {
 		return true
 	}
 	return false
@@ -633,10 +636,11 @@ func streamAndForwardWithTrace(
 	emptyStream := nonDonePayloads == 0 && (sawDone || sawTerminal)
 	// Detect empty response: stream finalized with max_tokens but produced no content.
 	// Reference: bifrost EmptyResponseCondition + IncompleteStreamCondition.
-	if (sawDone || sawTerminal) && ct == 0 && nonDonePayloads > 0 {
+	if (sawDone || sawTerminal) && ct == 0 && tracker.EstimatedOutputTokens() == 0 && nonDonePayloads > 0 {
 		if trace != nil {
 			trace.Event("stream_empty_response_detected",
 				logger.F("completion_tokens", ct),
+				logger.F("estimated_output_tokens", tracker.EstimatedOutputTokens()),
 				logger.F("non_done_payloads", nonDonePayloads),
 				logger.F("saw_done", sawDone),
 				logger.F("saw_terminal", sawTerminal),
@@ -682,7 +686,14 @@ func peekStreamBootstrapError(bodyStream io.Reader) (io.Reader, string, bool, er
 				if message, ok := streamErrorMessage(normalized); ok {
 					return wrapped(), message, true, nil
 				}
-				return wrapped(), "", false, nil
+				if isNonEmptyChunk(normalized) || streamHasTerminalEvent(normalized) || streamSawChatFinish(normalized) {
+					return wrapped(), "", false, nil
+				}
+				skippedEvents++
+				if skippedEvents >= sseBootstrapMaxSkippedEvents {
+					return wrapped(), "", false, nil
+				}
+				continue
 			}
 			skippedEvents++
 			if skippedEvents >= sseBootstrapMaxSkippedEvents {
