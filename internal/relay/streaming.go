@@ -612,7 +612,7 @@ func streamAndForwardWithTrace(
 		trace.Event("stream_done_injected",
 			streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, 0, logger.F("send_ok", ok))...,
 		)
-		sawDone = sawChatFinish || sawTerminal
+		sawDone = ok || sawChatFinish || sawTerminal
 	} else if !sendDone && !sawDone && outputConvert != nil && (sawTerminal || sawChatFinish) {
 		if converted := outputConvert([]byte("data: [DONE]\n\n")); converted != nil {
 			ok := reader.Send(converted)

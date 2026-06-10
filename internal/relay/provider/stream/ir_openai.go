@@ -1074,7 +1074,7 @@ func irFinishToChat(finish *relayir.Finish) interface{} {
 	if finish == nil {
 		return nil
 	}
-	if finish.NativeReason != "" {
+	if isChatFinishReason(finish.NativeReason) {
 		return finish.NativeReason
 	}
 	switch finish.Reason {
@@ -1086,6 +1086,15 @@ func irFinishToChat(finish *relayir.Finish) interface{} {
 		return "content_filter"
 	default:
 		return "stop"
+	}
+}
+
+func isChatFinishReason(reason string) bool {
+	switch reason {
+	case "stop", "length", "tool_calls", "function_call", "content_filter":
+		return true
+	default:
+		return false
 	}
 }
 

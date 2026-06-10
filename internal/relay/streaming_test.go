@@ -615,6 +615,56 @@ func TestStreamAndForwardConvertedResponsesToChatSendsDone(t *testing.T) {
 	}
 }
 
+func TestStreamAndForwardConvertedGeminiCodeToChatTerminal(t *testing.T) {
+	body := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":3},"modelVersion":"gemini-test"}}` + "\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := newStreamConverterFunc(provider.FormatGeminiCode, provider.FormatOpenAIChatCompletions)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, true)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed {
+		t.Fatalf("Gemini Code to Chat stream must finalize successfully: %+v\n%s", result, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("Gemini STOP must map to Chat stop, got:\n%s", got)
+	}
+	if !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("converted Gemini Chat SSE must include [DONE], got:\n%s", got)
+	}
+}
+
+func TestStreamAndForwardSendDoneFinalizesConvertedChatStream(t *testing.T) {
+	body := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-test"}}` + "\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	outputConvert := newStreamConverterFunc(provider.FormatGeminiCode, provider.FormatOpenAIChatCompletions)
+	go func() {
+		done <- streamAndForward(strings.NewReader(body), reader, newStreamTracker(testUsageParser{}), nil, outputConvert, true)
+	}()
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	result := <-done
+	if !result.finalized || result.failed {
+		t.Fatalf("injected [DONE] must finalize converted Chat stream: %+v\n%s", result, out)
+	}
+	if !strings.Contains(string(out), "data: [DONE]") {
+		t.Fatalf("converted Chat SSE must include injected [DONE], got:\n%s", out)
+	}
+}
+
 func TestStreamAndForwardConvertedDoneOnlyMarksEmptyStream(t *testing.T) {
 	body := "data: [DONE]\n\n"
 
