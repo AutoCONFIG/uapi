@@ -141,6 +141,9 @@ func modelQuotaExhausted(acc *db.Account, model string) bool {
 	if len(buckets) == 0 {
 		return false
 	}
+	if codexQuotaExhausted(acc, buckets) {
+		return true
+	}
 
 	hasMatchingBucket := false
 	for _, b := range buckets {
@@ -168,6 +171,77 @@ func modelQuotaExhausted(acc *db.Account, model string) bool {
 		}
 	}
 	_ = hasMatchingBucket
+	return false
+}
+
+func codexQuotaExhausted(acc *db.Account, buckets []modelQuotaBucket) bool {
+	if !isCodexQuotaAccount(acc) {
+		return false
+	}
+	for _, b := range buckets {
+		if !strings.Contains(strings.ToLower(b.label), "codex") {
+			continue
+		}
+		if b.remaining <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func codexQuotaSkipDebug(acc *db.Account) map[string]interface{} {
+	if acc == nil || acc.Metadata == nil || !isCodexQuotaAccount(acc) {
+		return nil
+	}
+	buckets := extractQuotaBuckets(acc.Metadata["quota"])
+	if len(buckets) == 0 {
+		return nil
+	}
+	exhausted := make([]map[string]interface{}, 0)
+	for _, b := range buckets {
+		if !strings.Contains(strings.ToLower(b.label), "codex") || b.remaining > 0 {
+			continue
+		}
+		exhausted = append(exhausted, map[string]interface{}{
+			"label":             b.label,
+			"remaining_percent": b.remaining,
+		})
+	}
+	if len(exhausted) == 0 {
+		return nil
+	}
+	item := map[string]interface{}{
+		"account_id":        acc.ID.String(),
+		"account_name":      acc.Name,
+		"reason":            "codex_quota_exhausted",
+		"exhausted_buckets": exhausted,
+	}
+	if value, ok := acc.Metadata["chatgpt_account_id"].(string); ok && strings.TrimSpace(value) != "" {
+		item["chatgpt_account_id"] = strings.TrimSpace(value)
+	}
+	if value, ok := acc.Metadata["chatgpt_plan_type"].(string); ok && strings.TrimSpace(value) != "" {
+		item["chatgpt_plan_type"] = strings.TrimSpace(value)
+	}
+	return item
+}
+
+func isCodexQuotaAccount(acc *db.Account) bool {
+	if acc == nil || acc.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"oauth_provider", "auth_mode"} {
+		if value, ok := acc.Metadata[key].(string); ok && strings.EqualFold(strings.TrimSpace(value), "codex") {
+			return true
+		}
+	}
+	if value, ok := acc.Metadata["auth_mode"].(string); ok && strings.EqualFold(strings.TrimSpace(value), "chatgpt") {
+		if _, hasPlan := acc.Metadata["chatgpt_plan_type"]; hasPlan {
+			return true
+		}
+	}
+	if _, ok := acc.Metadata["chatgpt_account_id"]; ok {
+		return true
+	}
 	return false
 }
 
@@ -289,6 +363,41 @@ func (p *AccountPool) PickByIDForModel(accountID string, model string) (*db.Acco
 		return p.accounts[i].Account, true
 	}
 	return nil, false
+}
+
+func (p *AccountPool) QuotaSkipDebugForModel(model string, excluded map[string]bool) []map[string]interface{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]map[string]interface{}, 0)
+	for i := range p.accounts {
+		acc := p.accounts[i].Account
+		if acc == nil || p.accounts[i].Weight <= 0 {
+			continue
+		}
+		if excluded != nil && excluded[acc.ID.String()] {
+			continue
+		}
+		if item := codexQuotaSkipDebug(acc); item != nil {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func (p *AccountPool) QuotaSkipDebugForAccount(accountID string) []map[string]interface{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range p.accounts {
+		acc := p.accounts[i].Account
+		if acc == nil || acc.ID.String() != accountID {
+			continue
+		}
+		if item := codexQuotaSkipDebug(acc); item != nil {
+			return []map[string]interface{}{item}
+		}
+		return nil
+	}
+	return nil
 }
 
 func (p *AccountPool) AvailableCount() int {

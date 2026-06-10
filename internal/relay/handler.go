@@ -2368,10 +2368,12 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
 							attempt["selected"] = true
 							attempt["account_id"] = acc.ID.String()
+							r.attachQuotaSkipDebug(attempt, &ch, model, nil)
 							appendRouteAttempt(attempts, attempt)
 							return &ch, acc, adaptor, creds, nil
 						} else {
 							attempt["skip_reason"] = err.Error()
+							r.attachQuotaSkipDebug(attempt, &ch, model, nil)
 						}
 					} else if !modelOK {
 						attempt["skip_reason"] = "unsupported_model"
@@ -2404,10 +2406,12 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 			if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 				attempt["selected"] = true
 				attempt["account_id"] = acc.ID.String()
+				r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 				appendRouteAttempt(attempts, attempt)
 				return &channels[i], acc, adaptor, creds, nil
 			} else {
 				attempt["skip_reason"] = err.Error()
+				r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 			}
 			appendRouteAttempt(attempts, attempt)
 		}
@@ -2449,10 +2453,12 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 		if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 			attempt["selected"] = true
 			attempt["account_id"] = acc.ID.String()
+			r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 			appendRouteAttempt(attempts, attempt)
 			return &channels[i], acc, adaptor, creds, nil
 		} else {
 			attempt["skip_reason"] = err.Error()
+			r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 		}
 		appendRouteAttempt(attempts, attempt)
 	}
@@ -2531,7 +2537,7 @@ func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) 
 }
 
 func compactRouteAttempt(attempt map[string]interface{}) map[string]interface{} {
-	keys := []string{"source", "channel_id", "account_id", "affinity_account_id", "name", "type", "api_format", "priority", "weight", "supports_model", "supports_capability", "skip_reason", "selected"}
+	keys := []string{"source", "channel_id", "account_id", "affinity_account_id", "name", "type", "api_format", "priority", "weight", "supports_model", "supports_capability", "skip_reason", "account_skip_reasons", "selected"}
 	out := make(map[string]interface{}, len(keys))
 	for _, key := range keys {
 		if value, ok := attempt[key]; ok {
@@ -2539,6 +2545,20 @@ func compactRouteAttempt(attempt map[string]interface{}) map[string]interface{} 
 		}
 	}
 	return out
+}
+
+func (r *Relayer) attachQuotaSkipDebug(attempt map[string]interface{}, ch *db.Channel, model string, excluded map[string]bool) {
+	if attempt == nil || r == nil || r.pools == nil || ch == nil {
+		return
+	}
+	pool := poolFromChannel(r.pools, ch)
+	if pool == nil {
+		return
+	}
+	items := pool.QuotaSkipDebugForModel(model, excluded)
+	if len(items) > 0 {
+		attempt["account_skip_reasons"] = items
+	}
 }
 
 func splitRouteScope(scope string) (string, string) {
