@@ -58,10 +58,12 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 		limits = rl
 	}
 
-	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary_window"), "Codex 5小时窗口"), mapValue(limits, "primary_window"))
-	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary_window"), "Codex 每周窗口"), mapValue(limits, "secondary_window"))
-	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary"), "Codex 5小时窗口"), mapValue(limits, "primary"))
-	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary"), "Codex 每周窗口"), mapValue(limits, "secondary"))
+	planType := firstString(raw, "plan_type", "planType", "tier", "account_plan", "accountPlan")
+	primaryExhausted := codexPrimaryWindowExhausted(limits, planType)
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary_window"), codexPrimaryWindowFallbackLabel(planType)), mapValue(limits, "primary_window"), primaryExhausted)
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary_window"), "Codex 每周窗口"), mapValue(limits, "secondary_window"), false)
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "primary"), codexPrimaryWindowFallbackLabel(planType)), mapValue(limits, "primary"), primaryExhausted)
+	addCodexWindow(qd, codexWindowDisplayLabel(mapValue(limits, "secondary"), "Codex 每周窗口"), mapValue(limits, "secondary"), false)
 	if len(qd.Buckets) == 0 {
 		collectCodexWindows(qd, "", limits)
 		normalizeCodexWindowLabels(qd)
@@ -80,18 +82,18 @@ func convertCodexUsage(raw map[string]interface{}) *QuotaData {
 		}
 	}
 
-	if planType := firstString(raw, "plan_type", "planType", "tier", "account_plan", "accountPlan"); planType != "" {
+	if planType != "" {
 		qd.Tier = planType
 	}
 
 	return qd
 }
 
-func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}) {
+func addCodexWindow(qd *QuotaData, label string, window map[string]interface{}, forceExhausted bool) {
 	if window == nil {
 		return
 	}
-	if remainingPct := codexRemainingPercent(window); remainingPct != nil {
+	if remainingPct := codexRemainingPercent(window, forceExhausted); remainingPct != nil {
 		if quotaBucketExists(qd, label) {
 			return
 		}
@@ -109,7 +111,7 @@ func collectCodexWindows(qd *QuotaData, prefix string, m map[string]interface{})
 	if m == nil {
 		return
 	}
-	if remainingPct := codexRemainingPercent(m); remainingPct != nil {
+	if remainingPct := codexRemainingPercent(m, false); remainingPct != nil {
 		label := firstString(m, "label", "name", "model", "model_id", "modelId", "window")
 		if label == "" {
 			label = prefix
@@ -187,6 +189,17 @@ func codexWindowDisplayLabel(window map[string]interface{}, fallback string) str
 	return fallback
 }
 
+func codexPrimaryWindowFallbackLabel(planType string) string {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "free":
+		return "Codex 额度"
+	case "plus", "pro", "team", "enterprise", "business", "edu":
+		return "Codex 5小时窗口"
+	default:
+		return "Codex 5小时窗口"
+	}
+}
+
 func codexWindowDurationLabel(window map[string]interface{}) string {
 	seconds := firstFloat(window, "limit_window_seconds", "limitWindowSeconds", "window_seconds", "windowSeconds")
 	if seconds == nil || *seconds <= 0 {
@@ -242,30 +255,93 @@ func quotaBucketExists(qd *QuotaData, label string) bool {
 	return false
 }
 
-func codexRemainingPercent(m map[string]interface{}) *int {
+func codexRemainingPercent(m map[string]interface{}, forceExhausted bool) *int {
 	if v := firstFloat(m, "remaining_percent", "remainingPercent", "remaining_percentage", "remainingPercentage"); v != nil {
 		pct := int(*v)
+		if forceExhausted && pct >= 100 {
+			pct = 0
+		}
 		return &pct
 	}
 	if v := firstFloat(m, "remaining_fraction", "remainingFraction"); v != nil {
 		pct := int(*v * 100)
+		if forceExhausted && pct >= 100 {
+			pct = 0
+		}
 		return &pct
 	}
-	if v := firstFloat(m, "used_percent", "usedPercent", "used_percentage", "usedPercentage", "utilization"); v != nil {
+	if v := firstFloat(m, "used_percent", "usedPercent", "used_percentage", "usedPercentage"); v != nil {
+		used := *v
+		pct := 100 - int(used)
+		if forceExhausted && pct >= 100 {
+			pct = 0
+		}
+		return &pct
+	}
+	if v := firstFloat(m, "utilization"); v != nil {
 		used := *v
 		if used <= 1 {
 			used *= 100
 		}
 		pct := 100 - int(used)
+		if forceExhausted && pct >= 100 {
+			pct = 0
+		}
 		return &pct
 	}
 	limit := firstFloat(m, "limit", "total", "quota", "max")
 	used := firstFloat(m, "used", "usage", "consumed")
 	if limit != nil && used != nil && *limit > 0 {
 		pct := int(((*limit - *used) / *limit) * 100)
+		if forceExhausted && pct >= 100 {
+			pct = 0
+		}
+		return &pct
+	}
+	if forceExhausted {
+		pct := 0
 		return &pct
 	}
 	return nil
+}
+
+func codexPrimaryWindowExhausted(limits map[string]interface{}, planType string) bool {
+	if !codexPrimaryWindowIsFiveHour(limits, planType) {
+		return false
+	}
+	if codexWindowClearlyExhausted(mapValue(limits, "secondary_window")) || codexWindowClearlyExhausted(mapValue(limits, "secondary")) {
+		return false
+	}
+	if v, ok := limits["limit_reached"].(bool); ok && v {
+		return true
+	}
+	if v, ok := limits["allowed"].(bool); ok && !v {
+		return true
+	}
+	return false
+}
+
+func codexWindowClearlyExhausted(window map[string]interface{}) bool {
+	remainingPct := codexRemainingPercent(window, false)
+	return remainingPct != nil && *remainingPct <= 0
+}
+
+func codexPrimaryWindowIsFiveHour(limits map[string]interface{}, planType string) bool {
+	primary := mapValue(limits, "primary_window")
+	if primary == nil {
+		primary = mapValue(limits, "primary")
+	}
+	if label := codexWindowDurationLabel(primary); label != "" {
+		return label == "5小时窗口"
+	}
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "plus", "pro", "team", "enterprise", "business", "edu":
+		return true
+	case "free":
+		return false
+	default:
+		return true
+	}
 }
 
 func codexResetTime(m map[string]interface{}) string {
