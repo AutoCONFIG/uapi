@@ -199,6 +199,46 @@ func TestAccountPoolInFlightBeginEnd(t *testing.T) {
 	}
 }
 
+func TestAccountPoolCooldownExtensionDoesNotRestoreEarly(t *testing.T) {
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{acc})
+
+	pool.CooldownUntil(acc.ID.String(), time.Now().Add(20*time.Millisecond))
+	pool.CooldownUntil(acc.ID.String(), time.Now().Add(120*time.Millisecond))
+	time.Sleep(50 * time.Millisecond)
+
+	if _, ok := pool.PickByID(acc.ID.String()); ok {
+		t.Fatalf("account restored before extended cooldown expired")
+	}
+	if acc.CooldownUntil == nil || time.Until(*acc.CooldownUntil) <= 0 {
+		t.Fatalf("extended cooldown missing or expired too early: %v", acc.CooldownUntil)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if _, ok := pool.PickByID(acc.ID.String()); !ok {
+		t.Fatalf("account did not restore after extended cooldown expired")
+	}
+	if acc.CooldownUntil != nil {
+		t.Fatalf("CooldownUntil = %v, want nil after restore", acc.CooldownUntil)
+	}
+}
+
+func TestCooldownAndEvictDoesNotShortenExistingCooldown(t *testing.T) {
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, Type: "openai", APIFormat: "standard"}
+	later := time.Now().Add(time.Hour)
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1, CooldownUntil: &later}
+	pool := NewAccountPool([]*db.Account{acc})
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	relayer := &Relayer{pools: pools, affinity: NewAffinityCache()}
+
+	relayer.cooldownAndEvict(ch, acc, time.Minute)
+
+	if acc.CooldownUntil == nil || !acc.CooldownUntil.Equal(later) {
+		t.Fatalf("CooldownUntil = %v, want unchanged later cooldown %v", acc.CooldownUntil, later)
+	}
+}
+
 func TestPoolManagerSetPoolPreservesAndReleasesInFlight(t *testing.T) {
 	ch := &db.Channel{Base: db.Base{ID: uuid.New()}}
 	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1}
@@ -217,6 +257,27 @@ func TestPoolManagerSetPoolPreservesAndReleasesInFlight(t *testing.T) {
 	release()
 	if got := newPool.InFlight(acc.ID.String()); got != 0 {
 		t.Fatalf("released replacement pool in-flight = %d, want 0", got)
+	}
+}
+
+func TestPoolManagerSetPoolPreservesRuntimeCooldown(t *testing.T) {
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}}
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1}
+	pm := NewPoolManager()
+	oldPool := NewAccountPool([]*db.Account{acc})
+	pm.SetPool(ch.ID.String(), oldPool)
+	oldPool.CooldownUntil(acc.ID.String(), time.Now().Add(80*time.Millisecond))
+
+	replacementAcc := &db.Account{Base: db.Base{ID: acc.ID}, ChannelID: ch.ID, Enabled: true, Weight: 1}
+	newPool := NewAccountPool([]*db.Account{replacementAcc})
+	pm.SetPool(ch.ID.String(), newPool)
+
+	if _, ok := newPool.PickByID(acc.ID.String()); ok {
+		t.Fatalf("replacement pool lost runtime cooldown")
+	}
+	time.Sleep(120 * time.Millisecond)
+	if _, ok := newPool.PickByID(acc.ID.String()); !ok {
+		t.Fatalf("replacement pool did not restore account after preserved cooldown expired")
 	}
 }
 

@@ -3625,6 +3625,9 @@ func (r *Relayer) cooldownAndEvict(ch *db.Channel, acc *db.Account, duration tim
 		return
 	}
 	until := time.Now().Add(duration)
+	if acc.CooldownUntil != nil && acc.CooldownUntil.After(until) {
+		until = *acc.CooldownUntil
+	}
 	if r.pools != nil {
 		if pool, ok := r.pools.GetPool(ch.ID.String()); ok {
 			pool.CooldownUntil(acc.ID.String(), until)

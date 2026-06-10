@@ -407,6 +407,22 @@ func (p *AccountPool) snapshotInFlight() map[string]int {
 	return out
 }
 
+func (p *AccountPool) snapshotCooldowns(now time.Time) map[string]time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]time.Time, len(p.accounts))
+	for i := range p.accounts {
+		if p.accounts[i].Account == nil || p.accounts[i].Account.CooldownUntil == nil {
+			continue
+		}
+		if !p.accounts[i].Account.CooldownUntil.After(now) {
+			continue
+		}
+		out[p.accounts[i].Account.ID.String()] = *p.accounts[i].Account.CooldownUntil
+	}
+	return out
+}
+
 func (p *AccountPool) restoreInFlight(inFlight map[string]int) {
 	if len(inFlight) == 0 {
 		return
@@ -418,6 +434,12 @@ func (p *AccountPool) restoreInFlight(inFlight map[string]int) {
 			continue
 		}
 		p.accounts[i].InFlight = inFlight[p.accounts[i].Account.ID.String()]
+	}
+}
+
+func (p *AccountPool) restoreCooldowns(cooldowns map[string]time.Time) {
+	for accountID, until := range cooldowns {
+		p.CooldownUntil(accountID, until)
 	}
 }
 
@@ -524,12 +546,14 @@ func (p *AccountPool) CooldownUntil(accountID string, until time.Time) {
 	defer p.mu.Unlock()
 	for i := range p.accounts {
 		if p.accounts[i].Account.ID.String() == accountID {
-			if p.accounts[i].Weight == 0 {
-				return // already cooled down, skip
+			if current := p.accounts[i].Account.CooldownUntil; current != nil && current.After(until) {
+				until = *current
 			}
-			p.totalWeight -= p.accounts[i].Weight
-			p.accounts[i].Weight = 0
-			p.accounts[i].CurrentWeight = 0
+			if p.accounts[i].Weight > 0 {
+				p.totalWeight -= p.accounts[i].Weight
+				p.accounts[i].Weight = 0
+				p.accounts[i].CurrentWeight = 0
+			}
 			p.accounts[i].Account.CooldownUntil = &until
 			cooldownID := p.accounts[i].Account.ID.String()
 			cooldownWeight := p.accounts[i].OriginalWeight
@@ -545,9 +569,13 @@ func (p *AccountPool) CooldownUntil(accountID string, until time.Time) {
 				}
 				for j := range p.accounts {
 					if p.accounts[j].Account.ID.String() == cooldownID {
+						if until := p.accounts[j].Account.CooldownUntil; until != nil && time.Now().Before(*until) {
+							return
+						}
 						if !p.accounts[j].Account.Enabled || p.accounts[j].Weight > 0 {
 							return
 						}
+						p.accounts[j].Account.CooldownUntil = nil
 						p.accounts[j].Weight = cooldownWeight
 						p.totalWeight += cooldownWeight
 						break
@@ -610,6 +638,8 @@ func (pm *PoolManager) SetPool(channelID string, pool *AccountPool) {
 	defer pm.mu.Unlock()
 	if existing, ok := pm.pools[channelID]; ok && existing != nil && pool != nil {
 		pool.restoreInFlight(existing.snapshotInFlight())
+		pool.restoreCooldowns(existing.snapshotCooldowns(time.Now()))
+		existing.Close()
 	}
 	pm.pools[channelID] = pool
 }

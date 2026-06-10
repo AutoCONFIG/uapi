@@ -39,6 +39,7 @@ func TestClassifyUpstreamError_AccountSide(t *testing.T) {
 		{"402 payment required", 402, `{"error":"insufficient_quota"}`},
 		{"429 rate limit", 429, `{"error":"rate_limit_exceeded"}`},
 		{"403 forbidden generic", 403, `{"error":"forbidden"}`},
+		{"403 banned content policy", 403, `{"error":{"message":"banned content policy violation"}}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -110,6 +111,7 @@ func TestClassifyUpstreamError_ClientSide(t *testing.T) {
 		{"404 without model keyword", 404, `{"error":"route not found"}`},
 		{"405 method not allowed", 405, ``},
 		{"413 payload too large", 413, ``},
+		{"400 invalidated request", 400, `{"error":{"message":"request invalidated by client state"}}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
