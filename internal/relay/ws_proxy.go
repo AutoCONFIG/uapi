@@ -33,6 +33,7 @@ func (h *WSHandler) tryNativeUpstream(
 	estTokens int,
 	tokenPlanID uuid.UUID,
 	start time.Time,
+	forceAffinity bool,
 ) bool {
 	endpoint := strings.TrimSuffix(upstreamconfig.AccountEndpoint(ch, acc), "/")
 	upstreamPath := "/v1/responses"
@@ -104,7 +105,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 	upstreamConn.conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
-	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout, forwardMsg, releaseAccountAttempt)
+	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout, forwardMsg, releaseAccountAttempt, forceAffinity)
 
 	return true
 }
@@ -124,6 +125,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 	idleTimeout time.Duration,
 	requestBody []byte,
 	releaseAccountAttempt func(),
+	forceAffinity bool,
 ) {
 	defer func() {
 		if releaseAccountAttempt != nil {
@@ -214,9 +216,7 @@ func (h *WSHandler) proxyUpstreamToClient(
 			cacheReadTokens := extractStreamCacheReadTokens(msg)
 			estimateMissingUsage(&promptTokens, &completionTokens, wsCreateToHTTPBody(requestBody), msg, 0)
 			h.settleBilling(sess.tokenID, tokenPlanID, estTokens, promptTokens, completionTokens, model, cacheCreationTokens, cacheReadTokens)
-			if ch.AffinityTTL > 0 {
-				h.relayer.affinity.Set(sess.tokenID, model, sess.id, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
-			}
+			h.relayer.recordSuccessfulAffinity(sess.tokenID, model, sess.id, ch, acc, forceAffinity)
 			h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, promptTokens, completionTokens, start, 200, cacheCreationTokens, cacheReadTokens)
 			h.upstream.Put(upstreamConn)
 			return

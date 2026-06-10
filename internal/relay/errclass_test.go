@@ -107,6 +107,7 @@ func TestClassifyUpstreamError_ClientSide(t *testing.T) {
 		body       string
 	}{
 		{"400 bad request", 400, `{"error":"bad request"}`},
+		{"400 invalid api key text is client error", 400, `{"error":{"message":"invalid api key field in request body"}}`},
 		{"422 unprocessable", 422, `{"error":"invalid params"}`},
 		{"404 without model keyword", 404, `{"error":"route not found"}`},
 		{"405 method not allowed", 405, ``},
@@ -149,6 +150,7 @@ func TestIsTerminalAuthError(t *testing.T) {
 		{500, `{"error":"server"}`},
 		{401, `{"error":"temporarily unavailable"}`},
 		{402, `{"error":"quota exhausted"}`}, // 配额，不是终态
+		{400, `{"error":{"message":"invalid api key field in request body"}}`},
 	}
 	for _, c := range nonTerminalCases {
 		if IsTerminalAuthError(c.statusCode, []byte(c.body)) {

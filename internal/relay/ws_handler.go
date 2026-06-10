@@ -332,11 +332,14 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	}
 
 	// Resolve channel and account (reuse relayer logic)
-	ch, account, adaptor, creds, err := h.relayer.resolveChannelAndAccountWithAttempts(sess.tokenID, model, sess.id, nil)
+	var routeAttempts []map[string]interface{}
+	ch, account, adaptor, creds, err := h.relayer.resolveChannelAndAccountWithAttempts(sess.tokenID, model, sess.id, &routeAttempts)
 	if err != nil {
 		WriteWSErrorSession(sess, 404, "no_channel", err.Error())
 		return
 	}
+	routeAdminInfo := routeLogAdminInfo(sess.id, routeAttempts)
+	forceAffinity := hasAffinityYielded(routeAdminInfo) || hasAffinitySelectionFailed(routeAdminInfo)
 
 	// Per-turn billing (after successful channel resolution)
 	estTokens := EstimateTokensFromCreateEvent(msg)
@@ -363,14 +366,14 @@ func (h *WSHandler) handleResponseCreate(sess *Session, msg []byte) {
 	// Decide: native WS upstream or HTTP bridge
 	// Native WS only for OpenAI Responses format channels
 	if ch.Type == "openai" && ch.APIFormat == "responses" {
-		if h.tryNativeUpstream(sess, msg, ch, account, creds, model, estTokens, tokenPlanID, start) {
+		if h.tryNativeUpstream(sess, msg, ch, account, creds, model, estTokens, tokenPlanID, start, forceAffinity) {
 			releaseTurn = false
 			return
 		}
 	}
 
 	// Fallback: HTTP-SSE bridge
-	if h.httpBridgeFallback(sess, msg, ch, account, adaptor, creds, model, estTokens, tokenPlanID, start) {
+	if h.httpBridgeFallback(sess, msg, ch, account, adaptor, creds, model, estTokens, tokenPlanID, start, forceAffinity) {
 		releaseTurn = false
 	}
 }

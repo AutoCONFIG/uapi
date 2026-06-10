@@ -8,6 +8,9 @@ import (
 )
 
 func terminalAccountDisableReason(statusCode int, body []byte) (string, bool) {
+	if !isTerminalAuthStatus(statusCode) {
+		return "", false
+	}
 	fields := collectErrorFields(body)
 	if boolField(fields, "is_forbidden") || boolField(fields, "_forbidden") || boolField(fields, "quota.is_forbidden") {
 		reason := stringField(fields, "_forbidden_reason")

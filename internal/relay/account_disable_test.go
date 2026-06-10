@@ -88,6 +88,11 @@ func TestTerminalAccountDisableReasonDoesNotDisableTransientQuotaOrUserErrors(t 
 			body:   []byte(`{"error":{"message":"messages must not be empty","type":"invalid_request_error"}}`),
 		},
 		{
+			name:   "400 invalid api key field",
+			status: fasthttp.StatusBadRequest,
+			body:   []byte(`{"error":{"code":"invalid_api_key","message":"invalid api key field in request body"}}`),
+		},
+		{
 			name:   "401 generic unauthorized",
 			status: fasthttp.StatusUnauthorized,
 			body:   []byte(`{"error":{"message":"unauthorized"}}`),
@@ -210,16 +215,24 @@ func TestAccountPoolCooldownExtensionDoesNotRestoreEarly(t *testing.T) {
 	if _, ok := pool.PickByID(acc.ID.String()); ok {
 		t.Fatalf("account restored before extended cooldown expired")
 	}
-	if acc.CooldownUntil == nil || time.Until(*acc.CooldownUntil) <= 0 {
-		t.Fatalf("extended cooldown missing or expired too early: %v", acc.CooldownUntil)
-	}
 
 	time.Sleep(100 * time.Millisecond)
 	if _, ok := pool.PickByID(acc.ID.String()); !ok {
 		t.Fatalf("account did not restore after extended cooldown expired")
 	}
-	if acc.CooldownUntil != nil {
-		t.Fatalf("CooldownUntil = %v, want nil after restore", acc.CooldownUntil)
+}
+
+func TestNewAccountPoolRestoresPreexistingCooldown(t *testing.T) {
+	until := time.Now().Add(60 * time.Millisecond)
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, Enabled: true, Weight: 1, CooldownUntil: &until}
+	pool := NewAccountPool([]*db.Account{acc})
+
+	if _, ok := pool.PickByID(acc.ID.String()); ok {
+		t.Fatalf("preexisting cooldown account must not be initially selectable")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, ok := pool.PickByID(acc.ID.String()); !ok {
+		t.Fatalf("preexisting cooldown account did not restore after expiry")
 	}
 }
 

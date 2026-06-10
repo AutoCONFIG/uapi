@@ -37,6 +37,7 @@ func NewAccountPool(accounts []*db.Account) *AccountPool {
 	p := &AccountPool{}
 	wa := make([]WeightedAccount, len(accounts))
 	total := 0
+	cooldowns := make(map[string]time.Time)
 	for i, acc := range accounts {
 		w := acc.Weight
 		if !acc.Enabled {
@@ -44,6 +45,7 @@ func NewAccountPool(accounts []*db.Account) *AccountPool {
 		}
 		if acc.CooldownUntil != nil && time.Now().Before(*acc.CooldownUntil) {
 			w = 0
+			cooldowns[acc.ID.String()] = *acc.CooldownUntil
 		}
 		wa[i] = WeightedAccount{
 			Account:        acc,
@@ -55,6 +57,7 @@ func NewAccountPool(accounts []*db.Account) *AccountPool {
 	}
 	p.accounts = wa
 	p.totalWeight = total
+	p.restoreCooldowns(cooldowns)
 	return p
 }
 

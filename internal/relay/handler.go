@@ -3993,7 +3993,6 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 		headerAffinityScope(ctx, "Session-Id", "codex"),
 		headerAffinityScope(ctx, "Session_id", "codex"),
 		headerAffinityScope(ctx, "X-Amp-Thread-Id", "amp"),
-		headerAffinityScope(ctx, "X-Client-Request-Id", "clientreq"),
 		headerAffinityScope(ctx, "Thread-Id", "thread"),
 		requestJSONSessionValue(body),
 	} {
@@ -4048,11 +4047,6 @@ func requestJSONSessionValue(body []byte) string {
 			for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation_id", "conversationId"} {
 				if value := stringFromJSONValue(nested[key]); value != "" {
 					return nestedKey + ":" + key + ":" + value
-				}
-			}
-			if nestedKey == "metadata" {
-				if value := stringFromJSONValue(nested["user_id"]); value != "" {
-					return "user:" + value
 				}
 			}
 		}

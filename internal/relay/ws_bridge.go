@@ -29,6 +29,7 @@ func (h *WSHandler) httpBridgeFallback(
 	estTokens int,
 	tokenPlanID uuid.UUID,
 	start time.Time,
+	forceAffinity bool,
 ) bool {
 	body := wsCreateToHTTPBody(msg)
 	currentAccount := acc
@@ -197,7 +198,7 @@ func (h *WSHandler) httpBridgeFallback(
 			return false
 		}
 
-		go h.bridgeSSEToWS(sess, upReq, upResp, peekedBodyStream, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body, releaseAccountAttempt)
+		go h.bridgeSSEToWS(sess, upReq, upResp, peekedBodyStream, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body, releaseAccountAttempt, forceAffinity || attempt > 0)
 		return true
 	}
 
@@ -255,6 +256,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	start time.Time,
 	requestBody []byte,
 	releaseAccountAttempt func(),
+	forceAffinity bool,
 ) {
 	turnFinalized := false
 	defer func() {
@@ -449,9 +451,7 @@ func (h *WSHandler) bridgeSSEToWS(
 	}
 	estimateMissingUsage(&pt, &ct, requestBody, nil, tracker.EstimatedOutputTokens())
 	h.settleBilling(sess.tokenID, tokenPlanID, estTokens, pt, ct, model, cacheCreationTokens, cacheReadTokens)
-	if ch.AffinityTTL > 0 {
-		h.relayer.affinity.Set(sess.tokenID, model, sess.id, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
-	}
+	h.relayer.recordSuccessfulAffinity(sess.tokenID, model, sess.id, ch, acc, forceAffinity)
 	h.writeWSLog(sess.tokenID, ch.ID, acc.ID, model, pt, ct, start, 200, cacheCreationTokens, cacheReadTokens)
 	turnFinalized = true
 }

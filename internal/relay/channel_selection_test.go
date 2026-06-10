@@ -284,7 +284,7 @@ func TestRequestAffinityScopeUsesSessionIdentifiers(t *testing.T) {
 		{
 			name: "non claude metadata user id fallback",
 			body: []byte(`{"model":"claude","metadata":{"user_id":"plain-user"},"messages":[]}`),
-			want: "user:plain-user",
+			want: "",
 		},
 		{
 			name: "gemini session id",
@@ -313,6 +313,14 @@ func TestRequestAffinityScopeDoesNotUseTokenFallback(t *testing.T) {
 	var ctx fasthttp.RequestCtx
 	if got := requestAffinityScope(&ctx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "" {
 		t.Fatalf("requestAffinityScope without session = %q, want empty", got)
+	}
+}
+
+func TestRequestAffinityScopeDoesNotUseRequestIDAsSession(t *testing.T) {
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.Set("X-Client-Request-Id", "single-request")
+	if got := requestAffinityScope(&ctx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "" {
+		t.Fatalf("requestAffinityScope with request id = %q, want empty", got)
 	}
 }
 
@@ -463,6 +471,25 @@ func TestAffinityYieldForcesSuccessfulAffinityMigration(t *testing.T) {
 	}
 }
 
+func TestSuccessfulAffinityPreservesExistingWhenNotForced(t *testing.T) {
+	oldCh := &db.Channel{Base: db.Base{ID: uuid.New()}, AffinityTTL: 60}
+	oldAcc := &db.Account{Base: db.Base{ID: uuid.New()}}
+	newCh := &db.Channel{Base: db.Base{ID: uuid.New()}, AffinityTTL: 60}
+	newAcc := &db.Account{Base: db.Base{ID: uuid.New()}}
+	relayer := &Relayer{affinity: NewAffinityCache()}
+	relayer.affinity.Set("token", "model", "scope", oldCh.ID.String(), oldAcc.ID.String(), 60)
+
+	result := relayer.recordSuccessfulAffinity("token", "model", "scope", newCh, newAcc, false)
+
+	if result.Force || result.Action != "preserved_existing" {
+		t.Fatalf("recordSuccessfulAffinity = %#v, want preserved_existing without force", result)
+	}
+	gotCh, gotAcc := relayer.affinity.Get("token", "model", "scope")
+	if gotCh != oldCh.ID.String() || gotAcc != oldAcc.ID.String() {
+		t.Fatalf("affinity = (%q,%q), want existing (%q,%q)", gotCh, gotAcc, oldCh.ID.String(), oldAcc.ID.String())
+	}
+}
+
 func TestRouteSelectionErrorDistinguishesNoAccountFromNoChannel(t *testing.T) {
 	attempts := []map[string]interface{}{
 		{
@@ -512,6 +539,10 @@ func TestUpstreamAccountFailoverReason(t *testing.T) {
 
 	if reason, isQuota, ok = upstreamAccountFailoverReason(fasthttp.StatusBadRequest, []byte(`{"error":{"message":"invalid request"}}`)); ok {
 		t.Fatalf("ordinary request error failover = (%q, %v, %v), want disabled", reason, isQuota, ok)
+	}
+
+	if reason, isQuota, ok = upstreamAccountFailoverReason(fasthttp.StatusBadRequest, []byte(`{"error":{"code":"invalid_api_key","message":"invalid api key field in request body"}}`)); ok {
+		t.Fatalf("400 invalid_api_key field failover = (%q, %v, %v), want disabled", reason, isQuota, ok)
 	}
 }
 

@@ -181,7 +181,7 @@ func ClassifyUpstreamError(statusCode int, body []byte) ErrorClass {
 func IsTerminalAuthError(statusCode int, body []byte) bool {
 	// 终态关键词直接命中
 	bodyLower := lowerBody(body)
-	if len(bodyLower) > 0 && containsAny(bodyLower, terminalKeywords) {
+	if isTerminalAuthStatus(statusCode) && len(bodyLower) > 0 && containsAny(bodyLower, terminalKeywords) {
 		return true
 	}
 
@@ -194,11 +194,15 @@ func IsTerminalAuthError(statusCode int, body []byte) bool {
 	}
 	// 字段级强信号：is_forbidden / PERMISSION_DENIED / invalid_api_key
 	// 这些已在 terminalAccountDisableReason 中处理，使用一个特殊探针调用
-	if len(body) > 0 && hasStructuredTerminalSignal(body) {
+	if isTerminalAuthStatus(statusCode) && len(body) > 0 && hasStructuredTerminalSignal(body) {
 		return true
 	}
 
 	return false
+}
+
+func isTerminalAuthStatus(statusCode int) bool {
+	return statusCode == fasthttp.StatusUnauthorized || statusCode == fasthttp.StatusForbidden
 }
 
 // hasStructuredTerminalSignal 检查响应体中是否有结构化的终态字段。
