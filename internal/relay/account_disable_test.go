@@ -464,6 +464,41 @@ func TestConfigSideChannelFailoverEvictsAffinity(t *testing.T) {
 	}
 }
 
+func TestMediaTerminalAuthErrorDisablesAndEvicts(t *testing.T) {
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, Type: "openai", APIFormat: "standard"}
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1, CredType: "api_key"}
+	pool := NewAccountPool([]*db.Account{acc})
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	affinity := NewAffinityCache()
+	affinity.Set("token", "model", "scope", ch.ID.String(), acc.ID.String(), 60)
+	relayer := &Relayer{pools: pools, affinity: affinity, cooldownPolicy: NewCooldownPolicy()}
+	defer relayer.cooldownPolicy.Close()
+
+	relayer.prepareFailoverForMediaError(ch, acc, fasthttp.StatusUnauthorized, []byte(`{"error":{"code":"invalid_api_key"}}`), "model")
+
+	if acc.Enabled {
+		t.Fatalf("terminal media auth error must disable account")
+	}
+	if gotCh, gotAcc := affinity.Get("token", "model", "scope"); gotCh != "" || gotAcc != "" {
+		t.Fatalf("terminal media auth error must evict affinity, got (%q,%q)", gotCh, gotAcc)
+	}
+}
+
+func TestMediaServerErrorPreservesAffinity(t *testing.T) {
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, Type: "openai", APIFormat: "standard"}
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1, CredType: "api_key"}
+	affinity := NewAffinityCache()
+	affinity.Set("token", "model", "scope", ch.ID.String(), acc.ID.String(), 60)
+	relayer := &Relayer{affinity: affinity, channelModelBlock: NewChannelModelBlocklist(0)}
+
+	relayer.prepareFailoverForMediaError(ch, acc, fasthttp.StatusBadGateway, []byte("temporary upstream failure"), "model")
+
+	if gotCh, gotAcc := affinity.Get("token", "model", "scope"); gotCh != ch.ID.String() || gotAcc != acc.ID.String() {
+		t.Fatalf("media server error must preserve affinity, got (%q,%q)", gotCh, gotAcc)
+	}
+}
+
 func TestAffinityCacheStoresSessionScopedAccount(t *testing.T) {
 	cache := NewAffinityCache()
 	cache.Set("token-1", "gpt-5.5", "session-a", "channel-1", "account-1", 60)

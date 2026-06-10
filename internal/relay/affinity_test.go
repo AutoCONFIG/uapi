@@ -25,6 +25,23 @@ func TestSetIfAbsent_PreservesExistingEntry(t *testing.T) {
 	}
 }
 
+func TestSetIfAbsent_RefreshesExistingTTL(t *testing.T) {
+	c := NewAffinityCache()
+	c.SetIfAbsent("t", "m", "s", "ch-first", "acc-first", 60)
+	k := c.key("t", "m", "s")
+	firstExpiry := c.entries[k].expiresAt
+
+	time.Sleep(10 * time.Millisecond)
+	chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch-second", "acc-second", 60)
+
+	if !existed || chID != "ch-first" || accID != "acc-first" {
+		t.Fatalf("SetIfAbsent existing = %s/%s existed=%v, want original binding", chID, accID, existed)
+	}
+	if !c.entries[k].expiresAt.After(firstExpiry) {
+		t.Fatalf("existing affinity expiry was not refreshed: first=%s refreshed=%s", firstExpiry, c.entries[k].expiresAt)
+	}
+}
+
 func TestSetIfAbsent_SetsWhenEmpty(t *testing.T) {
 	c := NewAffinityCache()
 	chID, accID, existed := c.SetIfAbsent("t", "m", "s", "ch1", "acc1", 60)

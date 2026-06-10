@@ -504,7 +504,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 		}
 		tokenPlanID = planID
 	}
-	// Affinity is now recorded on success only (see recordSelectedAffinity calls
+	// Affinity is now recorded on success only (see recordSuccessfulAffinity calls
 	// in handleStreaming/handleBuffered completion paths). Pre-write affinity was
 	// removed to prevent zombie bindings when upstream requests fail.
 	upstreamFormat := upstreamFormatForChannel(targetChannel)
@@ -556,8 +556,36 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	)
 
 	if isMediaRequest {
+		var mediaTrace *relayDebugTrace
+		if relayDebugDumpEnabled() {
+			mediaTrace = startRelayRequestDebugDump(originalBody, body, token, targetChannel, account, claims, clientFormat, upstreamFormat, requestType, req.Model, upstreamModel, true)
+			mediaTrace.Event("route_attempts",
+				logger.F("model", req.Model),
+				logger.F("request_type", string(requestType)),
+				logger.F("attempts", routeAttempts),
+			)
+			mediaTrace.Event("route_selected",
+				logger.F("token_id", token.ID.String()),
+				logger.F("model", req.Model),
+				logger.F("routed_model", upstreamModel),
+				logger.F("stream", true),
+				logger.F("effective_stream", true),
+				logger.F("force_stream", false),
+				logger.F("client_format", string(clientFormat)),
+				logger.F("upstream_format", string(upstreamFormat)),
+				logger.F("channel_id", targetChannel.ID.String()),
+				logger.F("channel_type", targetChannel.Type),
+				logger.F("api_format", targetChannel.APIFormat),
+				logger.F("account_id", account.ID.String()),
+				logger.F("account_name", account.Name),
+				logger.F("account_cred_type", account.CredType),
+				logger.F("gateway_authenticated", gatewayAuthenticated),
+				logger.F("upstream_url", upstreamURL),
+			)
+			mediaTrace.SetRoutingInfo(routeAdminInfo)
+		}
 		streaming = true // media handler owns concurrency release on all paths
-		r.handleMediaRequest(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, upstreamModel, clientFormat, upstreamFormat, requestType, start, estimatedTokens, claims)
+		r.handleMediaRequest(ctx, token, tokenPlanID, targetChannel, account, adaptor, upstreamURL, body, creds, req.Model, upstreamModel, clientFormat, upstreamFormat, requestType, start, estimatedTokens, claims, routeAdminInfo, affinityScope, mediaTrace)
 		return
 	}
 
@@ -1512,25 +1540,33 @@ func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
 	return &channelCache{db: database, ttl: ttl}
 }
 
-func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, start time.Time, estTokens int, claims *internalauth.Claims) {
-	defer r.beginAccountAttempt(ch, acc, nil, "media")()
+func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, start time.Time, estTokens int, claims *internalauth.Claims, adminInfo map[string]interface{}, affinityScope string, trace *relayDebugTrace) {
+	defer trace.WriteRoutingInfo()
+	defer r.beginAccountAttempt(ch, acc, trace, "media")()
 	if !supportsRelayChannelRequest(ch, channelcap.AnalyzeJSON(string(requestType), body)) {
+		trace.Event("media_unsupported_request_type", logger.F("request_type", string(requestType)))
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 		return
 	}
 	responseFormat := imageResponseFormat(ctx, body)
 	if ch.APIFormat == "chatgpt_reverse" {
-		r.handleChatGPTReverseImageGeneration(ctx, token, tokenPlanID, ch, acc, adaptor, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, requestType)
+		r.handleChatGPTReverseImageGeneration(ctx, token, tokenPlanID, ch, acc, adaptor, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, requestType, adminInfo, affinityScope, trace)
 		return
 	}
 	if ch.Type == "antigravity" {
 		converted, err := antigravityImageBody(ctx, body, acc, model, requestType)
 		if err != nil {
+			trace.Event("media_request_conversion_failed", logger.Err(err))
 			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, err.Error(), claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 			return
 		}
 		body = converted
 		routedModel = routedModelFromBody(body, routedModel)
+		trace.StreamChunk("request.media.upstream.json", body)
+		trace.Event("media_request_converted",
+			logger.F("routed_model", routedModel),
+			logger.F("body_bytes", len(body)),
+		)
 	}
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
@@ -1550,18 +1586,27 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 		upReq.Header.SetBytesV("Content-Type", contentType)
 	}
 	if err := adaptor.SetupRequestHeader(upReq, creds); err != nil {
+		trace.Event("setup_headers_failed", logger.Err(err), logger.F("mode", "media"))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
+	trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("media", ch, acc, upReq)...)
 	if err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp); err != nil {
 		logger.Warnf("relay.media", "upstream media request failed", logger.F("request_type", string(requestType)), logger.Err(err))
+		trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "media"))
 		r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 		return
 	}
 	statusCode := upResp.StatusCode()
 	respBody := copyBody(upResp)
+	trace.Event("upstream_headers_received",
+		logger.F("mode", "media"),
+		logger.F("status", statusCode),
+		logger.F("body_bytes", len(respBody)),
+	)
 	if statusCode >= 400 {
 		if refreshedCreds, ok := r.refreshOAuthCredentialsAfterAuthFailure(ch, acc, statusCode, respBody); ok {
+			trace.Event("oauth_refreshed_after_upstream_error", logger.F("mode", "media"), logger.F("status", statusCode))
 			upReq.Reset()
 			upResp.Reset()
 			upReq.SetRequestURI(url)
@@ -1577,25 +1622,40 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 				upReq.Header.SetBytesV("Content-Type", contentType)
 			}
 			if err := adaptor.SetupRequestHeader(upReq, refreshedCreds); err != nil {
+				trace.Event("setup_headers_failed", logger.Err(err), logger.F("mode", "media_oauth_retry"))
 				r.refundAndError(ctx, token.ID.String(), estTokens, "setup headers failed", claims, ch, acc, model, start, tokenPlanID)
 				return
 			}
+			trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("media_oauth_retry", ch, acc, upReq)...)
 			if err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp); err != nil {
 				logger.Warnf("relay.media", "upstream media request failed after oauth refresh", logger.F("request_type", string(requestType)), logger.Err(err))
+				trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "media_oauth_retry"))
 				r.refundAndError(ctx, token.ID.String(), estTokens, "upstream error", claims, ch, acc, model, start, tokenPlanID)
 				return
 			}
 			statusCode = upResp.StatusCode()
 			respBody = copyBody(upResp)
+			trace.Event("upstream_headers_received",
+				logger.F("mode", "media_oauth_retry"),
+				logger.F("status", statusCode),
+				logger.F("body_bytes", len(respBody)),
+			)
 		}
 	}
 	if statusCode >= 400 {
+		trace.Event("media_error_classified",
+			logger.F("status", statusCode),
+			logger.F("class", ClassifyUpstreamError(statusCode, respBody).String()),
+			logger.F("body_preview", compactLogBody(respBody)),
+		)
+		r.prepareFailoverForMediaError(ch, acc, statusCode, respBody, model)
 		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, provider.FormatOpenAIResponses, claims, tokenPlanID)
 		return
 	}
 	if ch.Type == "antigravity" {
 		converted, err := antigravityImagesOpenAIResponse(respBody, responseFormat)
 		if err != nil {
+			trace.Event("response_conversion_failed", logger.Err(err), logger.F("mode", "media"))
 			r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "response conversion failed", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 			return
 		}
@@ -1606,8 +1666,16 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	}
 	ctx.SetStatusCode(statusCode)
 	ctx.SetBody(respBody)
+	trace.StreamChunk("response.downstream.json", respBody)
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	traceAffinityRecord(trace, "media", affinityResult)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.media", "media request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("request_type", string(requestType)), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
+	trace.Event("media_result_success",
+		logger.F("status", statusCode),
+		logger.F("response_bytes", len(respBody)),
+		logger.F("latency_ms", time.Since(start).Milliseconds()),
+	)
 	go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, 0, estTokens, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
 }
 
@@ -1615,28 +1683,84 @@ type chatGPTReverseImageGenerator interface {
 	GenerateImage(body []byte, credentials string) ([]byte, int, error)
 }
 
-func (r *Relayer) handleChatGPTReverseImageGeneration(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, requestType relayRequestType) {
+func (r *Relayer) handleChatGPTReverseImageGeneration(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, requestType relayRequestType, adminInfo map[string]interface{}, affinityScope string, trace *relayDebugTrace) {
 	if requestType != requestTypeImageGeneration {
+		trace.Event("media_unsupported_request_type", logger.F("request_type", string(requestType)))
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 		return
 	}
 	generator, ok := adaptor.(chatGPTReverseImageGenerator)
 	if !ok {
+		trace.Event("chatgpt_reverse_image_adaptor_unavailable")
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "chatgpt reverse image adaptor unavailable", claims, ch, acc, model, start, fasthttp.StatusBadGateway, tokenPlanID)
 		return
 	}
+	trace.Event("upstream_request_started",
+		logger.F("mode", "chatgpt_reverse_image"),
+		logger.F("channel_id", ch.ID.String()),
+		logger.F("channel_type", ch.Type),
+		logger.F("api_format", ch.APIFormat),
+		logger.F("account_id", acc.ID.String()),
+		logger.F("account_cred_type", acc.CredType),
+	)
 	respBody, statusCode, err := generator.GenerateImage(body, creds)
 	if err != nil {
 		logger.Warnf("relay.chatgpt_reverse", "image generation failed", logger.Err(err))
+		trace.Event("upstream_request_failed",
+			logger.Err(err),
+			logger.F("mode", "chatgpt_reverse_image"),
+			logger.F("status", statusCode),
+		)
+		if statusCode >= 400 {
+			trace.Event("media_error_classified",
+				logger.F("status", statusCode),
+				logger.F("class", ClassifyUpstreamError(statusCode, respBody).String()),
+				logger.F("body_preview", compactLogBody(respBody)),
+			)
+			r.prepareFailoverForMediaError(ch, acc, statusCode, respBody, model)
+		}
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, err.Error(), claims, ch, acc, model, start, statusCode, tokenPlanID)
+		return
+	}
+	trace.Event("upstream_headers_received",
+		logger.F("mode", "chatgpt_reverse_image"),
+		logger.F("status", statusCode),
+		logger.F("body_bytes", len(respBody)),
+	)
+	if statusCode >= 400 {
+		trace.Event("media_error_classified",
+			logger.F("status", statusCode),
+			logger.F("class", ClassifyUpstreamError(statusCode, respBody).String()),
+			logger.F("body_preview", compactLogBody(respBody)),
+		)
+		r.prepareFailoverForMediaError(ch, acc, statusCode, respBody, model)
+		r.refundOnError(ctx, token.ID.String(), estTokens, statusCode, respBody, ch, acc, model, false, start, clientFormat, claims, tokenPlanID)
 		return
 	}
 	ctx.SetStatusCode(statusCode)
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
+	trace.StreamChunk("response.downstream.json", respBody)
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	traceAffinityRecord(trace, "chatgpt_reverse_image", affinityResult)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.media", "chatgpt reverse image generation completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
+	trace.Event("media_result_success",
+		logger.F("mode", "chatgpt_reverse_image"),
+		logger.F("status", statusCode),
+		logger.F("response_bytes", len(respBody)),
+		logger.F("latency_ms", time.Since(start).Milliseconds()),
+	)
 	go r.finishUsageWithRoutedModelAndFormats(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, false, clientFormat, upstreamFormat, 0, estimatedImageTokens, start, statusCode, estTokens, r.clientIPForDirectRequest(ctx, claims))
+}
+
+func (r *Relayer) prepareFailoverForMediaError(ch *db.Channel, acc *db.Account, statusCode int, body []byte, model string) {
+	switch ClassifyUpstreamError(statusCode, body) {
+	case ErrAccountSide, ErrAccountTerminal:
+		r.prepareAccountFailover(ch, acc, statusCode, body, isUpstreamQuotaExhausted(statusCode, body))
+	case ErrServerSide, ErrConfigSide:
+		r.prepareChannelFailover(ch, statusCode, body, model)
+	}
 }
 
 func antigravityImageBody(ctx *fasthttp.RequestCtx, body []byte, acc *db.Account, model string, requestType relayRequestType) ([]byte, error) {
