@@ -461,7 +461,7 @@ func ResolveRequestModelWithSettings(model, effort, requestSize string, settings
 	if model == "" {
 		return ""
 	}
-	if IsTierPublicModelForSettings(model, settings) {
+	if IsTierEntryModelForSettings(model, settings) {
 		return UpstreamModelIDForEffortWithSettings(model, effort, requestSize, settings)
 	}
 	if IsDirectUpstreamModelForSettings(model, settings) {
@@ -483,6 +483,23 @@ func IsTierPublicModelForSettings(model string, settings ChannelSettings) bool {
 	for _, group := range settings.TierGroups {
 		if normalizeModelKey(group.PublicModel) == model {
 			return true
+		}
+	}
+	return false
+}
+
+func IsTierEntryModelForSettings(model string, settings ChannelSettings) bool {
+	model = normalizeModelKey(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
+	if model == "" {
+		return false
+	}
+	for _, group := range settings.TierGroups {
+		values := []string{group.PublicModel}
+		values = append(values, group.Aliases...)
+		for _, value := range values {
+			if normalizeModelKey(value) == model {
+				return true
+			}
 		}
 	}
 	return false

@@ -210,6 +210,27 @@ func TestResolveRequestModelPrefersPublicTierRouting(t *testing.T) {
 	}
 }
 
+func TestResolveRequestModelRoutesTierAliasesOnlyAsExternalEntries(t *testing.T) {
+	settings := antigravity.ChannelSettings{
+		ThinkingRouting: true,
+		TierGroups: []antigravity.TierGroup{{
+			PublicModel: "gemini-smart",
+			Aliases:     []string{"gemini-auto"},
+			High:        "gemini-3.1-pro-high",
+			Medium:      "gemini-pro-agent",
+			Low:         "gemini-3.1-pro-low",
+		}},
+	}
+	got := antigravity.ResolveRequestModelWithSettings("gemini-auto", "high", "short", settings, []string{"gemini-auto", "gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-low"})
+	if got != "gemini-3.1-pro-high" {
+		t.Fatalf("alias entry routed to %q, want gemini-3.1-pro-high", got)
+	}
+	got = antigravity.ResolveRequestModelWithSettings("gemini-3.1-pro-low", "high", "short", settings, []string{"gemini-auto", "gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-low"})
+	if got != "gemini-3.1-pro-low" {
+		t.Fatalf("direct tier upstream routed to %q, want gemini-3.1-pro-low", got)
+	}
+}
+
 func TestUpstreamModelIDForEffortCanLeaveModelUnchanged(t *testing.T) {
 	if got := antigravity.UpstreamModelIDForEffortWithThresholds("gemini-3.5-flash", "high", "short", false); got != "gemini-3.5-flash" {
 		t.Fatalf("disabled tier routing = %q, want original model", got)
