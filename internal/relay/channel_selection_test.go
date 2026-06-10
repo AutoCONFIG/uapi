@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +44,23 @@ func TestChannelForceStreamForModelUsesConfiguredModelsOnly(t *testing.T) {
 	legacy := db.Channel{ForceStream: true}
 	if channelForceStreamForModel(&legacy, "gpt-4.1", "gpt-4.1") {
 		t.Fatalf("legacy channel flag must not enable force stream without model config")
+	}
+}
+
+func TestNormalStreamingPathPropagatesAffinityScope(t *testing.T) {
+	src, err := os.ReadFile("handler.go")
+	if err != nil {
+		t.Fatalf("read handler.go: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "routeAdminInfo, affinityScope, requestType)") {
+		t.Fatalf("normal streaming dispatch must pass affinityScope to handleStreaming")
+	}
+	if !strings.Contains(text, "trace, adminInfo, affinityScope, requestType)") {
+		t.Fatalf("handleStreaming must pass affinityScope to handleStreamingAttempt")
+	}
+	if strings.Contains(text, "trace, adminInfo, \"\", requestType)") {
+		t.Fatalf("handleStreaming must not drop affinityScope when starting first streaming attempt")
 	}
 }
 

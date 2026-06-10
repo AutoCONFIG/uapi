@@ -624,7 +624,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	}
 	if req.Stream && !forceStreamActive {
 		streaming = true // goroutine handles Release
-		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, path, clientBody, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, requestType)
+		r.handleStreaming(ctx, token, tokenPlanID, targetChannel, account, adaptor, path, clientBody, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType)
 	} else if forceStreamActive {
 		streaming = true
 		r.handleForceStream(ctx, token, tokenPlanID, targetChannel, account, adaptor, path, clientBody, upstreamURL, convertedBody, creds, req.Model, routedModel, clientFormat, upstreamFormat, start, estimatedTokens, claims, debugTrace, routeAdminInfo, affinityScope, requestType, nil, nil)
@@ -636,8 +636,8 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 }
 
 // handleStreaming: real-time chunk-by-chunk forwarding using SSEStreamReader.
-func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, requestType relayRequestType) {
-	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, path, clientBody, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nil, trace, adminInfo, "", requestType)
+func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
+	r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, path, clientBody, url, body, creds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, 0, nil, nil, trace, adminInfo, affinityScope, requestType)
 }
 
 func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, excludedChannels map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
@@ -4130,6 +4130,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool, clientMetadataSeed
 			},
 		}
 	}
+	normalizeCodexResponsesMessageContent(bodyMap)
 	normalizeCodexResponsesInputRoles(bodyMap)
 	normalizeCodexResponsesTools(bodyMap)
 	result, err := json.Marshal(bodyMap)
@@ -4381,6 +4382,53 @@ func codexTextFormatFromResponseFormat(raw interface{}) (map[string]interface{},
 		"schema": schema,
 		"name":   name,
 	}, true
+}
+
+func normalizeCodexResponsesMessageContent(bodyMap map[string]interface{}) {
+	items, ok := bodyMap["input"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "" && itemType != "message" {
+			continue
+		}
+		role, _ := item["role"].(string)
+		partType := "input_text"
+		if role == "assistant" {
+			partType = "output_text"
+		}
+		switch content := item["content"].(type) {
+		case string:
+			item["content"] = []map[string]interface{}{{"type": partType, "text": content}}
+		case []interface{}:
+			for _, rawPart := range content {
+				part, ok := rawPart.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				typ, _ := part["type"].(string)
+				switch typ {
+				case "":
+					if _, hasText := part["text"]; hasText {
+						part["type"] = partType
+					}
+				case "text":
+					part["type"] = partType
+				case "input_text", "output_text":
+				default:
+					continue
+				}
+				if _, ok := part["text"].(string); !ok {
+					part["text"] = ""
+				}
+			}
+		}
+	}
 }
 
 func normalizeCodexResponsesInputRoles(bodyMap map[string]interface{}) {

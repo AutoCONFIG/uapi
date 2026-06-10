@@ -496,6 +496,36 @@ func TestNormalizeCodexResponsesRequestConvertsSystemInputRole(t *testing.T) {
 	}
 }
 
+func TestNormalizeCodexResponsesRequestFillsMalformedAssistantTextPart(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"message","role":"user","content":"hi"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text"}]},
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	userContent := input[0].(map[string]interface{})["content"].([]interface{})
+	userPart := userContent[0].(map[string]interface{})
+	if userPart["type"] != "input_text" || userPart["text"] != "hi" {
+		t.Fatalf("user content = %#v, want input_text hi", userPart)
+	}
+	assistantContent := input[1].(map[string]interface{})["content"].([]interface{})
+	assistantPart := assistantContent[0].(map[string]interface{})
+	if assistantPart["type"] != "output_text" {
+		t.Fatalf("assistant content type = %#v, want output_text", assistantPart["type"])
+	}
+	if text, ok := assistantPart["text"].(string); !ok || text != "" {
+		t.Fatalf("assistant text = %#v, want empty string", assistantPart["text"])
+	}
+}
+
 func TestCleanJSONUndefinedPlaceholdersRemovesCherryStudioSentinels(t *testing.T) {
 	got := cleanJSONUndefinedPlaceholders([]byte(`{"model":"gemini-2.5-pro","temperature":" [undefined] ","include":["reasoning.encrypted_content","[undefined]"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":"[undefined]"}]}],"store":false}`))
 	var body map[string]interface{}

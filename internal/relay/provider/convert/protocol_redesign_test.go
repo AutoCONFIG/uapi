@@ -96,6 +96,33 @@ func TestChatToResponsesPreservesRichContentAndToolCalls(t *testing.T) {
 	if call["call_id"] != "call_1" || call["name"] != "lookup" || call["arguments"] == "" {
 		t.Fatalf("assistant tool call not emitted as Responses function_call: %s", converted)
 	}
+	for _, raw := range input {
+		item, ok := raw.(map[string]interface{})
+		if !ok || item["type"] != "message" || item["role"] != "assistant" {
+			continue
+		}
+		t.Fatalf("empty assistant content before tool call should be skipped: %s", converted)
+	}
+}
+
+func TestChatToResponsesKeepsEmptyUserText(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":""}]}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIChatCompletions, convert.FormatOpenAIResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("input len = %d, want 1: %s", len(input), converted)
+	}
+	message := input[0].(map[string]interface{})
+	if message["role"] != "user" || message["content"] != "" {
+		t.Fatalf("empty user content not preserved: %s", converted)
+	}
 }
 
 func TestOpenAIResponsesSameFormatPreservesRichInputItems(t *testing.T) {

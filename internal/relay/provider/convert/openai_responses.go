@@ -381,6 +381,10 @@ func responsesInputItemsFromIRTurn(turn relayir.Turn) ([]map[string]interface{},
 		if len(pendingContent) == 0 {
 			return
 		}
+		if role == "assistant" && isOnlyEmptyResponsesTextParts(pendingContent) {
+			pendingContent = nil
+			return
+		}
 		item := map[string]interface{}{
 			"type":    "message",
 			"role":    role,
@@ -462,6 +466,23 @@ func responsesInputItemsFromIRTurn(turn relayir.Turn) ([]map[string]interface{},
 	}
 	flushContent()
 	return items, nil
+}
+
+func isOnlyEmptyResponsesTextParts(parts []schema.ContentPart) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		switch part.Type {
+		case "text", "input_text", "output_text":
+			if part.Text != "" || len(part.Extra) > 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func responsesRole(role string) string {
@@ -631,7 +652,7 @@ func responsesContentPartMap(role string, part schema.ContentPart) map[string]in
 	if partType != "" {
 		out["type"] = partType
 	}
-	if part.Text != "" {
+	if part.Text != "" || partType == "input_text" || partType == "output_text" || partType == "text" {
 		out["text"] = part.Text
 	}
 	if part.ImageURL != nil {
