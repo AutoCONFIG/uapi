@@ -3,30 +3,49 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { Blocks } from "lucide-react";
 import { adminApi, authStorage, userApi } from "@/lib/api";
 
 export function LoginForm() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    setHydrated(true);
 
-    async function redirectToSetupWhenNeeded() {
+    async function restoreExistingSession() {
       try {
         const status = await adminApi.initStatus();
         if (!cancelled && !status.initialized) {
           router.replace("/setup");
+          return;
         }
       } catch {
         // Keep the login form usable when the API is temporarily unavailable.
       }
+
+      const adminToken = await authStorage.restoreAuth("admin");
+      if (!cancelled && adminToken) {
+        router.replace("/admin/dashboard");
+        return;
+      }
+
+      const userToken = await authStorage.restoreAuth("user");
+      if (!cancelled && userToken) {
+        router.replace("/overview");
+        return;
+      }
+
+      if (!cancelled) {
+        setHydrated(true);
+        setRestoring(false);
+      }
     }
 
-    redirectToSetupWhenNeeded();
+    restoreExistingSession();
     return () => {
       cancelled = true;
     };
@@ -80,7 +99,10 @@ export function LoginForm() {
 
   return (
     <form method="post" onSubmit={handleSubmit}>
-      <h1 className="auth-title">登录</h1>
+      <h1 className="auth-logo" aria-label="UAPI">
+        <span className="auth-logo-mark"><Blocks size={28} /></span>
+        <span className="auth-logo-word">UAPI</span>
+      </h1>
       <div className="field">
         <label htmlFor="email">邮箱</label>
         <input className="input" id="email" name="email" type="email" autoComplete="username" />
@@ -90,8 +112,8 @@ export function LoginForm() {
         <input className="input" id="password" name="password" type="password" autoComplete="current-password" />
       </div>
       {error ? <p className="form-error">{error}</p> : null}
-      <button className="btn primary" disabled={loading || !hydrated} style={{ width: "100%", marginTop: 4 }} type="submit">
-        {loading ? "登录中" : "登录"}
+      <button className="btn primary" disabled={loading || restoring || !hydrated} style={{ width: "100%", marginTop: 4 }} type="submit">
+        {restoring ? "检查会话" : loading ? "登录中" : "登录"}
       </button>
       <div className="auth-links">
         <Link href="/forgot-password">找回密码</Link>

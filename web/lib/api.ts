@@ -54,6 +54,22 @@ function clearAuth(scope: AuthScope) {
   window.localStorage.removeItem(`uapi.${scope}.refresh_expires_at`);
 }
 
+function storedToken(scope: AuthScope) {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(`uapi.${scope}.token`);
+}
+
+function storedExpiry(scope: AuthScope, kind: "access" | "refresh") {
+  if (typeof window === "undefined") return 0;
+  const raw = window.localStorage.getItem(`uapi.${scope}.${kind}_expires_at`);
+  const value = raw ? Number(raw) : 0;
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isFutureUnixSeconds(value: number, skewSeconds = 30) {
+  return value > Math.floor(Date.now() / 1000) + skewSeconds;
+}
+
 async function rawRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Content-Type", "application/json");
@@ -90,6 +106,10 @@ async function refreshStoredAuth(scope: AuthScope): Promise<string | null> {
   if (typeof window === "undefined") return null;
   const refreshToken = window.localStorage.getItem(`uapi.${scope}.refresh_token`);
   if (!refreshToken) return null;
+  if (!isFutureUnixSeconds(storedExpiry(scope, "refresh"), 0)) {
+    clearAuth(scope);
+    return null;
+  }
   try {
     const auth = await rawRequest<LoginResponse>(`/api/${scope}/refresh`, {
       method: "POST",
@@ -102,6 +122,15 @@ async function refreshStoredAuth(scope: AuthScope): Promise<string | null> {
     clearAuth(scope);
     return null;
   }
+}
+
+async function restoreAuth(scope: AuthScope): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const token = storedToken(scope);
+  if (token && isFutureUnixSeconds(storedExpiry(scope, "access"))) {
+    return token;
+  }
+  return refreshStoredAuth(scope);
 }
 
 function tokenScope(token?: string): AuthScope | null {
@@ -189,7 +218,7 @@ async function uploadForm<T>(path: string, token: string, body: FormData): Promi
   return payload.data as T;
 }
 
-export const authStorage = { storeAuth, clearAuth };
+export const authStorage = { storeAuth, clearAuth, restoreAuth, storedToken };
 
 export const publicApi = {
   settings: () => request<PublicSettings>("/api/public/settings"),

@@ -3470,9 +3470,54 @@ tr:last-child td {
   padding: 28px;
 }
 
-.auth-title {
-  margin-bottom: 24px;
-  text-align: center;
+.auth-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 0 0 26px;
+  color: var(--text);
+  line-height: 1;
+}
+
+.auth-logo-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.84);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.96), rgba(19, 164, 107, 0.86)),
+    #2563eb;
+  color: #ffffff;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.42) inset,
+    0 18px 32px rgba(37, 99, 235, 0.22);
+}
+
+.auth-logo-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(110deg, rgba(255, 255, 255, 0.34), transparent 42%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.12) 0 1px, transparent 1px 12px);
+  pointer-events: none;
+}
+
+.auth-logo-mark svg {
+  position: relative;
+  z-index: 1;
+}
+
+.auth-logo-word {
+  font-size: 34px;
+  font-weight: 850;
+  letter-spacing: 0;
 }
 
 .field {
