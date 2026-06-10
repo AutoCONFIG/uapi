@@ -39,11 +39,13 @@ func (h *WSHandler) httpBridgeFallback(
 		maxAttempts = 1
 	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		releaseAccountAttempt := h.relayer.beginAccountAttempt(ch, currentAccount, nil, "ws_bridge")
 		adaptor.Init(ch, currentAccount)
 		adaptor.SetRequestParams(model, true) // always stream in bridge mode
 
 		convertedBody, err := convertWSHTTPBridgeRequestBody(ch, currentAccount, adaptor, msg, sess.id)
 		if err != nil {
+			releaseAccountAttempt()
 			WriteWSErrorSession(sess, 400, "convert_error", "request conversion failed")
 			h.refundBilling(sess.tokenID, tokenPlanID, estTokens, model)
 			return false
@@ -54,6 +56,7 @@ func (h *WSHandler) httpBridgeFallback(
 
 		upstreamURL, err := adaptor.GetRequestURL("/v1/responses")
 		if err != nil {
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, 500, "url_error", "build upstream url failed")
@@ -63,6 +66,7 @@ func (h *WSHandler) httpBridgeFallback(
 
 		currentCreds, err = h.relayer.ensureCredentials(ch, currentAccount)
 		if err != nil {
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, 500, "cred_error", "credential refresh failed")
@@ -74,6 +78,7 @@ func (h *WSHandler) httpBridgeFallback(
 		upReq.Header.SetMethodBytes([]byte("POST"))
 		upReq.SetBody(convertedBody)
 		if err := adaptor.SetupRequestHeader(upReq, currentCreds); err != nil {
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, 500, "header_error", "setup headers failed")
@@ -83,6 +88,7 @@ func (h *WSHandler) httpBridgeFallback(
 		applyCodexMetadataHeaders(upReq, channelUpstreamFormat(ch), convertedBody)
 
 		if err := doStreamingRequest(upReq, upResp); err != nil {
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, 502, "upstream_error", "upstream request failed")
@@ -93,6 +99,7 @@ func (h *WSHandler) httpBridgeFallback(
 		statusCode := upResp.StatusCode()
 		if statusCode >= 400 {
 			bodyCopy := readUpstreamErrorBody(upResp)
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			errClass := ClassifyUpstreamError(statusCode, bodyCopy)
@@ -124,6 +131,7 @@ func (h *WSHandler) httpBridgeFallback(
 
 		bodyStream := upResp.BodyStream()
 		if bodyStream == nil {
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, 502, "upstream_error", "upstream stream body missing")
@@ -133,6 +141,7 @@ func (h *WSHandler) httpBridgeFallback(
 		}
 		peekedBodyStream, bootstrapMessage, bootstrapFailed, peekErr := peekStreamBootstrapError(bodyStream)
 		if peekErr != nil {
+			releaseAccountAttempt()
 			if closer, ok := peekedBodyStream.(io.Closer); ok {
 				_ = closer.Close()
 			}
@@ -169,6 +178,7 @@ func (h *WSHandler) httpBridgeFallback(
 					if closer, ok := peekedBodyStream.(io.Closer); ok {
 						_ = closer.Close()
 					}
+					releaseAccountAttempt()
 					fasthttp.ReleaseRequest(upReq)
 					fasthttp.ReleaseResponse(upResp)
 					currentAccount = next
@@ -178,6 +188,7 @@ func (h *WSHandler) httpBridgeFallback(
 			if closer, ok := peekedBodyStream.(io.Closer); ok {
 				_ = closer.Close()
 			}
+			releaseAccountAttempt()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			WriteWSErrorSession(sess, fasthttp.StatusBadGateway, "upstream_error", bootstrapMessage)
@@ -186,7 +197,7 @@ func (h *WSHandler) httpBridgeFallback(
 			return false
 		}
 
-		go h.bridgeSSEToWS(sess, upReq, upResp, peekedBodyStream, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body)
+		go h.bridgeSSEToWS(sess, upReq, upResp, peekedBodyStream, adaptor, ch, currentAccount, model, estTokens, tokenPlanID, start, body, releaseAccountAttempt)
 		return true
 	}
 
@@ -243,9 +254,13 @@ func (h *WSHandler) bridgeSSEToWS(
 	tokenPlanID uuid.UUID,
 	start time.Time,
 	requestBody []byte,
+	releaseAccountAttempt func(),
 ) {
 	turnFinalized := false
 	defer func() {
+		if releaseAccountAttempt != nil {
+			releaseAccountAttempt()
+		}
 		sess.ReleaseTurn()
 		if r := recover(); r != nil {
 			logger.Default().Panic("relay.ws", "panic in SSE bridge", r, logger.F("session", sess.id))

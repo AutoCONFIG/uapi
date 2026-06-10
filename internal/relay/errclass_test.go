@@ -34,7 +34,7 @@ func TestClassifyUpstreamError_AccountSide(t *testing.T) {
 		statusCode int
 		body       string
 	}{
-		{"401 with auth keyword", 401, `{"error":{"message":"invalid api key"}}`},
+		{"401 with auth keyword", 401, `{"error":{"message":"authentication failed"}}`},
 		{"401 with unauthorized", 401, `{"error":{"code":"unauthorized"}}`},
 		{"402 payment required", 402, `{"error":"insufficient_quota"}`},
 		{"429 rate limit", 429, `{"error":"rate_limit_exceeded"}`},
@@ -66,6 +66,8 @@ func TestClassifyUpstreamError_AccountTerminal(t *testing.T) {
 		{"PERMISSION_DENIED status", 403, `{"error":{"status":"PERMISSION_DENIED"}}`},
 		{"is_forbidden flag", 403, `{"is_forbidden":true,"_forbidden_reason":"banned"}`},
 		{"invalid_api_key code", 401, `{"error":{"code":"invalid_api_key"}}`},
+		{"invalid api key message", 401, `{"error":{"message":"invalid api key"}}`},
+		{"incorrect api key message", 401, `{"error":{"message":"Incorrect API key provided"}}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -129,6 +131,7 @@ func TestIsTerminalAuthError(t *testing.T) {
 		{403, `{"error":"account_suspended"}`},
 		{403, `{"is_forbidden":true}`},
 		{401, `{"error":{"code":"invalid_api_key"}}`},
+		{401, `{"error":{"message":"invalid api key"}}`},
 	}
 	for _, c := range terminalCases {
 		if !IsTerminalAuthError(c.statusCode, []byte(c.body)) {

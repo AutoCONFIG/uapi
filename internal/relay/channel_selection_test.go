@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -8,6 +10,8 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/relay/provider"
+	relayir "github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
@@ -25,6 +29,158 @@ func TestChannelCacheInvalidateClearsSnapshot(t *testing.T) {
 	}
 	if !cache.expiry.IsZero() {
 		t.Fatalf("expected expiry to be zero, got %s", cache.expiry)
+	}
+}
+
+type bufferedSuccessAdaptor struct{}
+
+func (bufferedSuccessAdaptor) Init(*db.Channel, *db.Account) {}
+func (bufferedSuccessAdaptor) SetRequestParams(string, bool) {}
+func (bufferedSuccessAdaptor) GetRequestURL(string) (string, error) {
+	return "http://upstream.test/v1/chat/completions", nil
+}
+func (bufferedSuccessAdaptor) SetupRequestHeader(*fasthttp.Request, string) error { return nil }
+func (bufferedSuccessAdaptor) FromIR(*relayir.Request) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+func (bufferedSuccessAdaptor) ParseUsage([]byte) (int, int, error)       { return 1, 1, nil }
+func (bufferedSuccessAdaptor) ParseStreamUsage([]byte) (int, int, error) { return 0, 0, nil }
+func (bufferedSuccessAdaptor) ParseUsageFull([]byte) (provider.InternalUsage, error) {
+	return provider.InternalUsage{PromptTokens: 1, CompletionTokens: 1}, nil
+}
+func (bufferedSuccessAdaptor) GetChannelType() string { return "test" }
+func (bufferedSuccessAdaptor) DoHTTPRequest(req *fasthttp.Request, resp *fasthttp.Response) error {
+	resp.SetStatusCode(fasthttp.StatusOK)
+	resp.Header.SetContentType("application/json")
+	resp.SetBodyString(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	return nil
+}
+
+type bufferedRetryAdaptor struct {
+	calls int
+}
+
+func (a *bufferedRetryAdaptor) Init(*db.Channel, *db.Account) {}
+func (a *bufferedRetryAdaptor) SetRequestParams(string, bool) {}
+func (a *bufferedRetryAdaptor) GetRequestURL(string) (string, error) {
+	return "http://upstream.test/v1/chat/completions", nil
+}
+func (a *bufferedRetryAdaptor) SetupRequestHeader(*fasthttp.Request, string) error { return nil }
+func (a *bufferedRetryAdaptor) FromIR(*relayir.Request) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+func (a *bufferedRetryAdaptor) ParseUsage([]byte) (int, int, error)       { return 1, 1, nil }
+func (a *bufferedRetryAdaptor) ParseStreamUsage([]byte) (int, int, error) { return 0, 0, nil }
+func (a *bufferedRetryAdaptor) ParseUsageFull([]byte) (provider.InternalUsage, error) {
+	return provider.InternalUsage{PromptTokens: 1, CompletionTokens: 1}, nil
+}
+func (a *bufferedRetryAdaptor) GetChannelType() string { return "test" }
+func (a *bufferedRetryAdaptor) DoHTTPRequest(req *fasthttp.Request, resp *fasthttp.Response) error {
+	a.calls++
+	resp.Header.SetContentType("application/json")
+	if a.calls == 1 {
+		resp.SetStatusCode(fasthttp.StatusTooManyRequests)
+		resp.SetBodyString(`{"error":{"message":"rate limit"}}`)
+		return nil
+	}
+	resp.SetStatusCode(fasthttp.StatusOK)
+	resp.SetBodyString(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	return nil
+}
+
+func TestHandleBufferedSuccessReleasesLocalConcurrency(t *testing.T) {
+	tokenID := uuid.New()
+	token := db.Token{Base: db.Base{ID: tokenID}}
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, APIFormat: "openai"}
+	acc := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1}
+	limiter := NewConcurrencyLimiter(1)
+	if status := limiter.AcquireDetailed(context.Background(), tokenID.String()); status != AcquireOK {
+		t.Fatalf("AcquireDetailed = %v, want AcquireOK", status)
+	}
+	relayer := &Relayer{
+		concLimiter:       limiter,
+		pools:             NewPoolManager(),
+		cooldownPolicy:    NewCooldownPolicy(),
+		channelModelBlock: NewChannelModelBlocklist(0),
+	}
+	defer relayer.cooldownPolicy.Close()
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+
+	relayer.handleBuffered(&ctx, token, uuid.Nil, ch, acc, bufferedSuccessAdaptor{}, "/v1/chat/completions",
+		[]byte(`{"model":"gpt-test","messages":[]}`),
+		"http://upstream.test/v1/chat/completions",
+		[]byte(`{"model":"gpt-test","messages":[]}`),
+		"sk-test", "gpt-test", "gpt-test",
+		provider.FormatOpenAIChatCompletions, provider.FormatOpenAIChatCompletions,
+		time.Now(), 100, nil, nil, map[string]interface{}{}, "", requestTypeChatCompletion, 0)
+
+	if got := limiter.ActiveCount(tokenID.String()); got != 0 {
+		t.Fatalf("buffered success leaked local concurrency slot, active = %d", got)
+	}
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("status = %d, want 200", ctx.Response.StatusCode())
+	}
+}
+
+func TestHandleBufferedRetrySwitchAccountReleasesFinalInFlight(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	cred1, err := crypto.Encrypt("sk-one")
+	if err != nil {
+		t.Fatalf("encrypt cred1: %v", err)
+	}
+	cred2, err := crypto.Encrypt("sk-two")
+	if err != nil {
+		t.Fatalf("encrypt cred2: %v", err)
+	}
+	tokenID := uuid.New()
+	token := db.Token{Base: db.Base{ID: tokenID}}
+	ch := &db.Channel{Base: db.Base{ID: uuid.New()}, Type: "openai", APIFormat: "standard"}
+	acc1 := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1, Credentials: cred1, CredType: "api_key"}
+	acc2 := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Enabled: true, Weight: 1, Credentials: cred2, CredType: "api_key"}
+	pool := NewAccountPool([]*db.Account{acc1, acc2})
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	limiter := NewConcurrencyLimiter(1)
+	if status := limiter.AcquireDetailed(context.Background(), tokenID.String()); status != AcquireOK {
+		t.Fatalf("AcquireDetailed = %v, want AcquireOK", status)
+	}
+	relayer := &Relayer{
+		concLimiter:       limiter,
+		pools:             pools,
+		affinity:          NewAffinityCache(),
+		cooldownPolicy:    NewCooldownPolicy(),
+		channelModelBlock: NewChannelModelBlocklist(0),
+	}
+	defer relayer.cooldownPolicy.Close()
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	adaptor := &bufferedRetryAdaptor{}
+
+	relayer.handleBuffered(&ctx, token, uuid.Nil, ch, acc1, adaptor, "/v1/chat/completions",
+		[]byte(`{"model":"gpt-test","messages":[]}`),
+		"http://upstream.test/v1/chat/completions",
+		[]byte(`{"model":"gpt-test","messages":[]}`),
+		"sk-test", "gpt-test", "gpt-test",
+		provider.FormatOpenAIChatCompletions, provider.FormatOpenAIChatCompletions,
+		time.Now(), 100, nil, nil, map[string]interface{}{}, "header:scope", requestTypeChatCompletion, 0)
+
+	if adaptor.calls != 2 {
+		t.Fatalf("calls = %d, want 2", adaptor.calls)
+	}
+	if got := pool.InFlight(acc1.ID.String()); got != 0 {
+		t.Fatalf("first account in-flight = %d, want 0", got)
+	}
+	if got := pool.InFlight(acc2.ID.String()); got != 0 {
+		t.Fatalf("final account in-flight = %d, want 0", got)
+	}
+	if got := limiter.ActiveCount(tokenID.String()); got != 0 {
+		t.Fatalf("buffered retry leaked local concurrency slot, active = %d", got)
+	}
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("status = %d, want 200", ctx.Response.StatusCode())
 	}
 }
 
@@ -153,6 +309,13 @@ func TestRequestAffinityScopeFallsBackToHeaders(t *testing.T) {
 	}
 }
 
+func TestRequestAffinityScopeDoesNotUseTokenFallback(t *testing.T) {
+	var ctx fasthttp.RequestCtx
+	if got := requestAffinityScope(&ctx, []byte(`{"model":"gpt-5.5","input":"hi"}`)); got != "" {
+		t.Fatalf("requestAffinityScope without session = %q, want empty", got)
+	}
+}
+
 func TestRequestAffinityScopeSupportsCodexAndOpenCodeHeaders(t *testing.T) {
 	var codexCtx fasthttp.RequestCtx
 	codexCtx.Request.Header.Set("Session-Id", "codex-session")
@@ -219,6 +382,84 @@ func TestRouteLogAdminInfoMarksAffinityHitAndFallbackPath(t *testing.T) {
 	}
 	if path[0]["from_account_name"] != "one" || path[0]["to_account_name"] != "two" {
 		t.Fatalf("fallback_path item = %#v", path[0])
+	}
+}
+
+func TestAccountSideRouteFallbackClassification(t *testing.T) {
+	info := map[string]interface{}{}
+	appendRouteFallback(info, "stream", nil, nil, nil, fasthttp.StatusBadGateway, "channel_failover", 0)
+	if hasAccountSideRouteFallback(info) {
+		t.Fatalf("server-side channel failover must not force affinity migration")
+	}
+
+	appendRouteFallback(info, "stream", nil, nil, nil, fasthttp.StatusTooManyRequests, "quota_exhausted", 1)
+	if !hasAccountSideRouteFallback(info) {
+		t.Fatalf("account-side fallback must force affinity migration")
+	}
+}
+
+func TestRouteLogAdminInfoMarksAffinityYieldWithoutHit(t *testing.T) {
+	info := routeLogAdminInfo("codex:session-1234567890", []map[string]interface{}{
+		{
+			"source":                     "affinity",
+			"channel_id":                 "ch-1",
+			"selected":                   true,
+			"account_id":                 "acc-selected",
+			"affinity_account_id":        "acc-bound",
+			"affinity_account_yielded":   true,
+			"affinity_yield_reason":      "bound_account_unavailable_or_overloaded",
+			"account_in_flight":          2,
+			"affinity_account_in_flight": accountInFlightSoftCap,
+		},
+	})
+	affinity, ok := info["affinity"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing affinity info: %#v", info)
+	}
+	if hit, _ := affinity["hit"].(bool); hit {
+		t.Fatalf("affinity hit = true, want false when bound account yielded")
+	}
+	if yielded, _ := affinity["yielded"].(bool); !yielded {
+		t.Fatalf("affinity yielded = %#v, want true", affinity["yielded"])
+	}
+	if affinity["selected_account_id"] != "acc-selected" {
+		t.Fatalf("selected_account_id = %#v, want acc-selected", affinity["selected_account_id"])
+	}
+	selected, _ := info["selected"].(map[string]interface{})
+	if selected["account_in_flight"] != 2 || selected["affinity_account_in_flight"] != accountInFlightSoftCap {
+		t.Fatalf("selected route did not preserve load debug: %#v", selected)
+	}
+	if !hasAffinityYielded(info) {
+		t.Fatalf("hasAffinityYielded = false, want true")
+	}
+}
+
+func TestAffinityYieldForcesSuccessfulAffinityMigration(t *testing.T) {
+	oldCh := &db.Channel{Base: db.Base{ID: uuid.New()}, AffinityTTL: 60}
+	oldAcc := &db.Account{Base: db.Base{ID: uuid.New()}}
+	newCh := &db.Channel{Base: db.Base{ID: uuid.New()}, AffinityTTL: 60}
+	newAcc := &db.Account{Base: db.Base{ID: uuid.New()}}
+	relayer := &Relayer{affinity: NewAffinityCache()}
+	relayer.affinity.Set("token", "model", "scope", oldCh.ID.String(), oldAcc.ID.String(), 60)
+
+	adminInfo := routeLogAdminInfo("header:scope", []map[string]interface{}{
+		{
+			"source":                   "affinity",
+			"selected":                 true,
+			"channel_id":               oldCh.ID.String(),
+			"account_id":               newAcc.ID.String(),
+			"affinity_account_id":      oldAcc.ID.String(),
+			"affinity_account_yielded": true,
+		},
+	})
+	result := relayer.recordSuccessfulAffinity("token", "model", "scope", newCh, newAcc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo))
+
+	if !result.Force || result.Action != "force_set" {
+		t.Fatalf("affinity yield record result = %#v, want force_set", result)
+	}
+	gotCh, gotAcc := relayer.affinity.Get("token", "model", "scope")
+	if gotCh != newCh.ID.String() || gotAcc != newAcc.ID.String() {
+		t.Fatalf("affinity = (%q,%q), want (%q,%q)", gotCh, gotAcc, newCh.ID.String(), newAcc.ID.String())
 	}
 }
 
@@ -340,12 +581,13 @@ func TestRuntimeResolveIgnoresDisabledAffinityChannel(t *testing.T) {
 		Version: 1,
 		Channels: []db.Channel{
 			{
-				Base:      db.Base{ID: enabledChID},
-				Name:      "enabled",
-				Type:      "openai",
-				APIFormat: "standard",
-				Models:    "gpt-5.5",
-				Enabled:   true,
+				Base:        db.Base{ID: enabledChID},
+				Name:        "enabled",
+				Type:        "openai",
+				APIFormat:   "standard",
+				Models:      "gpt-5.5",
+				Enabled:     true,
+				AffinityTTL: 60,
 			},
 			{
 				Base:      db.Base{ID: disabledChID},
@@ -363,11 +605,127 @@ func TestRuntimeResolveIgnoresDisabledAffinityChannel(t *testing.T) {
 	})
 	relayer.affinity.Set("token-1", "gpt-5.5", "codex:thread-1", disabledChID.String(), disabledAccID.String(), 60)
 
-	ch, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttempts("token-1", "gpt-5.5", "codex:thread-1", nil)
+	var attempts []map[string]interface{}
+	ch, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttempts("token-1", "gpt-5.5", "codex:thread-1", &attempts)
 	if err != nil {
 		t.Fatalf("resolve with disabled runtime affinity: %v", err)
 	}
 	if ch.ID != enabledChID || acc.ID != enabledAccID || creds != "sk-enabled" {
 		t.Fatalf("selected (%s,%s,%q), want enabled (%s,%s,sk-enabled)", ch.ID, acc.ID, creds, enabledChID, enabledAccID)
+	}
+	info := routeLogAdminInfo("codex:thread-1", attempts)
+	if !hasAffinitySelectionFailed(info) {
+		t.Fatalf("hasAffinitySelectionFailed = false, want true; info=%#v", info)
+	}
+	result := relayer.recordSuccessfulAffinity("token-1", "gpt-5.5", "codex:thread-1", ch, acc, hasAffinitySelectionFailed(info))
+	if !result.Force || result.Action != "force_set" {
+		t.Fatalf("recordSuccessfulAffinity = %#v, want force_set", result)
+	}
+	gotCh, gotAcc := relayer.affinity.Get("token-1", "gpt-5.5", "codex:thread-1")
+	if gotCh != enabledChID.String() || gotAcc != enabledAccID.String() {
+		t.Fatalf("affinity = (%q,%q), want enabled (%s,%s)", gotCh, gotAcc, enabledChID, enabledAccID)
+	}
+}
+
+func TestRuntimeResolveSkipsExcludedAffinityChannelWithoutEvicting(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	affinityCred, err := crypto.Encrypt("sk-affinity")
+	if err != nil {
+		t.Fatalf("encrypt affinity cred: %v", err)
+	}
+	fallbackCred, err := crypto.Encrypt("sk-fallback")
+	if err != nil {
+		t.Fatalf("encrypt fallback cred: %v", err)
+	}
+	affinityChID := uuid.New()
+	fallbackChID := uuid.New()
+	affinityAccID := uuid.New()
+	fallbackAccID := uuid.New()
+	relayer := NewRelayer(nil, NewPoolManager(), nil, NewAffinityCache(), 10, "", false, "")
+	relayer.ApplyRuntimeConfig(RuntimeConfig{
+		Version: 1,
+		Channels: []db.Channel{
+			{
+				Base:      db.Base{ID: affinityChID},
+				Name:      "affinity",
+				Type:      "openai",
+				APIFormat: "standard",
+				Models:    "gpt-5.5",
+				Enabled:   true,
+				Priority:  10,
+			},
+			{
+				Base:      db.Base{ID: fallbackChID},
+				Name:      "fallback",
+				Type:      "openai",
+				APIFormat: "standard",
+				Models:    "gpt-5.5",
+				Enabled:   true,
+				Priority:  10,
+			},
+		},
+		Accounts: []RuntimeAccount{
+			{ID: affinityAccID, ChannelID: affinityChID, Name: "affinity", Credentials: affinityCred, CredType: "api_key", Weight: 1, Enabled: true},
+			{ID: fallbackAccID, ChannelID: fallbackChID, Name: "fallback", Credentials: fallbackCred, CredType: "api_key", Weight: 1, Enabled: true},
+		},
+	})
+	relayer.affinity.Set("token-1", "gpt-5.5", "codex:thread-1", affinityChID.String(), affinityAccID.String(), 60)
+
+	excluded := map[string]bool{affinityChID.String(): true}
+	var attempts []map[string]interface{}
+	ch, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttemptsExcluded("token-1", "gpt-5.5", "codex:thread-1", &attempts, excluded)
+	if err != nil {
+		t.Fatalf("resolve with excluded affinity: %v", err)
+	}
+	if ch.ID != fallbackChID || acc.ID != fallbackAccID || creds != "sk-fallback" {
+		t.Fatalf("selected (%s,%s,%q), want fallback (%s,%s,sk-fallback)", ch.ID, acc.ID, creds, fallbackChID, fallbackAccID)
+	}
+	gotCh, gotAcc := relayer.affinity.Get("token-1", "gpt-5.5", "codex:thread-1")
+	if gotCh != affinityChID.String() || gotAcc != affinityAccID.String() {
+		t.Fatalf("excluded affinity must remain cached, got (%q,%q)", gotCh, gotAcc)
+	}
+	info := routeLogAdminInfo("codex:thread-1", attempts)
+	if hasAffinitySelectionFailed(info) {
+		t.Fatalf("excluded affinity must not count as selection failure: %#v", info)
+	}
+}
+
+func TestPickAccountForAffinityYieldsWhenBoundAccountOverSoftCap(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	boundCred, err := crypto.Encrypt("sk-bound")
+	if err != nil {
+		t.Fatalf("encrypt bound cred: %v", err)
+	}
+	otherCred, err := crypto.Encrypt("sk-other")
+	if err != nil {
+		t.Fatalf("encrypt other cred: %v", err)
+	}
+	ch := db.Channel{
+		Base:      db.Base{ID: uuid.New()},
+		Type:      "openai",
+		APIFormat: "standard",
+		Models:    "gpt-5.5",
+		Enabled:   true,
+	}
+	bound := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Name: "bound", Credentials: boundCred, CredType: "api_key", Enabled: true, Weight: 100}
+	other := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Name: "other", Credentials: otherCred, CredType: "api_key", Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{bound, other})
+	for i := 0; i < accountInFlightSoftCap; i++ {
+		pool.Begin(bound.ID.String())
+	}
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	relayer := &Relayer{pools: pools}
+
+	got, _, creds, err := relayer.pickAccountForAffinity(ch, bound.ID.String(), "gpt-5.5")
+	if err != nil {
+		t.Fatalf("pickAccountForAffinity: %v", err)
+	}
+	if got.ID != other.ID || creds != "sk-other" {
+		t.Fatalf("selected (%s,%q), want other %s/sk-other", got.ID, creds, other.ID)
 	}
 }

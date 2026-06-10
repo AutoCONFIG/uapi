@@ -438,7 +438,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	var err error
 	var routeAttempts []map[string]interface{}
 	capabilityReq := channelcap.AnalyzeJSON(string(requestType), clientBody)
-	affinityScope := requestAffinityScopeWithTokenID(ctx, body, token.ID.String())
+	affinityScope := requestAffinityScope(ctx, body)
 	if gatewayAuthenticated && internalClaims.ChannelID != "" && internalClaims.AccountID != "" {
 		targetChannel, account, adaptor, creds, err = r.resolveSelectedChannelAndAccount(internalClaims.ChannelID, internalClaims.AccountID, req.Model)
 	} else {
@@ -447,6 +447,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	if err != nil {
 		if relayDebugDumpEnabled() {
 			trace := startRelayRequestDebugDump(originalBody, body, token, nil, nil, claims, clientFormat, "", requestType, req.Model, req.Model, req.Stream)
+			trace.SetRoutingInfo(routeLogAdminInfo(affinityScope, routeAttempts))
 			trace.Event("route_failed",
 				logger.F("status", fasthttp.StatusNotFound),
 				logger.Err(err),
@@ -455,6 +456,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 				logger.F("route_attempts", routeAttempts),
 				logger.F("route_diagnostics", r.routeFailureDiagnostics(req.Model, capabilityReq)),
 			)
+			trace.WriteRoutingInfo()
 		}
 		finishGatewayEarlyFailure(req.Model, fasthttp.StatusNotFound)
 		ctx.Error(`{"error":"`+httputil.JSONEscape(err.Error())+`"}`, fasthttp.StatusNotFound)
@@ -641,6 +643,13 @@ func (r *Relayer) handleStreaming(ctx *fasthttp.RequestCtx, token db.Token, toke
 }
 
 func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, authRetried bool, quotaAttempts int, transientExcluded map[string]bool, excludedChannels map[string]bool, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType) {
+	releaseAccountAttempt := r.beginAccountAttempt(ch, acc, trace, "stream")
+	releaseInCaller := true
+	defer func() {
+		if releaseInCaller {
+			releaseAccountAttempt()
+		}
+	}()
 	upReq := fasthttp.AcquireRequest()
 	upResp := fasthttp.AcquireResponse()
 	rebuildForChannel := func(nextCh *db.Channel, nextAcc *db.Account, nextAdaptor provider.Adaptor, nextCreds string) (upstreamRelayRequest, bool) {
@@ -668,6 +677,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 	fields := relayDebugUpstreamRequestFields("stream", ch, acc, upReq,
 		logger.F("auth_retried", authRetried),
 		logger.F("body_stream", requestJSONBool(body, "stream")),
+		logger.F("account_in_flight", r.accountInFlight(ch, acc)),
+		logger.F("account_soft_cap", accountInFlightSoftCap),
 	)
 	trace.Event("upstream_request_started", fields...)
 	// The streaming request returns after receiving headers; the body is read from BodyStream.
@@ -700,6 +711,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				fasthttp.ReleaseRequest(upReq)
 				fasthttp.ReleaseResponse(upResp)
 				appendRouteFallback(adminInfo, "stream", ch, acc, acc, statusCode, "oauth_refresh", quotaAttempts)
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, acc, adaptor, path, clientBody, url, body, refreshedCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, true, quotaAttempts, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -738,6 +750,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_failover", 0)
 				// Cross-channel: reset attempt counter and exclusion map
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -766,6 +779,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, failoverReason, quotaAttempts+1)
+						releaseAccountAttempt()
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, path, clientBody, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
@@ -793,6 +807,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 				}
 				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "channel_escalation", 0)
 				// Cross-channel: reset attempt counter and exclusion map
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -824,6 +839,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "stream", ch, acc, next, statusCode, "terminal_account_failover", quotaAttempts+1)
+						releaseAccountAttempt()
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, path, clientBody, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
@@ -847,6 +863,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					return
 				}
 				appendRouteFallback(adminInfo, "stream", ch, acc, nextAcc, statusCode, "terminal_channel_escalation", 0)
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -919,6 +936,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					return
 				}
 				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_failover", 0)
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -948,6 +966,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, "account_failover", quotaAttempts+1)
+						releaseAccountAttempt()
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, path, clientBody, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
@@ -974,6 +993,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					return
 				}
 				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "channel_escalation", 0)
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -1008,6 +1028,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 						fasthttp.ReleaseResponse(upResp)
 						adaptor.Init(ch, next)
 						appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, next, bootstrapStatus, "terminal_account_failover", quotaAttempts+1)
+						releaseAccountAttempt()
 						r.handleStreamingAttempt(ctx, token, tokenPlanID, ch, next, adaptor, path, clientBody, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, false, quotaAttempts+1, transientExcluded, excludedChannels, trace, adminInfo, affinityScope, requestType)
 						return
 					}
@@ -1033,6 +1054,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 					return
 				}
 				appendRouteFallback(adminInfo, "stream_bootstrap", ch, acc, nextAcc, bootstrapStatus, "terminal_channel_escalation", 0)
+				releaseAccountAttempt()
 				r.handleStreamingAttempt(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, false, 0, nil, nextExcluded, trace, adminInfo, affinityScope, requestType)
 				return
 			}
@@ -1081,6 +1103,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		}()
 		defer fasthttp.ReleaseRequest(upReq)
 		defer releaseStreamingResponse(upResp)
+		defer releaseAccountAttempt()
 		defer r.releaseLocalConcurrency(token.ID.String(), claims)
 		defer stopIdleTimeout()
 		defer trace.WriteRoutingInfo()
@@ -1136,7 +1159,8 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
-		r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasRouteFallback(adminInfo) || quotaAttempts > 0)
+		affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempts > 0)
+		traceAffinityRecord(trace, "stream", affinityResult)
 		pt, ct, parseFailed := tracker.Result()
 		cacheCreationTokens := tracker.CacheCreationTokens()
 		cacheReadTokens := tracker.CacheReadTokens()
@@ -1183,11 +1207,14 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 		}
 		go r.finishUsageWithRoutedModelFormatsCacheAndAdmin(claims, token.ID, tokenPlanID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, statusCode, estTokens, adminInfo, r.clientIPForDirectRequest(ctx, claims))
 	}()
+	releaseInCaller = false
 }
 
 // handleForceStream: stream to upstream, buffer all, convert to non-stream for downstream.
 func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, transientExcluded map[string]bool, excludedChannels map[string]bool, quotaAttempts ...int) {
 	quotaAttempt := firstInt(quotaAttempts...)
+	releaseAccountAttempt := r.beginAccountAttempt(ch, acc, trace, "force_stream")
+	defer releaseAccountAttempt()
 	defer func() {
 		if rec := recover(); rec != nil {
 			logger.Default().Panic("relay.stream", "force stream panic", rec)
@@ -1222,6 +1249,8 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 
 	fields := relayDebugUpstreamRequestFields("force_stream", ch, acc, upReq,
 		logger.F("body_stream", requestJSONBool(body, "stream")),
+		logger.F("account_in_flight", r.accountInFlight(ch, acc)),
+		logger.F("account_soft_cap", accountInFlightSoftCap),
 	)
 	trace.Event("upstream_request_started", fields...)
 	if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
@@ -1259,7 +1288,10 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 				return
 			}
 			applyCodexMetadataHeaders(upReq, upstreamFormat, body)
-			trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("force_stream_retry", ch, acc, upReq)...)
+			trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("force_stream_retry", ch, acc, upReq,
+				logger.F("account_in_flight", r.accountInFlight(ch, acc)),
+				logger.F("account_soft_cap", accountInFlightSoftCap),
+			)...)
 			if err := doUpstreamStreaming(adaptor, upReq, upResp); err != nil {
 				trace.Event("upstream_request_failed", logger.Err(err), logger.F("mode", "force_stream_retry"))
 				logger.Warnf("relay.upstream", "force stream request failed after oauth refresh", logger.Err(err))
@@ -1311,6 +1343,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						return
 					}
 					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_failover", 0)
+					releaseAccountAttempt()
 					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, 0)
 					return
 				}
@@ -1333,6 +1366,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 							)
 							adaptor.Init(ch, next)
 							appendRouteFallback(adminInfo, "force_stream", ch, acc, next, statusCode, failoverReason, quotaAttempt+1)
+							releaseAccountAttempt()
 							r.handleForceStream(ctx, token, tokenPlanID, ch, next, adaptor, path, clientBody, url, body, nextCreds, model, routedModel, clientFormat, upstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, transientExcluded, excludedChannels, quotaAttempt+1)
 							return
 						}
@@ -1356,6 +1390,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 						return
 					}
 					appendRouteFallback(adminInfo, "force_stream", ch, acc, nextAcc, statusCode, "channel_escalation", 0)
+					releaseAccountAttempt()
 					r.handleForceStream(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, nil, nextExcluded, 0)
 					return
 				}
@@ -1437,7 +1472,8 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasRouteFallback(adminInfo) || quotaAttempt > 0)
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempt > 0)
+	traceAffinityRecord(trace, "force_stream", affinityResult)
 
 	logger.Debugf("relay.stream", "force stream request completed",
 		logger.F("token_id", token.ID.String()),
@@ -1477,6 +1513,7 @@ func newChannelCache(database *gorm.DB, ttl time.Duration) *channelCache {
 }
 
 func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, start time.Time, estTokens int, claims *internalauth.Claims) {
+	defer r.beginAccountAttempt(ch, acc, nil, "media")()
 	if !supportsRelayChannelRequest(ch, channelcap.AnalyzeJSON(string(requestType), body)) {
 		r.refundAndErrorWithStatus(ctx, token.ID.String(), estTokens, "request type not supported by selected channel", claims, ch, acc, model, start, fasthttp.StatusBadRequest, tokenPlanID)
 		return
@@ -1682,6 +1719,7 @@ func (r *Relayer) ChannelModelBlock() *ChannelModelBlocklist {
 
 // handleBuffered: standard buffered request with retry.
 func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, tokenPlanID uuid.UUID, ch *db.Channel, acc *db.Account, adaptor provider.Adaptor, path string, clientBody []byte, url string, body []byte, creds string, model string, routedModel string, clientFormat, upstreamFormat provider.Format, start time.Time, estTokens int, claims *internalauth.Claims, trace *relayDebugTrace, adminInfo map[string]interface{}, affinityScope string, requestType relayRequestType, channelAttempts int, excludedChannelArgs ...map[string]bool) {
+	defer trace.WriteRoutingInfo()
 	excludedChannels := firstChannelExclusion(excludedChannelArgs...)
 	var respBody []byte
 	var statusCode int
@@ -1689,6 +1727,10 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	respAccount := acc
 	currentCreds := creds
 	currentAccount := acc
+	releaseCurrentAccountAttempt := r.beginAccountAttempt(ch, currentAccount, trace, "buffered")
+	defer func() {
+		releaseCurrentAccountAttempt()
+	}()
 	refreshedAuthAccounts := make(map[uuid.UUID]bool)
 	transientExcluded := make(map[string]bool)
 	maxAttempts := r.accountAttemptLimit(ch)
@@ -1718,7 +1760,11 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 			return
 		}
 		applyCodexMetadataHeaders(upReq, upstreamFormat, body)
-		trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("buffered", ch, currentAccount, upReq, logger.F("retry", retry))...)
+		trace.Event("upstream_request_started", relayDebugUpstreamRequestFields("buffered", ch, currentAccount, upReq,
+			logger.F("retry", retry),
+			logger.F("account_in_flight", r.accountInFlight(ch, currentAccount)),
+			logger.F("account_soft_cap", accountInFlightSoftCap),
+		)...)
 
 		err := doUpstreamBuffered(adaptor, bufferedClient, upReq, upResp)
 		fasthttp.ReleaseRequest(upReq)
@@ -1746,6 +1792,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 					return
 				}
 				appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, fasthttp.StatusBadGateway, "channel_failover", channelAttempts+1)
+				releaseCurrentAccountAttempt()
 				r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
 				return
 			}
@@ -1866,6 +1913,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 					return
 				}
 				appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_failover", channelAttempts+1)
+				releaseCurrentAccountAttempt()
 				r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
 				return
 			}
@@ -1902,12 +1950,15 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 						return
 					}
 					appendRouteFallback(adminInfo, "buffered", ch, currentAccount, nextAcc, statusCode, "channel_escalation", channelAttempts+1)
+					releaseCurrentAccountAttempt()
 					r.handleBuffered(ctx, token, tokenPlanID, nextCh, nextAcc, nextAdaptor, path, clientBody, nextReq.URL, nextReq.Body, nextCreds, model, nextReq.RoutedModel, clientFormat, nextReq.UpstreamFormat, start, estTokens, claims, trace, adminInfo, affinityScope, requestType, channelAttempts+1, nextExcluded)
 					return
 				}
 				break
 			}
 			currentAccount = nextAccount
+			releaseCurrentAccountAttempt()
+			releaseCurrentAccountAttempt = r.beginAccountAttempt(ch, currentAccount, trace, "buffered")
 			trace.Event("retry_switch_account",
 				logger.F("mode", "buffered"),
 				logger.F("retry", retry),
@@ -1932,6 +1983,8 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 				)
 				appendRouteFallback(adminInfo, "buffered", ch, respAccount, currentAccount, statusCode, "credential_error", retry+1)
 				respAccount = currentAccount
+				releaseCurrentAccountAttempt()
+				releaseCurrentAccountAttempt = r.beginAccountAttempt(ch, currentAccount, trace, "buffered")
 				adaptor.Init(ch, currentAccount)
 				currentCreds, err = r.ensureCredentials(ch, currentAccount)
 				if err != nil {
@@ -2037,7 +2090,8 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, respAccount, hasRouteFallback(adminInfo) || channelAttempts > 0)
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, respAccount, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	traceAffinityRecord(trace, "buffered", affinityResult)
 
 	logger.Debugf("relay.buffered", "buffered request completed",
 		logger.F("token_id", token.ID.String()),
@@ -2066,6 +2120,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	} else {
 		go r.writeLogWithRoutedModelFormatsErrorCacheAndAdmin(token.ID, ch.ID, respAccount.ID, model, routedModel, false, clientFormat, upstreamFormat, pt, ct, cacheCreationTokens, cacheReadTokens, start, statusCode, "", adminInfo, r.clientIPForDirectRequest(ctx, claims))
 	}
+	r.releaseLocalConcurrency(token.ID.String(), claims)
 }
 
 func logGeminiCodeUpstreamError(ch *db.Channel, acc *db.Account, statusCode int, reqBody, respBody []byte) {
@@ -2476,7 +2531,15 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 	if affinityScope != "" && r.affinity != nil {
 		if chID, accID := r.affinity.Get(tokenID, model, affinityScope); chID != "" {
 			if excludedChannels != nil && excludedChannels[chID] {
-				r.affinity.InvalidateChannel(chID)
+				appendRouteAttempt(attempts, map[string]interface{}{
+					"source":              "affinity",
+					"channel_id":          chID,
+					"affinity_account_id": accID,
+					"skip_reason":         "excluded_for_request",
+				})
+				// The channel is excluded only for this request's failover path.
+				// Do not mutate the global affinity binding here; permanent
+				// invalidation is handled by the error classifier before retry.
 			} else {
 				if r.db != nil {
 					var ch db.Channel
@@ -2492,6 +2555,8 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 							if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
 								attempt["selected"] = true
 								attempt["account_id"] = acc.ID.String()
+								r.attachAffinitySelectionDebug(attempt, &ch, accID, acc)
+								r.attachAccountLoadDebug(attempt, &ch, acc)
 								appendRouteAttempt(attempts, attempt)
 								return &ch, acc, adaptor, creds, nil
 							} else {
@@ -2503,6 +2568,13 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 							attempt["skip_reason"] = "unsupported_capability"
 						}
 						appendRouteAttempt(attempts, attempt)
+					} else {
+						appendRouteAttempt(attempts, map[string]interface{}{
+							"source":              "affinity",
+							"channel_id":          chID,
+							"affinity_account_id": accID,
+							"skip_reason":         "channel_unavailable",
+						})
 					}
 				} else if ch, ok := r.runtimeChannelByID(chID); ok {
 					modelOK := r.channelSupportsModel(ch, model)
@@ -2516,6 +2588,8 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
 							attempt["selected"] = true
 							attempt["account_id"] = acc.ID.String()
+							r.attachAffinitySelectionDebug(attempt, &ch, accID, acc)
+							r.attachAccountLoadDebug(attempt, &ch, acc)
 							r.attachQuotaSkipDebug(attempt, &ch, model, nil)
 							appendRouteAttempt(attempts, attempt)
 							return &ch, acc, adaptor, creds, nil
@@ -2529,6 +2603,13 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 						attempt["skip_reason"] = "unsupported_capability"
 					}
 					appendRouteAttempt(attempts, attempt)
+				} else {
+					appendRouteAttempt(attempts, map[string]interface{}{
+						"source":              "affinity",
+						"channel_id":          chID,
+						"affinity_account_id": accID,
+						"skip_reason":         "channel_unavailable",
+					})
 				}
 			}
 		}
@@ -2554,6 +2635,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 			if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 				attempt["selected"] = true
 				attempt["account_id"] = acc.ID.String()
+				r.attachAccountLoadDebug(attempt, &channels[i], acc)
 				r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 				appendRouteAttempt(attempts, attempt)
 				return &channels[i], acc, adaptor, creds, nil
@@ -2601,6 +2683,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 		if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
 			attempt["selected"] = true
 			attempt["account_id"] = acc.ID.String()
+			r.attachAccountLoadDebug(attempt, &channels[i], acc)
 			r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 			appendRouteAttempt(attempts, attempt)
 			return &channels[i], acc, adaptor, creds, nil
@@ -2620,6 +2703,85 @@ func appendRouteAttempt(attempts *[]map[string]interface{}, attempt map[string]i
 	*attempts = append(*attempts, attempt)
 }
 
+func (r *Relayer) beginAccountAttempt(ch *db.Channel, acc *db.Account, trace *relayDebugTrace, mode string) func() {
+	if r == nil || r.pools == nil || ch == nil || acc == nil {
+		return func() {}
+	}
+	pool, ok := r.pools.GetPool(ch.ID.String())
+	if !ok || pool == nil {
+		return func() {}
+	}
+	channelID := ch.ID.String()
+	accountID := acc.ID.String()
+	inFlight := pool.Begin(accountID)
+	trace.Event("account_in_flight_begin",
+		logger.F("mode", mode),
+		logger.F("channel_id", channelID),
+		logger.F("account_id", accountID),
+		logger.F("account_in_flight", inFlight),
+		logger.F("account_soft_cap", accountInFlightSoftCap),
+	)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releasePool := pool
+			if r.pools != nil {
+				if currentPool, ok := r.pools.GetPool(channelID); ok && currentPool != nil {
+					releasePool = currentPool
+				}
+			}
+			remaining := releasePool.End(accountID)
+			trace.Event("account_in_flight_end",
+				logger.F("mode", mode),
+				logger.F("channel_id", channelID),
+				logger.F("account_id", accountID),
+				logger.F("account_in_flight", remaining),
+				logger.F("account_soft_cap", accountInFlightSoftCap),
+			)
+		})
+	}
+}
+
+func (r *Relayer) accountInFlight(ch *db.Channel, acc *db.Account) int {
+	if r == nil || r.pools == nil || ch == nil || acc == nil {
+		return 0
+	}
+	pool, ok := r.pools.GetPool(ch.ID.String())
+	if !ok || pool == nil {
+		return 0
+	}
+	return pool.InFlight(acc.ID.String())
+}
+
+func (r *Relayer) attachAccountLoadDebug(item map[string]interface{}, ch *db.Channel, acc *db.Account) {
+	if item == nil || ch == nil || acc == nil {
+		return
+	}
+	item["account_in_flight"] = r.accountInFlight(ch, acc)
+	item["account_soft_cap"] = accountInFlightSoftCap
+}
+
+func (r *Relayer) attachAffinitySelectionDebug(item map[string]interface{}, ch *db.Channel, affinityAccountID string, selected *db.Account) {
+	if item == nil || strings.TrimSpace(affinityAccountID) == "" || selected == nil {
+		return
+	}
+	selectedID := selected.ID.String()
+	if selectedID == affinityAccountID {
+		item["affinity_account_selected"] = true
+		return
+	}
+	item["affinity_account_selected"] = false
+	item["affinity_account_yielded"] = true
+	item["affinity_yield_reason"] = "bound_account_unavailable_or_overloaded"
+	item["selected_account_id"] = selectedID
+	if r != nil && r.pools != nil && ch != nil {
+		if pool, ok := r.pools.GetPool(ch.ID.String()); ok && pool != nil {
+			item["affinity_account_in_flight"] = pool.InFlight(affinityAccountID)
+			item["account_soft_cap"] = accountInFlightSoftCap
+		}
+	}
+}
+
 func (r *Relayer) recordSelectedAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account) {
 	if r == nil || r.affinity == nil || ch == nil || acc == nil || strings.TrimSpace(scope) == "" || ch.AffinityTTL <= 0 {
 		return
@@ -2628,23 +2790,175 @@ func (r *Relayer) recordSelectedAffinity(tokenID, model, scope string, ch *db.Ch
 	r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
 }
 
-func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account, force bool) {
-	if r == nil || r.affinity == nil || ch == nil || acc == nil || strings.TrimSpace(scope) == "" || ch.AffinityTTL <= 0 {
-		return
+type affinityRecordResult struct {
+	Recorded          bool
+	Reason            string
+	Action            string
+	Force             bool
+	Existed           bool
+	Scope             string
+	Model             string
+	SelectedChannelID string
+	SelectedAccountID string
+	BoundChannelID    string
+	BoundAccountID    string
+	TTLSeconds        int
+}
+
+func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account, force bool) affinityRecordResult {
+	result := affinityRecordResult{
+		Force: force,
+		Scope: strings.TrimSpace(scope),
+		Model: model,
+	}
+	if ch != nil {
+		result.SelectedChannelID = ch.ID.String()
+		result.TTLSeconds = ch.AffinityTTL
+	}
+	if acc != nil {
+		result.SelectedAccountID = acc.ID.String()
+	}
+	switch {
+	case r == nil:
+		result.Reason = "nil_relayer"
+		return result
+	case r.affinity == nil:
+		result.Reason = "affinity_disabled"
+		return result
+	case ch == nil:
+		result.Reason = "nil_channel"
+		return result
+	case acc == nil:
+		result.Reason = "nil_account"
+		return result
+	case result.Scope == "":
+		result.Reason = "no_session_scope"
+		return result
+	case ch.AffinityTTL <= 0:
+		result.Reason = "ttl_disabled"
+		return result
 	}
 	if force {
 		r.affinity.ForceSet(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
-		return
+		result.Recorded = true
+		result.Action = "force_set"
+		result.BoundChannelID = ch.ID.String()
+		result.BoundAccountID = acc.ID.String()
+		return result
 	}
-	r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+	chID, accID, existed := r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
+	result.Recorded = true
+	result.Existed = existed
+	result.Action = "set_if_absent"
+	if existed {
+		result.Action = "preserved_existing"
+	}
+	result.BoundChannelID = chID
+	result.BoundAccountID = accID
+	return result
 }
 
-func hasRouteFallback(info map[string]interface{}) bool {
+func traceAffinityRecord(trace *relayDebugTrace, mode string, result affinityRecordResult) {
+	if trace == nil {
+		return
+	}
+	source, key := splitRouteScope(result.Scope)
+	trace.Event("affinity_recorded",
+		logger.F("mode", mode),
+		logger.F("recorded", result.Recorded),
+		logger.F("reason", result.Reason),
+		logger.F("action", result.Action),
+		logger.F("force", result.Force),
+		logger.F("existed", result.Existed),
+		logger.F("source", source),
+		logger.F("key_hint", routeKeyHint(key)),
+		logger.F("model", result.Model),
+		logger.F("selected_channel_id", result.SelectedChannelID),
+		logger.F("selected_account_id", result.SelectedAccountID),
+		logger.F("bound_channel_id", result.BoundChannelID),
+		logger.F("bound_account_id", result.BoundAccountID),
+		logger.F("ttl_seconds", result.TTLSeconds),
+	)
+}
+
+func hasAccountSideRouteFallback(info map[string]interface{}) bool {
 	if info == nil {
 		return false
 	}
 	path, _ := info["fallback_path"].([]map[string]interface{})
-	return len(path) > 0
+	for _, item := range path {
+		reason, _ := item["reason"].(string)
+		if isAccountSideFallbackReason(reason) {
+			return true
+		}
+		status, _ := item["status_code"].(int)
+		if isAccountSideFallbackStatus(status) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAffinityYielded(info map[string]interface{}) bool {
+	if info == nil {
+		return false
+	}
+	affinity, _ := info["affinity"].(map[string]interface{})
+	if affinity == nil {
+		return false
+	}
+	yielded, _ := affinity["yielded"].(bool)
+	return yielded
+}
+
+func hasAffinitySelectionFailed(info map[string]interface{}) bool {
+	if info == nil {
+		return false
+	}
+	path, _ := info["route_path"].([]map[string]interface{})
+	for _, item := range path {
+		if item == nil {
+			continue
+		}
+		source, _ := item["source"].(string)
+		if source != "affinity" {
+			continue
+		}
+		if selected, _ := item["selected"].(bool); selected {
+			continue
+		}
+		reason, _ := item["skip_reason"].(string)
+		if reason != "" && reason != "excluded_for_request" {
+			return true
+		}
+	}
+	return false
+}
+
+func isAccountSideFallbackReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "quota_exhausted",
+		"account_failover",
+		"channel_escalation",
+		"credential_error",
+		"terminal_account_failover",
+		"terminal_channel_escalation":
+		return true
+	default:
+		return strings.HasPrefix(reason, "status_401") ||
+			strings.HasPrefix(reason, "status_402") ||
+			strings.HasPrefix(reason, "status_403") ||
+			strings.HasPrefix(reason, "status_429")
+	}
+}
+
+func isAccountSideFallbackStatus(status int) bool {
+	switch status {
+	case fasthttp.StatusUnauthorized, fasthttp.StatusPaymentRequired, fasthttp.StatusForbidden, fasthttp.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) map[string]interface{} {
@@ -2667,11 +2981,19 @@ func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) 
 		}
 		if selected, _ := attempt["selected"].(bool); selected {
 			info["selected"] = item
-			if source, _ := attempt["source"].(string); source == "affinity" {
-				affinity["hit"] = true
-			}
 			if accountID, _ := attempt["affinity_account_id"].(string); accountID != "" {
 				affinity["account_id"] = accountID
+				selectedAccountID, _ := attempt["account_id"].(string)
+				if source, _ := attempt["source"].(string); source == "affinity" && selectedAccountID == accountID {
+					affinity["hit"] = true
+				}
+				if yielded, _ := attempt["affinity_account_yielded"].(bool); yielded {
+					affinity["yielded"] = true
+					affinity["selected_account_id"] = selectedAccountID
+					if reason, _ := attempt["affinity_yield_reason"].(string); reason != "" {
+						affinity["yield_reason"] = reason
+					}
+				}
 			}
 		}
 	}
@@ -2685,7 +3007,14 @@ func routeLogAdminInfo(affinityScope string, attempts []map[string]interface{}) 
 }
 
 func compactRouteAttempt(attempt map[string]interface{}) map[string]interface{} {
-	keys := []string{"source", "channel_id", "account_id", "affinity_account_id", "name", "type", "api_format", "priority", "weight", "supports_model", "supports_capability", "skip_reason", "account_skip_reasons", "selected"}
+	keys := []string{
+		"source", "channel_id", "account_id", "selected_account_id", "affinity_account_id",
+		"affinity_account_selected", "affinity_account_yielded", "affinity_yield_reason",
+		"affinity_account_in_flight", "name", "type", "api_format", "priority", "weight",
+		"supports_model", "supports_capability", "skip_reason", "account_skip_reasons",
+		"selected", "account_in_flight", "account_soft_cap", "pool_total_in_flight",
+		"pool_accounts", "pool_total_weight", "pool_exists", "pool_closed",
+	}
 	out := make(map[string]interface{}, len(keys))
 	for _, key := range keys {
 		if value, ok := attempt[key]; ok {
@@ -2776,6 +3105,7 @@ func (r *Relayer) routeAttemptInfo(ch db.Channel, modelOK, capabilityOK bool) ma
 			item["pool_exists"] = true
 			item["pool_accounts"] = stats.Accounts
 			item["pool_total_weight"] = stats.TotalWeight
+			item["pool_total_in_flight"] = stats.TotalInFlight
 			item["pool_closed"] = stats.Closed
 		} else {
 			item["pool_exists"] = false
@@ -2837,6 +3167,7 @@ func (r *Relayer) routeFailureDiagnostics(model string, capabilityReq ...channel
 				item["pool_exists"] = true
 				item["pool_accounts"] = stats.Accounts
 				item["pool_total_weight"] = stats.TotalWeight
+				item["pool_total_in_flight"] = stats.TotalInFlight
 				item["pool_closed"] = stats.Closed
 			} else {
 				item["pool_exists"] = false
@@ -3115,6 +3446,10 @@ func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model 
 		}
 		return r.pickAccount(ch, model)
 	}
+	if pool.InFlight(accountID) >= accountInFlightSoftCap &&
+		pool.HasAvailableBelowSoftCapForModel(model, map[string]bool{accountID: true}) {
+		return r.pickAccount(ch, model)
+	}
 	creds, err := r.ensureCredentials(&ch, account)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("credential error: %w", err)
@@ -3335,20 +3670,12 @@ func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, status
 		return
 	}
 
-	// API key channels: evict affinity only (no DB cooldown since stateless)
-	if isAPIKeyChannel(ch) {
-		if r.affinity != nil {
-			r.affinity.EvictAccount(acc.ID.String())
-		}
-		return
-	}
-
 	// Quota errors: scheduler notification + auto-disable + cooldown
 	if isQuota || errClass == ErrAccountSide {
 		if isQuota && r.quotaScheduler != nil && ch != nil {
 			r.quotaScheduler.On429(acc.ID, ch.ID)
 		}
-		if isQuota {
+		if isQuota && !isAPIKeyChannel(ch) {
 			r.markAutoDisable(acc, "quota_exhausted")
 		}
 		dur := r.cooldownPolicy.ComputeCooldown(errClass, statusCode, acc.ID.String())
@@ -3356,11 +3683,8 @@ func (r *Relayer) prepareAccountFailover(ch *db.Channel, acc *db.Account, status
 		return
 	}
 
-	// Server-side errors (5xx/408): no account cooldown — not the account's fault
-	// Only evict affinity so the next request routes to a different channel
-	if errClass == ErrServerSide && r.affinity != nil {
-		r.affinity.EvictAccount(acc.ID.String())
-	}
+	// Server-side errors (5xx/408): no account cooldown and no affinity
+	// mutation. The failing channel/account is excluded only for this request.
 }
 
 func (r *Relayer) markAutoDisable(acc *db.Account, reason string) {
@@ -3645,13 +3969,16 @@ func (r *Relayer) prepareChannelFailover(ch *db.Channel, statusCode int, body []
 		logger.F("model", model),
 		logger.F("body_preview", compactLogBody(body)),
 	)
-	// Clear all affinity bindings for this channel (uses reverse index O(k))
-	if r.affinity != nil {
-		r.affinity.EvictChannel(ch.ID.String())
-	}
-	// 404 with model keyword → block (channel, model) pair for 5 minutes
-	if ClassifyUpstreamError(statusCode, body) == ErrConfigSide && model != "" && r.channelModelBlock != nil {
-		r.channelModelBlock.Block(ch.ID.String(), model)
+	errClass := ClassifyUpstreamError(statusCode, body)
+	if errClass == ErrConfigSide {
+		// Config errors are channel/model problems, not account problems.
+		if r.affinity != nil {
+			r.affinity.EvictChannel(ch.ID.String())
+		}
+		// 404 with model keyword → block (channel, model) pair for 5 minutes
+		if model != "" && r.channelModelBlock != nil {
+			r.channelModelBlock.Block(ch.ID.String(), model)
+		}
 	}
 }
 
@@ -3670,19 +3997,6 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 		if value = strings.TrimSpace(value); value != "" {
 			return value
 		}
-	}
-	return ""
-}
-
-// requestAffinityScopeWithTokenID returns an affinity scope, falling back to
-// "token:<tokenID>" when no provider-specific scope is found. This ensures
-// every request has at least a basic per-token affinity binding.
-func requestAffinityScopeWithTokenID(ctx *fasthttp.RequestCtx, body []byte, tokenID string) string {
-	if scope := requestAffinityScope(ctx, body); scope != "" {
-		return scope
-	}
-	if tokenID != "" {
-		return "token:" + tokenID
 	}
 	return ""
 }

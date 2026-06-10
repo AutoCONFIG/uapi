@@ -78,6 +78,7 @@ func (h *WSHandler) tryNativeUpstream(
 		logger.Component("relay.ws").Warn("upstream pool get failed", logger.F("session", sess.id), logger.Err(err))
 		return false
 	}
+	releaseAccountAttempt := h.relayer.beginAccountAttempt(ch, acc, nil, "ws_native")
 
 	// 3. Forward response.create to upstream after request cleanup.
 	forwardMsg := wsCreateToNativeMessage(msg)
@@ -85,6 +86,7 @@ func (h *WSHandler) tryNativeUpstream(
 	err = upstreamConn.conn.WriteMessage(ws.TextMessage, forwardMsg)
 	upstreamConn.writeMu.Unlock()
 	if err != nil {
+		releaseAccountAttempt()
 		h.upstream.Discard(upstreamConn)
 		logger.Component("relay.ws").Warn("upstream write failed", logger.F("session", sess.id), logger.Err(err))
 		return false
@@ -102,7 +104,7 @@ func (h *WSHandler) tryNativeUpstream(
 	}
 	upstreamConn.conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
-	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout, forwardMsg)
+	go h.proxyUpstreamToClient(sess, upstreamConn, ch, acc, model, estTokens, tokenPlanID, start, ts, idleTimeout, forwardMsg, releaseAccountAttempt)
 
 	return true
 }
@@ -121,8 +123,12 @@ func (h *WSHandler) proxyUpstreamToClient(
 	ts *turnState,
 	idleTimeout time.Duration,
 	requestBody []byte,
+	releaseAccountAttempt func(),
 ) {
 	defer func() {
+		if releaseAccountAttempt != nil {
+			releaseAccountAttempt()
+		}
 		if r := recover(); r != nil {
 			logger.Default().Panic("relay.ws", "panic in upstream proxy", r, logger.F("session", sess.id))
 		}

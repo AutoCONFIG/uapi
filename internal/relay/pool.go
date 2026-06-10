@@ -14,6 +14,7 @@ type WeightedAccount struct {
 	Weight         int
 	CurrentWeight  int
 	OriginalWeight int
+	InFlight       int
 }
 
 type AccountPool struct {
@@ -24,10 +25,13 @@ type AccountPool struct {
 }
 
 type AccountPoolStats struct {
-	Accounts    int  `json:"accounts"`
-	TotalWeight int  `json:"total_weight"`
-	Closed      bool `json:"closed"`
+	Accounts      int  `json:"accounts"`
+	TotalWeight   int  `json:"total_weight"`
+	TotalInFlight int  `json:"total_in_flight"`
+	Closed        bool `json:"closed"`
 }
+
+const accountInFlightSoftCap = 10
 
 func NewAccountPool(accounts []*db.Account) *AccountPool {
 	p := &AccountPool{}
@@ -59,13 +63,13 @@ func (p *AccountPool) Pick() (*db.Account, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return p.pickLocked(nil)
+	return p.pickLocked(nil, "")
 }
 
 func (p *AccountPool) PickExcluding(excluded map[string]bool) (*db.Account, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pickLocked(excluded)
+	return p.pickLocked(excluded, "")
 }
 
 // PickForModel selects an account with quota available for the requested model.
@@ -75,49 +79,13 @@ func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.
 	if model == "" {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return p.pickLocked(excluded)
+		return p.pickLocked(excluded, "")
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	totalWeight := 0
-	for i := range p.accounts {
-		if p.accounts[i].Weight <= 0 {
-			continue
-		}
-		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
-			continue
-		}
-		if !modelQuotaExhausted(p.accounts[i].Account, model) {
-			totalWeight += p.accounts[i].Weight
-		}
-	}
-	if totalWeight == 0 {
-		return nil, false
-	}
-
-	var best *WeightedAccount
-	for i := range p.accounts {
-		if p.accounts[i].Weight <= 0 {
-			continue
-		}
-		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
-			continue
-		}
-		if modelQuotaExhausted(p.accounts[i].Account, model) {
-			continue
-		}
-		p.accounts[i].CurrentWeight += p.accounts[i].Weight
-		if best == nil || p.accounts[i].CurrentWeight > best.CurrentWeight {
-			best = &p.accounts[i]
-		}
-	}
-	if best == nil {
-		return nil, false
-	}
-	best.CurrentWeight -= totalWeight
-	return best.Account, true
+	return p.pickLocked(excluded, model)
 }
 
 // modelQuotaExhausted checks if the account's quota for the given model is exhausted.
@@ -289,16 +257,27 @@ func parseBucketsFromSlice(buckets []interface{}) []modelQuotaBucket {
 	return result
 }
 
-func (p *AccountPool) pickLocked(excluded map[string]bool) (*db.Account, bool) {
+func (p *AccountPool) pickLocked(excluded map[string]bool, model string) (*db.Account, bool) {
+	preferBelowSoftCap := false
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if p.accounts[i].InFlight < accountInFlightSoftCap {
+			preferBelowSoftCap = true
+			break
+		}
+	}
+
 	totalWeight := 0
 	for i := range p.accounts {
-		if p.accounts[i].Weight <= 0 {
+		if !p.accountSelectableLocked(i, excluded, model) {
 			continue
 		}
-		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+		if preferBelowSoftCap && p.accounts[i].InFlight >= accountInFlightSoftCap {
 			continue
 		}
-		totalWeight += p.accounts[i].Weight
+		totalWeight += p.effectiveAccountWeightLocked(i)
 	}
 	if totalWeight == 0 {
 		return nil, false
@@ -306,14 +285,17 @@ func (p *AccountPool) pickLocked(excluded map[string]bool) (*db.Account, bool) {
 
 	var best *WeightedAccount
 	for i := range p.accounts {
-		if p.accounts[i].Weight <= 0 {
+		if !p.accountSelectableLocked(i, excluded, model) {
 			continue
 		}
-		if excluded != nil && excluded[p.accounts[i].Account.ID.String()] {
+		if preferBelowSoftCap && p.accounts[i].InFlight >= accountInFlightSoftCap {
 			continue
 		}
-		p.accounts[i].CurrentWeight += p.accounts[i].Weight
-		if best == nil || p.accounts[i].CurrentWeight > best.CurrentWeight {
+		effectiveWeight := p.effectiveAccountWeightLocked(i)
+		p.accounts[i].CurrentWeight += effectiveWeight
+		if best == nil ||
+			p.accounts[i].CurrentWeight > best.CurrentWeight ||
+			(p.accounts[i].CurrentWeight == best.CurrentWeight && p.accounts[i].InFlight < best.InFlight) {
 			best = &p.accounts[i]
 		}
 	}
@@ -322,6 +304,121 @@ func (p *AccountPool) pickLocked(excluded map[string]bool) (*db.Account, bool) {
 	}
 	best.CurrentWeight -= totalWeight
 	return best.Account, true
+}
+
+func (p *AccountPool) accountSelectableLocked(i int, excluded map[string]bool, model string) bool {
+	if p.accounts[i].Weight <= 0 {
+		return false
+	}
+	acc := p.accounts[i].Account
+	if acc == nil {
+		return false
+	}
+	if excluded != nil && excluded[acc.ID.String()] {
+		return false
+	}
+	return model == "" || !modelQuotaExhausted(acc, model)
+}
+
+func (p *AccountPool) effectiveAccountWeightLocked(i int) int {
+	weight := p.accounts[i].Weight
+	if weight <= 0 {
+		return 0
+	}
+	load := p.accounts[i].InFlight + 1
+	penalized := weight / (load * load)
+	if penalized < 1 {
+		return 1
+	}
+	return penalized
+}
+
+func (p *AccountPool) Begin(accountID string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account == nil || p.accounts[i].Account.ID.String() != accountID {
+			continue
+		}
+		p.accounts[i].InFlight++
+		return p.accounts[i].InFlight
+	}
+	return 0
+}
+
+func (p *AccountPool) End(accountID string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account == nil || p.accounts[i].Account.ID.String() != accountID {
+			continue
+		}
+		if p.accounts[i].InFlight > 0 {
+			p.accounts[i].InFlight--
+		}
+		return p.accounts[i].InFlight
+	}
+	return 0
+}
+
+func (p *AccountPool) InFlight(accountID string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account != nil && p.accounts[i].Account.ID.String() == accountID {
+			return p.accounts[i].InFlight
+		}
+	}
+	return 0
+}
+
+func (p *AccountPool) HasAvailableBelowSoftCapForModel(model string, excluded map[string]bool) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if p.accounts[i].InFlight < accountInFlightSoftCap {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *AccountPool) totalInFlightLocked() int {
+	total := 0
+	for i := range p.accounts {
+		total += p.accounts[i].InFlight
+	}
+	return total
+}
+
+func (p *AccountPool) snapshotInFlight() map[string]int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]int, len(p.accounts))
+	for i := range p.accounts {
+		if p.accounts[i].Account == nil || p.accounts[i].InFlight <= 0 {
+			continue
+		}
+		out[p.accounts[i].Account.ID.String()] = p.accounts[i].InFlight
+	}
+	return out
+}
+
+func (p *AccountPool) restoreInFlight(inFlight map[string]int) {
+	if len(inFlight) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].Account == nil {
+			continue
+		}
+		p.accounts[i].InFlight = inFlight[p.accounts[i].Account.ID.String()]
+	}
 }
 
 func (p *AccountPool) PickByID(accountID string) (*db.Account, bool) {
@@ -415,7 +512,7 @@ func (p *AccountPool) AvailableCount() int {
 func (p *AccountPool) Stats() AccountPoolStats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return AccountPoolStats{Accounts: len(p.accounts), TotalWeight: p.totalWeight, Closed: p.closed}
+	return AccountPoolStats{Accounts: len(p.accounts), TotalWeight: p.totalWeight, TotalInFlight: p.totalInFlightLocked(), Closed: p.closed}
 }
 
 func (p *AccountPool) Cooldown(accountID string, duration time.Duration) {
@@ -511,6 +608,9 @@ func NewPoolManager() *PoolManager {
 func (pm *PoolManager) SetPool(channelID string, pool *AccountPool) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	if existing, ok := pm.pools[channelID]; ok && existing != nil && pool != nil {
+		pool.restoreInFlight(existing.snapshotInFlight())
+	}
 	pm.pools[channelID] = pool
 }
 

@@ -43,14 +43,12 @@ func terminalAccountDisableReason(statusCode int, body []byte) (string, bool) {
 		return "unauthenticated", true
 	case strings.Contains(code, "invalid_api_key"), strings.Contains(code, "invalid_key"):
 		return "invalid_api_key", true
-	case strings.Contains(code, "insufficient_quota"):
-		return "insufficient_quota", true
 	case strings.Contains(code, "permission"), strings.Contains(code, "forbidden"), strings.Contains(code, "unauthorized"):
 		return normalizedDisableReason(code), true
 	}
 
-	if statusCode == fasthttp.StatusUnauthorized {
-		return "unauthorized", true
+	if statusCode == fasthttp.StatusUnauthorized && hasTerminalAccountKeyword(message) {
+		return normalizedDisableReason(message), true
 	}
 	if statusCode == fasthttp.StatusForbidden && hasTerminalAccountKeyword(message) {
 		return normalizedDisableReason(message), true
@@ -138,6 +136,18 @@ func hasTerminalAccountKeyword(message string) bool {
 		"api key is invalid",
 		"invalid api key",
 		"invalid token",
+		"apikey不存在",
+		"api key不存在",
+		"api_key不存在",
+		"api key 不存在",
+		"apikey 不存在",
+		"api key配置错误",
+		"apikey配置错误",
+		"api_key配置错误",
+		"凭据无效",
+		"认证过期",
+		"认证已过期",
+		"认证失败",
 	} {
 		if strings.Contains(message, keyword) {
 			return true

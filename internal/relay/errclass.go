@@ -107,6 +107,21 @@ var (
 		[]byte("credential invalid"),
 		[]byte("credentials_invalid"),
 		[]byte("invalidated"),
+		[]byte("invalid api key"),
+		[]byte("incorrect api key"),
+		[]byte("api key is invalid"),
+		[]byte("apikey不存在"),
+		[]byte("api key不存在"),
+		[]byte("api_key不存在"),
+		[]byte("api key 不存在"),
+		[]byte("apikey 不存在"),
+		[]byte("api key配置错误"),
+		[]byte("apikey配置错误"),
+		[]byte("api_key配置错误"),
+		[]byte("凭据无效"),
+		[]byte("认证过期"),
+		[]byte("认证已过期"),
+		[]byte("认证失败"),
 		// 组织/账户级永久拒绝
 		[]byte("organization has been disabled"),
 		[]byte("organization_disabled"),
@@ -172,9 +187,8 @@ func IsTerminalAuthError(statusCode int, body []byte) bool {
 		return true
 	}
 
-	// 复用 account_disable.go 中更细致的字段解析
-	// 注意：terminalAccountDisableReason 对 401 总是返回 ("unauthorized", true)，
-	// 这与"终态"语义不完全等价。所以我们只在 403 / 强字段场景下采用它。
+	// 复用 account_disable.go 中更细致的字段解析。401 只有明确终态信号时
+	// 才会返回 true，普通账号侧 401 仍走冷却/跳过路径。
 	if statusCode == fasthttp.StatusForbidden {
 		if _, terminal := terminalAccountDisableReason(statusCode, body); terminal {
 			return true

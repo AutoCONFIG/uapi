@@ -39,7 +39,17 @@ func NewSSEStreamReaderWithTrace(trace *relayDebugTrace) *SSEStreamReader {
 }
 
 func (r *SSEStreamReader) Read(p []byte) (int, error) {
-	if len(r.current) == 0 {
+	for {
+		r.mu.Lock()
+		if len(r.current) > 0 {
+			n := copy(p, r.current)
+			r.current = r.current[n:]
+			r.readCount++
+			r.mu.Unlock()
+			return n, nil
+		}
+		r.mu.Unlock()
+
 		select {
 		case event, ok := <-r.eventCh:
 			if !ok {
@@ -48,9 +58,12 @@ func (r *SSEStreamReader) Read(p []byte) (int, error) {
 				)
 				return 0, io.EOF
 			}
+			r.mu.Lock()
 			r.current = event
+			fields := loggerReaderStateFieldsLocked(r, "event_dequeued")
+			r.mu.Unlock()
 			r.trace.Event("downstream_read_event_dequeued",
-				append(loggerReaderStateFields(r, "event_dequeued"), logger.F("sse", relayDebugSSEEventSummary(event)))...,
+				append(fields, logger.F("sse", relayDebugSSEEventSummary(event)))...,
 			)
 		case <-r.closeCh:
 			if err := r.abortError(); err != nil {
@@ -65,12 +78,6 @@ func (r *SSEStreamReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 	}
-	n := copy(p, r.current)
-	r.current = r.current[n:]
-	r.mu.Lock()
-	r.readCount++
-	r.mu.Unlock()
-	return n, nil
 }
 
 func (r *SSEStreamReader) Close() error {
