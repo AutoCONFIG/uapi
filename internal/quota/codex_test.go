@@ -40,7 +40,39 @@ func TestConvertCodexUsagePlusPrimaryLimitReachedMeansFiveHourExhausted(t *testi
 	}
 }
 
-func TestConvertCodexUsageWeeklyExhaustedDoesNotForcePrimary(t *testing.T) {
+func TestConvertCodexUsagePlusAllowedFalseWithPrimaryOnePercent(t *testing.T) {
+	qd := convertCodexUsage(map[string]interface{}{
+		"plan_type": "plus",
+		"rate_limit": map[string]interface{}{
+			"allowed":       false,
+			"limit_reached": true,
+			"primary_window": map[string]interface{}{
+				"used_percent":         1.0,
+				"limit_window_seconds": 5 * 60 * 60,
+				"reset_after_seconds":  18000.0,
+			},
+			"secondary_window": map[string]interface{}{
+				"used_percent":         100.0,
+				"limit_window_seconds": 7 * 24 * 60 * 60,
+			},
+		},
+	})
+
+	if len(qd.Buckets) != 2 {
+		t.Fatalf("bucket count = %d, want 2: %#v", len(qd.Buckets), qd.Buckets)
+	}
+	if qd.Buckets[0].RemainingPercent != 0 {
+		t.Fatalf("primary remaining = %d, want 0", qd.Buckets[0].RemainingPercent)
+	}
+	if qd.Buckets[0].UsedPercent == nil || *qd.Buckets[0].UsedPercent != 100 {
+		t.Fatalf("primary used = %#v, want 100", qd.Buckets[0].UsedPercent)
+	}
+	if qd.Buckets[1].RemainingPercent != 0 {
+		t.Fatalf("secondary remaining = %d, want 0", qd.Buckets[1].RemainingPercent)
+	}
+}
+
+func TestConvertCodexUsageWeeklyExhaustedAlsoForcesPlusPrimary(t *testing.T) {
 	qd := convertCodexUsage(map[string]interface{}{
 		"plan_type": "plus",
 		"rate_limit": map[string]interface{}{
@@ -60,11 +92,18 @@ func TestConvertCodexUsageWeeklyExhaustedDoesNotForcePrimary(t *testing.T) {
 	if len(qd.Buckets) != 2 {
 		t.Fatalf("bucket count = %d, want 2: %#v", len(qd.Buckets), qd.Buckets)
 	}
-	if qd.Buckets[0].RemainingPercent != 100 {
-		t.Fatalf("primary remaining = %d, want 100", qd.Buckets[0].RemainingPercent)
+	if qd.Buckets[0].RemainingPercent != 0 {
+		t.Fatalf("primary remaining = %d, want 0", qd.Buckets[0].RemainingPercent)
 	}
 	if qd.Buckets[1].RemainingPercent != 0 {
 		t.Fatalf("secondary remaining = %d, want 0", qd.Buckets[1].RemainingPercent)
+	}
+}
+
+func TestConvertCodexUsageSetsFetchedAtForDebugDump(t *testing.T) {
+	qd := convertCodexUsage(map[string]interface{}{})
+	if qd.FetchedAt.IsZero() {
+		t.Fatal("FetchedAt is zero")
 	}
 }
 

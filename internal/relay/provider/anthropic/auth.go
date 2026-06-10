@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/google/uuid"
 )
 
@@ -103,28 +104,41 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, state str
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	debugInfo := oauthdebug.NewHTTPDebug(req, body)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("token exchange failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("token exchange failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var result TokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
 	if result.Error != "" {
-		return nil, fmt.Errorf("token exchange failed: %s", result.Error)
+		err := fmt.Errorf("token exchange failed: %s", result.Error)
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	if result.AccessToken == "" {
-		return nil, fmt.Errorf("token exchange response missing access_token")
+		err := fmt.Errorf("token exchange response missing access_token")
+		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, result, nil)
 	return &result, nil
 }
 
@@ -222,22 +236,31 @@ func fetchUsage(accessToken string) (interface{}, error) {
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", ClaudeCodeUserAgent)
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("claude_code", "fetch_usage", nil, debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("claude_code", "fetch_usage", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("usage fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("usage fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("claude_code", "fetch_usage", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var usage map[string]interface{}
 	if err := json.Unmarshal(body, &usage); err != nil {
+		oauthdebug.Write("claude_code", "fetch_usage", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.Write("claude_code", "fetch_usage", nil, debugInfo, usage, nil)
 	return usage, nil
 }
 
@@ -248,22 +271,31 @@ func fetchOAuthProfile(accessToken string) (*OAuthProfile, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("claude_code", "fetch_profile", nil, debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("claude_code", "fetch_profile", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("profile fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("profile fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("claude_code", "fetch_profile", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var profile OAuthProfile
 	if err := json.Unmarshal(body, &profile); err != nil {
+		oauthdebug.Write("claude_code", "fetch_profile", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.Write("claude_code", "fetch_profile", nil, debugInfo, profile, nil)
 	return &profile, nil
 }
 
@@ -273,22 +305,31 @@ func fetchUserRoles(accessToken string) (*UserRoles, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("claude_code", "fetch_roles", nil, debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("claude_code", "fetch_roles", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("roles fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("roles fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("claude_code", "fetch_roles", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var roles UserRoles
 	if err := json.Unmarshal(body, &roles); err != nil {
+		oauthdebug.Write("claude_code", "fetch_roles", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.Write("claude_code", "fetch_roles", nil, debugInfo, roles, nil)
 	return &roles, nil
 }
 
@@ -300,24 +341,33 @@ func fetchFirstTokenDate(accessToken string) (interface{}, error) {
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("anthropic-beta", OAuthBetaHeader)
 	req.Header.Set("User-Agent", ClaudeCodeUserAgent)
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("claude_code", "fetch_first_token_date", nil, debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("claude_code", "fetch_first_token_date", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("first token date fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("first token date fetch failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("claude_code", "fetch_first_token_date", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var result struct {
 		FirstTokenDate interface{} `json:"first_token_date"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
+		oauthdebug.Write("claude_code", "fetch_first_token_date", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.Write("claude_code", "fetch_first_token_date", nil, debugInfo, result, nil)
 	return result.FirstTokenDate, nil
 }
 

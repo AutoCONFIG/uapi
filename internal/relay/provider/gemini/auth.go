@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 )
 
 // httpClient is shared across OAuth operations with a reasonable timeout.
@@ -96,28 +98,47 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, clientSec
 	if clientSecret != "" {
 		data.Set("client_secret", clientSecret)
 	}
-	resp, err := httpClient.PostForm(tokenURL, data)
+	requestBody := []byte(data.Encode())
+	req, reqErr := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(string(requestBody)))
+	if reqErr != nil {
+		return nil, reqErr
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("exchange request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("exchange failed: %s", tokenResp.Error)
+		err := fmt.Errorf("exchange failed: %s", tokenResp.Error)
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("no access token in response")
+		err := fmt.Errorf("no access token in response")
+		oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write("gemini_code", "exchange_code", nil, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 
@@ -297,22 +318,31 @@ func getCodeAssistOperation(accessToken, name string) (map[string]interface{}, e
 		return nil, err
 	}
 	setCodeAssistHeaders(req, accessToken, "")
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("gemini_code", "get_code_assist_operation", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("get operation failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("gemini_code", "get_code_assist_operation", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read operation response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("get operation failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("get operation failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("gemini_code", "get_code_assist_operation", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write("gemini_code", "get_code_assist_operation", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse operation response: %w", err)
 	}
+	oauthdebug.Write("gemini_code", "get_code_assist_operation", nil, debugInfo, result, nil)
 	return result, nil
 }
 
@@ -323,22 +353,32 @@ func codeAssistPost(accessToken, method string, reqBody map[string]interface{}) 
 		return nil, err
 	}
 	setCodeAssistHeaders(req, accessToken, "")
+	operation := "code_assist_" + strings.ToLower(method)
+	debugInfo := oauthdebug.NewHTTPDebug(req, body)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("gemini_code", operation, nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("%s failed: %w", method, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("gemini_code", operation, nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read %s response: %w", method, err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s failed: status %d: %s", method, resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("%s failed: status %d: %s", method, resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("gemini_code", operation, nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write("gemini_code", operation, nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse %s response: %w", method, err)
 	}
+	oauthdebug.Write("gemini_code", operation, nil, debugInfo, result, nil)
 	return result, nil
 }
 

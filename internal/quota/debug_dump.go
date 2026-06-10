@@ -2,12 +2,14 @@ package quota
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/google/uuid"
 )
 
@@ -20,6 +22,25 @@ type quotaDebugDump struct {
 	Upstream  interface{}            `json:"upstream,omitempty"`
 	Quota     *QuotaData             `json:"quota,omitempty"`
 	Error     string                 `json:"error,omitempty"`
+}
+
+type quotaHTTPDebug struct {
+	Request  quotaHTTPDebugRequest  `json:"request"`
+	Response quotaHTTPDebugResponse `json:"response"`
+}
+
+type quotaHTTPDebugRequest struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body,omitempty"`
+}
+
+type quotaHTTPDebugResponse struct {
+	StatusCode int                 `json:"status_code,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
+	BodyBytes  int                 `json:"body_bytes,omitempty"`
+	Body       string              `json:"body,omitempty"`
 }
 
 func writeQuotaDebugDump(provider string, metadata map[string]interface{}, upstream interface{}, qd *QuotaData, err error) {
@@ -38,12 +59,12 @@ func writeQuotaDebugDump(provider string, metadata map[string]interface{}, upstr
 	record := quotaDebugDump{
 		Timestamp: now.Local().Format(time.RFC3339Nano),
 		Provider:  provider,
-		Metadata:  redactQuotaDebugMetadata(metadata),
+		Metadata:  oauthdebug.RedactMap(metadata),
 		Upstream:  upstream,
 		Quota:     qd,
 	}
 	if err != nil {
-		record.Error = logger.Redact(err.Error())
+		record.Error = oauthdebug.RedactText(err.Error())
 	}
 	raw, marshalErr := json.MarshalIndent(record, "", "  ")
 	if marshalErr != nil {
@@ -55,22 +76,49 @@ func writeQuotaDebugDump(provider string, metadata map[string]interface{}, upstr
 	}
 }
 
-func redactQuotaDebugMetadata(metadata map[string]interface{}) map[string]interface{} {
-	if metadata == nil {
+func newQuotaHTTPDebug(req *http.Request, requestBody []byte) *quotaHTTPDebug {
+	if req == nil {
 		return nil
 	}
-	out := make(map[string]interface{}, len(metadata))
-	for key, value := range metadata {
-		lower := strings.ToLower(key)
-		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "credential") {
-			out[key] = "[redacted]"
-			continue
-		}
-		if text, ok := value.(string); ok {
-			out[key] = logger.Redact(text)
-			continue
-		}
-		out[key] = value
+	debugInfo := &quotaHTTPDebug{
+		Request: quotaHTTPDebugRequest{
+			Method:  req.Method,
+			URL:     oauthdebug.RedactURL(req.URL.String()),
+			Headers: oauthdebug.RedactRequestHeaders(req.Header),
+		},
 	}
-	return out
+	if len(requestBody) > 0 {
+		debugInfo.Request.Body = quotaDebugBodyPreview(requestBody, 10000)
+	}
+	return debugInfo
+}
+
+func finishQuotaHTTPDebug(debugInfo *quotaHTTPDebug, resp *http.Response, responseBody []byte) {
+	if debugInfo == nil || resp == nil {
+		return
+	}
+	debugInfo.Response.StatusCode = resp.StatusCode
+	debugInfo.Response.Headers = oauthdebug.RedactResponseHeaders(resp.Header)
+	debugInfo.Response.BodyBytes = len(responseBody)
+	debugInfo.Response.Body = quotaDebugBodyPreview(responseBody, 10000)
+}
+
+func redactQuotaDebugMetadata(metadata map[string]interface{}) map[string]interface{} {
+	return oauthdebug.RedactMap(metadata)
+}
+
+func redactedQuotaRequestHeaders(headers http.Header) map[string]string {
+	return oauthdebug.RedactRequestHeaders(headers)
+}
+
+func redactedQuotaResponseHeaders(headers http.Header) map[string][]string {
+	return oauthdebug.RedactResponseHeaders(headers)
+}
+
+func isQuotaSecretHeader(key string) bool {
+	return oauthdebug.IsSecretHeader(key)
+}
+
+func quotaDebugBodyPreview(body []byte, limit int) string {
+	return oauthdebug.BodyPreview(body, limit)
 }

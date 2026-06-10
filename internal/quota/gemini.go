@@ -23,12 +23,15 @@ func (g *geminiFetcher) FetchQuota(accessToken string, metadata map[string]inter
 		return nil, nil
 	}
 
-	quota, err := fetchGeminiQuota(accessToken, projectID)
+	quota, debugInfo, err := fetchGeminiQuotaWithDebug(accessToken, projectID)
 	if err != nil {
+		writeQuotaDebugDump("gemini_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 
-	return convertGeminiQuota(quota), nil
+	qd := convertGeminiQuota(quota)
+	writeQuotaDebugDump("gemini_code", metadata, debugInfo, qd, nil)
+	return qd, nil
 }
 
 func geminiProjectID(metadata map[string]interface{}) string {
@@ -51,37 +54,44 @@ func geminiProjectID(metadata map[string]interface{}) string {
 }
 
 func fetchGeminiQuota(accessToken, projectID string) (map[string]interface{}, error) {
+	quota, _, err := fetchGeminiQuotaWithDebug(accessToken, projectID)
+	return quota, err
+}
+
+func fetchGeminiQuotaWithDebug(accessToken, projectID string) (map[string]interface{}, *quotaHTTPDebug, error) {
 	reqBody := map[string]interface{}{"project": projectID}
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequest(http.MethodPost, gemini.CodeAssistEndpoint+"/"+gemini.CodeAssistVersion+":retrieveUserQuota", strings.NewReader(string(body)))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "google-cloud-sdk")
+	debugInfo := newQuotaHTTPDebug(req, body)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("retrieveUserQuota request: %w", err)
+		return nil, debugInfo, fmt.Errorf("retrieveUserQuota request: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read retrieveUserQuota response: %w", err)
+		return nil, debugInfo, fmt.Errorf("read retrieveUserQuota response: %w", err)
 	}
+	finishQuotaHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode == 403 {
-		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, nil
+		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, debugInfo, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("retrieveUserQuota failed: status %d: %s", resp.StatusCode, truncate(respBody, 200))
+		return nil, debugInfo, fmt.Errorf("retrieveUserQuota failed: status %d: %s", resp.StatusCode, truncate(respBody, 200))
 	}
 	var quota map[string]interface{}
 	if err := json.Unmarshal(respBody, &quota); err != nil {
-		return nil, fmt.Errorf("parse retrieveUserQuota response: %w", err)
+		return nil, debugInfo, fmt.Errorf("parse retrieveUserQuota response: %w", err)
 	}
-	return quota, nil
+	return quota, debugInfo, nil
 }
 
 func convertGeminiQuota(raw map[string]interface{}) *QuotaData {

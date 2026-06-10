@@ -35,9 +35,11 @@ func (a *antigravityFetcher) FetchQuota(accessToken string, metadata map[string]
 
 	var models []modelEntry
 	var lastErr error
+	var debugAttempts []*quotaHTTPDebug
 	forbidden := false
 	for _, endpoint := range antigravityQuotaEndpoints {
-		m, err := fetchAntigravityModels(endpoint, accessToken, body)
+		m, debugInfo, err := fetchAntigravityModelsWithDebug(endpoint, accessToken, body)
+		debugAttempts = append(debugAttempts, debugInfo)
 		if err != nil {
 			if strings.Contains(err.Error(), "forbidden") {
 				forbidden = true
@@ -54,17 +56,22 @@ func (a *antigravityFetcher) FetchQuota(accessToken string, metadata map[string]
 
 	// All endpoints returned 403 → account is forbidden
 	if forbidden && models == nil {
-		return &QuotaData{
+		qd := &QuotaData{
 			IsForbidden:     true,
 			ForbiddenReason: "account_forbidden",
-		}, nil
+		}
+		writeQuotaDebugDump("antigravity", metadata, debugAttempts, qd, nil)
+		return qd, nil
 	}
 
 	if lastErr != nil {
+		writeQuotaDebugDump("antigravity", metadata, debugAttempts, nil, lastErr)
 		return nil, fmt.Errorf("all antigravity quota endpoints failed: %w", lastErr)
 	}
 
-	return convertAntigravityModels(models, metadata), nil
+	qd := convertAntigravityModels(models, metadata)
+	writeQuotaDebugDump("antigravity", metadata, debugAttempts, qd, nil)
+	return qd, nil
 }
 
 func antigravityProjectIDFromMeta(metadata map[string]interface{}) string {
@@ -96,32 +103,43 @@ type modelEntry struct {
 }
 
 func fetchAntigravityModels(endpoint, accessToken string, body []byte) ([]modelEntry, error) {
+	models, _, err := fetchAntigravityModelsWithDebug(endpoint, accessToken, body)
+	return models, err
+}
+
+func fetchAntigravityModelsWithDebug(endpoint, accessToken string, body []byte) ([]modelEntry, *quotaHTTPDebug, error) {
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", antigravity.RequestUserAgent())
+	debugInfo := newQuotaHTTPDebug(req, body)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, debugInfo, err
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, debugInfo, fmt.Errorf("read response: %w", err)
 	}
+	finishQuotaHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode == 403 {
-		return nil, fmt.Errorf("forbidden")
+		return nil, debugInfo, fmt.Errorf("forbidden")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, truncate(respBody, 200))
+		return nil, debugInfo, fmt.Errorf("status %d: %s", resp.StatusCode, truncate(respBody, 200))
 	}
 
-	return parseAntigravityModels(respBody)
+	models, err := parseAntigravityModels(respBody)
+	if err != nil {
+		return nil, debugInfo, err
+	}
+	return models, debugInfo, nil
 }
 
 func parseAntigravityModels(data []byte) ([]modelEntry, error) {

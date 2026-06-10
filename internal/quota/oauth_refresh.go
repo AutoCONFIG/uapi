@@ -13,6 +13,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/gemini"
@@ -122,6 +123,8 @@ func refreshTokenRequest(acc *db.Account, ch db.Channel, refreshToken string) (*
 
 	var resp *http.Response
 	var err error
+	var req *http.Request
+	var requestBody []byte
 	if ch.APIFormat == "claude_code" {
 		payload := map[string]interface{}{
 			"grant_type":    "refresh_token",
@@ -129,17 +132,32 @@ func refreshTokenRequest(acc *db.Account, ch db.Channel, refreshToken string) (*
 			"client_id":     clientID,
 			"scope":         anthropic.ClaudeAIRefreshScope,
 		}
-		body, _ := json.Marshal(payload)
-		req, reqErr := http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(body))
+		requestBody, _ = json.Marshal(payload)
+		var reqErr error
+		req, reqErr = http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
 			return nil, reqErr
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthRefreshClient.Do(req)
 	} else if ch.APIFormat == "codex" {
-		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
+		refreshReq, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
 		if reqErr != nil {
 			return nil, reqErr
+		}
+		req = refreshReq
+		if req.GetBody != nil {
+			if bodyReader, bodyErr := req.GetBody(); bodyErr == nil {
+				requestBody, _ = io.ReadAll(bodyReader)
+				_ = bodyReader.Close()
+			}
+		}
+		if len(requestBody) == 0 {
+			payload := map[string]string{"client_id": clientID, "grant_type": "refresh_token", "refresh_token": refreshToken}
+			if clientSecret != "" {
+				payload["client_secret"] = clientSecret
+			}
+			requestBody, _ = json.Marshal(payload)
 		}
 		resp, err = oauthRefreshClient.Do(req)
 	} else {
@@ -151,31 +169,44 @@ func refreshTokenRequest(acc *db.Account, ch db.Channel, refreshToken string) (*
 		if clientSecret != "" {
 			form.Set("client_secret", clientSecret)
 		}
-		req, reqErr := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		requestBody = []byte(form.Encode())
+		var reqErr error
+		req, reqErr = http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(string(requestBody)))
 		if reqErr != nil {
 			return nil, reqErr
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		resp, err = oauthRefreshClient.Do(req)
 	}
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
 	if err != nil {
+		oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, nil, err)
 		return nil, fmt.Errorf("refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, nil, err)
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("refresh failed: status %d: %s", resp.StatusCode, compactOAuthBody(body))
+		err := fmt.Errorf("refresh failed: status %d: %s", resp.StatusCode, compactOAuthBody(body))
+		oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, nil, err)
+		return nil, err
 	}
 	var result oauthRefreshResult
 	if err := json.Unmarshal(body, &result); err != nil {
+		oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, nil, err)
 		return nil, fmt.Errorf("decode refresh response: %w", err)
 	}
 	if result.Error != "" {
-		return nil, fmt.Errorf("refresh failed: %s", result.Error)
+		err := fmt.Errorf("refresh failed: %s", result.Error)
+		oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write(ch.APIFormat, "refresh_token", oauthRefreshDebugMetadata(acc, ch), debugInfo, result, nil)
 	return &result, nil
 }
 
@@ -199,6 +230,24 @@ func (s *Scheduler) syncOAuthMetadata(acc *db.Account, ch db.Channel, accessToke
 			acc.Metadata["oauth_provider"] = "antigravity"
 		}
 	}
+}
+
+func oauthRefreshDebugMetadata(acc *db.Account, ch db.Channel) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"channel_id":  ch.ID.String(),
+		"channel":     ch.Name,
+		"api_format":  ch.APIFormat,
+		"account_id":  acc.ID.String(),
+		"account":     acc.Name,
+		"token_url":   acc.TokenURL,
+		"client_id":   acc.ClientID,
+		"cred_type":   acc.CredType,
+		"has_refresh": acc.RefreshToken != "",
+	}
+	if acc.TokenExpiry != nil {
+		metadata["token_expiry"] = acc.TokenExpiry.Format(time.RFC3339)
+	}
+	return metadata
 }
 
 func decryptedClientSecret(acc *db.Account) string {

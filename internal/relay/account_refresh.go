@@ -13,6 +13,7 @@ import (
 	"github.com/AutoCONFIG/uapi/internal/crypto"
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/AutoCONFIG/uapi/internal/oauthprovider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/anthropic"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/antigravity"
@@ -184,6 +185,8 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 	}
 
 	var resp *http.Response
+	var req *http.Request
+	var requestBody []byte
 	if providerKey == "anthropic" {
 		payload := map[string]interface{}{
 			"grant_type":    "refresh_token",
@@ -191,32 +194,61 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 			"client_id":     clientID,
 			"scope":         anthropic.ClaudeAIRefreshScope,
 		}
-		body, _ := json.Marshal(payload)
-		req, reqErr := http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(body))
+		requestBody, _ = json.Marshal(payload)
+		var reqErr error
+		req, reqErr = http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err = oauthHTTPClient.Do(req)
 	} else if providerKey == "openai" && (ch == nil || !strings.EqualFold(strings.TrimSpace(ch.APIFormat), "chatgpt_reverse")) {
-		req, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
+		refreshReq, reqErr := openai.NewRefreshTokenRequest(tokenURL, refreshToken, clientID, clientSecret)
 		if reqErr != nil {
 			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
 		}
+		req = refreshReq
+		if req.GetBody != nil {
+			if bodyReader, bodyErr := req.GetBody(); bodyErr == nil {
+				requestBody, _ = io.ReadAll(bodyReader)
+				_ = bodyReader.Close()
+			}
+		}
+		if len(requestBody) == 0 {
+			payload := map[string]string{"client_id": clientID, "grant_type": "refresh_token", "refresh_token": refreshToken}
+			if clientSecret != "" {
+				payload["client_secret"] = clientSecret
+			}
+			requestBody, _ = json.Marshal(payload)
+		}
 		resp, err = oauthHTTPClient.Do(req)
 	} else {
-		resp, err = oauthHTTPClient.PostForm(tokenURL, data)
+		requestBody = []byte(data.Encode())
+		var reqErr error
+		req, reqErr = http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(string(requestBody)))
+		if reqErr != nil {
+			return "", fmt.Errorf("refresh request build failed: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err = oauthHTTPClient.Do(req)
 	}
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
 	if err != nil {
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
 		return "", fmt.Errorf("refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
 		return "", fmt.Errorf("read refresh response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("refresh failed: status %d: %s", resp.StatusCode, compactOAuthBody(respBody))
+		err := fmt.Errorf("refresh failed: status %d: %s", resp.StatusCode, compactOAuthBody(respBody))
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
+		return "", err
 	}
 
 	var result struct {
@@ -228,14 +260,20 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		Scope        string `json:"scope"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
 		return "", fmt.Errorf("decode refresh response: %w", err)
 	}
 	if result.Error != "" {
-		return "", fmt.Errorf("refresh failed: %s", result.Error)
+		err := fmt.Errorf("refresh failed: %s", result.Error)
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
+		return "", err
 	}
 	if result.AccessToken == "" && result.IDToken == "" {
-		return "", fmt.Errorf("refresh response missing access token")
+		err := fmt.Errorf("refresh response missing access token")
+		oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, nil, err)
+		return "", err
 	}
+	oauthdebug.Write(relayOAuthDebugProvider(providerKey, ch), "refresh_token", relayOAuthRefreshDebugMetadata(account, ch, providerKey, tokenURL), debugInfo, result, nil)
 
 	if result.IDToken != "" && providerKey == "openai" {
 		if metadata, err := openai.ParseIDTokenMetadata(result.IDToken); err == nil {
@@ -368,6 +406,47 @@ func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refres
 		}
 	}
 	return credential, nil
+}
+
+func relayOAuthDebugProvider(providerKey string, ch *db.Channel) string {
+	if ch != nil && strings.TrimSpace(ch.APIFormat) != "" {
+		return strings.TrimSpace(ch.APIFormat)
+	}
+	switch providerKey {
+	case "openai":
+		return "codex"
+	case "anthropic":
+		return "claude_code"
+	case "gemini":
+		return "gemini_code"
+	case "antigravity":
+		return "antigravity"
+	default:
+		return providerKey
+	}
+}
+
+func relayOAuthRefreshDebugMetadata(account *db.Account, ch *db.Channel, providerKey, tokenURL string) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"provider_key": providerKey,
+		"token_url":    tokenURL,
+	}
+	if account != nil {
+		metadata["account_id"] = account.ID.String()
+		metadata["account"] = account.Name
+		metadata["cred_type"] = account.CredType
+		metadata["client_id"] = account.ClientID
+		metadata["has_refresh"] = account.RefreshToken != ""
+		if account.TokenExpiry != nil {
+			metadata["token_expiry"] = account.TokenExpiry.Format(time.RFC3339)
+		}
+	}
+	if ch != nil {
+		metadata["channel_id"] = ch.ID.String()
+		metadata["channel"] = ch.Name
+		metadata["api_format"] = ch.APIFormat
+	}
+	return metadata
 }
 
 func oauthProviderKey(account *db.Account) string {

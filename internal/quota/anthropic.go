@@ -19,43 +19,53 @@ const anthropicUsageURL = "https://api.claude.ai/api/oauth/usage"
 type anthropicFetcher struct{}
 
 func (a *anthropicFetcher) FetchQuota(accessToken string, metadata map[string]interface{}) (*QuotaData, error) {
-	usage, err := fetchAnthropicUsage(accessToken)
+	usage, debugInfo, err := fetchAnthropicUsageWithDebug(accessToken)
 	if err != nil {
+		writeQuotaDebugDump("claude_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
-	return convertAnthropicUsage(usage, metadata), nil
+	qd := convertAnthropicUsage(usage, metadata)
+	writeQuotaDebugDump("claude_code", metadata, debugInfo, qd, nil)
+	return qd, nil
 }
 
 func fetchAnthropicUsage(accessToken string) (map[string]interface{}, error) {
+	usage, _, err := fetchAnthropicUsageWithDebug(accessToken)
+	return usage, err
+}
+
+func fetchAnthropicUsageWithDebug(accessToken string) (map[string]interface{}, *quotaHTTPDebug, error) {
 	req, err := http.NewRequest(http.MethodGet, anthropicUsageURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", anthropic.ClaudeCodeUserAgent)
+	debugInfo := newQuotaHTTPDebug(req, nil)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic usage request: %w", err)
+		return nil, debugInfo, fmt.Errorf("anthropic usage request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read anthropic usage response: %w", err)
+		return nil, debugInfo, fmt.Errorf("read anthropic usage response: %w", err)
 	}
+	finishQuotaHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode == 403 {
-		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, nil
+		return map[string]interface{}{"_forbidden": true, "_forbidden_reason": "account_forbidden"}, debugInfo, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("anthropic usage failed: status %d: %s", resp.StatusCode, truncate(body, 200))
+		return nil, debugInfo, fmt.Errorf("anthropic usage failed: status %d: %s", resp.StatusCode, truncate(body, 200))
 	}
 	var usage map[string]interface{}
 	if err := json.Unmarshal(body, &usage); err != nil {
-		return nil, fmt.Errorf("parse anthropic usage response: %w", err)
+		return nil, debugInfo, fmt.Errorf("parse anthropic usage response: %w", err)
 	}
-	return usage, nil
+	return usage, debugInfo, nil
 }
 
 var anthropicWindowLabels = map[string]string{

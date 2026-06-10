@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -190,28 +192,41 @@ func ExchangeCode(tokenURL, code, redirectURI, clientID, clientSecret string) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", NativeOAuthUserAgent())
+	debugInfo := oauthdebug.NewHTTPDebug(req, []byte(data.Encode()))
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("antigravity exchange request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read antigravity exchange response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("antigravity exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("antigravity exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse antigravity exchange response: %w", err)
 	}
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("antigravity exchange failed: %s", tokenResp.Error)
+		err := fmt.Errorf("antigravity exchange failed: %s", tokenResp.Error)
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("antigravity exchange response missing access token")
+		err := fmt.Errorf("antigravity exchange response missing access token")
+		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 
@@ -267,25 +282,36 @@ func RefreshToken(tokenURL, refreshToken, clientID, clientSecret string) (*Token
 		return nil, fmt.Errorf("antigravity refresh request build failed: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	debugInfo := oauthdebug.NewHTTPDebug(req, []byte(data.Encode()))
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("antigravity refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read antigravity refresh response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("antigravity refresh failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("antigravity refresh failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse antigravity refresh response: %w", err)
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("antigravity refresh response missing access token")
+		err := fmt.Errorf("antigravity refresh response missing access token")
+		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 
@@ -296,24 +322,33 @@ func fetchUserInfo(ctx context.Context, accessToken string) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", RequestUserAgent())
+	debugInfo := oauthdebug.NewHTTPDebug(req, nil)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("antigravity", "fetch_userinfo", nil, debugInfo, nil, err)
 		return "", err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("antigravity", "fetch_userinfo", nil, debugInfo, nil, err)
 		return "", err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("userinfo failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("userinfo failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("antigravity", "fetch_userinfo", nil, debugInfo, nil, err)
+		return "", err
 	}
 	var info struct {
 		Email string `json:"email"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
+		oauthdebug.Write("antigravity", "fetch_userinfo", nil, debugInfo, nil, err)
 		return "", err
 	}
+	oauthdebug.Write("antigravity", "fetch_userinfo", nil, debugInfo, info, nil)
 	return strings.TrimSpace(info.Email), nil
 }
 
@@ -331,22 +366,31 @@ func loadCodeAssist(ctx context.Context, accessToken string) (map[string]interfa
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", LoadCodeAssistUserAgent())
 	req.Header.Set("X-Goog-Api-Client", GoogAPIClientUA)
+	debugInfo := oauthdebug.NewHTTPDebug(req, body)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("antigravity", "load_code_assist", nil, debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("antigravity", "load_code_assist", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("loadCodeAssist failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("loadCodeAssist failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("antigravity", "load_code_assist", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var out map[string]interface{}
 	if err := json.Unmarshal(respBody, &out); err != nil {
+		oauthdebug.Write("antigravity", "load_code_assist", nil, debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.Write("antigravity", "load_code_assist", nil, debugInfo, out, nil)
 	return out, nil
 }
 
@@ -369,22 +413,31 @@ func onboardUser(ctx context.Context, accessToken, tierID string) (string, error
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("X-Goog-Api-Client", GoogAPIClientUA)
+		debugInfo := oauthdebug.NewHTTPDebug(req, body)
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			oauthdebug.Write("antigravity", "onboard_user", map[string]interface{}{"attempt": attempt + 1}, debugInfo, nil, err)
 			return "", err
 		}
 		respBody, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
+			oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+			oauthdebug.Write("antigravity", "onboard_user", map[string]interface{}{"attempt": attempt + 1}, debugInfo, nil, readErr)
 			return "", readErr
 		}
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("onboardUser failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+			err := fmt.Errorf("onboardUser failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+			oauthdebug.Write("antigravity", "onboard_user", map[string]interface{}{"attempt": attempt + 1}, debugInfo, nil, err)
+			return "", err
 		}
 		var out map[string]interface{}
 		if err := json.Unmarshal(respBody, &out); err != nil {
+			oauthdebug.Write("antigravity", "onboard_user", map[string]interface{}{"attempt": attempt + 1}, debugInfo, nil, err)
 			return "", err
 		}
+		oauthdebug.Write("antigravity", "onboard_user", map[string]interface{}{"attempt": attempt + 1}, debugInfo, out, nil)
 		if done, _ := out["done"].(bool); done {
 			if response, ok := out["response"].(map[string]interface{}); ok {
 				if project := extractProject(response); project != "" {

@@ -52,7 +52,7 @@ func codexFedramp(metadata map[string]interface{}) bool {
 }
 
 func convertCodexUsage(raw map[string]interface{}) *QuotaData {
-	qd := &QuotaData{}
+	qd := &QuotaData{FetchedAt: time.Now().UTC()}
 
 	limits := raw
 	if rl, ok := raw["rate_limit"].(map[string]interface{}); ok {
@@ -261,26 +261,21 @@ func quotaBucketExists(qd *QuotaData, label string) bool {
 }
 
 func codexRemainingPercent(m map[string]interface{}, forceExhausted bool) *int {
+	if forceExhausted {
+		pct := 0
+		return &pct
+	}
 	if v := firstFloat(m, "remaining_percent", "remainingPercent", "remaining_percentage", "remainingPercentage"); v != nil {
 		pct := int(*v)
-		if forceExhausted && pct >= 100 {
-			pct = 0
-		}
 		return &pct
 	}
 	if v := firstFloat(m, "remaining_fraction", "remainingFraction"); v != nil {
 		pct := int(*v * 100)
-		if forceExhausted && pct >= 100 {
-			pct = 0
-		}
 		return &pct
 	}
 	if v := firstFloat(m, "used_percent", "usedPercent", "used_percentage", "usedPercentage"); v != nil {
 		used := *v
 		pct := 100 - int(used)
-		if forceExhausted && pct >= 100 {
-			pct = 0
-		}
 		return &pct
 	}
 	if v := firstFloat(m, "utilization"); v != nil {
@@ -289,22 +284,12 @@ func codexRemainingPercent(m map[string]interface{}, forceExhausted bool) *int {
 			used *= 100
 		}
 		pct := 100 - int(used)
-		if forceExhausted && pct >= 100 {
-			pct = 0
-		}
 		return &pct
 	}
 	limit := firstFloat(m, "limit", "total", "quota", "max")
 	used := firstFloat(m, "used", "usage", "consumed")
 	if limit != nil && used != nil && *limit > 0 {
 		pct := int(((*limit - *used) / *limit) * 100)
-		if forceExhausted && pct >= 100 {
-			pct = 0
-		}
-		return &pct
-	}
-	if forceExhausted {
-		pct := 0
 		return &pct
 	}
 	return nil
@@ -314,9 +299,6 @@ func codexPrimaryWindowExhausted(limits map[string]interface{}, planType string)
 	if !codexPrimaryWindowIsFiveHour(limits, planType) {
 		return false
 	}
-	if codexWindowClearlyExhausted(mapValue(limits, "secondary_window")) || codexWindowClearlyExhausted(mapValue(limits, "secondary")) {
-		return false
-	}
 	if v, ok := limits["limit_reached"].(bool); ok && v {
 		return true
 	}
@@ -324,11 +306,6 @@ func codexPrimaryWindowExhausted(limits map[string]interface{}, planType string)
 		return true
 	}
 	return false
-}
-
-func codexWindowClearlyExhausted(window map[string]interface{}) bool {
-	remainingPct := codexRemainingPercent(window, false)
-	return remainingPct != nil && *remainingPct <= 0
 }
 
 func codexPrimaryWindowIsFiveHour(limits map[string]interface{}, planType string) bool {

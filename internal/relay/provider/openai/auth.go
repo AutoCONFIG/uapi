@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 )
 
 // httpClient is shared across OAuth operations with a reasonable timeout.
@@ -187,67 +188,90 @@ func encodeCodexQuery(params [][2]string) string {
 
 // StartDeviceAuth creates an OpenAI device-code authorization session.
 func StartDeviceAuth(clientID string) (*DeviceUserCodeResponse, error) {
-	body := strings.NewReader(fmt.Sprintf(`{"client_id":%q}`, clientID))
-	req, err := http.NewRequest(http.MethodPost, DeviceUserCodeURL, body)
+	requestBody := []byte(fmt.Sprintf(`{"client_id":%q}`, clientID))
+	req, err := http.NewRequest(http.MethodPost, DeviceUserCodeURL, strings.NewReader(string(requestBody)))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("codex", "device_user_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("device auth request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("codex", "device_user_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("device auth failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("device auth failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("codex", "device_user_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var result DeviceUserCodeResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write("codex", "device_user_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	if result.DeviceAuthID == "" || result.UserCode == "" {
-		return nil, fmt.Errorf("device auth response missing code")
+		err := fmt.Errorf("device auth response missing code")
+		oauthdebug.Write("codex", "device_user_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	if result.Interval <= 0 {
 		result.Interval = 5
 	}
+	oauthdebug.Write("codex", "device_user_code", nil, debugInfo, result, nil)
 	return &result, nil
 }
 
 // PollDeviceToken checks whether the user has completed OpenAI device authorization.
 func PollDeviceToken(deviceAuthID, userCode string) (*DeviceTokenResponse, bool, error) {
-	body := strings.NewReader(fmt.Sprintf(`{"device_auth_id":%q,"user_code":%q}`, deviceAuthID, userCode))
-	req, err := http.NewRequest(http.MethodPost, DeviceTokenURL, body)
+	requestBody := []byte(fmt.Sprintf(`{"device_auth_id":%q,"user_code":%q}`, deviceAuthID, userCode))
+	req, err := http.NewRequest(http.MethodPost, DeviceTokenURL, strings.NewReader(string(requestBody)))
 	if err != nil {
 		return nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, nil, err)
 		return nil, false, fmt.Errorf("device token request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, nil, err)
 		return nil, false, fmt.Errorf("read response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, map[string]interface{}{"complete": false}, nil)
 		return nil, false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, fmt.Errorf("device token failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		err := fmt.Errorf("device token failed: status %d: %s", resp.StatusCode, compactBody(respBody))
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, nil, err)
+		return nil, false, err
 	}
 	var result DeviceTokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, nil, err)
 		return nil, false, fmt.Errorf("parse response: %w", err)
 	}
 	if result.AuthorizationCode == "" || result.CodeVerifier == "" {
-		return nil, false, fmt.Errorf("device token response missing authorization code")
+		err := fmt.Errorf("device token response missing authorization code")
+		oauthdebug.Write("codex", "device_token", nil, debugInfo, nil, err)
+		return nil, false, err
 	}
+	oauthdebug.Write("codex", "device_token", nil, debugInfo, result, nil)
 	return &result, true, nil
 }
 
@@ -260,28 +284,47 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID string) (*
 		"code_verifier": {codeVerifier},
 		"client_id":     {clientID},
 	}
-	resp, err := postForm(tokenURL, data)
+	requestBody := []byte(data.Encode())
+	req, reqErr := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(string(requestBody)))
+	if reqErr != nil {
+		return nil, reqErr
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	debugInfo := oauthdebug.NewHTTPDebug(req, requestBody)
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("exchange request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		err := fmt.Errorf("exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("exchange failed: %s", tokenResp.Error)
+		err := fmt.Errorf("exchange failed: %s", tokenResp.Error)
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
 	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("no access token in response: %s", compactBody(body))
+		err := fmt.Errorf("no access token in response: %s", compactBody(body))
+		oauthdebug.Write("codex", "exchange_code", nil, debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write("codex", "exchange_code", nil, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 

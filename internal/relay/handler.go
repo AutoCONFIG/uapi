@@ -4507,13 +4507,13 @@ func relayDebugOAuthMetadataFields(metadata map[string]interface{}) []logger.Fie
 		fields = append(fields, logger.F("oauth_chatgpt_plan_type", plan))
 	}
 	if accountID, _ := metadata["chatgpt_account_id"].(string); accountID != "" {
-		fields = append(fields, logger.F("oauth_chatgpt_account_id_present", true))
+		fields = append(fields, logger.F("oauth_chatgpt_account_id", accountID))
 	}
 	if fedramp, ok := metadata["chatgpt_account_is_fedramp"].(bool); ok {
 		fields = append(fields, logger.F("oauth_chatgpt_fedramp", fedramp))
 	}
 	if projectID, _ := metadata["project_id"].(string); projectID != "" {
-		fields = append(fields, logger.F("oauth_project_id_present", true))
+		fields = append(fields, logger.F("oauth_project_id", projectID))
 	}
 	if authMode, _ := metadata["auth_mode"].(string); authMode != "" {
 		fields = append(fields, logger.F("oauth_auth_mode", authMode))
