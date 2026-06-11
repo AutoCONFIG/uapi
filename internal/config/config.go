@@ -23,14 +23,14 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Mode                     string   `yaml:"mode"`
-	Host                     string   `yaml:"host"`
-	Port                     int      `yaml:"port"`
-	MaxBodySizeMB            int      `yaml:"max_body_size_mb"`
+	Mode          string `yaml:"mode"`
+	Host          string `yaml:"host"`
+	Port          int    `yaml:"port"`
+	MaxBodySizeMB int    `yaml:"max_body_size_mb"`
 	// LargePayloadThresholdMB skips JSON cleanup for requests above this size
 	// to avoid request body size changes from JSON parse→re-serialize cycle.
 	// Uses Bifrost's default of 10MB when set to 0.
-	LargePayloadThresholdMB int      `yaml:"large_payload_threshold_mb"`
+	LargePayloadThresholdMB  int      `yaml:"large_payload_threshold_mb"`
 	ConcurrencyLimit         int      `yaml:"concurrency_limit"`
 	StreamIdleTimeoutSeconds int      `yaml:"stream_idle_timeout_seconds"`
 	AllowedOrigins           []string `yaml:"allowed_origins"`
@@ -163,7 +163,7 @@ func defaultConfig() *Config {
 			Port:                     8080,
 			MaxBodySizeMB:            256,
 			LargePayloadThresholdMB:  256,
-			StreamIdleTimeoutSeconds: 300,
+			StreamIdleTimeoutSeconds: 1800,
 		},
 		Gateway: GatewayConfig{
 			CacheTTL:           "5s",

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/valyala/fasthttp"
 )
@@ -312,6 +313,37 @@ func TestStreamAndForwardUpstreamResetAbortsDownstream(t *testing.T) {
 	result := <-done
 	if result.err == nil || !strings.Contains(result.err.Error(), "connection reset by peer") {
 		t.Fatalf("stream result should preserve upstream reset error: %+v", result)
+	}
+}
+
+func TestStreamAndForwardIdleTimeoutEmitsProtocolError(t *testing.T) {
+	body := `data: {"id":"chatcmpl-test","created":1700000000,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{"}}]},"finish_reason":null}]}` + "\n\n"
+
+	reader := NewSSEStreamReader()
+	done := make(chan streamResult, 1)
+	go func() {
+		done <- streamAndForward(&errAfterReader{
+			data: []byte(body),
+			err:  httputil.ErrStreamIdleTimeout,
+		}, reader, newStreamTracker(testUsageParser{}), nil, newStreamConverterFunc(provider.FormatOpenAIChatCompletions, provider.FormatAnthropic), false)
+	}()
+
+	out, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("idle timeout should be delivered as protocol error event, got read error %v", readErr)
+	}
+	result := <-done
+	if !errors.Is(result.err, httputil.ErrStreamIdleTimeout) {
+		t.Fatalf("stream result should preserve idle timeout: %+v", result)
+	}
+	got := string(out)
+	for _, want := range []string{"event: error", "upstream_stream_idle_timeout", "no data received before a terminal event"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("timeout error event missing %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "message_stop") || strings.Contains(got, "response.completed") {
+		t.Fatalf("timeout must not synthesize a successful terminal event:\n%s", got)
 	}
 }
 

@@ -368,6 +368,9 @@ func (e *anthropicIREmitter) Emit(event relayir.StreamEvent) []byte {
 		}
 		e.toolBlockStoppedByCall[callID] = true
 		return sseEventJSON("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": idx})
+	case relayir.EventError:
+		e.finished = true
+		return sseEventJSON("error", map[string]interface{}{"type": "error", "error": irErrorMap(event.Error)})
 	case relayir.EventResponseDone:
 		out := e.stopThinking()
 		out = append(out, e.stopText()...)

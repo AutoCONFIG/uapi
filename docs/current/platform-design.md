@@ -36,7 +36,7 @@ docs/                     项目文档和外部 API reference
 
 - `server.mode`: `all`、`gateway`、`relay`。
 - `server.max_body_size_mb`: 默认 256。
-- `server.stream_idle_timeout_seconds`: 默认 300。
+- `server.stream_idle_timeout_seconds`: 默认 1800。
 - `security.jwt_secret`: JWT secret，至少 32 字符。
 - `security.encryption_key`: 32 字节 hex，用于 AES-256-GCM。
 - `security.trusted_proxies`: 允许信任 `X-Forwarded-For`/`X-Real-IP` 的代理。

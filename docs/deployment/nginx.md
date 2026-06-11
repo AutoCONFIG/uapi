@@ -155,7 +155,7 @@ server {
 }
 ```
 
-流式请求使用 UAPI 应用层 idle timeout。`server.stream_idle_timeout_seconds` 默认 300 秒，因此反代 `proxy_read_timeout` 应大于该值。
+流式请求使用 UAPI 应用层 idle timeout。`server.stream_idle_timeout_seconds` 默认 1800 秒，因此反代 `proxy_read_timeout` 应大于该值。
 
 ## 常见检查
 

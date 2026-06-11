@@ -212,7 +212,7 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 		concLimiter = relay.NewConcurrencyLimiter(0)
 	}
 	if streamIdleTimeout <= 0 {
-		streamIdleTimeout = 300 * time.Second
+		streamIdleTimeout = 1800 * time.Second
 	}
 	g := &Gateway{
 		db:                database,

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/httputil"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/stream"
@@ -545,6 +546,11 @@ func streamAndForwardWithTrace(
 		if lineStr == "" {
 			ok, err := flush()
 			if err != nil {
+				if isStreamTimeoutError(err) {
+					if !sendStreamErrorEvent(reader, outputConvert, err, trace, "converted") {
+						return streamResult{err: io.ErrClosedPipe}
+					}
+				}
 				return streamResult{err: err}
 			}
 			if !ok {
@@ -597,6 +603,12 @@ func streamAndForwardWithTrace(
 			logger.F("saw_chat_finish", sawChatFinish),
 		)
 		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
+		if isStreamTimeoutError(err) {
+			if !sendStreamErrorEvent(reader, outputConvert, err, trace, "converted") {
+				return streamResult{err: io.ErrClosedPipe}
+			}
+			return streamResult{err: err}
+		}
 		aborted = true
 		reader.Abort(err)
 		return streamResult{err: err}
@@ -605,6 +617,11 @@ func streamAndForwardWithTrace(
 		streamDebugStateFields(trace, "converted", sawDone, sawTerminal, sawChatFinish, failed, len(event))...,
 	)
 	if ok, err := flush(); err != nil {
+		if isStreamTimeoutError(err) {
+			if !sendStreamErrorEvent(reader, outputConvert, err, trace, "converted") {
+				return streamResult{err: io.ErrClosedPipe}
+			}
+		}
 		return streamResult{err: err}
 	} else if !ok {
 		return streamResult{err: io.ErrClosedPipe}
@@ -803,6 +820,52 @@ func openAIResponsesFailedEventFromStreamError(event []byte) []byte {
 		},
 	})
 	return []byte("event: response.failed\ndata: " + string(payload) + "\n\n")
+}
+
+func sendStreamErrorEvent(reader *SSEStreamReader, outputConvert func([]byte) []byte, err error, trace *relayDebugTrace, mode string) bool {
+	event := streamErrorEvent(err)
+	out := event
+	if outputConvert != nil {
+		if converted := outputConvert(event); len(converted) > 0 {
+			out = converted
+		}
+	}
+	trace.StreamChunk("stream.downstream.sse", out)
+	ok := reader.Send(out)
+	trace.Event("stream_error_event_sent",
+		logger.F("mode", mode),
+		logger.F("send_ok", ok),
+		logger.Err(err),
+		logger.F("event_bytes", len(out)),
+	)
+	return ok
+}
+
+func streamErrorEvent(err error) []byte {
+	errType := "upstream_stream_error"
+	message := "upstream stream error"
+	switch {
+	case errors.Is(err, httputil.ErrStreamIdleTimeout):
+		errType = "upstream_stream_idle_timeout"
+		message = "upstream stream idle timeout: no data received before a terminal event"
+	case errors.Is(err, errContentIdleTimeout):
+		errType = "upstream_stream_content_idle_timeout"
+		message = "upstream stream content idle timeout: upstream sent only empty chunks before a terminal event"
+	case err != nil:
+		message = err.Error()
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    errType,
+			"message": message,
+		},
+	})
+	return []byte("event: error\ndata: " + string(payload) + "\n\n")
+}
+
+func isStreamTimeoutError(err error) bool {
+	return errors.Is(err, httputil.ErrStreamIdleTimeout) || errors.Is(err, errContentIdleTimeout)
 }
 
 func streamErrorMessage(event []byte) (string, bool) {
@@ -1022,6 +1085,12 @@ func streamRawAndForward(scanner *bufio.Scanner, reader *SSEStreamReader, tracke
 			logger.F("saw_chat_finish", sawChatFinish),
 		)
 		logger.Warnf("relay.sse", "scanner failed", logger.Err(err))
+		if isStreamTimeoutError(err) {
+			if !sendStreamErrorEvent(reader, nil, err, trace, "raw") {
+				return streamResult{err: io.ErrClosedPipe}
+			}
+			return streamResult{err: err}
+		}
 		reader.Abort(err)
 		return streamResult{err: err}
 	}

@@ -50,7 +50,7 @@ const maxResponseSize = 100 * 1024 * 1024
 // Set to 256MB to support large files (PDFs up to 64MB, videos up to 256MB).
 const largePayloadThresholdBytesDefault = 256 * 1024 * 1024
 
-const defaultStreamIdleTimeout = 300 * time.Second
+const defaultStreamIdleTimeout = 1800 * time.Second
 
 var claudeCodeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
@@ -4745,7 +4745,7 @@ func sanitizeCodexReasoningInputItems(bodyMap map[string]interface{}) {
 		summary, hasSummary := item["summary"].([]interface{})
 		encrypted, hasEncrypted := item["encrypted_content"].(string)
 		hasValidEncrypted := hasEncrypted && isValidCodexReasoningEncryptedContent(encrypted)
-		if !hasValidEncrypted && (!hasSummary || len(summary) == 0) {
+		if !hasValidEncrypted && (isCodexPersistedReasoningID(item["id"]) || !hasSummary || len(summary) == 0) {
 			continue
 		}
 		for _, key := range []string{"id", "status"} {
@@ -4757,6 +4757,20 @@ func sanitizeCodexReasoningInputItems(bodyMap map[string]interface{}) {
 		filtered = append(filtered, item)
 	}
 	bodyMap["input"] = filtered
+}
+
+func isCodexPersistedReasoningID(value interface{}) bool {
+	id, _ := value.(string)
+	if !strings.HasPrefix(id, "rs_") || len(id) < 16 {
+		return false
+	}
+	for _, ch := range id[3:] {
+		if (ch >= 'a' && ch <= 'f') || (ch >= '0' && ch <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func sanitizeCodexMessageReasoningFields(bodyMap map[string]interface{}) {
