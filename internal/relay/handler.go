@@ -4558,6 +4558,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool, clientMetadataSeed
 	}
 	normalizeCodexResponsesClientMetadata(bodyMap, clientMetadataSeed)
 	sanitizeCodexReasoningEncryptedContent(bodyMap)
+	sanitizeCodexReasoningInputItems(bodyMap)
 	sanitizeCodexMessageReasoningFields(bodyMap)
 	for _, key := range []string{
 		"max_output_tokens",
@@ -4723,6 +4724,34 @@ func sanitizeCodexReasoningEncryptedContent(bodyMap map[string]interface{}) {
 			delete(item, "encrypted_content")
 		}
 	}
+}
+
+func sanitizeCodexReasoningInputItems(bodyMap map[string]interface{}) {
+	items, ok := bodyMap["input"].([]interface{})
+	if !ok {
+		return
+	}
+	filtered := items[:0]
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			filtered = append(filtered, rawItem)
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "reasoning" {
+			filtered = append(filtered, rawItem)
+			continue
+		}
+		encrypted, ok := item["encrypted_content"].(string)
+		if !ok || !isValidCodexReasoningEncryptedContent(encrypted) {
+			continue
+		}
+		for _, key := range []string{"id", "status", "summary"} {
+			delete(item, key)
+		}
+		filtered = append(filtered, item)
+	}
+	bodyMap["input"] = filtered
 }
 
 func sanitizeCodexMessageReasoningFields(bodyMap map[string]interface{}) {

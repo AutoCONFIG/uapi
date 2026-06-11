@@ -383,17 +383,74 @@ func TestNormalizeCodexResponsesRequestSanitizesInvalidReasoningEncryptedContent
 		t.Fatalf("normalized body is not JSON: %v", err)
 	}
 	input := body["input"].([]interface{})
-	if _, ok := input[0].(map[string]interface{})["encrypted_content"]; ok {
-		t.Fatalf("invalid reasoning encrypted_content should be removed: %s", got)
+	if len(input) != 2 {
+		t.Fatalf("invalid reasoning items should be dropped, got %d input items: %s", len(input), got)
 	}
-	if _, ok := input[1].(map[string]interface{})["encrypted_content"]; ok {
-		t.Fatalf("non-string reasoning encrypted_content should be removed: %s", got)
-	}
-	if input[2].(map[string]interface{})["encrypted_content"] != valid {
+	if input[0].(map[string]interface{})["encrypted_content"] != valid {
 		t.Fatalf("valid reasoning encrypted_content should be preserved: %s", got)
 	}
-	if input[3].(map[string]interface{})["encrypted_content"] != "leave-message-alone" {
+	if input[1].(map[string]interface{})["encrypted_content"] != "leave-message-alone" {
 		t.Fatalf("non-reasoning encrypted_content should be preserved: %s", got)
+	}
+}
+
+func TestNormalizeCodexResponsesRequestDropsUnencryptedReasoningItems(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"id":"rs_18b7ed7b7a95d92f","type":"reasoning","summary":[{"type":"summary_text","text":"hidden"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible"}]}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	if len(input) != 2 {
+		t.Fatalf("input length = %d, want 2 after dropping reasoning item: %s", len(input), got)
+	}
+	for idx, rawItem := range input {
+		item := rawItem.(map[string]interface{})
+		if item["type"] == "reasoning" || item["id"] == "rs_18b7ed7b7a95d92f" {
+			t.Fatalf("input[%d] should not contain persisted reasoning history: %s", idx, got)
+		}
+	}
+	if input[0].(map[string]interface{})["role"] != "user" || input[1].(map[string]interface{})["role"] != "assistant" {
+		t.Fatalf("message items should remain in order: %s", got)
+	}
+}
+
+func TestNormalizeCodexResponsesRequestKeepsOnlyEncryptedReasoningPayload(t *testing.T) {
+	validBytes := []byte{0x80}
+	validBytes = append(validBytes, make([]byte, 8)...)
+	validBytes = append(validBytes, make([]byte, 16)...)
+	validBytes = append(validBytes, make([]byte, 16)...)
+	validBytes = append(validBytes, make([]byte, 32)...)
+	valid := base64.RawURLEncoding.EncodeToString(validBytes)
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"hidden"}],"encrypted_content":"`+valid+`"}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	if len(input) != 1 {
+		t.Fatalf("input length = %d, want encrypted reasoning item preserved: %s", len(input), got)
+	}
+	item := input[0].(map[string]interface{})
+	if item["encrypted_content"] != valid {
+		t.Fatalf("encrypted_content should be preserved: %s", got)
+	}
+	for _, key := range []string{"id", "status", "summary"} {
+		if _, ok := item[key]; ok {
+			t.Fatalf("encrypted reasoning item should not include %s: %s", key, got)
+		}
 	}
 }
 
@@ -411,20 +468,19 @@ func TestNormalizeCodexResponsesRequestStripsMessageReasoningFields(t *testing.T
 		t.Fatalf("normalized body is not JSON: %v", err)
 	}
 	input := body["input"].([]interface{})
-	for _, idx := range []int{0, 2} {
-		item := input[idx].(map[string]interface{})
+	if len(input) != 2 {
+		t.Fatalf("invalid reasoning item should be dropped: %s", got)
+	}
+	for idx, rawItem := range input {
+		item := rawItem.(map[string]interface{})
+		if item["type"] == "reasoning" {
+			t.Fatalf("input[%d] should not be a reasoning item after dropping reasoning: %s", idx, got)
+		}
 		for _, key := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
 			if _, ok := item[key]; ok {
 				t.Fatalf("message item %d should not include %s: %s", idx, key, got)
 			}
 		}
-	}
-	reasoningItem := input[1].(map[string]interface{})
-	if reasoningItem["type"] != "reasoning" {
-		t.Fatalf("reasoning item type = %#v, want reasoning", reasoningItem["type"])
-	}
-	if _, ok := reasoningItem["summary"]; !ok {
-		t.Fatalf("reasoning item should be preserved: %s", got)
 	}
 }
 
