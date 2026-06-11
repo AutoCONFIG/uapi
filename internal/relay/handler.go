@@ -1225,8 +1225,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			if acc.Metadata == nil {
 				acc.Metadata = make(map[string]interface{})
 			}
-			acc.Metadata["last_conversation_id"] = reverseConverter.ConversationID()
-			acc.Metadata["last_conversation_timestamp"] = time.Now().Format(time.RFC3339)
+			recordChatGPTReverseConversation(acc.Metadata, affinityScope, reverseConverter.ConversationID(), time.Now())
 			go func() {
 				if err := r.db.Model(&db.Account{}).Where("id = ?", acc.ID).Update("metadata", acc.Metadata).Error; err != nil {
 					logger.Warnf("relay.stream", "failed to update conversation_id in account metadata", logger.Err(err))
@@ -4125,6 +4124,32 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 		}
 	}
 	return ""
+}
+
+func recordChatGPTReverseConversation(metadata map[string]interface{}, scope, conversationID string, now time.Time) {
+	if metadata == nil {
+		return
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return
+	}
+	timestamp := now.Format(time.RFC3339)
+	metadata["last_conversation_id"] = conversationID
+	metadata["last_conversation_timestamp"] = timestamp
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return
+	}
+	conversations, _ := metadata["chatgpt_reverse_conversations"].(map[string]interface{})
+	if conversations == nil {
+		conversations = map[string]interface{}{}
+	}
+	conversations[scope] = map[string]interface{}{
+		"conversation_id": conversationID,
+		"updated_at":      timestamp,
+	}
+	metadata["chatgpt_reverse_conversations"] = conversations
 }
 
 func headerAffinityScope(ctx *fasthttp.RequestCtx, name string, prefix string) string {

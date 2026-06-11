@@ -35,21 +35,24 @@ const (
 	defaultBaseURL   = "https://chatgpt.com"
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 	defaultPowScript = "https://chatgpt.com/backend-api/sentinel/sdk.js"
-	// conversationContinuationMaxAge is the maximum age for a conversation_id to be considered valid for continuation
-	conversationContinuationMaxAge = 1 * time.Hour
 )
 
 type Adaptor struct {
-	channel      *db.Channel
-	account      *db.Account
-	model        string
-	stream       bool
-	deviceID     string
-	sessionID    string
-	scriptSource []string
-	dataBuild    string
-	httpClient   *http.Client
-	accessToken  string
+	channel             *db.Channel
+	account             *db.Account
+	model               string
+	stream              bool
+	deviceID            string
+	sessionID           string
+	scriptSource        []string
+	dataBuild           string
+	httpClient          *http.Client
+	accessToken         string
+	useFastConversation bool
+	conduitToken        string
+	preparedReqs        requirements
+	hasPreparedReqs     bool
+	debug               *chatGPTReverseDebugTrace
 }
 
 func (a *Adaptor) Init(channel *db.Channel, account *db.Account) {
@@ -70,6 +73,7 @@ func (a *Adaptor) Init(channel *db.Channel, account *db.Account) {
 		a.sessionID = uuid.NewString()
 	}
 	a.httpClient = newUTLSClient()
+	a.debug = newChatGPTReverseDebugDump(channel, account)
 }
 
 func (a *Adaptor) SetRequestParams(model string, stream bool) {
@@ -82,6 +86,9 @@ func (a *Adaptor) SetCredentials(credentials string) {
 }
 
 func (a *Adaptor) GetRequestURL(path string) (string, error) {
+	if a.useFastConversation {
+		return strings.TrimRight(a.baseURL(), "/") + "/backend-api/f/conversation", nil
+	}
 	return strings.TrimRight(a.baseURL(), "/") + "/backend-api/conversation", nil
 }
 
@@ -94,16 +101,25 @@ func (a *Adaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) 
 	if err := a.bootstrap(); err != nil {
 		return err
 	}
-	requirements, err := a.chatRequirements(accessToken)
-	if err != nil {
-		return err
+	requirements := a.preparedReqs
+	if !a.hasPreparedReqs {
+		var err error
+		requirements, err = a.chatRequirements(accessToken)
+		if err != nil {
+			return err
+		}
+	}
+	targetPath := "/backend-api/conversation"
+	if a.useFastConversation {
+		targetPath = "/backend-api/f/conversation"
+		req.SetRequestURI(strings.TrimRight(a.baseURL(), "/") + targetPath)
 	}
 	setBrowserHeaders(&req.Header, a.deviceID, a.sessionID)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-OpenAI-Target-Path", "/backend-api/conversation")
-	req.Header.Set("X-OpenAI-Target-Route", "/backend-api/conversation")
+	req.Header.Set("X-OpenAI-Target-Path", targetPath)
+	req.Header.Set("X-OpenAI-Target-Route", targetPath)
 	req.Header.Set("OpenAI-Sentinel-Chat-Requirements-Token", requirements.Token)
 	if requirements.ProofToken != "" {
 		req.Header.Set("OpenAI-Sentinel-Proof-Token", requirements.ProofToken)
@@ -114,10 +130,18 @@ func (a *Adaptor) SetupRequestHeader(req *fasthttp.Request, credentials string) 
 	if requirements.TurnstileToken != "" {
 		req.Header.Set("OpenAI-Sentinel-Turnstile-Token", requirements.TurnstileToken)
 	}
+	if a.useFastConversation && a.conduitToken != "" {
+		req.Header.Set("X-Conduit-Token", a.conduitToken)
+		req.Header.Set("X-Oai-Turn-Trace-Id", uuid.NewString())
+	}
 	return nil
 }
 
 func (a *Adaptor) FromIR(req *ir.Request) ([]byte, error) {
+	a.useFastConversation = false
+	a.conduitToken = ""
+	a.preparedReqs = requirements{}
+	a.hasPreparedReqs = false
 	messages, err := a.conversationMessages(req)
 	if err != nil {
 		return nil, err
@@ -128,6 +152,9 @@ func (a *Adaptor) FromIR(req *ir.Request) ([]byte, error) {
 	}
 	if model == "" {
 		model = "auto"
+	}
+	if a.useFastConversation {
+		return a.fastConversationBody(req, messages, model)
 	}
 	body := map[string]interface{}{
 		"action":                        "next",
@@ -159,21 +186,59 @@ func (a *Adaptor) FromIR(req *ir.Request) ([]byte, error) {
 			"screen_width":      2560,
 		},
 	}
-
-	// Check for conversation continuation (cache hit)
-	if a.account != nil && a.account.Metadata != nil {
-		conversationID, _ := a.account.Metadata["last_conversation_id"].(string)
-		conversationTimestamp, _ := a.account.Metadata["last_conversation_timestamp"].(string)
-		if conversationID != "" && conversationTimestamp != "" {
-			if ts, err := time.Parse(time.RFC3339, conversationTimestamp); err == nil {
-				if time.Since(ts) < conversationContinuationMaxAge {
-					// Valid conversation_id, continue the conversation
-					body["conversation_id"] = conversationID
-				}
-			}
-		}
+	if conversationID := explicitConversationID(req); conversationID != "" {
+		body["conversation_id"] = conversationID
+	} else if conversationID := a.cachedConversationID(req); conversationID != "" {
+		body["conversation_id"] = conversationID
 	}
 
+	return json.Marshal(body)
+}
+
+func (a *Adaptor) fastConversationBody(req *ir.Request, messages []map[string]interface{}, model string) ([]byte, error) {
+	if a.accessToken == "" {
+		return nil, fmt.Errorf("authenticated upstream account required for file conversation")
+	}
+	if err := a.bootstrap(); err != nil {
+		return nil, err
+	}
+	reqs, err := a.chatRequirements(a.accessToken)
+	if err != nil {
+		return nil, err
+	}
+	mimes := attachmentMimeTypes(messages)
+	text := firstUserMessageText(messages)
+	conduitToken, err := a.prepareFileConversation(model, text, mimes, a.accessToken, reqs)
+	if err != nil {
+		return nil, err
+	}
+	a.conduitToken = conduitToken
+	a.preparedReqs = reqs
+	a.hasPreparedReqs = true
+
+	parentID := uuid.NewString()
+	body := map[string]interface{}{
+		"action":                               "next",
+		"messages":                             messages,
+		"parent_message_id":                    parentID,
+		"model":                                model,
+		"client_prepare_state":                 "sent",
+		"timezone_offset_min":                  -480,
+		"timezone":                             "Asia/Shanghai",
+		"conversation_mode":                    map[string]interface{}{"kind": "primary_assistant"},
+		"enable_message_followups":             true,
+		"system_hints":                         []string{},
+		"supports_buffering":                   true,
+		"supported_encodings":                  []string{"v1"},
+		"client_contextual_info":               chatGPTClientContext(),
+		"paragen_cot_summary_display_override": "allow",
+		"force_parallel_switch":                "auto",
+	}
+	if conversationID := explicitConversationID(req); conversationID != "" {
+		body["conversation_id"] = conversationID
+	} else if conversationID := a.cachedConversationID(req); conversationID != "" {
+		body["conversation_id"] = conversationID
+	}
 	return json.Marshal(body)
 }
 
@@ -381,6 +446,50 @@ func (a *Adaptor) startImageConversation(req ImageGenerationRequest, accessToken
 	return extractImageIDsFromSSE(respBody)
 }
 
+func (a *Adaptor) prepareFileConversation(model, text string, mimeTypes []string, accessToken string, requirements requirements) (string, error) {
+	path := "/backend-api/f/conversation/prepare"
+	body := map[string]interface{}{
+		"action":                 "next",
+		"fork_from_shared_post":  false,
+		"parent_message_id":      "client-created-root",
+		"model":                  model,
+		"client_prepare_state":   "success",
+		"timezone_offset_min":    -480,
+		"timezone":               "Asia/Shanghai",
+		"conversation_mode":      map[string]interface{}{"kind": "primary_assistant"},
+		"system_hints":           []string{},
+		"attachment_mime_types":  mimeTypes,
+		"supports_buffering":     true,
+		"supported_encodings":    []string{"v1"},
+		"client_contextual_info": map[string]interface{}{"app_name": "chatgpt.com"},
+	}
+	if strings.TrimSpace(text) != "" {
+		body["partial_query"] = map[string]interface{}{
+			"id":      uuid.NewString(),
+			"author":  map[string]interface{}{"role": "user"},
+			"content": map[string]interface{}{"content_type": "text", "parts": []string{text}},
+		}
+	}
+	rawBody, _ := json.Marshal(body)
+	respBody, status, err := a.doJSON(path, rawBody, accessToken, requirements, "*/*", "")
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", fmt.Errorf("chatgpt reverse file prepare status %d: %s", status, truncateBody(respBody))
+	}
+	var resp struct {
+		ConduitToken string `json:"conduit_token"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return "", fmt.Errorf("decode file prepare response: %w", err)
+	}
+	if resp.ConduitToken == "" {
+		resp.ConduitToken = "no-token"
+	}
+	return resp.ConduitToken, nil
+}
+
 func (a *Adaptor) doJSON(path string, body []byte, accessToken string, requirements requirements, accept string, conduitToken string) ([]byte, int, error) {
 	headers := browserHeaderMap(a.deviceID, a.sessionID)
 	headers["Authorization"] = "Bearer " + accessToken
@@ -410,14 +519,168 @@ func (a *Adaptor) doJSON(path string, body []byte, accessToken string, requireme
 	return respBody, status, nil
 }
 
+func chatGPTClientContext() map[string]interface{} {
+	return map[string]interface{}{
+		"is_dark_mode":      false,
+		"time_since_loaded": 1200,
+		"page_height":       900,
+		"page_width":        1400,
+		"pixel_ratio":       2,
+		"screen_height":     1440,
+		"screen_width":      2560,
+		"app_name":          "chatgpt.com",
+	}
+}
+
+func attachmentMimeTypes(messages []map[string]interface{}) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, msg := range messages {
+		meta, _ := msg["metadata"].(map[string]interface{})
+		rawAttachments, _ := meta["attachments"].([]map[string]interface{})
+		for _, att := range rawAttachments {
+			mimeType, _ := att["mime_type"].(string)
+			if mimeType == "" {
+				mimeType, _ = att["mimeType"].(string)
+			}
+			if mimeType != "" && !seen[mimeType] {
+				seen[mimeType] = true
+				out = append(out, mimeType)
+			}
+		}
+	}
+	return out
+}
+
+func firstUserMessageText(messages []map[string]interface{}) string {
+	for _, msg := range messages {
+		author, _ := msg["author"].(map[string]interface{})
+		if role, _ := author["role"].(string); role != "user" {
+			continue
+		}
+		content, _ := msg["content"].(map[string]interface{})
+		parts, _ := content["parts"].([]string)
+		if len(parts) > 0 {
+			return parts[0]
+		}
+		rawParts, _ := content["parts"].([]interface{})
+		for _, part := range rawParts {
+			if text, ok := part.(string); ok && strings.TrimSpace(text) != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func explicitConversationID(req *ir.Request) string {
+	if req == nil {
+		return ""
+	}
+	for _, metadata := range []map[string]json.RawMessage{req.Metadata, req.Native.Fields, req.Native.Unknown} {
+		if id := stringFromRawMetadata(metadata, []string{"conversation_id", "conversationId", "conversation"}); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func (a *Adaptor) cachedConversationID(req *ir.Request) string {
+	if a == nil || a.account == nil || len(a.account.Metadata) == 0 {
+		return ""
+	}
+	scope := conversationCacheScope(req)
+	if scope == "" {
+		return ""
+	}
+	conversations, _ := a.account.Metadata["chatgpt_reverse_conversations"].(map[string]interface{})
+	if len(conversations) == 0 {
+		return ""
+	}
+	entry := conversations[scope]
+	switch typed := entry.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]interface{}:
+		if id, _ := typed["conversation_id"].(string); strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
+}
+
+func conversationCacheScope(req *ir.Request) string {
+	if req == nil {
+		return ""
+	}
+	for _, metadata := range []map[string]json.RawMessage{req.Metadata, req.Native.Fields, req.Native.Unknown} {
+		if scope := rawConversationCacheScope(metadata, "body"); scope != "" {
+			return scope
+		}
+	}
+	return ""
+}
+
+func rawConversationCacheScope(metadata map[string]json.RawMessage, prefix string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{"prompt_cache_key", "session_id", "sessionId"} {
+		if value := rawJSONString(metadata[key]); value != "" {
+			return prefix + ":" + key + ":" + value
+		}
+	}
+	for _, nestedKey := range []string{"metadata", "client_metadata"} {
+		var nested map[string]json.RawMessage
+		if raw := metadata[nestedKey]; len(raw) > 0 && json.Unmarshal(raw, &nested) == nil {
+			if scope := rawConversationCacheScope(nested, nestedKey); scope != "" {
+				return scope
+			}
+		}
+	}
+	return ""
+}
+
+func stringFromRawMetadata(metadata map[string]json.RawMessage, keys []string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		if value := rawJSONString(metadata[key]); value != "" {
+			return value
+		}
+	}
+	for _, nestedKey := range []string{"metadata", "client_metadata"} {
+		var nested map[string]json.RawMessage
+		if raw := metadata[nestedKey]; len(raw) > 0 && json.Unmarshal(raw, &nested) == nil {
+			if value := stringFromRawMetadata(nested, keys); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 type uploadedAttachment struct {
-	FileID   string
-	FileName string
-	FileSize int
-	MimeType string
-	Width    int
-	Height   int
-	IsImage  bool
+	FileID        string
+	LibraryFileID string
+	FileName      string
+	FileSize      int
+	MimeType      string
+	Width         int
+	Height        int
+	IsImage       bool
 }
 
 func (a *Adaptor) conversationMessages(req *ir.Request) ([]map[string]interface{}, error) {
@@ -493,6 +756,30 @@ func (a *Adaptor) webMessageFromItems(role string, items []ir.Item, fallbackText
 		}
 		return webTextMessage(role, text), nil
 	}
+	hasFileUpload := false
+	for _, upload := range uploads {
+		if !upload.IsImage {
+			hasFileUpload = true
+			break
+		}
+	}
+	if hasFileUpload {
+		a.useFastConversation = true
+		if strings.TrimSpace(text) == "" {
+			text = "Please analyze the attached file."
+		}
+		return map[string]interface{}{
+			"id":      uuid.NewString(),
+			"author":  map[string]interface{}{"role": role},
+			"content": map[string]interface{}{"content_type": "text", "parts": []string{text}},
+			"metadata": map[string]interface{}{
+				"attachments":               attachmentMetadata(uploads),
+				"selected_github_repos":     []interface{}{},
+				"selected_all_github_repos": false,
+				"serialization_metadata":    map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
+			},
+		}, nil
+	}
 	parts := make([]interface{}, 0, len(uploads)+1)
 	for _, upload := range uploads {
 		if upload.IsImage {
@@ -549,11 +836,22 @@ func webTextMessage(role, text string) map[string]interface{} {
 func attachmentMetadata(uploads []uploadedAttachment) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(uploads))
 	for _, upload := range uploads {
-		item := map[string]interface{}{
-			"id":       upload.FileID,
-			"mimeType": upload.MimeType,
-			"name":     upload.FileName,
-			"size":     upload.FileSize,
+		item := map[string]interface{}{}
+		if upload.IsImage {
+			item["id"] = upload.FileID
+			item["mimeType"] = upload.MimeType
+			item["name"] = upload.FileName
+			item["size"] = upload.FileSize
+		} else {
+			item["id"] = upload.FileID
+			item["size"] = upload.FileSize
+			item["name"] = upload.FileName
+			item["mime_type"] = upload.MimeType
+			item["source"] = "local"
+			item["is_big_paste"] = false
+			if upload.LibraryFileID != "" {
+				item["library_file_id"] = upload.LibraryFileID
+			}
 		}
 		if upload.Width > 0 {
 			item["width"] = upload.Width
@@ -625,11 +923,24 @@ func (a *Adaptor) uploadAttachment(data []byte, fileName, mimeType string, isIma
 	body := map[string]interface{}{
 		"file_name": fileName,
 		"file_size": len(data),
-		"use_case":  "multimodal",
 	}
-	if isImage && width > 0 && height > 0 {
-		body["width"] = width
-		body["height"] = height
+	if isImage {
+		body["use_case"] = "multimodal"
+		if width > 0 && height > 0 {
+			body["width"] = width
+			body["height"] = height
+		}
+	} else {
+		body["use_case"] = "my_files"
+		body["timezone_offset_min"] = -480
+		body["reset_rate_limits"] = false
+		body["mime_type"] = mimeType
+		body["entry_surface"] = "chat_composer"
+		body["selection_method"] = "file_picker"
+		body["client_resolved_mime_type"] = mimeType
+		body["mime_resolution_source"] = "declared_mime"
+		body["store_in_library"] = true
+		body["library_persistence_mode"] = "opportunistic"
 	}
 	rawBody, _ := json.Marshal(body)
 	headers := browserHeaderMap(a.deviceID, a.sessionID)
@@ -646,8 +957,9 @@ func (a *Adaptor) uploadAttachment(data []byte, fileName, mimeType string, isIma
 		return uploadedAttachment{}, fmt.Errorf("%s status %d: %s", path, status, truncateBody(respBody))
 	}
 	var meta struct {
-		FileID    string `json:"file_id"`
-		UploadURL string `json:"upload_url"`
+		FileID        string `json:"file_id"`
+		UploadURL     string `json:"upload_url"`
+		LibraryFileID string `json:"library_file_id"`
 	}
 	if err := json.Unmarshal(respBody, &meta); err != nil {
 		return uploadedAttachment{}, fmt.Errorf("decode upload metadata: %w", err)
@@ -687,13 +999,14 @@ func (a *Adaptor) uploadAttachment(data []byte, fileName, mimeType string, isIma
 		return uploadedAttachment{}, fmt.Errorf("%s status %d: %s", uploadedPath, status, truncateBody(respBody))
 	}
 	return uploadedAttachment{
-		FileID:   meta.FileID,
-		FileName: fileName,
-		FileSize: len(data),
-		MimeType: mimeType,
-		Width:    width,
-		Height:   height,
-		IsImage:  isImage,
+		FileID:        meta.FileID,
+		LibraryFileID: meta.LibraryFileID,
+		FileName:      fileName,
+		FileSize:      len(data),
+		MimeType:      mimeType,
+		Width:         width,
+		Height:        height,
+		IsImage:       isImage,
 	}, nil
 }
 

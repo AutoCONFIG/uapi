@@ -21,12 +21,12 @@ import (
 // utlsRoundTripper is an http.RoundTripper that uses utls for TLS fingerprint
 // impersonation. It auto-negotiates HTTP/1.1 vs HTTP/2 based on ALPN.
 type utlsRoundTripper struct {
-	helloID    utls.ClientHelloID
-	h1         *http.Transport
-	h2         *http2.Transport
-	dialer     *net.Dialer
-	connMu     sync.Mutex
-	connPool   map[string]net.Conn // host:port -> reusable conn (h2 only, simple pool)
+	helloID  utls.ClientHelloID
+	h1       *http.Transport
+	h2       *http2.Transport
+	dialer   *net.Dialer
+	connMu   sync.Mutex
+	connPool map[string]net.Conn // host:port -> reusable conn (h2 only, simple pool)
 }
 
 func newUTLSRoundTripper(helloID utls.ClientHelloID) *utlsRoundTripper {
@@ -124,6 +124,7 @@ func newUTLSClient() *http.Client {
 // doHTTP executes a buffered HTTP request via the utls client and returns the
 // status code and full response body.
 func (a *Adaptor) doHTTP(method, url string, headers map[string]string, body []byte, timeout time.Duration) (int, []byte, error) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var bodyReader io.Reader
@@ -139,19 +140,23 @@ func (a *Adaptor) doHTTP(method, url string, headers map[string]string, body []b
 	}
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
+		a.debug.HTTP(method, url, headers, body, 0, nil, nil, false, started, err)
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
+		a.debug.HTTP(method, url, headers, body, resp.StatusCode, resp.Header, nil, false, started, err)
 		return resp.StatusCode, nil, err
 	}
+	a.debug.HTTP(method, url, headers, body, resp.StatusCode, resp.Header, buf, false, started, nil)
 	return resp.StatusCode, buf, nil
 }
 
 // doHTTPStream executes a streaming HTTP request via the utls client and returns
 // the *http.Response with body open for streaming. Caller must close resp.Body.
 func (a *Adaptor) doHTTPStream(method, url string, headers map[string]string, body []byte, timeout time.Duration) (*http.Response, error) {
+	started := time.Now()
 	// For streaming, use a context with a long deadline (timeout serves as overall cap)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	var bodyReader io.Reader
@@ -169,8 +174,10 @@ func (a *Adaptor) doHTTPStream(method, url string, headers map[string]string, bo
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		cancel()
+		a.debug.HTTP(method, url, headers, body, 0, nil, nil, true, started, err)
 		return nil, err
 	}
+	a.debug.HTTP(method, url, headers, body, resp.StatusCode, resp.Header, nil, true, started, nil)
 	// Wrap body so cancel runs on Close
 	resp.Body = &cancelingReadCloser{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil

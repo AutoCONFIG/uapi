@@ -178,6 +178,13 @@ func dropExtraForCrossProtocol(req *ir.Request, clientFormat, upstreamFormat For
 			}
 		}
 	}
+	if upstreamFormat == FormatChatGPTReverse {
+		for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation_id", "conversationId", "conversation", "metadata", "client_metadata"} {
+			if raw := req.Metadata[key]; len(raw) > 0 {
+				preservedMetadata[key] = append([]byte(nil), raw...)
+			}
+		}
+	}
 	if isAnthropicFamily(upstreamFormat) || isResponsesFamily(upstreamFormat) {
 		if raw := req.Metadata["cache_control"]; len(raw) > 0 {
 			preservedMetadata["cache_control"] = append([]byte(nil), raw...)
