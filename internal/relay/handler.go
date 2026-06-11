@@ -4742,12 +4742,17 @@ func sanitizeCodexReasoningInputItems(bodyMap map[string]interface{}) {
 			filtered = append(filtered, rawItem)
 			continue
 		}
-		encrypted, ok := item["encrypted_content"].(string)
-		if !ok || !isValidCodexReasoningEncryptedContent(encrypted) {
+		summary, hasSummary := item["summary"].([]interface{})
+		encrypted, hasEncrypted := item["encrypted_content"].(string)
+		hasValidEncrypted := hasEncrypted && isValidCodexReasoningEncryptedContent(encrypted)
+		if !hasValidEncrypted && (!hasSummary || len(summary) == 0) {
 			continue
 		}
-		for _, key := range []string{"id", "status", "summary"} {
+		for _, key := range []string{"id", "status"} {
 			delete(item, key)
+		}
+		if !hasSummary {
+			item["summary"] = []interface{}{}
 		}
 		filtered = append(filtered, item)
 	}

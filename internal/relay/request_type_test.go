@@ -447,9 +447,68 @@ func TestNormalizeCodexResponsesRequestKeepsOnlyEncryptedReasoningPayload(t *tes
 	if item["encrypted_content"] != valid {
 		t.Fatalf("encrypted_content should be preserved: %s", got)
 	}
-	for _, key := range []string{"id", "status", "summary"} {
+	for _, key := range []string{"id", "status"} {
 		if _, ok := item[key]; ok {
 			t.Fatalf("encrypted reasoning item should not include %s: %s", key, got)
+		}
+	}
+	summary, ok := item["summary"].([]interface{})
+	if !ok || len(summary) != 1 {
+		t.Fatalf("encrypted reasoning item should preserve summary: %s", got)
+	}
+}
+
+func TestNormalizeCodexResponsesRequestAddsEmptySummaryForEncryptedReasoning(t *testing.T) {
+	validBytes := []byte{0x80}
+	validBytes = append(validBytes, make([]byte, 8+16)...)
+	validBytes = append(validBytes, make([]byte, 16)...)
+	validBytes = append(validBytes, make([]byte, 32)...)
+	valid := base64.RawURLEncoding.EncodeToString(validBytes)
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"id":"rs_1","type":"reasoning","status":"completed","encrypted_content":"`+valid+`"}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	item := input[0].(map[string]interface{})
+	summary, ok := item["summary"].([]interface{})
+	if !ok || len(summary) != 0 {
+		t.Fatalf("encrypted reasoning item should include empty summary: %s", got)
+	}
+}
+
+func TestNormalizeCodexResponsesRequestPreservesSummaryOnlyReasoning(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"thinking"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	if len(input) != 2 {
+		t.Fatalf("summary-only reasoning item should be preserved: %s", got)
+	}
+	item := input[0].(map[string]interface{})
+	if item["type"] != "reasoning" {
+		t.Fatalf("first item should remain reasoning: %s", got)
+	}
+	summary, ok := item["summary"].([]interface{})
+	if !ok || len(summary) != 1 {
+		t.Fatalf("summary-only reasoning item should preserve summary: %s", got)
+	}
+	for _, key := range []string{"id", "status"} {
+		if _, ok := item[key]; ok {
+			t.Fatalf("reasoning item should not include %s: %s", key, got)
 		}
 	}
 }

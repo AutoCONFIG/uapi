@@ -399,7 +399,7 @@ func responsesInputItemsFromIRTurn(turn relayir.Turn) ([]map[string]interface{},
 		if turn.Phase != "" {
 			item["phase"] = turn.Phase
 		}
-		for k, v := range turn.Metadata {
+		for k, v := range responsesMessageMetadata(turn.Metadata) {
 			item[k] = v
 		}
 		items = append(items, item)
@@ -598,6 +598,20 @@ func textOnlyInterfaceContentBlocksString(value interface{}) (string, bool) {
 
 func generateResponsesReasoningID() string {
 	return fmt.Sprintf("rs_%x", time.Now().UnixNano())
+}
+
+func responsesMessageMetadata(metadata map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := relayir.CloneRawMap(metadata)
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
+		delete(out, key)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func copyRawFields(dst map[string]json.RawMessage, src map[string]json.RawMessage, keys ...string) {

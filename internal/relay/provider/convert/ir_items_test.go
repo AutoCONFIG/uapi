@@ -396,6 +396,51 @@ func TestOrderedPartsDriveResponsesEmission(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatReasoningContentDoesNotLeakIntoResponsesMessage(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"user","content":"hi"},
+			{"role":"assistant","content":"answer","reasoning_content":"thinking"}
+		]
+	}`)
+	converted, err := ConvertRequest(FormatOpenAIChatCompletions, FormatCodexResponses, body)
+	if err != nil {
+		t.Fatalf("ConvertRequest: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("unmarshal converted body: %v\n%s", err, converted)
+	}
+	input := got["input"].([]interface{})
+	var reasoning, message map[string]interface{}
+	for _, raw := range input {
+		item := raw.(map[string]interface{})
+		switch item["type"] {
+		case "reasoning":
+			reasoning = item
+		case "message":
+			if item["role"] == "assistant" {
+				message = item
+			}
+		}
+	}
+	if reasoning == nil {
+		t.Fatalf("reasoning item missing: %s", converted)
+	}
+	if summary, ok := reasoning["summary"].([]interface{}); !ok || len(summary) != 1 {
+		t.Fatalf("reasoning summary missing: %s", converted)
+	}
+	if message == nil {
+		t.Fatalf("assistant message missing: %s", converted)
+	}
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
+		if _, ok := message[key]; ok {
+			t.Fatalf("assistant message leaked %s: %s", key, converted)
+		}
+	}
+}
+
 func TestGeminiFunctionResponseNativeFieldsSurviveSameFormat(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[{"functionResponse":{
