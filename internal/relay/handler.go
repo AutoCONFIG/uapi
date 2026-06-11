@@ -4533,6 +4533,7 @@ func normalizeCodexResponsesRequest(body []byte, stream bool, clientMetadataSeed
 	}
 	normalizeCodexResponsesClientMetadata(bodyMap, clientMetadataSeed)
 	sanitizeCodexReasoningEncryptedContent(bodyMap)
+	sanitizeCodexMessageReasoningFields(bodyMap)
 	for _, key := range []string{
 		"max_output_tokens",
 		"max_completion_tokens",
@@ -4696,6 +4697,25 @@ func sanitizeCodexReasoningEncryptedContent(bodyMap map[string]interface{}) {
 		if !ok || !isValidCodexReasoningEncryptedContent(encrypted) {
 			delete(item, "encrypted_content")
 		}
+	}
+}
+
+func sanitizeCodexMessageReasoningFields(bodyMap map[string]interface{}) {
+	items, ok := bodyMap["input"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "" && itemType != "message" {
+			continue
+		}
+		delete(item, "reasoning_content")
+		delete(item, "reasoning")
+		delete(item, "reasoning_details")
 	}
 }
 

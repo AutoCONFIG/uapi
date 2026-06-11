@@ -397,6 +397,37 @@ func TestNormalizeCodexResponsesRequestSanitizesInvalidReasoningEncryptedContent
 	}
 }
 
+func TestNormalizeCodexResponsesRequestStripsMessageReasoningFields(t *testing.T) {
+	got := normalizeCodexResponsesRequest([]byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"message","role":"assistant","reasoning_content":"hidden","reasoning":"alias","reasoning_details":[{"type":"text","text":"hidden"}],"content":[{"type":"output_text","text":"visible"}]},
+			{"type":"reasoning","summary":[],"encrypted_content":"invalid-but-separate"},
+			{"role":"user","reasoning_content":"client-leak","content":"next"}
+		]
+	}`), true, "")
+	var body map[string]interface{}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("normalized body is not JSON: %v", err)
+	}
+	input := body["input"].([]interface{})
+	for _, idx := range []int{0, 2} {
+		item := input[idx].(map[string]interface{})
+		for _, key := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
+			if _, ok := item[key]; ok {
+				t.Fatalf("message item %d should not include %s: %s", idx, key, got)
+			}
+		}
+	}
+	reasoningItem := input[1].(map[string]interface{})
+	if reasoningItem["type"] != "reasoning" {
+		t.Fatalf("reasoning item type = %#v, want reasoning", reasoningItem["type"])
+	}
+	if _, ok := reasoningItem["summary"]; !ok {
+		t.Fatalf("reasoning item should be preserved: %s", got)
+	}
+}
+
 func testHeaderPresent(req *fasthttp.Request, name string) bool {
 	found := false
 	req.Header.VisitAll(func(key, _ []byte) {
