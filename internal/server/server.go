@@ -112,6 +112,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
 		if s.relayer != nil {
 			s.adminHandler.SetAccountRecovery(s.relayer)
+			s.adminHandler.SetLargePayloadThresholdUpdater(s.relayer)
 		}
 		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
 		s.adminHandler.OAuthIdle = s.oauthIdle
@@ -130,10 +131,14 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
-	logger.Infof("server", "server listening", logger.F("addr", addr), logger.F("mode", s.cfg.Server.Mode))
+	maxBodySize := s.cfg.Server.MaxBodySizeMB * 1024 * 1024
+	logger.Infof("server", "server listening", logger.F("addr", addr), logger.F("mode", s.cfg.Server.Mode), logger.F("max_body_size_mb", s.cfg.Server.MaxBodySizeMB))
 
-	handler := s.handler()
-	return fasthttp.ListenAndServe(addr, handler)
+	server := &fasthttp.Server{
+		Handler:            s.handler(),
+		MaxRequestBodySize: maxBodySize,
+	}
+	return server.ListenAndServe(addr)
 }
 
 // Close gracefully shuts down server resources.

@@ -25,6 +25,7 @@ type AdminSettingsResponse struct {
 	PublicBaseURL           string `json:"public_base_url,omitempty"`
 	WallpaperURL            string `json:"wallpaper_url,omitempty"`
 	LargePayloadThresholdMB int    `json:"large_payload_threshold_mb"`
+	MaxBodySizeMB           int    `json:"max_body_size_mb"`
 }
 
 type UpdateAdminSettingsRequest struct {
@@ -133,8 +134,9 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 			changes["public_base_url"] = publicBaseURL
 		}
 		if req.LargePayloadThresholdMB != nil {
-			if *req.LargePayloadThresholdMB < 1 || *req.LargePayloadThresholdMB > 1024 {
-				h.jsonError(ctx, fasthttp.StatusBadRequest, "large_payload_threshold_mb must be between 1 and 1024")
+			maxBodySizeMB := h.maxBodySizeMB()
+			if *req.LargePayloadThresholdMB < 1 || *req.LargePayloadThresholdMB > maxBodySizeMB {
+				h.jsonError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("large_payload_threshold_mb must be between 1 and %d", maxBodySizeMB))
 				return
 			}
 			changes["large_payload_threshold_mb"] = *req.LargePayloadThresholdMB
@@ -146,6 +148,9 @@ func (h *Handler) HandleSettings(ctx *fasthttp.RequestCtx) {
 		if err := h.saveSettings(changes); err != nil {
 			h.jsonError(ctx, fasthttp.StatusInternalServerError, "save settings failed")
 			return
+		}
+		if value, ok := changes["large_payload_threshold_mb"].(int); ok && h.payloadUpdater != nil {
+			h.payloadUpdater.SetLargePayloadThreshold(value)
 		}
 		createAuditLogWithValues(h.db, "update", "settings", "logging", h.getAdminUser(ctx), auditIP(ctx), "", auditJSON(changes))
 		h.jsonResponse(ctx, 200, h.settingsResponse())
@@ -174,7 +179,15 @@ func (h *Handler) settingsResponse() AdminSettingsResponse {
 		PublicBaseURL:           appsettings.Get(h.db, appsettings.UIPublicBaseURL, ""),
 		WallpaperURL:            h.wallpaperURL(),
 		LargePayloadThresholdMB: appsettings.GetInt(h.db, appsettings.LargePayloadThresholdMB, 256),
+		MaxBodySizeMB:           h.maxBodySizeMB(),
 	}
+}
+
+func (h *Handler) maxBodySizeMB() int {
+	if h.cfg != nil && h.cfg.Server.MaxBodySizeMB > 0 {
+		return h.cfg.Server.MaxBodySizeMB
+	}
+	return 256
 }
 
 func (h *Handler) HandlePublicSettings(ctx *fasthttp.RequestCtx) {

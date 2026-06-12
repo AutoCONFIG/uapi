@@ -39,6 +39,7 @@ export type AdminSettings = {
   public_base_url?: string;
   wallpaper_url?: string;
   large_payload_threshold_mb?: number;
+  max_body_size_mb?: number;
 };
 
 export type PublicSettings = {

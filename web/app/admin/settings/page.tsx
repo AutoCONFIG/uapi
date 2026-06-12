@@ -34,6 +34,7 @@ export default function AdminSettingsPage() {
   const [publicBaseURL, setPublicBaseURL] = useState("");
   const [wallpaperURL, setWallpaperURL] = useState("");
   const [largePayloadThreshold, setLargePayloadThreshold] = useState(256);
+  const [maxBodySize, setMaxBodySize] = useState(256);
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -54,6 +55,7 @@ export default function AdminSettingsPage() {
       setPublicBaseURL(settings.public_base_url || "");
       setWallpaperURL(settings.wallpaper_url || "");
       setLargePayloadThreshold(settings.large_payload_threshold_mb ?? 256);
+      setMaxBodySize(settings.max_body_size_mb ?? 256);
       applyBackground(settings);
     }).catch(() => undefined);
   }, []);
@@ -85,6 +87,7 @@ export default function AdminSettingsPage() {
       setPublicBaseURL(updated.public_base_url || "");
       setWallpaperURL(updated.wallpaper_url || "");
       setLargePayloadThreshold(updated.large_payload_threshold_mb ?? 256);
+      setMaxBodySize(updated.max_body_size_mb ?? 256);
       applyBackground(updated);
       setMessage("设置已保存");
     } catch (err) {
@@ -205,8 +208,8 @@ export default function AdminSettingsPage() {
             </div>
             <div className="field">
               <label>大请求体阈值 (MB)</label>
-              <input className="input" type="number" min={1} max={1024} value={largePayloadThreshold} onChange={(e) => setLargePayloadThreshold(Number(e.target.value))} />
-              <span className="muted" style={{ fontSize: 12 }}>超过此大小的请求将跳过JSON清理，避免请求体大小变化。默认256MB，支持PDF(64MB)和视频(256MB)等大文件。</span>
+              <input className="input" type="number" min={1} max={maxBodySize} value={largePayloadThreshold} onChange={(e) => setLargePayloadThreshold(Number(e.target.value))} />
+              <span className="muted" style={{ fontSize: 12 }}>超过此大小的请求将跳过JSON清理，避免请求体大小变化。不能超过 Nginx/UAPI 请求体硬上限 {maxBodySize}MB。</span>
             </div>
             <div className="grid grid-2">
               <div className="field">

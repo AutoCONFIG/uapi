@@ -42,6 +42,7 @@ type Handler struct {
 	setupDone       bool
 	oauthMu         sync.Mutex
 	oauthSessions   map[string]*oauthSession
+	payloadUpdater  LargePayloadThresholdUpdater
 }
 
 type AccountRecovery interface {
@@ -49,8 +50,16 @@ type AccountRecovery interface {
 	HandleAccountFailure(accountID, channelID string, statusCode int, body []byte, isQuota bool)
 }
 
+type LargePayloadThresholdUpdater interface {
+	SetLargePayloadThreshold(thresholdMB int)
+}
+
 func (h *Handler) SetAccountRecovery(recovery AccountRecovery) {
 	h.accountRecovery = recovery
+}
+
+func (h *Handler) SetLargePayloadThresholdUpdater(updater LargePayloadThresholdUpdater) {
+	h.payloadUpdater = updater
 }
 
 // NewHandler creates a new admin Handler.
