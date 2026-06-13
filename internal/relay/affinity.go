@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -8,6 +9,7 @@ import (
 type affinityEntry struct {
 	channelID string
 	accountID string
+	scope     string
 	expiresAt time.Time
 }
 
@@ -157,6 +159,7 @@ func (ac *AffinityCache) SetIfAbsent(tokenID, model, scope, channelID, accountID
 	ac.entries[k] = affinityEntry{
 		channelID: channelID,
 		accountID: accountID,
+		scope:     scope,
 		expiresAt: time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 	}
 	ac.addIndex(k, channelID, accountID)
@@ -178,6 +181,7 @@ func (ac *AffinityCache) ForceSet(tokenID, model, scope, channelID, accountID st
 	ac.entries[k] = affinityEntry{
 		channelID: channelID,
 		accountID: accountID,
+		scope:     scope,
 		expiresAt: time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 	}
 	ac.addIndex(k, channelID, accountID)
@@ -270,6 +274,34 @@ func (ac *AffinityCache) Snapshot() map[string]struct{ Channel, Account string }
 		if now.Before(e.expiresAt) {
 			out[k] = struct{ Channel, Account string }{e.channelID, e.accountID}
 		}
+	}
+	return out
+}
+
+func (ac *AffinityCache) AccountScopeCounts(scopeSource string) map[string]int {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	now := time.Now()
+	out := make(map[string]int)
+	for k, e := range ac.entries {
+		if now.After(e.expiresAt) {
+			ac.removeIndex(k, e.channelID, e.accountID)
+			delete(ac.entries, k)
+			continue
+		}
+		if e.accountID == "" {
+			continue
+		}
+		if scopeSource != "" {
+			source, _ := splitRouteScope(e.scope)
+			if source == "" && strings.Contains(k, ":"+scopeSource+":") {
+				source = scopeSource
+			}
+			if source != scopeSource {
+				continue
+			}
+		}
+		out[e.accountID]++
 	}
 	return out
 }

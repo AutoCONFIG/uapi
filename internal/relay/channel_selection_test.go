@@ -465,6 +465,9 @@ func TestAffinityYieldForcesSuccessfulAffinityMigration(t *testing.T) {
 	if !result.Force || result.Action != "force_set" {
 		t.Fatalf("affinity yield record result = %#v, want force_set", result)
 	}
+	if !result.Migrated || result.PreviousAccountID != oldAcc.ID.String() || result.BoundAccountID != newAcc.ID.String() {
+		t.Fatalf("affinity migration result = %#v, want migrated old->new", result)
+	}
 	gotCh, gotAcc := relayer.affinity.Get("token", "model", "scope")
 	if gotCh != newCh.ID.String() || gotAcc != newAcc.ID.String() {
 		t.Fatalf("affinity = (%q,%q), want (%q,%q)", gotCh, gotAcc, newCh.ID.String(), newAcc.ID.String())
@@ -723,6 +726,56 @@ func TestRuntimeResolveSkipsExcludedAffinityChannelWithoutEvicting(t *testing.T)
 	}
 }
 
+func TestRuntimeResolveNewCodexSessionPrefersLowerSessionLoadAccount(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	cred1, err := crypto.Encrypt("sk-one")
+	if err != nil {
+		t.Fatalf("encrypt one: %v", err)
+	}
+	cred2, err := crypto.Encrypt("sk-two")
+	if err != nil {
+		t.Fatalf("encrypt two: %v", err)
+	}
+	chID := uuid.New()
+	acc1ID := uuid.New()
+	acc2ID := uuid.New()
+	relayer := NewRelayer(nil, NewPoolManager(), nil, NewAffinityCache(), 10, "", false, "")
+	relayer.ApplyRuntimeConfig(RuntimeConfig{
+		Version: 1,
+		Channels: []db.Channel{{
+			Base:        db.Base{ID: chID},
+			Name:        "codex",
+			Type:        "openai",
+			APIFormat:   "codex",
+			Models:      "gpt-5.5",
+			Enabled:     true,
+			AffinityTTL: 60,
+		}},
+		Accounts: []RuntimeAccount{
+			{ID: acc1ID, ChannelID: chID, Name: "one", Credentials: cred1, CredType: "api_key", Weight: 100, Enabled: true},
+			{ID: acc2ID, ChannelID: chID, Name: "two", Credentials: cred2, CredType: "api_key", Weight: 100, Enabled: true},
+		},
+	})
+	relayer.affinity.Set("token-1", "gpt-5.5", "codex:session-a", chID.String(), acc1ID.String(), 60)
+	relayer.affinity.Set("token-1", "gpt-5.5", "codex:session-b", chID.String(), acc1ID.String(), 60)
+
+	var attempts []map[string]interface{}
+	_, acc, _, creds, err := relayer.resolveChannelAndAccountWithAttempts("token-1", "gpt-5.5", "codex:session-new", &attempts)
+	if err != nil {
+		t.Fatalf("resolve new codex session: %v", err)
+	}
+	if acc.ID != acc2ID || creds != "sk-two" {
+		t.Fatalf("selected (%s,%q), want lower-load account %s/sk-two", acc.ID, creds, acc2ID)
+	}
+	info := routeLogAdminInfo("codex:session-new", attempts)
+	selected, _ := info["selected"].(map[string]interface{})
+	if selected["account_session_affinity_load"] != 0 {
+		t.Fatalf("selected session load = %#v, want 0; info=%#v", selected["account_session_affinity_load"], info)
+	}
+}
+
 func TestPickAccountForAffinityYieldsWhenBoundAccountOverSoftCap(t *testing.T) {
 	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
 		t.Fatalf("crypto init: %v", err)
@@ -752,11 +805,60 @@ func TestPickAccountForAffinityYieldsWhenBoundAccountOverSoftCap(t *testing.T) {
 	pools.SetPool(ch.ID.String(), pool)
 	relayer := &Relayer{pools: pools}
 
-	got, _, creds, err := relayer.pickAccountForAffinity(ch, bound.ID.String(), "gpt-5.5")
+	got, _, creds, err := relayer.pickAccountForAffinity(ch, bound.ID.String(), "gpt-5.5", false)
 	if err != nil {
 		t.Fatalf("pickAccountForAffinity: %v", err)
 	}
 	if got.ID != other.ID || creds != "sk-other" {
 		t.Fatalf("selected (%s,%q), want other %s/sk-other", got.ID, creds, other.ID)
+	}
+}
+
+func TestPickAccountForStrictAffinityKeepsBoundAccountOverSoftCap(t *testing.T) {
+	if err := crypto.Init("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("crypto init: %v", err)
+	}
+	boundCred, err := crypto.Encrypt("sk-bound")
+	if err != nil {
+		t.Fatalf("encrypt bound cred: %v", err)
+	}
+	otherCred, err := crypto.Encrypt("sk-other")
+	if err != nil {
+		t.Fatalf("encrypt other cred: %v", err)
+	}
+	ch := db.Channel{
+		Base:      db.Base{ID: uuid.New()},
+		Type:      "openai",
+		APIFormat: "standard",
+		Models:    "gpt-5.5",
+		Enabled:   true,
+	}
+	bound := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Name: "bound", Credentials: boundCred, CredType: "api_key", Enabled: true, Weight: 100}
+	other := &db.Account{Base: db.Base{ID: uuid.New()}, ChannelID: ch.ID, Name: "other", Credentials: otherCred, CredType: "api_key", Enabled: true, Weight: 1}
+	pool := NewAccountPool([]*db.Account{bound, other})
+	for i := 0; i < accountInFlightSoftCap; i++ {
+		pool.Begin(bound.ID.String())
+	}
+	pools := NewPoolManager()
+	pools.SetPool(ch.ID.String(), pool)
+	relayer := &Relayer{pools: pools}
+
+	got, _, creds, err := relayer.pickAccountForAffinity(ch, bound.ID.String(), "gpt-5.5", true)
+	if err != nil {
+		t.Fatalf("pickAccountForAffinity: %v", err)
+	}
+	if got.ID != bound.ID || creds != "sk-bound" {
+		t.Fatalf("selected (%s,%q), want bound %s/sk-bound", got.ID, creds, bound.ID)
+	}
+}
+
+func TestStrictAffinityScopeOnlyAppliesToCodex(t *testing.T) {
+	if !strictAffinityScope("codex:session-1") {
+		t.Fatalf("codex scope should be strict")
+	}
+	for _, scope := range []string{"header:session-1", "opencode:session-1", "claude:session-1", "thread:session-1", ""} {
+		if strictAffinityScope(scope) {
+			t.Fatalf("scope %q should not be strict", scope)
+		}
 	}
 }

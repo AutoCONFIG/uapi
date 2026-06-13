@@ -164,7 +164,7 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 		return "", fmt.Errorf("oauth account %s has no token url", account.ID)
 	}
 	if providerKey == "antigravity" {
-		return refreshAntigravityOAuthToken(account, database, refreshToken, tokenURL)
+		return refreshAntigravityOAuthToken(account, ch, database, refreshToken, tokenURL)
 	}
 	clientID := oauthClientIDForProvider(account.ClientID, providerKey)
 	if ch != nil && strings.EqualFold(strings.TrimSpace(ch.APIFormat), "chatgpt_reverse") && strings.TrimSpace(account.ClientID) == "" {
@@ -344,7 +344,7 @@ func refreshOAuthTokenForChannel(account *db.Account, ch *db.Channel, database *
 	return result.AccessToken, nil
 }
 
-func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refreshToken, tokenURL string) (string, error) {
+func refreshAntigravityOAuthToken(account *db.Account, ch *db.Channel, database *gorm.DB, refreshToken, tokenURL string) (string, error) {
 	clientSecret := ""
 	if account.ClientSecret != "" {
 		decrypted, err := crypto.Decrypt(account.ClientSecret)
@@ -353,7 +353,7 @@ func refreshAntigravityOAuthToken(account *db.Account, database *gorm.DB, refres
 		}
 		clientSecret = decrypted
 	}
-	result, err := antigravity.RefreshToken(tokenURL, refreshToken, account.ClientID, clientSecret)
+	result, err := antigravity.RefreshTokenWithDebugMetadata(tokenURL, refreshToken, account.ClientID, clientSecret, relayOAuthRefreshDebugMetadata(account, ch, "antigravity", tokenURL))
 	if err != nil {
 		return "", err
 	}

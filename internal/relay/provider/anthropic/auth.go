@@ -90,6 +90,10 @@ func encodeQuery(params [][2]string) string {
 }
 
 func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, state string) (*TokenResponse, error) {
+	return ExchangeCodeWithDebugMetadata(tokenURL, code, redirectURI, codeVerifier, clientID, state, nil)
+}
+
+func ExchangeCodeWithDebugMetadata(tokenURL, code, redirectURI, codeVerifier, clientID, state string, metadata map[string]interface{}) (*TokenResponse, error) {
 	payload := map[string]interface{}{
 		"grant_type":    "authorization_code",
 		"code":          code,
@@ -107,38 +111,38 @@ func ExchangeCode(tokenURL, code, redirectURI, codeVerifier, clientID, state str
 	debugInfo := oauthdebug.NewHTTPDebug(req, body)
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
 	oauthdebug.FinishHTTPDebug(debugInfo, resp, respBody)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("token exchange failed: status %d: %s", resp.StatusCode, compactBody(respBody))
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 	var result TokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
 	if result.Error != "" {
 		err := fmt.Errorf("token exchange failed: %s", result.Error)
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 	if result.AccessToken == "" {
 		err := fmt.Errorf("token exchange response missing access_token")
-		oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
-	oauthdebug.Write("claude_code", "exchange_code", nil, debugInfo, result, nil)
+	oauthdebug.Write("claude_code", "exchange_code", metadata, debugInfo, result, nil)
 	return &result, nil
 }
 

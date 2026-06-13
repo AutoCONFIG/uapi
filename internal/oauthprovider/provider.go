@@ -15,13 +15,14 @@ import (
 )
 
 type ExchangeRequest struct {
-	Code         string
-	RedirectURI  string
-	CodeVerifier string
-	ClientID     string
-	ClientSecret string
-	TokenURL     string
-	State        string
+	Code          string
+	RedirectURI   string
+	CodeVerifier  string
+	ClientID      string
+	ClientSecret  string
+	TokenURL      string
+	State         string
+	DebugMetadata map[string]interface{}
 }
 
 type ExchangeResult struct {
@@ -175,7 +176,7 @@ func init() {
 		},
 		buildAuthURL: openai.BuildAuthURL,
 		exchange: func(req ExchangeRequest) (*ExchangeResult, error) {
-			tokens, err := openai.ExchangeCode(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID)
+			tokens, err := openai.ExchangeCodeWithDebugMetadata(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID, req.DebugMetadata)
 			if err != nil {
 				return nil, err
 			}
@@ -213,7 +214,7 @@ func init() {
 		},
 		buildAuthURL: gemini.BuildAuthURL,
 		exchange: func(req ExchangeRequest) (*ExchangeResult, error) {
-			tokens, err := gemini.ExchangeCode(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID, req.ClientSecret)
+			tokens, err := gemini.ExchangeCodeWithDebugMetadata(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID, req.ClientSecret, req.DebugMetadata)
 			if err != nil {
 				return nil, err
 			}
@@ -250,7 +251,7 @@ func init() {
 		},
 		buildAuthURL: anthropic.BuildAuthURL,
 		exchange: func(req ExchangeRequest) (*ExchangeResult, error) {
-			tokens, err := anthropic.ExchangeCode(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID, req.State)
+			tokens, err := anthropic.ExchangeCodeWithDebugMetadata(req.TokenURL, req.Code, req.RedirectURI, req.CodeVerifier, req.ClientID, req.State, req.DebugMetadata)
 			if err != nil {
 				return nil, err
 			}
@@ -282,7 +283,7 @@ func init() {
 			return antigravity.BuildAuthURL(clientID, redirectURI, state)
 		},
 		exchange: func(req ExchangeRequest) (*ExchangeResult, error) {
-			tokens, err := antigravity.ExchangeCode(req.TokenURL, req.Code, req.RedirectURI, req.ClientID, req.ClientSecret)
+			tokens, err := antigravity.ExchangeCodeWithDebugMetadata(req.TokenURL, req.Code, req.RedirectURI, req.ClientID, req.ClientSecret, req.DebugMetadata)
 			if err != nil {
 				return nil, err
 			}

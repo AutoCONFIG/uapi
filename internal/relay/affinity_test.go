@@ -143,6 +143,24 @@ func TestReverseIndex_MaintainedOnSet(t *testing.T) {
 	}
 }
 
+func TestAccountScopeCountsCountsActiveScopesBySource(t *testing.T) {
+	c := NewAffinityCache()
+	c.ForceSet("t1", "m", "codex:session-1", "ch", "acc1", 60)
+	c.ForceSet("t2", "m", "codex:session-2", "ch", "acc1", 60)
+	c.ForceSet("t3", "m", "codex:session-3", "ch", "acc2", 60)
+	c.ForceSet("t4", "m", "header:session-4", "ch", "acc1", 60)
+	c.ForceSet("expired", "m", "codex:old", "ch", "acc2", 1)
+	time.Sleep(1100 * time.Millisecond)
+
+	counts := c.AccountScopeCounts("codex")
+	if counts["acc1"] != 2 || counts["acc2"] != 1 {
+		t.Fatalf("codex scope counts = %#v, want acc1=2 acc2=1", counts)
+	}
+	if _, _, ok := c.GetHit("expired", "m", "codex:old"); ok {
+		t.Fatalf("expired entry should be cleaned")
+	}
+}
+
 func TestReverseIndex_CleanedOnEvictChannel(t *testing.T) {
 	c := NewAffinityCache()
 	c.ForceSet("t1", "m", "s1", "chA", "acc1", 60)

@@ -91,6 +91,13 @@ func (p *AccountPool) PickForModel(model string, excluded map[string]bool) (*db.
 	return p.pickLocked(excluded, model)
 }
 
+func (p *AccountPool) PickForModelWithSessionLoad(model string, excluded map[string]bool, sessionLoad map[string]int) (*db.Account, int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	acc, load, ok := p.pickWithSessionLoadLocked(excluded, model, sessionLoad)
+	return acc, load, ok
+}
+
 // modelQuotaExhausted checks if the account's quota for the given model is exhausted.
 // It looks for a quota bucket whose label matches the model name and checks if remaining <= 0.
 func modelQuotaExhausted(acc *db.Account, model string) bool {
@@ -307,6 +314,94 @@ func (p *AccountPool) pickLocked(excluded map[string]bool, model string) (*db.Ac
 	}
 	best.CurrentWeight -= totalWeight
 	return best.Account, true
+}
+
+func (p *AccountPool) pickWithSessionLoadLocked(excluded map[string]bool, model string, sessionLoad map[string]int) (*db.Account, int, bool) {
+	preferBelowSoftCap := false
+	minSessions := 0
+	haveCandidate := false
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if p.accounts[i].InFlight < accountInFlightSoftCap {
+			preferBelowSoftCap = true
+		}
+		load := p.accountSessionLoadLocked(i, sessionLoad)
+		if !haveCandidate || load < minSessions {
+			minSessions = load
+			haveCandidate = true
+		}
+	}
+	if !haveCandidate {
+		return nil, 0, false
+	}
+	haveCandidate = false
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if preferBelowSoftCap && p.accounts[i].InFlight >= accountInFlightSoftCap {
+			continue
+		}
+		load := p.accountSessionLoadLocked(i, sessionLoad)
+		if !haveCandidate || load < minSessions {
+			minSessions = load
+			haveCandidate = true
+		}
+	}
+	if !haveCandidate {
+		return nil, 0, false
+	}
+
+	totalWeight := 0
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if preferBelowSoftCap && p.accounts[i].InFlight >= accountInFlightSoftCap {
+			continue
+		}
+		if p.accountSessionLoadLocked(i, sessionLoad) != minSessions {
+			continue
+		}
+		totalWeight += p.effectiveAccountWeightLocked(i)
+	}
+	if totalWeight == 0 {
+		return nil, 0, false
+	}
+
+	var best *WeightedAccount
+	for i := range p.accounts {
+		if !p.accountSelectableLocked(i, excluded, model) {
+			continue
+		}
+		if preferBelowSoftCap && p.accounts[i].InFlight >= accountInFlightSoftCap {
+			continue
+		}
+		if p.accountSessionLoadLocked(i, sessionLoad) != minSessions {
+			continue
+		}
+		effectiveWeight := p.effectiveAccountWeightLocked(i)
+		p.accounts[i].CurrentWeight += effectiveWeight
+		if best == nil ||
+			p.accounts[i].CurrentWeight > best.CurrentWeight ||
+			(p.accounts[i].CurrentWeight == best.CurrentWeight && p.accounts[i].InFlight < best.InFlight) {
+			best = &p.accounts[i]
+		}
+	}
+	if best == nil {
+		return nil, 0, false
+	}
+	best.CurrentWeight -= totalWeight
+	return best.Account, minSessions, true
+}
+
+func (p *AccountPool) accountSessionLoadLocked(i int, sessionLoad map[string]int) int {
+	if sessionLoad == nil || p.accounts[i].Account == nil {
+		return 0
+	}
+	return sessionLoad[p.accounts[i].Account.ID.String()]
 }
 
 func (p *AccountPool) accountSelectableLocked(i int, excluded map[string]bool, model string) bool {

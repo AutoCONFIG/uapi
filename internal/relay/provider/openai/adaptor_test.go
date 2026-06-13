@@ -85,6 +85,31 @@ func TestCodexSetupRequestHeaderUsesNativeContract(t *testing.T) {
 	}
 }
 
+func TestCodexSetupRequestHeaderDoesNotEmitNonNativeFingerprintHeaders(t *testing.T) {
+	adaptor := &OpenAIAdaptor{}
+	adaptor.Init(&db.Channel{Type: "openai", APIFormat: "codex", Endpoint: "https://api.openai.com/v1"}, &db.Account{
+		Metadata: map[string]interface{}{
+			"chatgpt_account_id": "acc_123",
+		},
+	})
+
+	var req fasthttp.Request
+	if err := adaptor.SetupRequestHeader(&req, "sk-test"); err != nil {
+		t.Fatalf("SetupRequestHeader: %v", err)
+	}
+	for _, header := range []string{
+		"version",
+		"Conversation_id",
+		"X-Codex-Turn-State",
+		"X-ResponsesAPI-Include-Timing-Metrics",
+		"x-openai-internal-codex-responses-lite",
+	} {
+		if got := string(req.Header.Peek(header)); got != "" {
+			t.Fatalf("%s should not be emitted by default, got %q", header, got)
+		}
+	}
+}
+
 func TestParseUsageFullNormalizesCacheHitAliases(t *testing.T) {
 	tests := []struct {
 		name string

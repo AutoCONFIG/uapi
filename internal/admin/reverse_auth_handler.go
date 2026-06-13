@@ -12,6 +12,7 @@ import (
 
 	"github.com/AutoCONFIG/uapi/internal/db"
 	"github.com/AutoCONFIG/uapi/internal/logger"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/openai"
 	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
@@ -218,27 +219,46 @@ func exchangeReverseAuthCode(code, redirectURI, verifier, clientID string) (*rev
 	req.Header.Set("Referer", reversePlatformBase+"/")
 	req.Header.Set("auth0-client", reversePlatformAuth0Client)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0")
+	debugInfo := oauthdebug.NewHTTPDebug(req, payload)
 	resp, err := reverseAuthHTTPClient.Do(req)
 	if err != nil {
+		oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, nil, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
+		oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, nil, err)
 		return nil, err
 	}
+	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	var out reverseTokenResponse
 	if err := json.Unmarshal(body, &out); err != nil {
+		oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, nil, err)
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || out.AccessToken == "" {
 		detail := strings.TrimSpace(firstNonEmpty(out.ErrorDescription, out.Error, string(body)))
-		return nil, fmt.Errorf("reverse auth token exchange failed: status %d: %s", resp.StatusCode, detail)
+		err := fmt.Errorf("reverse auth token exchange failed: status %d: %s", resp.StatusCode, detail)
+		oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, nil, err)
+		return nil, err
 	}
 	if out.RefreshToken == "" {
-		return nil, fmt.Errorf("reverse auth token exchange missing refresh_token")
+		err := fmt.Errorf("reverse auth token exchange missing refresh_token")
+		oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, nil, err)
+		return nil, err
 	}
+	oauthdebug.Write(reverseAuthProvider, "exchange_code", reverseOAuthDebugMetadata(clientID, redirectURI), debugInfo, out, nil)
 	return &out, nil
+}
+
+func reverseOAuthDebugMetadata(clientID, redirectURI string) map[string]interface{} {
+	return map[string]interface{}{
+		"client_id":    clientID,
+		"redirect_uri": redirectURI,
+		"token_url":    reverseExchangeTokenURL,
+	}
 }
 
 func reverseAuthAccountType(session *oauthSession) string {

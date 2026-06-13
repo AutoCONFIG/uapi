@@ -25,12 +25,16 @@ import (
 )
 
 const (
-	relayDebugDumpDirEnv            = "UAPI_RELAY_DEBUG_DUMP_DIR"
-	relayDebugDumpMaxAgeEnv         = "UAPI_RELAY_DEBUG_DUMP_MAX_AGE"
-	relayDebugDumpMaxEntriesEnv     = "UAPI_RELAY_DEBUG_DUMP_MAX_ENTRIES"
-	relayDebugDumpDefaultMaxAge     = 7 * 24 * time.Hour  // 7 days
-	relayDebugDumpDefaultMaxEntries = 7                   // keep 7 daily archives
-	relayDebugStreamFileMaxSize     = 2 * 1024 * 1024
+	relayDebugDumpDirEnv              = "UAPI_RELAY_DEBUG_DUMP_DIR"
+	relayDebugDumpBodyModeEnv         = "UAPI_RELAY_DEBUG_DUMP_BODY_MODE"
+	relayDebugDumpMaxAgeEnv           = "UAPI_RELAY_DEBUG_DUMP_MAX_AGE"
+	relayDebugDumpMaxEntriesEnv       = "UAPI_RELAY_DEBUG_DUMP_MAX_ENTRIES"
+	relayDebugDumpDefaultMaxAge       = 7 * 24 * time.Hour // 7 days
+	relayDebugDumpDefaultMaxEntries   = 7                  // keep 7 daily archives
+	relayDebugStreamFileMaxSize       = 2 * 1024 * 1024
+	relayDebugRequestStringLimit      = 512
+	relayDebugRequestLargeStringLimit = 128
+	relayDebugRequestRawLimit         = 8 * 1024
 )
 
 var (
@@ -61,6 +65,10 @@ func init() {
 
 func relayDebugDumpEnabled() bool {
 	return relayDebugDumpDir != ""
+}
+
+func relayDebugDumpFullBodyEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(relayDebugDumpBodyModeEnv)), "full")
 }
 
 // rotateAndCleanupRelayDebugDumpDir rotates yesterday's dump to .tar.gz and cleans up old archives
@@ -242,30 +250,32 @@ func removeRelayDebugDumpEntry(dir, name string) bool {
 }
 
 type relayDebugDumpSummary struct {
-	Timestamp        string                                `json:"timestamp"`
-	RelayRequestID   string                                `json:"relay_request_id"`
-	ProcessID        int                                   `json:"process_id"`
-	ProcessStartedAt string                                `json:"process_started_at"`
-	TokenID          string                                `json:"token_id,omitempty"`
-	AccountID        string                                `json:"account_id,omitempty"`
-	ChannelID        string                                `json:"channel_id,omitempty"`
-	ChannelName      string                                `json:"channel_name,omitempty"`
-	ChannelType      string                                `json:"channel_type,omitempty"`
-	APIFormat        string                                `json:"api_format,omitempty"`
-	GatewayRequest   string                                `json:"gateway_request,omitempty"`
-	ClientFormat     provider.Format                       `json:"client_format"`
-	UpstreamFormat   provider.Format                       `json:"upstream_format"`
-	RequestType      string                                `json:"request_type"`
-	Model            string                                `json:"model"`
-	RoutedModel      string                                `json:"routed_model"`
-	Stream           bool                                  `json:"stream"`
-	OriginalBytes    int                                   `json:"original_bytes"`
-	ConvertedBytes   int                                   `json:"converted_bytes"`
-	CachePassthrough upstreamconfig.CachePassthroughPolicy `json:"cache_passthrough"`
-	Original         relayDebugRequestStats                `json:"original"`
-	Converted        relayDebugRequestStats                `json:"converted"`
-	RouteAttempts    []map[string]interface{}              `json:"route_attempts,omitempty"`
-	FallbackReasons  []string                              `json:"fallback_reasons,omitempty"`
+	Timestamp          string                                `json:"timestamp"`
+	RelayRequestID     string                                `json:"relay_request_id"`
+	ProcessID          int                                   `json:"process_id"`
+	ProcessStartedAt   string                                `json:"process_started_at"`
+	TokenID            string                                `json:"token_id,omitempty"`
+	AccountID          string                                `json:"account_id,omitempty"`
+	ChannelID          string                                `json:"channel_id,omitempty"`
+	ChannelName        string                                `json:"channel_name,omitempty"`
+	ChannelType        string                                `json:"channel_type,omitempty"`
+	APIFormat          string                                `json:"api_format,omitempty"`
+	GatewayRequest     string                                `json:"gateway_request,omitempty"`
+	ClientFormat       provider.Format                       `json:"client_format"`
+	UpstreamFormat     provider.Format                       `json:"upstream_format"`
+	RequestType        string                                `json:"request_type"`
+	Model              string                                `json:"model"`
+	RoutedModel        string                                `json:"routed_model"`
+	Stream             bool                                  `json:"stream"`
+	OriginalBytes      int                                   `json:"original_bytes"`
+	ConvertedBytes     int                                   `json:"converted_bytes"`
+	OriginalDumpBytes  int                                   `json:"original_dump_bytes,omitempty"`
+	ConvertedDumpBytes int                                   `json:"converted_dump_bytes,omitempty"`
+	CachePassthrough   upstreamconfig.CachePassthroughPolicy `json:"cache_passthrough"`
+	Original           relayDebugRequestStats                `json:"original"`
+	Converted          relayDebugRequestStats                `json:"converted"`
+	RouteAttempts      []map[string]interface{}              `json:"route_attempts,omitempty"`
+	FallbackReasons    []string                              `json:"fallback_reasons,omitempty"`
 }
 
 type relayDebugRequestStats struct {
@@ -371,23 +381,27 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		return nil
 	}
 
+	dumpedOriginal := relayDebugDumpRequestBody(original)
+	dumpedConverted := relayDebugDumpRequestBody(converted)
 	summary := relayDebugDumpSummary{
-		Timestamp:        relayDebugDumpTimestamp(now),
-		RelayRequestID:   traceID,
-		ProcessID:        os.Getpid(),
-		ProcessStartedAt: relayDebugDumpTimestamp(relayDebugDumpProcessStartedAt),
-		TokenID:          token.ID.String(),
-		ClientFormat:     clientFormat,
-		UpstreamFormat:   upstreamFormat,
-		RequestType:      string(requestType),
-		Model:            model,
-		RoutedModel:      routedModel,
-		Stream:           stream,
-		OriginalBytes:    len(original),
-		ConvertedBytes:   len(converted),
-		CachePassthrough: upstreamconfig.CachePassthroughPolicyForChannel(ch, upstreamFormat),
-		Original:         relayDebugRequestStatsFromBody(original),
-		Converted:        relayDebugRequestStatsFromBody(converted),
+		Timestamp:          relayDebugDumpTimestamp(now),
+		RelayRequestID:     traceID,
+		ProcessID:          os.Getpid(),
+		ProcessStartedAt:   relayDebugDumpTimestamp(relayDebugDumpProcessStartedAt),
+		TokenID:            token.ID.String(),
+		ClientFormat:       clientFormat,
+		UpstreamFormat:     upstreamFormat,
+		RequestType:        string(requestType),
+		Model:              model,
+		RoutedModel:        routedModel,
+		Stream:             stream,
+		OriginalBytes:      len(original),
+		ConvertedBytes:     len(converted),
+		OriginalDumpBytes:  len(dumpedOriginal),
+		ConvertedDumpBytes: len(dumpedConverted),
+		CachePassthrough:   upstreamconfig.CachePassthroughPolicyForChannel(ch, upstreamFormat),
+		Original:           relayDebugRequestStatsFromBody(original),
+		Converted:          relayDebugRequestStatsFromBody(converted),
 	}
 	if ch != nil {
 		summary.ChannelID = ch.ID.String()
@@ -402,25 +416,25 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		summary.GatewayRequest = claims.RequestID
 	}
 
-	writeRelayDebugFile(outDir, "request.original.json", original)
-	writeRelayDebugFile(outDir, "request.converted.json", converted)
+	writeRelayDebugFile(outDir, "request.original.json", dumpedOriginal)
+	writeRelayDebugFile(outDir, "request.converted.json", dumpedConverted)
 	if raw, err := json.MarshalIndent(summary, "", "  "); err == nil {
 		writeRelayDebugFile(outDir, "summary.json", raw)
 	}
 	trace := &relayDebugTrace{
-		ID:                    traceID,
-		Dir:                   outDir,
-		startedAt:             now,
-		streamBytes:           map[string]int{},
-		streamTruncated:       map[string]bool{},
-		streamEvents:          map[string]int{},
-		streamPayloads:        map[string]int{},
-		streamLast:            map[string]map[string]interface{}{},
-		streamFirstAt:         map[string]time.Time{},
-		streamLastAt:          map[string]time.Time{},
-		streamMaxGap:          map[string]time.Duration{},
+		ID:                     traceID,
+		Dir:                    outDir,
+		startedAt:              now,
+		streamBytes:            map[string]int{},
+		streamTruncated:        map[string]bool{},
+		streamEvents:           map[string]int{},
+		streamPayloads:         map[string]int{},
+		streamLast:             map[string]map[string]interface{}{},
+		streamFirstAt:          map[string]time.Time{},
+		streamLastAt:           map[string]time.Time{},
+		streamMaxGap:           map[string]time.Duration{},
 		streamConsecutiveNulls: map[string]int{},
-		streamLastWasNull:     map[string]bool{},
+		streamLastWasNull:      map[string]bool{},
 	}
 	trace.Event("request_dump_written",
 		logger.F("client_format", string(clientFormat)),
@@ -461,6 +475,99 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		logger.F("converted_bytes", len(converted)),
 	)
 	return trace
+}
+
+func relayDebugDumpRequestBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if relayDebugDumpFullBodyEnabled() {
+		return append([]byte(nil), body...)
+	}
+	var root interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil {
+		return relayDebugDumpRawPreview(body)
+	}
+	sanitized := relayDebugSanitizeRequestValue("", root)
+	raw, err := json.MarshalIndent(sanitized, "", "  ")
+	if err != nil {
+		return relayDebugDumpRawPreview(body)
+	}
+	return append(raw, '\n')
+}
+
+func relayDebugDumpRawPreview(body []byte) []byte {
+	if len(body) <= relayDebugRequestRawLimit {
+		return append([]byte(nil), body...)
+	}
+	prefix := append([]byte(nil), body[:relayDebugRequestRawLimit]...)
+	prefix = append(prefix, []byte(fmt.Sprintf("\n...[truncated %d bytes]", len(body)-relayDebugRequestRawLimit))...)
+	return prefix
+}
+
+func relayDebugSanitizeRequestValue(key string, value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for childKey, childValue := range v {
+			if relayDebugSensitiveJSONKey(childKey) {
+				out[childKey] = "[redacted]"
+				continue
+			}
+			out[childKey] = relayDebugSanitizeRequestValue(childKey, childValue)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i := range v {
+			out[i] = relayDebugSanitizeRequestValue(key, v[i])
+		}
+		return out
+	case string:
+		return relayDebugTruncateRequestString(key, v)
+	default:
+		return value
+	}
+}
+
+func relayDebugSensitiveJSONKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch normalized {
+	case "authorization", "api_key", "apikey", "x_api_key", "access_token", "refresh_token",
+		"id_token", "client_secret", "client_assertion", "code_verifier", "cookie", "set_cookie":
+		return true
+	default:
+		return false
+	}
+}
+
+func relayDebugTruncateRequestString(key, value string) string {
+	limit := relayDebugRequestStringLimit
+	if relayDebugLargeContentKey(key) {
+		limit = relayDebugRequestLargeStringLimit
+	}
+	if len([]rune(value)) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:limit]) + fmt.Sprintf("...[truncated %d chars]", len(runes)-limit)
+}
+
+func relayDebugLargeContentKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch normalized {
+	case "content", "text", "input", "output", "data", "image", "image_url", "audio", "video",
+		"file", "file_data", "inline_data", "cached_content", "encrypted_content", "redacted_content":
+		return true
+	default:
+		return strings.Contains(normalized, "base64") ||
+			strings.Contains(normalized, "blob") ||
+			strings.Contains(normalized, "bytes")
+	}
 }
 
 func relayDebugRequestStatsFromBody(body []byte) relayDebugRequestStats {

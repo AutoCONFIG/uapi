@@ -170,6 +170,10 @@ func BuildAuthURL(clientID, redirectURI, state string) string {
 }
 
 func ExchangeCode(tokenURL, code, redirectURI, clientID, clientSecret string) (*TokenResponse, error) {
+	return ExchangeCodeWithDebugMetadata(tokenURL, code, redirectURI, clientID, clientSecret, nil)
+}
+
+func ExchangeCodeWithDebugMetadata(tokenURL, code, redirectURI, clientID, clientSecret string, metadata map[string]interface{}) (*TokenResponse, error) {
 	if strings.TrimSpace(tokenURL) == "" {
 		tokenURL = DefaultTokenURL
 	}
@@ -195,38 +199,38 @@ func ExchangeCode(tokenURL, code, redirectURI, clientID, clientSecret string) (*
 	debugInfo := oauthdebug.NewHTTPDebug(req, []byte(data.Encode()))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("antigravity exchange request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("read antigravity exchange response: %w", err)
 	}
 	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("antigravity exchange failed: status %d: %s", resp.StatusCode, compactBody(body))
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse antigravity exchange response: %w", err)
 	}
 	if tokenResp.Error != "" {
 		err := fmt.Errorf("antigravity exchange failed: %s", tokenResp.Error)
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 	if tokenResp.AccessToken == "" {
 		err := fmt.Errorf("antigravity exchange response missing access token")
-		oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, nil, err)
 		return nil, err
 	}
-	oauthdebug.Write("antigravity", "exchange_code", nil, debugInfo, tokenResp, nil)
+	oauthdebug.Write("antigravity", "exchange_code", metadata, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 
@@ -262,6 +266,10 @@ func FetchAccountMetadata(accessToken string) (map[string]interface{}, error) {
 }
 
 func RefreshToken(tokenURL, refreshToken, clientID, clientSecret string) (*TokenResponse, error) {
+	return RefreshTokenWithDebugMetadata(tokenURL, refreshToken, clientID, clientSecret, nil)
+}
+
+func RefreshTokenWithDebugMetadata(tokenURL, refreshToken, clientID, clientSecret string, metadata map[string]interface{}) (*TokenResponse, error) {
 	if strings.TrimSpace(tokenURL) == "" {
 		tokenURL = DefaultTokenURL
 	}
@@ -285,33 +293,33 @@ func RefreshToken(tokenURL, refreshToken, clientID, clientSecret string) (*Token
 	debugInfo := oauthdebug.NewHTTPDebug(req, []byte(data.Encode()))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("antigravity refresh request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		oauthdebug.FinishHTTPDebug(debugInfo, resp, nil)
-		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("read antigravity refresh response: %w", err)
 	}
 	oauthdebug.FinishHTTPDebug(debugInfo, resp, body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("antigravity refresh failed: status %d: %s", resp.StatusCode, compactBody(body))
-		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, nil, err)
 		return nil, err
 	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, nil, err)
 		return nil, fmt.Errorf("parse antigravity refresh response: %w", err)
 	}
 	if tokenResp.AccessToken == "" {
 		err := fmt.Errorf("antigravity refresh response missing access token")
-		oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, nil, err)
+		oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, nil, err)
 		return nil, err
 	}
-	oauthdebug.Write("antigravity", "refresh_token", nil, debugInfo, tokenResp, nil)
+	oauthdebug.Write("antigravity", "refresh_token", metadata, debugInfo, tokenResp, nil)
 	return &tokenResp, nil
 }
 

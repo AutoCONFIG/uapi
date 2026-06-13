@@ -1,9 +1,13 @@
 package oauthdebug
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactValueRedactsTokenStructsOnly(t *testing.T) {
@@ -73,4 +77,47 @@ func TestNewHTTPDebugKeepsUsefulHeaders(t *testing.T) {
 	if !strings.Contains(debugInfo.Request.Body, "client_secret=visible") {
 		t.Fatalf("body over-redacted client_secret: %s", debugInfo.Request.Body)
 	}
+}
+
+func TestWriteCreatesOAuthDumpInDebugDumps(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UAPI_RELAY_DEBUG_DUMP_DIR", dir)
+
+	Write("codex", "exchange_code", map[string]interface{}{
+		"account_id":    "acct_123",
+		"refresh_token": "secret-refresh",
+	}, nil, map[string]interface{}{
+		"access_token": "secret-access",
+		"account_id":   "acct_123",
+	}, nil)
+
+	dayDir := filepath.Join(dir, timeNowLocalDate())
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		t.Fatalf("read day dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	raw, err := os.ReadFile(filepath.Join(dayDir, entries[0].Name(), "oauth.json"))
+	if err != nil {
+		t.Fatalf("read oauth dump: %v", err)
+	}
+	if strings.Contains(string(raw), "secret-refresh") || strings.Contains(string(raw), "secret-access") {
+		t.Fatalf("dump leaked token: %s", raw)
+	}
+	var dump Dump
+	if err := json.Unmarshal(raw, &dump); err != nil {
+		t.Fatalf("decode dump: %v", err)
+	}
+	if dump.Provider != "codex" || dump.Operation != "exchange_code" {
+		t.Fatalf("dump provider/operation = %q/%q", dump.Provider, dump.Operation)
+	}
+	if dump.Metadata["account_id"] != "acct_123" {
+		t.Fatalf("metadata account_id = %v", dump.Metadata["account_id"])
+	}
+}
+
+func timeNowLocalDate() string {
+	return strings.Split(time.Now().Local().Format("2006-01-02T15:04:05"), "T")[0]
 }

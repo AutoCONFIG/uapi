@@ -1187,7 +1187,7 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			go r.finishFailureUsageWithRoutedModelFormatsErrorClientIPAndAdmin(claims, token.ID, ch.ID, acc.ID, model, routedModel, true, clientFormat, upstreamFormat, start, fasthttp.StatusBadGateway, estTokens, "stream ended without terminal event", r.clientIPForDirectRequest(ctx, claims), adminInfo, tokenPlanID)
 			return
 		}
-		affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempts > 0)
+		affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempts > 0, affinityForceReason(adminInfo, quotaAttempts))
 		traceAffinityRecord(trace, "stream", affinityResult)
 		pt, ct, parseFailed := tracker.Result()
 		cacheCreationTokens := tracker.CacheCreationTokens()
@@ -1499,7 +1499,7 @@ func (r *Relayer) handleForceStream(ctx *fasthttp.RequestCtx, token db.Token, to
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempt > 0)
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo) || quotaAttempt > 0, affinityForceReason(adminInfo, quotaAttempt))
 	traceAffinityRecord(trace, "force_stream", affinityResult)
 
 	logger.Debugf("relay.stream", "force stream request completed",
@@ -1666,7 +1666,7 @@ func (r *Relayer) handleMediaRequest(ctx *fasthttp.RequestCtx, token db.Token, t
 	ctx.SetStatusCode(statusCode)
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo), affinityForceReason(adminInfo, 0))
 	traceAffinityRecord(trace, "media", affinityResult)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.media", "media request completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("request_type", string(requestType)), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
@@ -1740,7 +1740,7 @@ func (r *Relayer) handleChatGPTReverseImageGeneration(ctx *fasthttp.RequestCtx, 
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, acc, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo), affinityForceReason(adminInfo, 0))
 	traceAffinityRecord(trace, "chatgpt_reverse_image", affinityResult)
 	r.releaseLocalConcurrency(token.ID.String(), claims)
 	logger.Debugf("relay.media", "chatgpt reverse image generation completed", logger.F("token_id", token.ID.String()), logger.F("channel_id", ch.ID.String()), logger.F("account_id", acc.ID.String()), logger.F("model", model), logger.F("status", statusCode), logger.F("latency_ms", time.Since(start).Milliseconds()))
@@ -2213,7 +2213,7 @@ func (r *Relayer) handleBuffered(ctx *fasthttp.RequestCtx, token db.Token, token
 	}
 	ctx.SetBody(respBody)
 	trace.StreamChunk("response.downstream.json", respBody)
-	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, respAccount, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo))
+	affinityResult := r.recordSuccessfulAffinity(token.ID.String(), model, affinityScope, ch, respAccount, hasAccountSideRouteFallback(adminInfo) || hasAffinityYielded(adminInfo) || hasAffinitySelectionFailed(adminInfo), affinityForceReason(adminInfo, 0))
 	traceAffinityRecord(trace, "buffered", affinityResult)
 
 	logger.Debugf("relay.buffered", "buffered request completed",
@@ -2675,7 +2675,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 							attempt["affinity_account_id"] = accID
 						}
 						if modelOK && capabilityOK {
-							if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
+							if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model, strictAffinityScope(affinityScope)); err == nil {
 								attempt["selected"] = true
 								attempt["account_id"] = acc.ID.String()
 								r.attachAffinitySelectionDebug(attempt, &ch, accID, acc)
@@ -2708,7 +2708,7 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 						attempt["affinity_account_id"] = accID
 					}
 					if modelOK && capabilityOK {
-						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model); err == nil {
+						if acc, adaptor, creds, err := r.pickAccountForAffinity(ch, accID, model, strictAffinityScope(affinityScope)); err == nil {
 							attempt["selected"] = true
 							attempt["account_id"] = acc.ID.String()
 							r.attachAffinitySelectionDebug(attempt, &ch, accID, acc)
@@ -2755,9 +2755,12 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 		for i := range channels {
 			attempt := r.routeAttemptInfo(channels[i], true, true)
 			attempt["source"] = "runtime"
-			if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
+			if acc, adaptor, creds, sessionLoad, err := r.pickAccountForNewAffinity(channels[i], model, affinityScope); err == nil {
 				attempt["selected"] = true
 				attempt["account_id"] = acc.ID.String()
+				if sessionLoad >= 0 {
+					attempt["account_session_affinity_load"] = sessionLoad
+				}
 				r.attachAccountLoadDebug(attempt, &channels[i], acc)
 				r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 				appendRouteAttempt(attempts, attempt)
@@ -2803,9 +2806,12 @@ func (r *Relayer) resolveChannelAndAccountWithAttemptsExcluded(tokenID, model, a
 	for i := range channels {
 		attempt := r.routeAttemptInfo(channels[i], true, true)
 		attempt["source"] = "priority"
-		if acc, adaptor, creds, err := r.pickAccount(channels[i], model); err == nil {
+		if acc, adaptor, creds, sessionLoad, err := r.pickAccountForNewAffinity(channels[i], model, affinityScope); err == nil {
 			attempt["selected"] = true
 			attempt["account_id"] = acc.ID.String()
+			if sessionLoad >= 0 {
+				attempt["account_session_affinity_load"] = sessionLoad
+			}
 			r.attachAccountLoadDebug(attempt, &channels[i], acc)
 			r.attachQuotaSkipDebug(attempt, &channels[i], model, nil)
 			appendRouteAttempt(attempts, attempt)
@@ -2925,10 +2931,14 @@ type affinityRecordResult struct {
 	SelectedAccountID string
 	BoundChannelID    string
 	BoundAccountID    string
+	PreviousChannelID string
+	PreviousAccountID string
+	Migrated          bool
+	MigrationReason   string
 	TTLSeconds        int
 }
 
-func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account, force bool) affinityRecordResult {
+func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.Channel, acc *db.Account, force bool, forceReasons ...string) affinityRecordResult {
 	result := affinityRecordResult{
 		Force: force,
 		Scope: strings.TrimSpace(scope),
@@ -2961,12 +2971,19 @@ func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.
 		result.Reason = "ttl_disabled"
 		return result
 	}
+	if oldChID, oldAccID, hit := r.affinity.GetHit(tokenID, model, scope); hit {
+		result.PreviousChannelID = oldChID
+		result.PreviousAccountID = oldAccID
+	}
 	if force {
 		r.affinity.ForceSet(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
 		result.Recorded = true
 		result.Action = "force_set"
 		result.BoundChannelID = ch.ID.String()
 		result.BoundAccountID = acc.ID.String()
+		result.Migrated = result.PreviousChannelID != "" &&
+			(result.PreviousChannelID != result.BoundChannelID || result.PreviousAccountID != result.BoundAccountID)
+		result.MigrationReason = affinityMigrationReason(result, force, firstNonEmpty(forceReasons...))
 		return result
 	}
 	chID, accID, existed := r.affinity.SetIfAbsent(tokenID, model, scope, ch.ID.String(), acc.ID.String(), ch.AffinityTTL)
@@ -2978,7 +2995,69 @@ func (r *Relayer) recordSuccessfulAffinity(tokenID, model, scope string, ch *db.
 	}
 	result.BoundChannelID = chID
 	result.BoundAccountID = accID
+	result.Migrated = result.PreviousChannelID != "" &&
+		(result.PreviousChannelID != result.BoundChannelID || result.PreviousAccountID != result.BoundAccountID)
+	result.MigrationReason = affinityMigrationReason(result, force, firstNonEmpty(forceReasons...))
 	return result
+}
+
+func affinityMigrationReason(result affinityRecordResult, force bool, forceReason string) string {
+	if !result.Migrated {
+		return ""
+	}
+	if forceReason != "" {
+		return forceReason
+	}
+	if force {
+		return "account_or_affinity_failure"
+	}
+	return "set_if_absent_migration"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func affinityForceReason(info map[string]interface{}, quotaAttempts int) string {
+	if quotaAttempts > 0 {
+		return "quota_retry"
+	}
+	if reason := firstAccountSideFallbackReason(info); reason != "" {
+		return reason
+	}
+	if hasAffinitySelectionFailed(info) {
+		return "affinity_selection_failed"
+	}
+	if hasAffinityYielded(info) {
+		return "affinity_account_yielded"
+	}
+	return ""
+}
+
+func firstAccountSideFallbackReason(info map[string]interface{}) string {
+	if info == nil {
+		return ""
+	}
+	path, _ := info["fallback_path"].([]map[string]interface{})
+	for _, item := range path {
+		reason, _ := item["reason"].(string)
+		if isAccountSideFallbackReason(reason) {
+			return reason
+		}
+		status, _ := item["status_code"].(int)
+		if isAccountSideFallbackStatus(status) {
+			if reason != "" {
+				return reason
+			}
+			return fmt.Sprintf("status_%d", status)
+		}
+	}
+	return ""
 }
 
 func traceAffinityRecord(trace *relayDebugTrace, mode string, result affinityRecordResult) {
@@ -2998,8 +3077,12 @@ func traceAffinityRecord(trace *relayDebugTrace, mode string, result affinityRec
 		logger.F("model", result.Model),
 		logger.F("selected_channel_id", result.SelectedChannelID),
 		logger.F("selected_account_id", result.SelectedAccountID),
+		logger.F("previous_channel_id", result.PreviousChannelID),
+		logger.F("previous_account_id", result.PreviousAccountID),
 		logger.F("bound_channel_id", result.BoundChannelID),
 		logger.F("bound_account_id", result.BoundAccountID),
+		logger.F("migrated", result.Migrated),
+		logger.F("migration_reason", result.MigrationReason),
 		logger.F("ttl_seconds", result.TTLSeconds),
 	)
 }
@@ -3137,6 +3220,7 @@ func compactRouteAttempt(attempt map[string]interface{}) map[string]interface{} 
 		"supports_model", "supports_capability", "skip_reason", "account_skip_reasons",
 		"selected", "account_in_flight", "account_soft_cap", "pool_total_in_flight",
 		"pool_accounts", "pool_total_weight", "pool_exists", "pool_closed",
+		"account_session_affinity_load",
 	}
 	out := make(map[string]interface{}, len(keys))
 	for _, key := range keys {
@@ -3550,7 +3634,32 @@ func (r *Relayer) pickAccount(ch db.Channel, model string) (*db.Account, provide
 	return account, adaptor, creds, nil
 }
 
-func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model string) (*db.Account, provider.Adaptor, string, error) {
+func (r *Relayer) pickAccountForNewAffinity(ch db.Channel, model string, affinityScope string) (*db.Account, provider.Adaptor, string, int, error) {
+	if !strictAffinityScope(affinityScope) || r == nil || r.affinity == nil {
+		acc, adaptor, creds, err := r.pickAccount(ch, model)
+		return acc, adaptor, creds, -1, err
+	}
+	adaptor := getAdaptorForChannel(&ch)
+	if adaptor == nil {
+		return nil, nil, "", -1, fmt.Errorf("unsupported channel type")
+	}
+	pool, ok := r.pools.GetPool(ch.ID.String())
+	if !ok {
+		return nil, nil, "", -1, fmt.Errorf("channel pool not initialized")
+	}
+	sessionLoad := r.affinity.AccountScopeCounts("codex")
+	account, load, ok := pool.PickForModelWithSessionLoad(model, nil, sessionLoad)
+	if !ok {
+		return nil, nil, "", -1, fmt.Errorf("no available account")
+	}
+	creds, err := r.ensureCredentials(&ch, account)
+	if err != nil {
+		return nil, nil, "", -1, fmt.Errorf("credential error: %w", err)
+	}
+	return account, adaptor, creds, load, nil
+}
+
+func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model string, strict bool) (*db.Account, provider.Adaptor, string, error) {
 	if strings.TrimSpace(accountID) == "" {
 		return r.pickAccount(ch, model)
 	}
@@ -3569,7 +3678,7 @@ func (r *Relayer) pickAccountForAffinity(ch db.Channel, accountID string, model 
 		}
 		return r.pickAccount(ch, model)
 	}
-	if pool.InFlight(accountID) >= accountInFlightSoftCap &&
+	if !strict && pool.InFlight(accountID) >= accountInFlightSoftCap &&
 		pool.HasAvailableBelowSoftCapForModel(model, map[string]bool{accountID: true}) {
 		return r.pickAccount(ch, model)
 	}
@@ -4124,6 +4233,16 @@ func requestAffinityScope(ctx *fasthttp.RequestCtx, body []byte) string {
 		}
 	}
 	return ""
+}
+
+func strictAffinityScope(scope string) bool {
+	source, _ := splitRouteScope(scope)
+	switch source {
+	case "codex":
+		return true
+	default:
+		return false
+	}
 }
 
 func recordChatGPTReverseConversation(metadata map[string]interface{}, scope, conversationID string, now time.Time) {

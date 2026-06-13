@@ -1007,6 +1007,7 @@ func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshT
 	result, err := oauthProv.Exchange(oauthprovider.ExchangeRequest{
 		Code: code, RedirectURI: session.RedirectURI, CodeVerifier: session.CodeVerifier,
 		ClientID: session.ClientID, ClientSecret: session.ClientSecret, TokenURL: session.TokenURL, State: session.State,
+		DebugMetadata: oauthExchangeDebugMetadata(session),
 	})
 	if err != nil {
 		return "", "", nil, nil, err
@@ -1020,6 +1021,21 @@ func exchangeOAuthCode(session *oauthSession, code string) (credential, refreshT
 		metadata = normalizeCodexAccountMetadata(metadata)
 	}
 	return result.Credential, result.RefreshToken, result.Expiry, metadata, nil
+}
+
+func oauthExchangeDebugMetadata(session *oauthSession) map[string]interface{} {
+	if session == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"provider":     session.Provider,
+		"channel_id":   session.ChannelID.String(),
+		"account_name": session.AccountName,
+		"client_id":    session.ClientID,
+		"token_url":    session.TokenURL,
+		"redirect_uri": session.RedirectURI,
+		"created_by":   session.CreatedBy,
+	}
 }
 
 func geminiProjectID(metadata map[string]interface{}) string {

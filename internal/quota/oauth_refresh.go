@@ -114,7 +114,7 @@ func refreshTokenRequest(acc *db.Account, ch db.Channel, refreshToken string) (*
 	clientSecret := oauthClientSecretForFormat(acc, ch.APIFormat)
 
 	if ch.APIFormat == "antigravity" {
-		tokens, err := antigravity.RefreshToken(tokenURL, refreshToken, clientID, clientSecret)
+		tokens, err := antigravity.RefreshTokenWithDebugMetadata(tokenURL, refreshToken, clientID, clientSecret, oauthRefreshDebugMetadata(acc, ch))
 		if err != nil {
 			return nil, err
 		}
