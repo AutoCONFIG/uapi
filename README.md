@@ -2,142 +2,113 @@
 
 Your Unified AI API Gateway.
 
-UAPI 是一个统一的 AI API 网关，支持 OpenAI、Anthropic、Google Gemini 等多家大模型服务商。通过 UAPI，你可以用一套 API 接口管理所有上游渠道，统一鉴权、计费和流量调度。
+UAPI uses a strict Gateway / Relay split:
 
-## 特性
+- `uapi-gateway`: Web UI, admin/user API, API-key authentication, policy, billing, routing, and Gateway proxy.
+- `uapi-relay`: execution node for upstream providers. It does not expose user `/v1` APIs and does not connect to PostgreSQL.
 
-- **多供应商支持** — OpenAI Chat Completions API、OpenAI Responses API、Anthropic Messages API、Gemini API；同协议保留原生结构，跨协议按需转换
-- **OpenAI 兼容接口** — 下游客户端只需对接 `/v1/chat/completions`，即可路由到任意供应商
-- **多账号池 & 加权轮询** — 同一渠道可挂载多个上游账号，按权重自动调度
-- **API Key 管理** — 普通用户默认一个密钥，支持查看、复制、IP 白名单、过期时间、模型限制和端点权限
-- **套餐额度** — 用户必须通过管理员分配或兑换码获得套餐；支持按请求次数窗口和按 Token 窗口计量，`0` 表示额度用尽而不是不限制
-- **管理后台** — 渠道/账号凭据、节点、用户、套餐、日志、系统设置和操作审计
-- **Gateway / Relay 架构** — Gateway 统一鉴权、策略、计费和调度；Relay 节点只执行转发
-- **用户控制台** — 注册登录、密钥管理、用量查询、套餐订阅
-- **OAuth 渠道接入** — 支持 Codex、Gemini Code、Claude Code、Antigravity 等 OAuth 登录、账号元数据同步和自动刷新
-- **本地模型目录** — 下游模型列表从本地渠道配置读取，管理员可手动同步上游模型并设置模型重定向
-- **流式转发** — SSE 流式响应透明转发，支持流式转非流式
-- **流式稳定性** — 长流使用应用层 idle timeout，避免健康长推理被整体读超时杀掉，也避免卡死上游长期占用并发
+## Features
 
-## 快速开始
+- OpenAI-compatible `/v1/*` and Gemini-compatible `/v1beta/*` entrypoints on Gateway.
+- Multi-provider routing for OpenAI, Anthropic, Gemini, Codex, Claude Code, Gemini Code, and Antigravity style channels.
+- Admin console for channels, accounts, relay nodes, policies, users, plans, logs, and settings.
+- Relay runtime config pulled from Gateway, with Gateway-triggered reload notifications.
+- Internal Gateway/Relay calls protected by HMAC/internal secret and intended to be IP-allowlisted at Nginx.
 
-### 前置条件
-
-- Go 1.26+
-- PostgreSQL 17+
-- Node.js 20+ (前端)
-
-### 启动后端
+## Quick Start
 
 ```bash
-# 配置数据库
-cp config.example.yaml config.yaml
-# 编辑 config.yaml，填入数据库连接和密钥
-
-# 启动开发数据库
-make dev
-
-# 编译运行
-make build
-./bin/uapi -config config.yaml
+cp config.gateway.example.yaml config.gateway.yaml
+docker compose -f docker-compose.gateway.yaml up -d
 ```
 
-### Docker Compose 部署
-
-开发调试使用 `docker-compose.dev.yaml`，会本地构建后端和前端，并保留前端 nginx 反代，方便用一个入口测试页面和 API：
-
-```bash
-cp config.example.yaml config.yaml
-# 首次启动会自动写入随机 jwt_secret/encryption_key/internal_secret
-docker compose -f docker-compose.dev.yaml up -d --build
-```
-
-生产部署使用默认 `docker-compose.yaml`，从 GitHub Container Registry 拉取镜像。单机部署只暴露两个本机回环端口：`127.0.0.1:3000` 给前端页面，`127.0.0.1:8080` 给 Gateway/API。服务器层 nginx/Caddy/Traefik 负责按路径分流：页面走 web，`/api`、`/v1`、`/v1beta` 和 `/internal/relay` 走 Gateway：
-
-```bash
-cp config.example.yaml config.yaml
-docker compose pull
-docker compose up -d
-```
-
-独立 Relay 节点部署：
+Run a Relay node:
 
 ```bash
 cp config.relay.example.yaml config.relay.yaml
-# 在后台创建 Relay Node，base_url 填该 Relay 机器可被 Gateway 访问的地址，例如 https://relay.example.com
-# 编辑 gateway.control_url、gateway.relay_node_id，并复制 Gateway 的
-# gateway.internal_secret 与 security.encryption_key
-docker compose -f docker-compose.relay.yaml up -d --build
+# Edit gateway.control_url, gateway.relay_node_id, gateway.internal_secret, and security.encryption_key.
+docker compose -f docker-compose.relay.yaml up -d
 ```
 
-### 启动前端
+For a single-host deployment with Gateway, Relay, and PostgreSQL:
 
 ```bash
-npm --prefix web install
-npm --prefix web run dev
-```
-
-生产构建：
-
-```bash
-npm --prefix web run build
-npm --prefix web run serve:static
-```
-
-## 项目结构
-
-```
-cmd/uapi/          程序入口
-internal/
-  server/          HTTP 服务器 & 路由
-  gateway/         Gateway 鉴权、策略、节点调度、反向代理
-  relay/           Relay 执行引擎 (格式转换、上游转发、流式)
-    provider/      上游适配器 (OpenAI / Anthropic / Gemini)
-  admin/           管理后台 API
-  user/            用户系统 API
-  auth/            JWT 认证
-  db/              数据模型 (GORM)
-  crypto/          AES-256-GCM 加密
-  config/          配置加载
-web/               Next.js 前端
-docs/              项目文档
-tests/             跨包/黑盒测试
-```
-
-## API 概览
-
-| 路径前缀 | 说明 |
-|----------|------|
-| `/v1/*` | 中继接口 (OpenAI 兼容) |
-| `/v1beta/*` | Gemini 兼容中继接口 |
-| `/api/user/*` | 用户 API |
-| `/api/admin/*` | 管理后台 API |
-
-## 技术栈
-
-- **后端**: Go / fasthttp / GORM / PostgreSQL / AT/RT JWT (HS256) / AES-256-GCM
-- **前端**: Next.js 15 / React / TypeScript / 纯 CSS
-
-## 部署
-
-推荐优先使用 Docker Compose：
-
-```bash
-docker compose pull
+cp config.gateway.example.yaml config.gateway.yaml
+cp config.relay.example.yaml config.relay.yaml
+# For local Docker networking, set gateway.control_url in config.relay.yaml to http://gateway:8080.
 docker compose up -d
 ```
 
-架构细节见 [docs/current/gateway-relay.md](docs/current/gateway-relay.md)。Nginx/Systemd 方式见 [docs/deployment/nginx.md](docs/deployment/nginx.md)。
+For local development with build-from-source images:
 
-## 文档
+```bash
+cp config.gateway.example.yaml config.gateway.yaml
+cp config.relay.example.yaml config.relay.yaml
+docker compose -f docker-compose.dev.yaml up -d --build
+```
 
-- [文档索引](docs/README.md)
-- [项目交接文档](docs/current/handoff.md)
-- [前端文档](docs/current/frontend.md)
-- [平台设计](docs/current/platform-design.md)
-- [阶段范围与路线](docs/current/roadmap.md)
-- [OAuth 渠道对齐](docs/current/oauth-channels.md)
+Development access:
 
-## License
+```text
+http://127.0.0.1       # dev Nginx -> Gateway
+http://127.0.0.1:1240  # direct Gateway
+http://127.0.0.1:8081  # direct Relay health/internal debug only
+```
 
-Private. All rights reserved.
+## Build
+
+```bash
+go build ./cmd/uapi-gateway
+go build ./cmd/uapi-relay
+```
+
+Docker images:
+
+```bash
+docker build -f Dockerfile.gateway -t uapi-gateway:test .
+docker build -f Dockerfile.relay -t uapi-relay:test .
+```
+
+## Project Layout
+
+```text
+cmd/uapi-gateway/        Gateway + embedded Web entrypoint
+cmd/uapi-relay/          Relay entrypoint
+internal/server/         Gateway HTTP server and routes
+internal/relayserver/    Relay internal HTTP server
+internal/gateway/        Gateway auth, policy, billing, routing, proxy
+internal/relay/          Relay execution engine and provider handling
+internal/admin/          Admin API
+internal/user/           User API
+web/                     Next.js frontend embedded into uapi-gateway
+server/                  Split deployment examples
+docs/                    Local docs
+```
+
+## Internal Paths
+
+Gateway exposes user-facing APIs:
+
+```text
+/api/*
+/v1/*
+/v1beta/*
+```
+
+Relay calls Gateway:
+
+```text
+GET  /internal/config
+POST /internal/usage
+POST /internal/account
+POST /internal/dumps
+```
+
+Gateway calls Relay:
+
+```text
+POST /internal/execute
+POST /internal/reload
+```
+
+See [docs/current/gateway-relay.md](docs/current/gateway-relay.md) and [docs/deployment/nginx.md](docs/deployment/nginx.md).

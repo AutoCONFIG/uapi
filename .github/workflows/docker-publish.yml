@@ -26,12 +26,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: uapi
+          - name: uapi-gateway
             context: .
-            dockerfile: Dockerfile
-          - name: uapi-web
-            context: ./web
-            dockerfile: ./web/Dockerfile.prod
+            dockerfile: Dockerfile.gateway
+          - name: uapi-relay
+            context: .
+            dockerfile: Dockerfile.relay
 
     steps:
       - name: Checkout

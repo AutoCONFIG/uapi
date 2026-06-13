@@ -81,7 +81,8 @@ func TestNewHTTPDebugKeepsUsefulHeaders(t *testing.T) {
 
 func TestWriteCreatesOAuthDumpInDebugDumps(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("UAPI_RELAY_DEBUG_DUMP_DIR", dir)
+	Configure(dir)
+	t.Cleanup(func() { Configure("") })
 
 	Write("codex", "exchange_code", map[string]interface{}{
 		"account_id":    "acct_123",
@@ -92,14 +93,22 @@ func TestWriteCreatesOAuthDumpInDebugDumps(t *testing.T) {
 	}, nil)
 
 	dayDir := filepath.Join(dir, timeNowLocalDate())
-	entries, err := os.ReadDir(dayDir)
-	if err != nil {
-		t.Fatalf("read day dir: %v", err)
+	var dumpPath string
+	if err := filepath.WalkDir(dayDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Name() == "oauth.json" {
+			dumpPath = path
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk day dir: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("entries = %d, want 1", len(entries))
+	if dumpPath == "" {
+		t.Fatal("oauth.json was not written")
 	}
-	raw, err := os.ReadFile(filepath.Join(dayDir, entries[0].Name(), "oauth.json"))
+	raw, err := os.ReadFile(dumpPath)
 	if err != nil {
 		t.Fatalf("read oauth dump: %v", err)
 	}

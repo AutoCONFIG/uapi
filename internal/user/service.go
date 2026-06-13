@@ -482,6 +482,7 @@ func (s *Service) GetSubscription(userID string) (*SubscriptionResponse, error) 
 		PlanID:    tokenPlan.PlanID.String(),
 		PlanName:  plan.Name,
 		PlanType:  plan.Type,
+		PlanPrice: plan.Price,
 		Windows:   windows,
 		StartsAt:  tokenPlan.StartsAt.Format(time.RFC3339),
 		ExpiresAt: tokenPlan.ExpiresAt.Format(time.RFC3339),
@@ -507,6 +508,7 @@ func (s *Service) ListPublicPlans() ([]PublicPlanResponse, error) {
 			Name:         plan.Name,
 			Type:         plan.Type,
 			DurationDays: plan.DurationDays,
+			Price:        plan.Price,
 			Windows:      []PublicPlanWindow{},
 		}
 		if plan.PolicyID != nil && *plan.PolicyID != uuid.Nil {
@@ -703,7 +705,7 @@ func (s *Service) RedeemCode(userID, code string) (*SubscriptionResponse, error)
 		if err := tx.Save(&redeemCode).Error; err != nil {
 			return err
 		}
-		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
+		subscription = &SubscriptionResponse{PlanID: plan.ID.String(), PlanName: plan.Name, PlanType: plan.Type, PlanPrice: plan.Price, Windows: []SubscriptionWindow{}, StartsAt: startsAt.Format(time.RFC3339), ExpiresAt: expiresAt.Format(time.RFC3339), Status: "active"}
 		return nil
 	})
 	if err != nil {

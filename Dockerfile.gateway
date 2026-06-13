@@ -1,0 +1,23 @@
+FROM node:22-alpine AS web-builder
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ .
+RUN NEXT_PUBLIC_API_BASE_URL="" npm run build
+
+FROM golang:1.26-alpine AS go-builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN rm -rf internal/webstatic/dist
+COPY --from=web-builder /web/out internal/webstatic/dist
+RUN CGO_ENABLED=0 go build -o /uapi-gateway ./cmd/uapi-gateway/
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+COPY --from=go-builder /uapi-gateway /app/uapi-gateway
+WORKDIR /app
+EXPOSE 8080
+ENTRYPOINT ["/app/uapi-gateway"]
+CMD ["-config", "config.yaml"]

@@ -113,6 +113,7 @@ type SubscriptionResponse struct {
 	PlanID    string               `json:"plan_id"`
 	PlanName  string               `json:"plan_name"`
 	PlanType  string               `json:"plan_type"`
+	PlanPrice float64              `json:"plan_price"`
 	Windows   []SubscriptionWindow `json:"windows"`
 	StartsAt  string               `json:"starts_at"`
 	ExpiresAt string               `json:"expires_at"`
@@ -124,6 +125,7 @@ type PublicPlanResponse struct {
 	Name           string             `json:"name"`
 	Type           string             `json:"type"`
 	DurationDays   int                `json:"duration_days"`
+	Price          float64            `json:"price"`
 	AllowedModels  string             `json:"allowed_models"`
 	MaxConcurrency int                `json:"max_concurrency"`
 	Windows        []PublicPlanWindow `json:"windows"`

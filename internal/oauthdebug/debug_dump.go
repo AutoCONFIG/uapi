@@ -7,13 +7,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/debugdump"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/google/uuid"
 )
 
-const dumpDirEnv = "UAPI_RELAY_DEBUG_DUMP_DIR"
+var dumpConfig struct {
+	mu  sync.RWMutex
+	dir string
+}
+
+func Configure(dir string) {
+	dumpConfig.mu.Lock()
+	defer dumpConfig.mu.Unlock()
+	dumpConfig.dir = strings.TrimSpace(dir)
+}
+
+func DumpDir() string {
+	dumpConfig.mu.RLock()
+	defer dumpConfig.mu.RUnlock()
+	return dumpConfig.dir
+}
 
 type Dump struct {
 	Timestamp string                 `json:"timestamp"`
@@ -45,18 +62,17 @@ type HTTPDebugResponse struct {
 }
 
 func Write(provider, operation string, metadata map[string]interface{}, upstream interface{}, result interface{}, err error) {
-	baseDir := strings.TrimSpace(os.Getenv(dumpDirEnv))
+	baseDir := DumpDir()
 	if baseDir == "" {
 		return
 	}
 	now := time.Now()
-	dayDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"))
 	name := now.Local().Format("20060102T150405.000000000-0700") + "-oauth-" + safeName(provider)
 	if operation != "" {
 		name += "-" + safeName(operation)
 	}
 	name += "-" + uuid.NewString()
-	outDir := filepath.Join(dayDir, name)
+	outDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"), "oauth", safeName(provider), safeName(operation), name)
 	if mkErr := os.MkdirAll(outDir, 0755); mkErr != nil {
 		logger.Warnf("oauth.debug_dump", "create oauth dump dir failed", logger.Err(mkErr), logger.F("dir", outDir))
 		return
@@ -80,6 +96,26 @@ func Write(provider, operation string, metadata map[string]interface{}, upstream
 	if writeErr := os.WriteFile(filepath.Join(outDir, "oauth.json"), raw, 0644); writeErr != nil {
 		logger.Warnf("oauth.debug_dump", "write oauth dump failed", logger.Err(writeErr), logger.F("dir", outDir))
 	}
+	debugdump.AppendIndex(now, debugdump.Entry{
+		Side:     "gateway",
+		Category: "oauth",
+		Span:     "oauth." + safeName(operation),
+		Path:     operation,
+		Status:   oauthDebugStatus(err),
+		Error:    record.Error,
+		DumpPath: filepath.ToSlash(strings.TrimPrefix(outDir, filepath.Clean(baseDir)+string(os.PathSeparator))),
+		Extra: map[string]interface{}{
+			"provider":  provider,
+			"operation": operation,
+		},
+	})
+}
+
+func oauthDebugStatus(err error) int {
+	if err != nil {
+		return 500
+	}
+	return 200
 }
 
 func NewHTTPDebug(req *http.Request, requestBody []byte) *HTTPDebug {

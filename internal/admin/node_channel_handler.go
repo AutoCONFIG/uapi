@@ -87,6 +87,7 @@ func (h *Handler) createNodeChannel(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditCreateCtx(h.db, "node_channel", binding.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"relay_node_id": binding.RelayNodeID, "channel_id": binding.ChannelID, "weight": binding.Weight})
+	h.notifyRelayReloadAsync(binding.RelayNodeID.String())
 	h.jsonResponse(ctx, 200, binding)
 }
 
@@ -140,6 +141,7 @@ func (h *Handler) updateNodeChannel(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditUpdateCtx(h.db, "node_channel", id, h.getAdminUser(ctx), ctx, updates)
+	h.notifyRelayReloadAsync(existing.RelayNodeID.String())
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -147,6 +149,11 @@ func (h *Handler) deleteNodeChannel(ctx *fasthttp.RequestCtx) {
 	id, err := uuid.Parse(string(ctx.QueryArgs().Peek("id")))
 	if err != nil {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, "invalid id")
+		return
+	}
+	var existing db.NodeChannel
+	if err := h.db.Where("id = ? AND deleted_at IS NULL", id).First(&existing).Error; err != nil {
+		h.jsonError(ctx, fasthttp.StatusNotFound, "not found")
 		return
 	}
 	now := time.Now()
@@ -163,6 +170,7 @@ func (h *Handler) deleteNodeChannel(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditDeleteCtx(h.db, "node_channel", id, h.getAdminUser(ctx), ctx, nil)
+	h.notifyRelayReloadAsync(existing.RelayNodeID.String())
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
 

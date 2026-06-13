@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider/ir"
 	"github.com/valyala/fasthttp"
@@ -349,7 +350,8 @@ func TestFromIRUploadsFileAndUsesFastConversationPayload(t *testing.T) {
 func TestChatGPTReverseDebugDumpWritesRedactedHTTPLog(t *testing.T) {
 	const token = "test-token"
 	dumpDir := t.TempDir()
-	t.Setenv("UAPI_RELAY_DEBUG_DUMP_DIR", dumpDir)
+	oauthdebug.Configure(dumpDir)
+	t.Cleanup(func() { oauthdebug.Configure("") })
 	var uploadURL string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

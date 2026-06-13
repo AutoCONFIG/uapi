@@ -344,9 +344,9 @@ export const adminApi = {
     request<Record<string, unknown>>("/api/admin/accounts/export", { method: "POST", token, body }),
   plans: (token: string, page = 1, limit = 20) =>
     request<PaginatedResponse<Plan>>(`/api/admin/plans?page=${page}&limit=${limit}`, { token }),
-  createPlan: (token: string, body: { name: string; type: string; duration_days?: number; enabled?: boolean; public?: boolean; allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number }) =>
+  createPlan: (token: string, body: { name: string; type: string; duration_days?: number; price?: number; enabled?: boolean; public?: boolean; allowed_models?: string; max_concurrency?: number; hourly_limit?: number; weekly_limit?: number; monthly_limit?: number }) =>
     request<Plan>("/api/admin/plans", { method: "POST", token, body }),
-  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; duration_days: number; enabled: boolean; public: boolean; allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number }>) =>
+  updatePlan: (token: string, id: string, body: Partial<{ name: string; type: string; duration_days: number; price: number; enabled: boolean; public: boolean; allowed_models: string; max_concurrency: number; hourly_limit: number; weekly_limit: number; monthly_limit: number }>) =>
     request<Plan>(`/api/admin/plans?id=${id}`, { method: "PUT", token, body }),
   deletePlan: (token: string, id: string) =>
     request<{ deleted: boolean }>(`/api/admin/plans?id=${id}`, { method: "DELETE", token }),

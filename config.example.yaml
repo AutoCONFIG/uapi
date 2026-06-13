@@ -1,5 +1,4 @@
 server:
-  mode: "all" # all=Gateway+本机Relay；gateway=仅控制层；relay=仅转发节点
   host: "0.0.0.0"
   port: 8080
   max_body_size_mb: 256
@@ -27,10 +26,18 @@ gateway:
   gateway_id: "default"
   cache_ttl: "5s"
   internal_secret: ""
-  require_internal: false  # 远端 relay 节点建议设为 true，只接受 Gateway 签名请求
-  control_url: ""          # Relay 节点回报 Gateway/拉配置时填写，例如 http://gateway:8080
-  relay_node_id: ""        # Relay 节点自身 ID，在管理后台创建节点后获得
+  require_internal: false
+  control_url: ""
+  relay_node_id: ""
   config_pull_interval: "5s"
+
+debug_dump:
+  enabled: false
+  mode: "local"
+  dir: "/app/debug-dumps"
+  max_entries: 7
+  accept_remote: true
+  max_upload_bytes_mb: 16
 
 logging:
   level: "info"

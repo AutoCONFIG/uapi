@@ -18,6 +18,7 @@ type PolicyDraft = {
 type PlanDraft = {
   type: string;
   duration_days: string;
+  price: string;
   public: boolean;
 };
 
@@ -59,6 +60,12 @@ function policyBody(draft: PolicyDraft) {
 
 function monthlyQuotaLabel(type: string) {
   return type === "count_based" ? "每月次数" : "每月 Token";
+}
+
+function formatPrice(value?: number): string {
+  const price = Number(value || 0);
+  if (!Number.isFinite(price) || price <= 0) return "免费";
+  return `¥${price.toFixed(2).replace(/\.00$/, "")}`;
 }
 
 function csvModels(value: string): string[] {
@@ -190,7 +197,7 @@ export default function AdminPlansPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState({ name: "", type: "count_based", duration_days: 30, enabled: true, public: false });
+  const [draft, setDraft] = useState({ name: "", type: "count_based", duration_days: 30, price: "0", enabled: true, public: false });
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft>(emptyPolicyDraft());
   const [editingPolicies, setEditingPolicies] = useState<Record<string, PolicyDraft>>({});
   const [editingPlans, setEditingPlans] = useState<Record<string, PlanDraft>>({});
@@ -245,7 +252,7 @@ export default function AdminPlansPage() {
   }, [channels]);
 
   function openCreate() {
-    setDraft({ name: "", type: "count_based", duration_days: 30, enabled: true, public: false });
+    setDraft({ name: "", type: "count_based", duration_days: 30, price: "0", enabled: true, public: false });
     setPolicyDraft({ ...emptyPolicyDraft(), hourly_limit: "1000", weekly_limit: "1000", monthly_limit: "1000" });
     setError("");
     setNotice("");
@@ -253,17 +260,26 @@ export default function AdminPlansPage() {
   }
 
   async function createPlan() {
-    if (!draft.name.trim()) return;
+    if (!draft.name.trim()) {
+      setError("请填写套餐名称");
+      return;
+    }
     const token = window.localStorage.getItem("uapi.admin.token");
-    if (!token) return;
+    if (!token) {
+      setError("管理员登录已失效，请重新登录");
+      return;
+    }
     setSaving(true);
     setError("");
     setNotice("");
     try {
+      const price = Number(draft.price || 0);
+      if (!Number.isFinite(price) || price < 0) throw new Error("定价金额必须是非负数字");
       const createdPlan = await adminApi.createPlan(token, {
         name: draft.name.trim(),
         type: draft.type,
         duration_days: draft.duration_days,
+        price,
         enabled: draft.enabled,
         public: draft.public,
         ...policyBody(policyDraft),
@@ -288,8 +304,13 @@ export default function AdminPlansPage() {
     const currentDraft = editingPolicies[plan.id] || draftFromPolicy(currentPolicy);
     const currentMeta = planDraft(plan);
     const durationDays = Number(currentMeta.duration_days || 30);
+    const price = Number(currentMeta.price || 0);
     if (durationDays < 1) {
       setError("有效天数必须大于 0");
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      setError("定价金额必须是非负数字");
       return;
     }
     setSaving(true);
@@ -299,6 +320,7 @@ export default function AdminPlansPage() {
       const nextPlan = await adminApi.updatePlan(token, plan.id, {
         type: currentMeta.type,
         duration_days: durationDays,
+        price,
         public: currentMeta.public,
         ...policyBody(currentDraft),
       });
@@ -333,6 +355,7 @@ export default function AdminPlansPage() {
     return editingPlans[plan.id] || {
       type: plan.type,
       duration_days: String(plan.duration_days || 30),
+      price: String(plan.price || 0),
       public: Boolean(plan.public),
     };
   }
@@ -456,7 +479,7 @@ export default function AdminPlansPage() {
         action={
           <div className="row-actions">
             <button className="btn" onClick={() => document.getElementById("model-ratio-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })} type="button">模型倍率</button>
-            <button className="btn primary" onClick={openCreate}><Plus /> 新建套餐</button>
+            <button className="btn primary" onClick={openCreate} type="button"><Plus /> 新建套餐</button>
           </div>
         }
       />
@@ -491,6 +514,10 @@ export default function AdminPlansPage() {
                 <label>有效天数</label>
                 <input className="input" type="number" min={1} value={draft.duration_days} onChange={(e) => setDraft((d) => ({ ...d, duration_days: Number(e.target.value) }))} />
               </div>
+              <div className="field">
+                <label>定价金额</label>
+                <input className="input" type="number" min={0} step="0.01" value={draft.price} onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))} />
+              </div>
               <label className="check-row">
                 <input type="checkbox" checked={draft.public} onChange={(e) => setDraft((d) => ({ ...d, public: e.target.checked }))} />
                 用户可见
@@ -509,8 +536,8 @@ export default function AdminPlansPage() {
             </div>
             {error && <p className="form-error">{error}</p>}
             <div className="form-actions">
-              <button className="btn" disabled={saving} onClick={() => { setCreating(false); setError(""); }}>取消</button>
-              <button className="btn primary" disabled={saving} onClick={createPlan}>{saving ? "创建中" : "确认创建"}</button>
+              <button className="btn" disabled={saving} onClick={() => { setCreating(false); setError(""); }} type="button">取消</button>
+              <button className="btn primary" disabled={saving} onClick={createPlan} type="button">{saving ? "创建中" : "确认创建"}</button>
             </div>
           </section>
         </div>
@@ -527,7 +554,7 @@ export default function AdminPlansPage() {
                 <div className="plan-row-head">
                   <div>
                     <strong>{p.name}</strong>
-                    <span>{metaDraft.type === "count_based" ? "按次数" : "按 Token"} · {metaDraft.duration_days || 30} 天</span>
+                    <span>{metaDraft.type === "count_based" ? "按次数" : "按 Token"} · {metaDraft.duration_days || 30} 天 · {formatPrice(Number(metaDraft.price || 0))}</span>
                   </div>
                   <div className="row-actions">
                     <button className="btn plan-status-button" onClick={() => togglePlan(p)} type="button">
@@ -552,6 +579,10 @@ export default function AdminPlansPage() {
                     <div className="field compact-field">
                       <label>有效天数</label>
                       <input className="input" inputMode="numeric" value={metaDraft.duration_days} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, duration_days: value }))} />
+                    </div>
+                    <div className="field compact-field">
+                      <label>定价金额</label>
+                      <input className="input" inputMode="decimal" value={metaDraft.price} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, price: value }))} />
                     </div>
                     <label className="check-row plan-public-toggle">
                       <input type="checkbox" checked={metaDraft.public} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, public: e.target.checked })} />
@@ -587,7 +618,7 @@ export default function AdminPlansPage() {
                 <div className="plan-mobile-head">
                   <div>
                     <strong>{p.name}</strong>
-                    <span>{metaDraft.type === "count_based" ? "按次数" : "按 Token"} · {monthlyQuotaLabel(metaDraft.type)} {formatQuota(Number(draftRow.monthly_limit || 0))} · {metaDraft.duration_days || 30} 天</span>
+                    <span>{metaDraft.type === "count_based" ? "按次数" : "按 Token"} · {monthlyQuotaLabel(metaDraft.type)} {formatQuota(Number(draftRow.monthly_limit || 0))} · {metaDraft.duration_days || 30} 天 · {formatPrice(Number(metaDraft.price || 0))}</span>
                   </div>
                   <StatusBadge value={p.enabled ? "enabled" : "disabled"} />
                 </div>
@@ -603,6 +634,7 @@ export default function AdminPlansPage() {
                     </select>
                   </div>
                   <div className="field compact-field"><label>有效天数</label><input className="input" inputMode="numeric" value={metaDraft.duration_days} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, duration_days: value }))} /></div>
+                  <div className="field compact-field"><label>定价金额</label><input className="input" inputMode="decimal" value={metaDraft.price} onChange={(e) => preserveCursor(e.currentTarget, (value) => setPlanDraft(p.id, { ...metaDraft, price: value }))} /></div>
                   <label className="check-row">
                     <input type="checkbox" checked={metaDraft.public} onChange={(e) => setPlanDraft(p.id, { ...metaDraft, public: e.target.checked })} />
                     用户可见

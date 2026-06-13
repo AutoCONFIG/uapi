@@ -13,17 +13,17 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Security SecurityConfig `yaml:"security"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Gateway  GatewayConfig  `yaml:"gateway"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	WS       WSServerConfig `yaml:"ws"`
+	Server    ServerConfig    `yaml:"server"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Security  SecurityConfig  `yaml:"security"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Gateway   GatewayConfig   `yaml:"gateway"`
+	DebugDump DebugDumpConfig `yaml:"debug_dump"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	WS        WSServerConfig  `yaml:"ws"`
 }
 
 type ServerConfig struct {
-	Mode          string `yaml:"mode"`
 	Host          string `yaml:"host"`
 	Port          int    `yaml:"port"`
 	MaxBodySizeMB int    `yaml:"max_body_size_mb"`
@@ -71,6 +71,40 @@ type GatewayConfig struct {
 	ControlURL         string `yaml:"control_url"`
 	RelayNodeID        string `yaml:"relay_node_id"`
 	ConfigPullInterval string `yaml:"config_pull_interval"`
+}
+
+type DebugDumpConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	Mode             string `yaml:"mode"`
+	Dir              string `yaml:"dir"`
+	MaxEntries       int    `yaml:"max_entries"`
+	QueueMaxItems    int    `yaml:"queue_max_items"`
+	BatchMaxBytesMB  int    `yaml:"batch_max_bytes_mb"`
+	UploadTimeout    string `yaml:"upload_timeout"`
+	AcceptRemote     bool   `yaml:"accept_remote"`
+	MaxUploadBytesMB int    `yaml:"max_upload_bytes_mb"`
+}
+
+func (d *DebugDumpConfig) normalize() {
+	d.Mode = strings.ToLower(strings.TrimSpace(d.Mode))
+	if d.Mode == "" && d.Enabled {
+		d.Mode = "local"
+	}
+	if d.MaxEntries <= 0 {
+		d.MaxEntries = 7
+	}
+	if d.QueueMaxItems <= 0 {
+		d.QueueMaxItems = 1000
+	}
+	if d.BatchMaxBytesMB <= 0 {
+		d.BatchMaxBytesMB = 8
+	}
+	if d.UploadTimeout == "" {
+		d.UploadTimeout = "10s"
+	}
+	if d.MaxUploadBytesMB <= 0 {
+		d.MaxUploadBytesMB = 16
+	}
 }
 
 type WSServerConfig struct {
@@ -143,6 +177,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.LargePayloadThresholdMB <= 0 {
 		cfg.Server.LargePayloadThresholdMB = 256
 	}
+	cfg.DebugDump.normalize()
 
 	return cfg, nil
 }
@@ -159,7 +194,6 @@ func Save(cfg *Config, path string) error {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Mode:                     "all",
 			Port:                     8080,
 			MaxBodySizeMB:            256,
 			LargePayloadThresholdMB:  256,
@@ -185,6 +219,14 @@ func defaultConfig() *Config {
 		Auth: AuthConfig{
 			AccessTokenExpiry:  "15m",
 			RefreshTokenExpiry: "720h",
+		},
+		DebugDump: DebugDumpConfig{
+			Mode:             "local",
+			MaxEntries:       7,
+			QueueMaxItems:    1000,
+			BatchMaxBytesMB:  8,
+			UploadTimeout:    "10s",
+			MaxUploadBytesMB: 16,
 		},
 	}
 }
@@ -219,13 +261,6 @@ func generateGatewaySecret(gw *GatewayConfig) error {
 }
 
 func (c *Config) validate() error {
-	switch c.Server.Mode {
-	case "", "all":
-		c.Server.Mode = "all"
-	case "gateway", "relay":
-	default:
-		return fmt.Errorf("server.mode must be one of all, gateway, relay")
-	}
 	if len(c.Security.EncryptionKey) != 64 {
 		return fmt.Errorf("security.encryption_key must be 64 hex characters (32 bytes)")
 	}
@@ -262,26 +297,39 @@ func (c *Config) validate() error {
 	if c.Gateway.ConfigPullInterval == "" {
 		c.Gateway.ConfigPullInterval = "5s"
 	}
-	if c.Server.Mode == "relay" {
-		if !c.Gateway.RequireInternal {
-			return fmt.Errorf("gateway.require_internal must be true when server.mode is relay")
+	c.DebugDump.normalize()
+	if c.DebugDump.Enabled {
+		switch c.DebugDump.Mode {
+		case "local", "remote":
+		default:
+			return fmt.Errorf("debug_dump.mode must be one of local, remote")
 		}
-		if c.Gateway.ControlURL == "" {
-			return fmt.Errorf("gateway.control_url must be set when server.mode is relay")
+		if c.DebugDump.Mode == "local" && strings.TrimSpace(c.DebugDump.Dir) == "" {
+			return fmt.Errorf("debug_dump.dir must be set when debug_dump.mode is local")
 		}
-		if c.Gateway.RelayNodeID == "" {
-			return fmt.Errorf("gateway.relay_node_id must be set when server.mode is relay")
-		}
-		if isPlaceholderValue(c.Gateway.RelayNodeID) {
-			return fmt.Errorf("gateway.relay_node_id must not be a placeholder")
-		}
-		relayNodeID, err := uuid.Parse(c.Gateway.RelayNodeID)
-		if err != nil || relayNodeID == uuid.Nil {
-			return fmt.Errorf("gateway.relay_node_id must be a non-empty UUID when server.mode is relay")
-		}
-		if isRepeatedUUID(c.Gateway.RelayNodeID) {
-			return fmt.Errorf("gateway.relay_node_id must not be a placeholder UUID")
-		}
+	}
+	return nil
+}
+
+func ValidateRelay(cfg *Config) error {
+	if !cfg.Gateway.RequireInternal {
+		return fmt.Errorf("gateway.require_internal must be true for uapi-relay")
+	}
+	if cfg.Gateway.ControlURL == "" {
+		return fmt.Errorf("gateway.control_url must be set for uapi-relay")
+	}
+	if cfg.Gateway.RelayNodeID == "" {
+		return fmt.Errorf("gateway.relay_node_id must be set for uapi-relay")
+	}
+	if isPlaceholderValue(cfg.Gateway.RelayNodeID) {
+		return fmt.Errorf("gateway.relay_node_id must not be a placeholder")
+	}
+	relayNodeID, err := uuid.Parse(cfg.Gateway.RelayNodeID)
+	if err != nil || relayNodeID == uuid.Nil {
+		return fmt.Errorf("gateway.relay_node_id must be a non-empty UUID for uapi-relay")
+	}
+	if isRepeatedUUID(cfg.Gateway.RelayNodeID) {
+		return fmt.Errorf("gateway.relay_node_id must not be a placeholder UUID")
 	}
 	return nil
 }

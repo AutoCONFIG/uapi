@@ -14,6 +14,7 @@ type Plan struct {
 	Enabled      bool       `gorm:"default:true" json:"enabled"`
 	Public       bool       `gorm:"column:is_public;default:false;index" json:"public"`
 	DurationDays int        `gorm:"default:30" json:"duration_days"`
+	Price        float64    `gorm:"type:numeric(12,2);default:0" json:"price"`
 }
 
 func (Plan) TableName() string { return "plans" }

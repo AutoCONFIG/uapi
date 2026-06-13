@@ -15,35 +15,23 @@ services:
       timeout: 5s
       retries: 5
 
-  uapi:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  gateway:
+    image: ghcr.io/autoconfig/uapi-gateway:latest
     container_name: uapi-gateway
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - ./config.gateway.yaml:/app/config.yaml
+      - ./config.gateway.yaml:/app/config.yaml:ro
       - ./assets:/app/assets
-    expose:
-      - "8080"
-
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    container_name: uapi-web
-    restart: unless-stopped
-    depends_on:
-      - uapi
+      - ./debug-dumps:/app/debug-dumps
     ports:
-      - "80:80"
+      - "127.0.0.1:1240:8080"
 
 volumes:
   pgdata:
 
 networks:
   default:
-    name: uapi-net
+    name: uapi-gateway-net

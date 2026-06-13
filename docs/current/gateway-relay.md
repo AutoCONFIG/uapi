@@ -1,130 +1,104 @@
-# Gateway / Relay 架构
+# Gateway / Relay
 
-本文记录当前实现，不描述未落地的分布式控制面。
+UAPI has only split Gateway and Relay runtimes on this branch.
 
-## 分工
+## Roles
 
-Gateway 是唯一控制权威：
+Gateway:
 
-- 用户 API Key 鉴权。
-- active plan 和 access policy 校验。
-- 模型可见性和模型别名解析。
-- Relay node、channel、account 的调度。
-- 预扣费、结算、退款。
-- 管理 API、用户 API、审计和日志。
-- 远程 Relay 运行时配置下发。
+- Serves embedded Web UI.
+- Serves admin/user API.
+- Accepts user `/v1/*` and `/v1beta/*` requests.
+- Authenticates API keys, applies policy, precharges usage, chooses Relay node/channel/account.
+- Calls Relay through `POST /internal/execute`.
+- Receives Relay config, usage, and account update callbacks.
 
-Relay 是执行节点：
+Relay:
 
-- 接收 Gateway 签名的内部请求。
-- 按 Gateway 指定的 channel/account 执行上游请求。
-- 做凭据解密、OAuth 刷新、协议转换、流式转发和 usage 解析。
-- 回传 usage event 和 OAuth account update。
-- 远程 Relay 模式不连接 PostgreSQL，不提供管理 API。
+- Does not expose user `/v1` APIs.
+- Does not connect to PostgreSQL.
+- Pulls assigned runtime config from Gateway.
+- Executes upstream requests and streams responses back to Gateway.
+- Reports usage and OAuth account updates back to Gateway.
 
-## 请求流
-
-```text
-1. Client -> Gateway: /v1/* 或 /v1beta/*，携带 Bearer API Key
-2. Gateway 校验 key、IP、权限、模型、active plan 和 access policy
-3. Gateway 根据本地 channel/account/node 状态选择 relay_node + channel + account
-4. Gateway 预扣估算额度并生成 request_id
-5. Gateway HMAC 签名后转发给 Relay
-6. Relay 校验签名，执行上游请求
-7. Relay 将响应 body/stream 返回 Gateway
-8. Relay 上报 usage event
-9. Gateway 幂等结算或退款
-```
-
-`server.mode: all` 下 Gateway 可直接 fallback 到本地 in-process Relay。`server.mode: gateway` 下通常调度远程 Relay；远程节点不可用时会尝试本地 fallback handler，但纯 gateway 模式没有本地 relayer。
-
-## 节点和绑定
-
-后台管理：
-
-- `/api/admin/relay-nodes` 管理节点名称、地址、地区、出口 IP、权重、最大并发、状态和健康状态。
-- `/api/admin/node-channels` 绑定 `relay_node_id + channel_id`。
-
-运行时调度会把 channel-level binding 展开到该 channel 下所有 enabled accounts。Gateway 调度评分综合节点权重、账号权重和当前并发。
-
-可调度条件：
-
-- relay node 未软删，`status = active`，`health_status = healthy`。
-- node-channel binding enabled。
-- channel enabled 且未软删。
-- account enabled 且未软删。
-- channel 模型目录或别名支持当前请求模型。
-- node 未处于 passive failure cooldown。
-
-## 配置同步
-
-Remote Relay 通过：
+## Request Flow
 
 ```text
-GET /internal/relay/config
+Client  -> Gateway: /v1/* or /v1beta/*
+Gateway -> Relay:   POST /internal/execute
+Relay   -> Upstream provider
+Relay   -> Gateway: response stream
+Relay   -> Gateway: POST /internal/usage
+Relay   -> Gateway: POST /internal/dumps (optional async debug dump upload)
 ```
 
-定时拉取分配给自己的运行时配置。间隔来自 `gateway.config_pull_interval`，默认 5 秒。请求热路径只读 Relay 进程内内存。
+Gateway signs execution requests with HMAC. The original user URI is stored in `X-UAPI-Original-URI` and covered by the signature. Relay verifies the signature on `/internal/execute`, restores the original URI internally, then uses the existing Relay execution engine.
 
-运行时配置包含：
+## Internal Paths
 
-- 绑定到该节点的 channel。
-- channel 下可用 account。
-- channel 模型、别名、协议、设置。
-- account credential、endpoint、weight、token expiry、metadata 等。
+Relay -> Gateway:
 
-配置有版本号；未变化时 Relay 可跳过更新。删除、禁用或解绑会进入版本计算，避免远程 Relay 长期保留过期路由。
-
-## 内部认证
-
-Gateway 到 Relay 的执行请求使用 `internal/internalauth` HMAC 签名。签名 claims 包含：
-
-- gateway id
-- token id
-- user id
-- model
-- estimated tokens
-- request id
-- selected channel id
-- selected account id
-- precharged token plan id
-- client ip
-
-Remote Relay 应设置：
-
-```yaml
-server:
-  mode: relay
-gateway:
-  require_internal: true
+```text
+GET  /internal/config
+POST /internal/usage
+POST /internal/account
+POST /internal/dumps
 ```
 
-控制接口 `/internal/relay/config`、`/internal/relay/usage-events`、`/internal/relay/account-update` 使用 `X-UAPI-Internal-Secret`。
+Gateway -> Relay:
 
-## 模型列表
+```text
+POST /internal/execute
+POST /internal/reload
+```
 
-模型列表由 Gateway 本地处理：
+`/internal/reload` is best-effort. If a reload notification fails, Relay still refreshes by periodic config pull.
 
-- `GET /v1/models`：OpenAI-compatible 响应。
-- `GET /v1/models` + `x-api-key`：Anthropic-compatible 模型列表响应。
-- `GET /v1beta/models`：Gemini-compatible 响应。
+## Debug Dumps
 
-这些 endpoint 不访问上游 provider。
+Relay supports remote debug dumps for split deployments:
 
-## OAuth 刷新回写
+- Relay uses `debug_dump.mode: "remote"` and does not write dump files to local disk.
+- Request traces are collected in memory, packed as `tar.gz`, and queued after terminal relay events.
+- Internal Gateway/Relay exchanges are also captured when debug dump is enabled:
+  `Gateway -> Relay /internal/execute` is stored on Gateway, while
+  `Relay -> Gateway /internal/config`, `/internal/usage`, and `/internal/account`
+  are uploaded back to Gateway.
+- Upload is best-effort and asynchronous through `POST /internal/dumps`; a full queue or upload failure drops the dump without blocking the user request.
+- Gateway must set `debug_dump.accept_remote: true` and `debug_dump.dir` to store received archives.
+- Dump bodies always use redaction and truncation. User chat content is only kept as short snippets for protocol debugging.
+- Existing relay dump files are preserved. The classified layout changes parent directories only; files such as `summary.json`, `request.original.json`, `request.converted.json`, `routing.json`, `events.jsonl`, `stream.events.jsonl`, `stream.upstream.sse`, `stream.normalized.sse`, `stream.downstream.sse`, `response.upstream.json`, `response.downstream.json`, `oauth.json`, `quota.json`, and ChatGPT reverse `http.jsonl` remain available.
 
-Relay 执行 OAuth account 时会按 provider 规则刷新 token。远程 Relay 成功刷新后：
+Gateway stores a daily `index.jsonl` next to classified dump directories:
 
-1. 先更新本地内存中的 runtime account。
-2. 再调用 `POST /internal/relay/account-update` 回写 Gateway。
-3. Gateway 只接受同 account/channel 的更新，并继续加密存储。
+```text
+debug-dumps/
+  2026-06-14/
+    index.jsonl
+    gateway/
+      api/
+      downstream/
+      to-relay/
+      internal/
+    relay/
+      <relay-node-id>/
+        to-upstream/
+        to-gateway/
+        remote/
+        archives/
+    oauth/
+      <provider>/<operation>/
+    quota/
+      <provider>/
+    chatgptreverse/
+```
 
-当前回写是 best-effort；Gateway 不可达时 Relay 保留内存中的新 credential 并记录 warning，但没有持久重试。
+Use the index first, then open only the matching dump directory:
 
-## 当前限制
+```bash
+jq 'select(.status >= 500)' debug-dumps/2026-06-14/index.jsonl
+jq 'select(.category == "to-upstream")' debug-dumps/2026-06-14/index.jsonl
+jq 'select(.gateway_request_id == "gw_xxx")' debug-dumps/2026-06-14/index.jsonl
+```
 
-- 不使用 Redis 作为 Relay 运行时状态。
-- 不实现多 Gateway 控制面、GSLB、mTLS、gRPC stream 或长连接配置推送。
-- usage event 回传没有持久重试队列。
-- 节点级凭据加密未实现。
-- 分离式部署下 `/v1/responses` 仍走 HTTP/SSE Relay 路径；WebSocket turn handling 只在 `all` 模式本地处理。
+Use `debug_dump.enabled: false` by default and enable it only while investigating production issues.

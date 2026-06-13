@@ -1,7 +1,15 @@
 upstream/
 assets/
 docs/
-web/
+helper/
+bin/
+.codex-home/
+.claude/
+.superpowers/
+.playwright-mcp/
+debug-dumps/
+pgdata/
+pgdata-*/
 web/node_modules/
 web/.next/
 web/out/

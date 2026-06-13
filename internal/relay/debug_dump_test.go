@@ -171,11 +171,18 @@ func TestRelayDebugDumpRequestBodyTruncatesInvalidJSONRawBody(t *testing.T) {
 	}
 }
 
-func TestRelayDebugDumpRequestBodyFullModeKeepsBody(t *testing.T) {
-	t.Setenv(relayDebugDumpBodyModeEnv, "full")
+func TestRelayDebugDumpRequestBodyAlwaysSanitizesAndTruncates(t *testing.T) {
 	body := []byte(`{"content":"` + strings.Repeat("x", relayDebugRequestStringLimit+10) + `","access_token":"secret"}`)
 	dumped := relayDebugDumpRequestBody(body)
-	if string(dumped) != string(body) {
-		t.Fatalf("full mode changed body:\n got %s\nwant %s", dumped, body)
+	var got map[string]interface{}
+	if err := json.Unmarshal(dumped, &got); err != nil {
+		t.Fatalf("dump is not JSON: %v\n%s", err, dumped)
+	}
+	if got["access_token"] != "[redacted]" {
+		t.Fatalf("access token was not redacted: %#v", got["access_token"])
+	}
+	content, _ := got["content"].(string)
+	if !strings.Contains(content, "truncated") || len(content) >= relayDebugRequestStringLimit+10 {
+		t.Fatalf("content was not truncated: %q", content)
 	}
 }

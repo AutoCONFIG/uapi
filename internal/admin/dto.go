@@ -162,30 +162,32 @@ type UpdateAccessPolicyRequest struct {
 
 // CreatePlanRequest is the request DTO for creating a plan.
 type CreatePlanRequest struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	Enabled        bool   `json:"enabled"`
-	Public         bool   `json:"public"`
-	DurationDays   int    `json:"duration_days"`
-	AllowedModels  string `json:"allowed_models"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	HourlyLimit    int    `json:"hourly_limit"`
-	WeeklyLimit    int    `json:"weekly_limit"`
-	MonthlyLimit   int    `json:"monthly_limit"`
+	Name           string  `json:"name"`
+	Type           string  `json:"type"`
+	Enabled        bool    `json:"enabled"`
+	Public         bool    `json:"public"`
+	DurationDays   int     `json:"duration_days"`
+	Price          float64 `json:"price"`
+	AllowedModels  string  `json:"allowed_models"`
+	MaxConcurrency int     `json:"max_concurrency"`
+	HourlyLimit    int     `json:"hourly_limit"`
+	WeeklyLimit    int     `json:"weekly_limit"`
+	MonthlyLimit   int     `json:"monthly_limit"`
 }
 
 // UpdatePlanRequest is the request DTO for updating a plan.
 type UpdatePlanRequest struct {
-	Name           *string `json:"name,omitempty"`
-	Type           *string `json:"type,omitempty"`
-	Enabled        *bool   `json:"enabled,omitempty"`
-	Public         *bool   `json:"public,omitempty"`
-	DurationDays   *int    `json:"duration_days,omitempty"`
-	AllowedModels  *string `json:"allowed_models,omitempty"`
-	MaxConcurrency *int    `json:"max_concurrency,omitempty"`
-	HourlyLimit    *int    `json:"hourly_limit,omitempty"`
-	WeeklyLimit    *int    `json:"weekly_limit,omitempty"`
-	MonthlyLimit   *int    `json:"monthly_limit,omitempty"`
+	Name           *string  `json:"name,omitempty"`
+	Type           *string  `json:"type,omitempty"`
+	Enabled        *bool    `json:"enabled,omitempty"`
+	Public         *bool    `json:"public,omitempty"`
+	DurationDays   *int     `json:"duration_days,omitempty"`
+	Price          *float64 `json:"price,omitempty"`
+	AllowedModels  *string  `json:"allowed_models,omitempty"`
+	MaxConcurrency *int     `json:"max_concurrency,omitempty"`
+	HourlyLimit    *int     `json:"hourly_limit,omitempty"`
+	WeeklyLimit    *int     `json:"weekly_limit,omitempty"`
+	MonthlyLimit   *int     `json:"monthly_limit,omitempty"`
 }
 
 // --- User DTOs ---

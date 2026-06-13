@@ -346,6 +346,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseRequest(upReq)
 
 	clientIP := httputil.ClientIPForGatewayLog(ctx, g.trustedProxies)
+	originalURI := string(ctx.RequestURI())
 	if err := g.buildRequest(ctx, upReq, node.BaseURL, clientIP); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
@@ -368,6 +369,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
 		AccountID:       route.AccountID.String(),
+		OriginalURI:     originalURI,
 	}, time.Now()); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
@@ -379,6 +381,17 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 
 	start := time.Now()
 	if err := g.client.Do(upReq, upResp); err != nil {
+		relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
+			Direction:      "gateway_to_relay",
+			Method:         string(upReq.Header.Method()),
+			URL:            string(upReq.URI().FullURI()),
+			Endpoint:       "/internal/execute",
+			RequestHeaders: relay.HeaderMapFromRequest(upReq),
+			RequestBody:    upReq.Body(),
+			Err:            err,
+			StartedAt:      start,
+			Latency:        time.Since(start),
+		})
 		fasthttp.ReleaseResponse(upResp)
 		logger.Warnf("gateway.proxy", "relay proxy failed, trying local fallback", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
 		releaseNode(true)
@@ -409,6 +422,19 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 
 	stream := upResp.BodyStream()
 	if stream != nil {
+		relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
+			Direction:       "gateway_to_relay",
+			Method:          string(upReq.Header.Method()),
+			URL:             string(upReq.URI().FullURI()),
+			Endpoint:        "/internal/execute",
+			RequestHeaders:  relay.HeaderMapFromRequest(upReq),
+			RequestBody:     upReq.Body(),
+			StatusCode:      upResp.StatusCode(),
+			ResponseHeaders: relay.HeaderMapFromResponse(upResp),
+			ResponseStream:  true,
+			StartedAt:       start,
+			Latency:         time.Since(start),
+		})
 		streamReader, stopIdleTimeout := httputil.NewIdleTimeoutReader(stream, stream, g.streamIdleTimeout)
 		rel := releaseNode
 		resp := upResp
@@ -429,6 +455,19 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	bodyResp := upResp.Body()
 	bodyCopy := make([]byte, len(bodyResp))
 	copy(bodyCopy, bodyResp)
+	relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
+		Direction:       "gateway_to_relay",
+		Method:          string(upReq.Header.Method()),
+		URL:             string(upReq.URI().FullURI()),
+		Endpoint:        "/internal/execute",
+		RequestHeaders:  relay.HeaderMapFromRequest(upReq),
+		RequestBody:     upReq.Body(),
+		StatusCode:      upResp.StatusCode(),
+		ResponseHeaders: relay.HeaderMapFromResponse(upResp),
+		ResponseBody:    bodyCopy,
+		StartedAt:       start,
+		Latency:         time.Since(start),
+	})
 	fasthttp.ReleaseResponse(upResp)
 	ctx.SetBody(bodyCopy)
 	logProxy(node.Name, start, ctx.Response.StatusCode())
@@ -877,8 +916,7 @@ func isDNSError(err error) bool {
 }
 
 func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL, clientIP string) error {
-	path := string(ctx.RequestURI())
-	target := baseURL + path
+	target := strings.TrimRight(baseURL, "/") + "/internal/execute"
 	if _, err := url.ParseRequestURI(target); err != nil {
 		return fmt.Errorf("invalid target URL: %w", err)
 	}

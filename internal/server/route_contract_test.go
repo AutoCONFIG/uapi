@@ -14,7 +14,7 @@ import (
 
 func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 	cfg := &config.Config{
-		Server: config.ServerConfig{Mode: "all", MaxBodySizeMB: 256},
+		Server: config.ServerConfig{MaxBodySizeMB: 256},
 		Security: config.SecurityConfig{
 			JWTSecret:     strings.Repeat("j", 32),
 			EncryptionKey: strings.Repeat("a", 64),
@@ -76,7 +76,7 @@ func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 		"GET /api/user/subscription",
 		"GET /api/user/usage",
 		"GET /api/user/usage/logs",
-		"GET /internal/relay/config",
+		"GET /internal/config",
 		"POST /api/admin/access-policies",
 		"POST /api/admin/accounts",
 		"POST /api/admin/accounts/:id/refresh-quota",
@@ -110,8 +110,9 @@ func TestAPIRoutesRegisteredAndLookupable(t *testing.T) {
 		"POST /api/user/redeem",
 		"POST /api/user/refresh",
 		"POST /api/user/register",
-		"POST /internal/relay/account-update",
-		"POST /internal/relay/usage-events",
+		"POST /internal/account",
+		"POST /internal/dumps",
+		"POST /internal/usage",
 		"PUT /api/admin/access-policies",
 		"PUT /api/admin/accounts",
 		"PUT /api/admin/channels",

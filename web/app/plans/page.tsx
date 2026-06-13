@@ -29,6 +29,12 @@ function planWindow(plan: PublicPlan, type: SubscriptionWindow["type"]) {
   return plan.windows.find((item) => item.type === type)?.limit ?? 0;
 }
 
+function formatPrice(value?: number): string {
+  const price = Number(value || 0);
+  if (!Number.isFinite(price) || price <= 0) return "免费";
+  return `¥${price.toFixed(2).replace(/\.00$/, "")}`;
+}
+
 export default function PlansPage() {
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
@@ -95,6 +101,10 @@ export default function PlansPage() {
               <div className="metric-card">
                 <span className="muted">计费类型</span>
                 <strong>{subscription.plan_type === "count_based" ? "按次数" : "按 Token"}</strong>
+              </div>
+              <div className="metric-card">
+                <span className="muted">套餐定价</span>
+                <strong>{formatPrice(subscription.plan_price)}</strong>
               </div>
               <div className="metric-card">
                 <span className="muted">到期时间</span>
@@ -189,6 +199,7 @@ export default function PlansPage() {
               <article className="metric-card" key={plan.id}>
                 <span className="muted">{plan.type === "count_based" ? "按次数" : "按 Token"} · {plan.duration_days || 30} 天</span>
                 <strong>{plan.name}</strong>
+                <p style={{ margin: "8px 0 0", fontSize: 18, fontWeight: 700 }}>{formatPrice(plan.price)}</p>
                 <p className="muted" style={{ margin: "8px 0 0" }}>
                   月额度 {formatQuota(planWindow(plan, "month"), plan.type)}
                   {plan.max_concurrency > 0 ? ` · 并发 ${plan.max_concurrency}` : ""}

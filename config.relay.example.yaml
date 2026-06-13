@@ -1,5 +1,4 @@
 server:
-  mode: "relay"
   host: "0.0.0.0"
   port: 8081
   max_body_size_mb: 256
@@ -7,17 +6,25 @@ server:
 
 security:
   jwt_secret: "relay-example-jwt-secret-32-chars"
-  encryption_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  encryption_key: "91516b92009fd9c9bff66fe6e1f398dc8a7e5703c74053c8c90fddfdad8b127b"
   trusted_proxies: []
 
 gateway:
   gateway_id: "relay-node"
   cache_ttl: "5s"
-  internal_secret: "relay-example-internal-secret-32c"
+  internal_secret: "relay-example-internal-secret-32chars"
   require_internal: true
   control_url: "https://gateway.example.com"
   relay_node_id: "12345678-1234-4234-8234-123456789abc"
   config_pull_interval: "5s"
+
+debug_dump:
+  enabled: false
+  mode: "remote"
+  max_entries: 7
+  queue_max_items: 1000
+  batch_max_bytes_mb: 8
+  upload_timeout: "10s"
 
 ws:
   host: ""

@@ -153,6 +153,7 @@ export type Subscription = {
   plan_id: string;
   plan_name: string;
   plan_type: string;
+  plan_price: number;
   windows: SubscriptionWindow[];
   starts_at: string;
   expires_at: string;
@@ -173,6 +174,7 @@ export type Plan = {
   type: string;
   policy_id?: string;
   duration_days: number;
+  price: number;
   enabled: boolean;
   public: boolean;
 };
@@ -187,6 +189,7 @@ export type PublicPlan = {
   name: string;
   type: string;
   duration_days: number;
+  price: number;
   allowed_models: string;
   max_concurrency: number;
   windows: PublicPlanWindow[];

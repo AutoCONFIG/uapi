@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AutoCONFIG/uapi/internal/debugdump"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/google/uuid"
 )
-
-const quotaDebugDumpDirEnv = "UAPI_RELAY_DEBUG_DUMP_DIR"
 
 type quotaDebugDump struct {
 	Timestamp string                 `json:"timestamp"`
@@ -44,14 +43,13 @@ type quotaHTTPDebugResponse struct {
 }
 
 func writeQuotaDebugDump(provider string, metadata map[string]interface{}, upstream interface{}, qd *QuotaData, err error) {
-	baseDir := strings.TrimSpace(os.Getenv(quotaDebugDumpDirEnv))
+	baseDir := oauthdebug.DumpDir()
 	if baseDir == "" {
 		return
 	}
 	now := time.Now()
-	dayDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"))
 	name := now.Local().Format("20060102T150405.000000000-0700") + "-quota-" + provider + "-" + uuid.NewString()
-	outDir := filepath.Join(dayDir, name)
+	outDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"), "quota", debugdump.SafeName(provider), name)
 	if mkErr := os.MkdirAll(outDir, 0755); mkErr != nil {
 		logger.Warnf("quota.debug_dump", "create quota dump dir failed", logger.Err(mkErr), logger.F("dir", outDir))
 		return
@@ -74,6 +72,24 @@ func writeQuotaDebugDump(provider string, metadata map[string]interface{}, upstr
 	if writeErr := os.WriteFile(filepath.Join(outDir, "quota.json"), raw, 0644); writeErr != nil {
 		logger.Warnf("quota.debug_dump", "write quota dump failed", logger.Err(writeErr), logger.F("dir", outDir))
 	}
+	debugdump.AppendIndex(now, debugdump.Entry{
+		Side:     "relay",
+		Category: "quota",
+		Span:     "quota.fetch",
+		Status:   quotaDebugStatus(err),
+		Error:    record.Error,
+		DumpPath: filepath.ToSlash(strings.TrimPrefix(outDir, filepath.Clean(baseDir)+string(os.PathSeparator))),
+		Extra: map[string]interface{}{
+			"provider": provider,
+		},
+	})
+}
+
+func quotaDebugStatus(err error) int {
+	if err != nil {
+		return 500
+	}
+	return 200
 }
 
 func newQuotaHTTPDebug(req *http.Request, requestBody []byte) *quotaHTTPDebug {

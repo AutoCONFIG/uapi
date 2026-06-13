@@ -68,6 +68,10 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 		h.jsonError(ctx, fasthttp.StatusBadRequest, msg)
 		return
 	}
+	if !validPlanPrice(req.Price) {
+		h.jsonError(ctx, fasthttp.StatusBadRequest, "price must be a non-negative amount")
+		return
+	}
 	var p db.Plan
 	var policy db.AccessPolicy
 	if err := h.db.Transaction(func(tx *gorm.DB) error {
@@ -91,6 +95,7 @@ func (h *Handler) createPlan(ctx *fasthttp.RequestCtx) {
 			Enabled:      req.Enabled,
 			Public:       req.Public,
 			DurationDays: durationDays,
+			Price:        req.Price,
 		}
 		p.ID = uuid.New()
 		return tx.Create(&p).Error
@@ -143,6 +148,13 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		updates["duration_days"] = *req.DurationDays
+	}
+	if req.Price != nil {
+		if !validPlanPrice(*req.Price) {
+			h.jsonError(ctx, fasthttp.StatusBadRequest, "price must be a non-negative amount")
+			return
+		}
+		updates["price"] = *req.Price
 	}
 	updates["updated_at"] = time.Now()
 	policyChanged := planPolicyChanged(req)
@@ -226,6 +238,10 @@ func (h *Handler) updatePlan(ctx *fasthttp.RequestCtx) {
 		auditUpdateCtx(h.db, "access_policy", *existing.PolicyID, h.getAdminUser(ctx), ctx, policyAudit)
 	}
 	h.jsonResponse(ctx, 200, existing)
+}
+
+func validPlanPrice(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
 }
 
 func planPolicyChanged(req UpdatePlanRequest) bool {

@@ -13,12 +13,11 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/debugdump"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/oauthdebug"
 	"github.com/google/uuid"
 )
-
-const chatGPTReverseDebugDumpDirEnv = "UAPI_RELAY_DEBUG_DUMP_DIR"
 
 const (
 	chatGPTReverseDebugTextPreviewLimit = 4000
@@ -73,15 +72,14 @@ type chatGPTReverseHTTPDebugResponse struct {
 }
 
 func newChatGPTReverseDebugDump(ch *db.Channel, acc *db.Account) *chatGPTReverseDebugTrace {
-	baseDir := strings.TrimSpace(os.Getenv(chatGPTReverseDebugDumpDirEnv))
+	baseDir := oauthdebug.DumpDir()
 	if baseDir == "" {
 		return nil
 	}
 	now := time.Now()
 	traceID := uuid.NewString()
-	dayDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"))
 	name := now.Local().Format("20060102T150405.000000000-0700") + "-chatgpt_reverse-" + traceID
-	outDir := filepath.Join(dayDir, name)
+	outDir := filepath.Join(filepath.Clean(baseDir), now.Local().Format("2006-01-02"), "chatgptreverse", name)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		logger.Warnf("chatgpt_reverse.debug_dump", "create dump dir failed", logger.Err(err), logger.F("dir", outDir))
 		return nil
@@ -105,6 +103,15 @@ func newChatGPTReverseDebugDump(ch *db.Channel, acc *db.Account) *chatGPTReverse
 	if raw, err := json.MarshalIndent(summary, "", "  "); err == nil {
 		writeChatGPTReverseDebugFile(outDir, "summary.json", raw)
 	}
+	debugdump.AppendIndex(now, debugdump.Entry{
+		Side:      "relay",
+		Category:  "chatgptreverse",
+		Span:      "relay.chatgptreverse",
+		TraceID:   traceID,
+		ChannelID: summary.ChannelID,
+		AccountID: summary.AccountID,
+		DumpPath:  filepath.ToSlash(strings.TrimPrefix(outDir, filepath.Clean(baseDir)+string(os.PathSeparator))),
+	})
 	return &chatGPTReverseDebugTrace{ID: traceID, Dir: outDir}
 }
 

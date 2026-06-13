@@ -118,7 +118,7 @@ OAuth account 保存：
 Relay 执行请求前会调用凭据有效性检查。刷新成功后：
 
 - `all` 模式或本地数据库可用时更新数据库。
-- 远程 Relay 模式先更新内存 account，再 best-effort 调用 Gateway 的 `/internal/relay/account-update`。
+- 远程 Relay 先更新内存 account，再 best-effort 调用 Gateway 的 `/internal/account`。
 
 Gateway 不可达时不会持久重试，这是当前已知边界。
 

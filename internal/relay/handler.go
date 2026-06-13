@@ -215,18 +215,45 @@ func (r *Relayer) StartConfigPuller(nodeID string, interval time.Duration) {
 	}()
 }
 
+func (r *Relayer) TriggerConfigPull(nodeID string) bool {
+	return r.pullRuntimeConfig(nodeID)
+}
+
 func (r *Relayer) pullRuntimeConfig(nodeID string) bool {
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(r.controlURL + "/internal/relay/config?node_id=" + nodeID)
+	req.SetRequestURI(r.controlURL + "/internal/config?node_id=" + nodeID)
 	req.Header.SetMethod("GET")
 	req.Header.Set("X-UAPI-Internal-Secret", r.internalSecret)
+	start := time.Now()
 	if err := bufferedClient.DoTimeout(req, resp, 10*time.Second); err != nil {
+		RecordInternalExchangeDump(InternalExchangeDump{
+			Direction:      "relay_to_gateway",
+			Method:         string(req.Header.Method()),
+			URL:            string(req.URI().FullURI()),
+			Endpoint:       "/internal/config",
+			RequestHeaders: HeaderMapFromRequest(req),
+			Err:            err,
+			StartedAt:      start,
+			Latency:        time.Since(start),
+		})
 		logger.Warnf("relay.config", "pull failed", logger.Err(err))
 		return false
 	}
+	RecordInternalExchangeDump(InternalExchangeDump{
+		Direction:       "relay_to_gateway",
+		Method:          string(req.Header.Method()),
+		URL:             string(req.URI().FullURI()),
+		Endpoint:        "/internal/config",
+		RequestHeaders:  HeaderMapFromRequest(req),
+		StatusCode:      resp.StatusCode(),
+		ResponseHeaders: HeaderMapFromResponse(resp),
+		ResponseBody:    resp.Body(),
+		StartedAt:       start,
+		Latency:         time.Since(start),
+	})
 	if resp.StatusCode() >= 300 {
 		logger.Warnf("relay.config", "pull rejected", logger.F("status", resp.StatusCode()))
 		return false
@@ -262,6 +289,17 @@ type relayRequest struct {
 func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
+	var internalClaims internalauth.Claims
+	var gatewayAuthenticated bool
+	if path == "/internal/execute" {
+		internalClaims, gatewayAuthenticated = internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
+		if !gatewayAuthenticated || strings.TrimSpace(internalClaims.OriginalURI) == "" {
+			ctx.Error(`{"error":"valid gateway signature required"}`, fasthttp.StatusUnauthorized)
+			return
+		}
+		ctx.Request.SetRequestURI(internalClaims.OriginalURI)
+		path = string(ctx.Path())
+	}
 	requestType := detectRelayRequestType(path)
 	if requestType == requestTypeUnsupported {
 		ctx.Error(`{"error":"unsupported route"}`, fasthttp.StatusBadRequest)
@@ -272,7 +310,9 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	clientFormat := requestType.clientFormat()
 
 	var token db.Token
-	internalClaims, gatewayAuthenticated := internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
+	if !gatewayAuthenticated {
+		internalClaims, gatewayAuthenticated = internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
+	}
 	if gatewayAuthenticated {
 		tokenID, err := uuid.Parse(internalClaims.TokenID)
 		if err != nil {
@@ -3824,15 +3864,40 @@ func (r *Relayer) pushRuntimeAccountUpdate(account *db.Account) {
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(r.controlURL + "/internal/relay/account-update")
+	req.SetRequestURI(r.controlURL + "/internal/account")
 	req.Header.SetMethod("POST")
 	req.Header.SetContentType("application/json")
 	req.Header.Set("X-UAPI-Internal-Secret", r.internalSecret)
 	req.SetBody(body)
+	start := time.Now()
 	if err := bufferedClient.DoTimeout(req, resp, 10*time.Second); err != nil {
+		RecordInternalExchangeDump(InternalExchangeDump{
+			Direction:      "relay_to_gateway",
+			Method:         string(req.Header.Method()),
+			URL:            string(req.URI().FullURI()),
+			Endpoint:       "/internal/account",
+			RequestHeaders: HeaderMapFromRequest(req),
+			RequestBody:    body,
+			Err:            err,
+			StartedAt:      start,
+			Latency:        time.Since(start),
+		})
 		logger.Warnf("relay.config", "account update push failed", logger.F("account_id", account.ID.String()), logger.Err(err))
 		return
 	}
+	RecordInternalExchangeDump(InternalExchangeDump{
+		Direction:       "relay_to_gateway",
+		Method:          string(req.Header.Method()),
+		URL:             string(req.URI().FullURI()),
+		Endpoint:        "/internal/account",
+		RequestHeaders:  HeaderMapFromRequest(req),
+		RequestBody:     body,
+		StatusCode:      resp.StatusCode(),
+		ResponseHeaders: HeaderMapFromResponse(resp),
+		ResponseBody:    resp.Body(),
+		StartedAt:       start,
+		Latency:         time.Since(start),
+	})
 	if resp.StatusCode() >= 300 {
 		logger.Warnf("relay.config", "account update push rejected", logger.F("account_id", account.ID.String()), logger.F("status", resp.StatusCode()))
 		return
@@ -5788,14 +5853,39 @@ func (r *Relayer) reportUsageEvent(claims *internalauth.Claims, tokenID, channel
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
 	defer fasthttp.ReleaseResponse(resp)
-	req.SetRequestURI(r.controlURL + "/internal/relay/usage-events")
+	req.SetRequestURI(r.controlURL + "/internal/usage")
 	req.Header.SetMethod("POST")
 	req.Header.SetContentType("application/json")
 	req.Header.Set("X-UAPI-Internal-Secret", r.internalSecret)
 	req.SetBody(body)
+	reportStart := time.Now()
 	if err := bufferedClient.DoTimeout(req, resp, 10*time.Second); err != nil {
+		RecordInternalExchangeDump(InternalExchangeDump{
+			Direction:      "relay_to_gateway",
+			Method:         string(req.Header.Method()),
+			URL:            string(req.URI().FullURI()),
+			Endpoint:       "/internal/usage",
+			RequestHeaders: HeaderMapFromRequest(req),
+			RequestBody:    body,
+			Err:            err,
+			StartedAt:      reportStart,
+			Latency:        time.Since(reportStart),
+		})
 		return err
 	}
+	RecordInternalExchangeDump(InternalExchangeDump{
+		Direction:       "relay_to_gateway",
+		Method:          string(req.Header.Method()),
+		URL:             string(req.URI().FullURI()),
+		Endpoint:        "/internal/usage",
+		RequestHeaders:  HeaderMapFromRequest(req),
+		RequestBody:     body,
+		StatusCode:      resp.StatusCode(),
+		ResponseHeaders: HeaderMapFromResponse(resp),
+		ResponseBody:    resp.Body(),
+		StartedAt:       reportStart,
+		Latency:         time.Since(reportStart),
+	})
 	if resp.StatusCode() >= 300 {
 		return fmt.Errorf("usage event rejected: %d", resp.StatusCode())
 	}

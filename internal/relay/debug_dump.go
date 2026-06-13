@@ -17,16 +17,16 @@ import (
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/db"
+	"github.com/AutoCONFIG/uapi/internal/debugdump"
 	"github.com/AutoCONFIG/uapi/internal/internalauth"
 	"github.com/AutoCONFIG/uapi/internal/logger"
 	"github.com/AutoCONFIG/uapi/internal/relay/provider"
 	"github.com/AutoCONFIG/uapi/internal/upstreamconfig"
 	"github.com/google/uuid"
+	"github.com/valyala/fasthttp"
 )
 
 const (
-	relayDebugDumpDirEnv              = "UAPI_RELAY_DEBUG_DUMP_DIR"
-	relayDebugDumpBodyModeEnv         = "UAPI_RELAY_DEBUG_DUMP_BODY_MODE"
 	relayDebugDumpMaxAgeEnv           = "UAPI_RELAY_DEBUG_DUMP_MAX_AGE"
 	relayDebugDumpMaxEntriesEnv       = "UAPI_RELAY_DEBUG_DUMP_MAX_ENTRIES"
 	relayDebugDumpDefaultMaxAge       = 7 * 24 * time.Hour // 7 days
@@ -38,9 +38,132 @@ const (
 )
 
 var (
-	relayDebugDumpDir              = os.Getenv(relayDebugDumpDirEnv)
+	relayDebugDumpDir              string
 	relayDebugDumpProcessStartedAt = time.Now()
+	relayDebugDumpRuntimeMu        sync.RWMutex
+	relayDebugDumpRuntime          = relayDebugDumpRuntimeConfig{
+		Mode:             "local",
+		MaxEntries:       0,
+		QueueMaxItems:    1000,
+		BatchMaxBytes:    8 * 1024 * 1024,
+		UploadTimeout:    10 * time.Second,
+		remoteUploadChan: nil,
+	}
 )
+
+type RelayDebugDumpConfig struct {
+	Enabled        bool
+	Mode           string
+	Dir            string
+	MaxEntries     int
+	ControlURL     string
+	RelayNodeID    string
+	InternalSecret string
+	QueueMaxItems  int
+	BatchMaxBytes  int64
+	UploadTimeout  time.Duration
+}
+
+type relayDebugDumpRuntimeConfig struct {
+	Enabled          bool
+	Mode             string
+	Dir              string
+	MaxEntries       int
+	ControlURL       string
+	RelayNodeID      string
+	InternalSecret   string
+	QueueMaxItems    int
+	BatchMaxBytes    int64
+	UploadTimeout    time.Duration
+	remoteUploadChan chan relayDebugRemoteUpload
+}
+
+type relayDebugRemoteUpload struct {
+	ID   string
+	Body []byte
+}
+
+type InternalExchangeDump struct {
+	Direction       string
+	Method          string
+	URL             string
+	Endpoint        string
+	RequestHeaders  map[string]string
+	RequestBody     []byte
+	StatusCode      int
+	ResponseHeaders map[string]string
+	ResponseBody    []byte
+	ResponseStream  bool
+	Err             error
+	StartedAt       time.Time
+	Latency         time.Duration
+}
+
+func ConfigureRelayDebugDump(cfg RelayDebugDumpConfig) {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	if mode == "" {
+		mode = "local"
+	}
+	maxEntries := cfg.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = relayDebugDumpDefaultMaxEntries
+	}
+	queueMax := cfg.QueueMaxItems
+	if queueMax <= 0 {
+		queueMax = 1000
+	}
+	batchMax := cfg.BatchMaxBytes
+	if batchMax <= 0 {
+		batchMax = 8 * 1024 * 1024
+	}
+	uploadTimeout := cfg.UploadTimeout
+	if uploadTimeout <= 0 {
+		uploadTimeout = 10 * time.Second
+	}
+
+	runtimeCfg := relayDebugDumpRuntimeConfig{
+		Enabled:        cfg.Enabled,
+		Mode:           mode,
+		Dir:            strings.TrimSpace(cfg.Dir),
+		MaxEntries:     maxEntries,
+		ControlURL:     strings.TrimRight(strings.TrimSpace(cfg.ControlURL), "/"),
+		RelayNodeID:    strings.TrimSpace(cfg.RelayNodeID),
+		InternalSecret: cfg.InternalSecret,
+		QueueMaxItems:  queueMax,
+		BatchMaxBytes:  batchMax,
+		UploadTimeout:  uploadTimeout,
+	}
+	if runtimeCfg.Enabled && runtimeCfg.Mode == "remote" {
+		runtimeCfg.remoteUploadChan = make(chan relayDebugRemoteUpload, queueMax)
+		go relayDebugRemoteUploader(runtimeCfg)
+		logger.Infof("relay.debug_dump", "remote debug dump initialized",
+			logger.F("relay_node_id", runtimeCfg.RelayNodeID),
+			logger.F("queue_max_items", queueMax),
+			logger.F("batch_max_bytes", batchMax),
+		)
+	}
+
+	relayDebugDumpRuntimeMu.Lock()
+	relayDebugDumpRuntime = runtimeCfg
+	if !runtimeCfg.Enabled {
+		relayDebugDumpDir = ""
+	} else if runtimeCfg.Mode == "local" {
+		relayDebugDumpDir = runtimeCfg.Dir
+	} else if runtimeCfg.Mode == "remote" {
+		relayDebugDumpDir = ""
+	}
+	relayDebugDumpRuntimeMu.Unlock()
+
+	if runtimeCfg.Enabled && runtimeCfg.Mode == "local" {
+		cleanupRelayDebugDumpDir()
+	}
+}
+
+func relayDebugRuntime() relayDebugDumpRuntimeConfig {
+	relayDebugDumpRuntimeMu.RLock()
+	defer relayDebugDumpRuntimeMu.RUnlock()
+	return relayDebugDumpRuntime
+}
 
 func init() {
 	cleanupRelayDebugDumpDir()
@@ -64,11 +187,11 @@ func init() {
 }
 
 func relayDebugDumpEnabled() bool {
+	cfg := relayDebugRuntime()
+	if cfg.Enabled {
+		return cfg.Mode == "remote" || cfg.Dir != ""
+	}
 	return relayDebugDumpDir != ""
-}
-
-func relayDebugDumpFullBodyEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(relayDebugDumpBodyModeEnv)), "full")
 }
 
 // rotateAndCleanupRelayDebugDumpDir rotates yesterday's dump to .tar.gz and cleans up old archives
@@ -224,6 +347,10 @@ func cleanupRelayDebugDumpDir() {
 }
 
 func relayDebugDumpMaxEntries() int {
+	cfg := relayDebugRuntime()
+	if cfg.Enabled && cfg.MaxEntries > 0 {
+		return cfg.MaxEntries
+	}
 	raw := os.Getenv(relayDebugDumpMaxEntriesEnv)
 	if raw == "" {
 		return relayDebugDumpDefaultMaxEntries
@@ -312,6 +439,9 @@ type relayDebugTrace struct {
 	Dir             string
 	startedAt       time.Time
 	mu              sync.Mutex
+	finalOnce       sync.Once
+	remote          bool
+	files           map[string][]byte
 	upstreamStarted time.Time
 	upstreamHeaders time.Time
 	streamBytes     map[string]int
@@ -338,7 +468,7 @@ func (t *relayDebugTrace) SetRoutingInfo(info map[string]interface{}) {
 
 // WriteRoutingInfo persists routing decisions to the debug dump directory.
 func (t *relayDebugTrace) WriteRoutingInfo() {
-	if t == nil || t.Dir == "" {
+	if t == nil {
 		return
 	}
 	info := t.routingInfo
@@ -346,7 +476,7 @@ func (t *relayDebugTrace) WriteRoutingInfo() {
 		info = map[string]interface{}{}
 	}
 	if raw, err := json.MarshalIndent(info, "", "  "); err == nil {
-		writeRelayDebugFile(t.Dir, "routing.json", raw)
+		t.WriteFile("routing.json", raw)
 	}
 }
 
@@ -355,6 +485,14 @@ func relayDebugDumpTimestamp(t time.Time) string {
 }
 
 func relayDebugDumpCurrentDayDir() string {
+	cfg := relayDebugRuntime()
+	if cfg.Enabled && cfg.Mode == "local" {
+		if cfg.Dir == "" {
+			return ""
+		}
+		day := time.Now().Local().Format("2006-01-02")
+		return filepath.Join(cfg.Dir, day)
+	}
 	if relayDebugDumpDir == "" {
 		return ""
 	}
@@ -368,17 +506,24 @@ func relayDebugDumpEntryName(t time.Time, traceID string) string {
 }
 
 func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *db.Channel, acc *db.Account, claims *internalauth.Claims, clientFormat, upstreamFormat provider.Format, requestType relayRequestType, model, routedModel string, stream bool) *relayDebugTrace {
-	dayDir := relayDebugDumpCurrentDayDir()
-	if dayDir == "" {
-		return nil
-	}
+	cfg := relayDebugRuntime()
 	traceID := uuid.NewString()
 	now := time.Now()
 	name := relayDebugDumpEntryName(now, traceID)
-	outDir := filepath.Join(dayDir, name)
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		logger.Warnf("relay.debug_dump", "create dump dir failed", logger.Err(err), logger.F("dir", outDir))
-		return nil
+	outDir := ""
+	remote := cfg.Enabled && cfg.Mode == "remote"
+	if remote {
+		outDir = "remote:" + name
+	} else {
+		dayDir := relayDebugDumpCurrentDayDir()
+		if dayDir == "" {
+			return nil
+		}
+		outDir = filepath.Join(dayDir, "relay", relayDebugNodeDir(cfg), "to-upstream", name)
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			logger.Warnf("relay.debug_dump", "create dump dir failed", logger.Err(err), logger.F("dir", outDir))
+			return nil
+		}
 	}
 
 	dumpedOriginal := relayDebugDumpRequestBody(original)
@@ -416,15 +561,12 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		summary.GatewayRequest = claims.RequestID
 	}
 
-	writeRelayDebugFile(outDir, "request.original.json", dumpedOriginal)
-	writeRelayDebugFile(outDir, "request.converted.json", dumpedConverted)
-	if raw, err := json.MarshalIndent(summary, "", "  "); err == nil {
-		writeRelayDebugFile(outDir, "summary.json", raw)
-	}
 	trace := &relayDebugTrace{
 		ID:                     traceID,
 		Dir:                    outDir,
 		startedAt:              now,
+		remote:                 remote,
+		files:                  map[string][]byte{},
 		streamBytes:            map[string]int{},
 		streamTruncated:        map[string]bool{},
 		streamEvents:           map[string]int{},
@@ -435,6 +577,11 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		streamMaxGap:           map[string]time.Duration{},
 		streamConsecutiveNulls: map[string]int{},
 		streamLastWasNull:      map[string]bool{},
+	}
+	trace.WriteFile("request.original.json", dumpedOriginal)
+	trace.WriteFile("request.converted.json", dumpedConverted)
+	if raw, err := json.MarshalIndent(summary, "", "  "); err == nil {
+		trace.WriteFile("summary.json", raw)
 	}
 	trace.Event("request_dump_written",
 		logger.F("client_format", string(clientFormat)),
@@ -474,15 +621,57 @@ func startRelayRequestDebugDump(original, converted []byte, token db.Token, ch *
 		logger.F("original_bytes", len(original)),
 		logger.F("converted_bytes", len(converted)),
 	)
+	debugdump.AppendIndex(now, debugdump.Entry{
+		Side:             "relay",
+		Category:         "to-upstream",
+		Span:             "relay.to-upstream",
+		TraceID:          traceID,
+		GatewayRequestID: summary.GatewayRequest,
+		RelayRequestID:   traceID,
+		RelayNodeID:      relayDebugNodeDir(cfg),
+		Model:            model,
+		RoutedModel:      routedModel,
+		ChannelID:        summary.ChannelID,
+		AccountID:        summary.AccountID,
+		DumpPath:         relayDebugRelativeDumpPath(outDir),
+		Extra: map[string]interface{}{
+			"request_type":    string(requestType),
+			"client_format":   string(clientFormat),
+			"upstream_format": string(upstreamFormat),
+			"stream":          stream,
+		},
+	})
 	return trace
+}
+
+func relayDebugNodeDir(cfg relayDebugDumpRuntimeConfig) string {
+	if name := debugdump.SafeName(cfg.RelayNodeID); name != "" {
+		return name
+	}
+	return "local"
+}
+
+func relayDebugRelativeDumpPath(path string) string {
+	cfg := relayDebugRuntime()
+	base := strings.TrimSpace(cfg.Dir)
+	if base == "" {
+		base = relayDebugDumpDir
+	}
+	base = filepath.Clean(base)
+	rel := strings.TrimPrefix(path, base+string(os.PathSeparator))
+	return filepath.ToSlash(rel)
 }
 
 func relayDebugDumpRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	if relayDebugDumpFullBodyEnabled() {
-		return append([]byte(nil), body...)
+	return relayDebugDumpRequestBodyPreview(body)
+}
+
+func relayDebugDumpRequestBodyPreview(body []byte) []byte {
+	if len(body) == 0 {
+		return body
 	}
 	var root interface{}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -860,6 +1049,26 @@ func writeRelayDebugFile(dir, name string, body []byte) {
 	}
 }
 
+func (t *relayDebugTrace) WriteFile(name string, body []byte) {
+	if t == nil || name == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.writeFileLocked(name, body)
+}
+
+func (t *relayDebugTrace) writeFileLocked(name string, body []byte) {
+	if t.remote {
+		t.files[name] = append([]byte(nil), body...)
+		return
+	}
+	if t.Dir == "" {
+		return
+	}
+	writeRelayDebugFile(t.Dir, name, body)
+}
+
 func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 	if t == nil {
 		return
@@ -885,8 +1094,11 @@ func (t *relayDebugTrace) Event(name string, fields ...logger.Field) {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.writeJSONLRawLocked("events.jsonl", raw)
+	t.mu.Unlock()
+	if relayDebugTerminalEvent(name) {
+		t.FinalizeRemoteDump()
+	}
 }
 
 func (t *relayDebugTrace) recordLifecycleEvent(name string) {
@@ -917,6 +1129,14 @@ func relayDebugEventNeedsTiming(name string) bool {
 		name == "scanner_benign_close_after_terminal" ||
 		name == "scanner_benign_close_before_terminal" ||
 		name == "stream_eof_without_terminal"
+}
+
+func relayDebugTerminalEvent(name string) bool {
+	return strings.HasPrefix(name, "stream_result_") ||
+		strings.HasPrefix(name, "buffered_result_") ||
+		strings.HasPrefix(name, "force_stream_result_") ||
+		strings.HasPrefix(name, "media_result_") ||
+		name == "route_failed"
 }
 
 func (t *relayDebugTrace) StreamChunk(name string, body []byte) {
@@ -970,23 +1190,32 @@ func (t *relayDebugTrace) writeStreamChunkLocked(name string, body []byte) {
 		truncated = true
 	}
 
-	f, err := os.OpenFile(filepath.Join(t.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		logger.Warnf("relay.debug_dump", "open stream dump file failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
-		return
-	}
-	if _, err := f.Write(chunk); err != nil {
-		logger.Warnf("relay.debug_dump", "write stream dump failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
-		_ = f.Close()
-		return
+	if t.remote {
+		t.files[name] = append(t.files[name], chunk...)
+	} else {
+		f, err := os.OpenFile(filepath.Join(t.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			logger.Warnf("relay.debug_dump", "open stream dump file failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
+			return
+		}
+		if _, err := f.Write(chunk); err != nil {
+			logger.Warnf("relay.debug_dump", "write stream dump failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
+			_ = f.Close()
+			return
+		}
+		if err := f.Close(); err != nil {
+			logger.Warnf("relay.debug_dump", "close stream dump failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
+		}
 	}
 	t.streamBytes[name] += len(chunk)
 	if truncated {
-		_, _ = f.Write([]byte("\n\n# UAPI debug stream truncated\n"))
+		if t.remote {
+			t.files[name] = append(t.files[name], []byte("\n\n# UAPI debug stream truncated\n")...)
+		} else if f, err := os.OpenFile(filepath.Join(t.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			_, _ = f.Write([]byte("\n\n# UAPI debug stream truncated\n"))
+			_ = f.Close()
+		}
 		t.noteStreamTruncatedLocked(name, t.streamBytes[name])
-	}
-	if err := f.Close(); err != nil {
-		logger.Warnf("relay.debug_dump", "close stream dump failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
 	}
 	t.writeStreamEventSummaryLocked(name, body, len(chunk), truncated)
 }
@@ -1116,15 +1345,7 @@ func (t *relayDebugTrace) noteStreamTruncatedLocked(name string, written int) {
 		logger.Warnf("relay.debug_dump", "marshal truncation event failed", logger.Err(err), logger.F("relay_request_id", t.ID))
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(t.Dir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		logger.Warnf("relay.debug_dump", "open events file failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir))
-		return
-	}
-	defer f.Close()
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		logger.Warnf("relay.debug_dump", "write truncation event failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir))
-	}
+	t.writeJSONLRawLocked("events.jsonl", raw)
 }
 
 func (t *relayDebugTrace) writeStreamEventSummaryLocked(name string, body []byte, written int, truncated bool) {
@@ -1159,6 +1380,10 @@ func relayDebugCopyMap(src map[string]interface{}) map[string]interface{} {
 }
 
 func (t *relayDebugTrace) writeJSONLRawLocked(name string, raw []byte) {
+	if t.remote {
+		t.files[name] = append(t.files[name], append(raw, '\n')...)
+		return
+	}
 	f, err := os.OpenFile(filepath.Join(t.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		logger.Warnf("relay.debug_dump", "open jsonl file failed", logger.Err(err), logger.F("relay_request_id", t.ID), logger.F("dump_dir", t.Dir), logger.F("file", name))
@@ -1330,4 +1555,295 @@ func isDebugNullChunk(body []byte) bool {
 		}
 	}
 	return true
+}
+
+func (t *relayDebugTrace) FinalizeRemoteDump() {
+	if t == nil || !t.remote {
+		return
+	}
+	t.finalOnce.Do(func() {
+		cfg := relayDebugRuntime()
+		if cfg.remoteUploadChan == nil {
+			return
+		}
+		t.mu.Lock()
+		files := make(map[string][]byte, len(t.files))
+		for name, body := range t.files {
+			files[name] = append([]byte(nil), body...)
+		}
+		t.mu.Unlock()
+		body, err := createRelayDebugTarGzBytes(t.ID, files)
+		if err != nil {
+			logger.Warnf("relay.debug_dump", "create remote archive failed", logger.Err(err), logger.F("relay_request_id", t.ID))
+			return
+		}
+		if cfg.BatchMaxBytes > 0 && int64(len(body)) > cfg.BatchMaxBytes {
+			logger.Warnf("relay.debug_dump", "drop remote archive over limit",
+				logger.F("relay_request_id", t.ID),
+				logger.F("bytes", len(body)),
+				logger.F("limit", cfg.BatchMaxBytes),
+			)
+			return
+		}
+		select {
+		case cfg.remoteUploadChan <- relayDebugRemoteUpload{ID: t.ID, Body: body}:
+		default:
+			logger.Warnf("relay.debug_dump", "drop remote archive because upload queue is full",
+				logger.F("relay_request_id", t.ID),
+				logger.F("queue_max_items", cfg.QueueMaxItems),
+			)
+		}
+	})
+}
+
+func createRelayDebugTarGzBytes(root string, files map[string][]byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		if clean := cleanRelayDebugArchiveName(name); clean != "" {
+			names = append(names, clean)
+		}
+	}
+	sort.Strings(names)
+	prefix := cleanRelayDebugArchiveName(root)
+	if prefix == "" {
+		prefix = "dump"
+	}
+	now := time.Now()
+	for _, name := range names {
+		body := files[name]
+		header := &tar.Header{
+			Name:    pathJoinArchive(prefix, name),
+			Mode:    0600,
+			Size:    int64(len(body)),
+			ModTime: now,
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			_ = tw.Close()
+			_ = gzw.Close()
+			return nil, err
+		}
+		if _, err := tw.Write(body); err != nil {
+			_ = tw.Close()
+			_ = gzw.Close()
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		_ = gzw.Close()
+		return nil, err
+	}
+	if err := gzw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func cleanRelayDebugArchiveName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "/")
+	clean := filepath.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
+		return ""
+	}
+	return strings.ReplaceAll(clean, "\\", "/")
+}
+
+func pathJoinArchive(elem ...string) string {
+	return strings.ReplaceAll(filepath.Join(elem...), "\\", "/")
+}
+
+func relayDebugRemoteUploader(cfg relayDebugDumpRuntimeConfig) {
+	for item := range cfg.remoteUploadChan {
+		if len(item.Body) == 0 {
+			continue
+		}
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		req.SetRequestURI(cfg.ControlURL + "/internal/dumps")
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.Header.Set("X-UAPI-Internal-Secret", cfg.InternalSecret)
+		req.Header.Set("X-UAPI-Relay-Node-ID", cfg.RelayNodeID)
+		req.Header.Set("X-UAPI-Dump-ID", item.ID)
+		req.Header.SetContentType("application/gzip")
+		req.SetBodyRaw(item.Body)
+		err := bufferedClient.DoTimeout(req, resp, cfg.UploadTimeout)
+		status := resp.StatusCode()
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+		if err != nil {
+			logger.Warnf("relay.debug_dump", "remote upload failed", logger.Err(err), logger.F("relay_request_id", item.ID))
+			continue
+		}
+		if status >= 300 {
+			logger.Warnf("relay.debug_dump", "remote upload rejected", logger.F("relay_request_id", item.ID), logger.F("status", status))
+			continue
+		}
+		logger.Debugf("relay.debug_dump", "remote upload accepted", logger.F("relay_request_id", item.ID), logger.F("bytes", len(item.Body)))
+	}
+}
+
+func RecordInternalExchangeDump(exchange InternalExchangeDump) {
+	if !relayDebugDumpEnabled() {
+		return
+	}
+	cfg := relayDebugRuntime()
+	if cfg.Enabled && cfg.Mode == "remote" && cfg.remoteUploadChan == nil {
+		return
+	}
+	now := time.Now()
+	if exchange.StartedAt.IsZero() {
+		exchange.StartedAt = now
+	}
+	traceID := uuid.NewString()
+	name := relayDebugDumpEntryName(now, traceID)
+	summary := map[string]interface{}{
+		"timestamp":        relayDebugDumpTimestamp(now),
+		"relay_request_id": traceID,
+		"kind":             "internal_exchange",
+		"direction":        exchange.Direction,
+		"method":           exchange.Method,
+		"url":              relayDebugRedactedURL(exchange.URL),
+		"endpoint":         exchange.Endpoint,
+		"status_code":      exchange.StatusCode,
+		"response_stream":  exchange.ResponseStream,
+		"started_at":       relayDebugDumpTimestamp(exchange.StartedAt),
+		"latency_ms":       exchange.Latency.Milliseconds(),
+		"request_headers":  relayDebugSanitizeHeaderMap(exchange.RequestHeaders),
+		"response_headers": relayDebugSanitizeHeaderMap(exchange.ResponseHeaders),
+		"request_bytes":    len(exchange.RequestBody),
+		"response_bytes":   len(exchange.ResponseBody),
+	}
+	if exchange.Err != nil {
+		summary["error"] = exchange.Err.Error()
+	}
+	files := map[string][]byte{}
+	if raw, err := json.MarshalIndent(summary, "", "  "); err == nil {
+		files["summary.json"] = raw
+	}
+	if len(exchange.RequestBody) > 0 {
+		files["request.body.json"] = relayDebugDumpRequestBodyPreview(exchange.RequestBody)
+	}
+	if len(exchange.ResponseBody) > 0 {
+		files["response.body.json"] = relayDebugDumpRequestBodyPreview(exchange.ResponseBody)
+	}
+	if cfg.Enabled && cfg.Mode == "remote" {
+		body, err := createRelayDebugTarGzBytes(traceID, files)
+		if err != nil {
+			logger.Warnf("relay.debug_dump", "create internal exchange archive failed", logger.Err(err), logger.F("relay_request_id", traceID))
+			return
+		}
+		if cfg.BatchMaxBytes > 0 && int64(len(body)) > cfg.BatchMaxBytes {
+			logger.Warnf("relay.debug_dump", "drop internal exchange archive over limit", logger.F("relay_request_id", traceID), logger.F("bytes", len(body)), logger.F("limit", cfg.BatchMaxBytes))
+			return
+		}
+		select {
+		case cfg.remoteUploadChan <- relayDebugRemoteUpload{ID: traceID, Body: body}:
+		default:
+			logger.Warnf("relay.debug_dump", "drop internal exchange archive because upload queue is full", logger.F("relay_request_id", traceID), logger.F("queue_max_items", cfg.QueueMaxItems))
+		}
+		return
+	}
+	dayDir := relayDebugDumpCurrentDayDir()
+	if dayDir == "" {
+		return
+	}
+	category := relayDebugInternalExchangeCategory(exchange.Direction)
+	side := relayDebugInternalExchangeSide(exchange.Direction)
+	var outDir string
+	if side == "gateway" {
+		outDir = filepath.Join(dayDir, "gateway", category, name)
+	} else {
+		outDir = filepath.Join(dayDir, "relay", relayDebugNodeDir(cfg), category, name)
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		logger.Warnf("relay.debug_dump", "create internal exchange dump dir failed", logger.Err(err), logger.F("dir", outDir))
+		return
+	}
+	for fileName, body := range files {
+		writeRelayDebugFile(outDir, fileName, body)
+	}
+	debugdump.AppendIndex(now, debugdump.Entry{
+		Side:           side,
+		Category:       category,
+		Span:           side + "." + category,
+		TraceID:        traceID,
+		RelayRequestID: traceID,
+		RelayNodeID:    relayDebugNodeDir(cfg),
+		Method:         exchange.Method,
+		URL:            relayDebugRedactedURL(exchange.URL),
+		Endpoint:       exchange.Endpoint,
+		Status:         exchange.StatusCode,
+		LatencyMS:      exchange.Latency.Milliseconds(),
+		DumpPath:       relayDebugRelativeDumpPath(outDir),
+		Extra: map[string]interface{}{
+			"direction":       exchange.Direction,
+			"response_stream": exchange.ResponseStream,
+		},
+	})
+}
+
+func relayDebugInternalExchangeCategory(direction string) string {
+	switch strings.ToLower(strings.TrimSpace(direction)) {
+	case "gateway_to_relay":
+		return "to-relay"
+	case "relay_to_gateway":
+		return "to-gateway"
+	default:
+		return "control"
+	}
+}
+
+func relayDebugInternalExchangeSide(direction string) string {
+	if strings.EqualFold(strings.TrimSpace(direction), "gateway_to_relay") {
+		return "gateway"
+	}
+	return "relay"
+}
+
+func HeaderMapFromRequest(req *fasthttp.Request) map[string]string {
+	if req == nil {
+		return nil
+	}
+	headers := map[string]string{}
+	req.Header.VisitAll(func(k, v []byte) {
+		headers[string(k)] = string(v)
+	})
+	return headers
+}
+
+func HeaderMapFromResponse(resp *fasthttp.Response) map[string]string {
+	if resp == nil {
+		return nil
+	}
+	headers := map[string]string{}
+	resp.Header.VisitAll(func(k, v []byte) {
+		headers[string(k)] = string(v)
+	})
+	return headers
+}
+
+func relayDebugSanitizeHeaderMap(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for key, value := range headers {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if lower == "authorization" ||
+			lower == "cookie" ||
+			lower == "set-cookie" ||
+			lower == "x-uapi-internal-secret" ||
+			lower == "x-uapi-signature" ||
+			strings.Contains(lower, "token") ||
+			strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "credential") {
+			out[key] = "[redacted]"
+			continue
+		}
+		out[key] = value
+	}
+	return out
 }

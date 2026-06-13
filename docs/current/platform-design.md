@@ -14,8 +14,10 @@ UAPI 由控制面、Gateway、Relay 和前端组成：
 ## 代码结构
 
 ```text
-cmd/uapi/                 程序入口
-internal/server/          fasthttp 服务、路由、运行模式分发
+cmd/uapi-gateway/         Gateway + embedded Web 程序入口
+cmd/uapi-relay/           Relay 程序入口
+internal/server/          Gateway fasthttp 服务和路由
+internal/relayserver/     Relay 内部 HTTP 服务
 internal/gateway/         Gateway 鉴权、策略、模型列表、调度、反向代理
 internal/relay/           Relay 执行、计费、并发、流式、WS、运行时配置
 internal/relay/provider/  上游适配器、协议 schema、IR 转换
@@ -34,7 +36,6 @@ docs/                     项目文档和外部 API reference
 
 `config.Load` 会在配置文件不存在或 secret 缺失时自动生成强 secret 并写回文件。关键配置：
 
-- `server.mode`: `all`、`gateway`、`relay`。
 - `server.max_body_size_mb`: 默认 256。
 - `server.stream_idle_timeout_seconds`: 默认 1800。
 - `security.jwt_secret`: JWT secret，至少 32 字符。
@@ -45,7 +46,7 @@ docs/                     项目文档和外部 API reference
 - `ws.max_message_size_mb`: 默认 256。
 - `logging.level`: 默认 `info`。
 
-`server.mode: relay` 时必须设置 `gateway.require_internal: true`、`gateway.control_url` 和非占位 UUID 的 `gateway.relay_node_id`。
+`uapi-relay` 启动时必须设置 `gateway.require_internal: true`、`gateway.control_url` 和非占位 UUID 的 `gateway.relay_node_id`。
 
 ## 数据模型
 
@@ -83,7 +84,7 @@ PolicyUsageWindow, UsageEvent, SystemSetting
 - 模型列表也接受 Anthropic SDK 常用的 `x-api-key`，但不能同时依赖匿名访问。
 - Gateway 会校验 key 是否启用、是否过期、IP 白名单、模型限制和 endpoint permission。
 
-Remote Relay 内部请求使用 HMAC 签名；`/internal/relay/*` 控制接口使用 `X-UAPI-Internal-Secret`。
+Gateway 到 Relay 的 `/internal/execute` 使用 HMAC 签名；Relay 到 Gateway 的 `/internal/config`、`/internal/usage`、`/internal/account`、`/internal/dumps` 使用 `X-UAPI-Internal-Secret`。
 
 ## 套餐、策略和计费
 

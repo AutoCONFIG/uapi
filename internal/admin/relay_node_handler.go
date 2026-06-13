@@ -81,6 +81,7 @@ func (h *Handler) createRelayNode(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditCreateCtx(h.db, "relay_node", node.ID, h.getAdminUser(ctx), ctx, map[string]interface{}{"name": node.Name, "base_url": node.BaseURL, "weight": node.Weight, "max_concurrency": node.MaxConcurrency})
+	h.notifyRelayReloadAsync(node.ID.String())
 	h.jsonResponse(ctx, 200, node)
 }
 
@@ -161,6 +162,7 @@ func (h *Handler) updateRelayNode(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditUpdateCtx(h.db, "relay_node", id, h.getAdminUser(ctx), ctx, updates)
+	h.notifyRelayReloadAsync(id.String())
 	h.jsonResponse(ctx, 200, existing)
 }
 
@@ -184,6 +186,7 @@ func (h *Handler) deleteRelayNode(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	auditDeleteCtx(h.db, "relay_node", id, h.getAdminUser(ctx), ctx, nil)
+	h.notifyRelayReloadAsync(id.String())
 	h.jsonResponse(ctx, 200, map[string]interface{}{"deleted": true})
 }
 

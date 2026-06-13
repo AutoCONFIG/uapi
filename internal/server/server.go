@@ -3,11 +3,13 @@ package server
 import (
 	"crypto/subtle"
 	"fmt"
+	"io/fs"
+	"mime"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/AutoCONFIG/uapi/internal/admin"
-	"github.com/AutoCONFIG/uapi/internal/appsettings"
 	"github.com/AutoCONFIG/uapi/internal/auth"
 	"github.com/AutoCONFIG/uapi/internal/config"
 	"github.com/AutoCONFIG/uapi/internal/db"
@@ -26,24 +28,28 @@ type Server struct {
 	db             *gorm.DB
 	pools          *relay.PoolManager
 	billing        *relay.BillingService
-	relayer        *relay.Relayer
 	gateway        *gateway.Gateway
 	affinity       *relay.AffinityCache
 	adminHandler   *admin.Handler
 	oauthIdle      *admin.OAuthIdleMaintainer
 	userHandler    *user.Handler
-	wsHandler      *relay.WSHandler
 	router         *Router
 	quotaScheduler *quota.Scheduler
+	webFS          fs.FS
 }
 
-func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billing *relay.BillingService, userSvc *user.Service, cfgPath string) *Server {
+type Option func(*Server)
+
+func WithWebFS(webFS fs.FS) Option {
+	return func(s *Server) {
+		s.webFS = webFS
+	}
+}
+
+func NewGateway(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billing *relay.BillingService, userSvc *user.Service, cfgPath string, opts ...Option) *Server {
 	affinity := relay.NewAffinityCache()
 	cacheTTL, _ := time.ParseDuration(cfg.Gateway.CacheTTL)
-	pullInterval, _ := time.ParseDuration(cfg.Gateway.ConfigPullInterval)
 
-	// Create a single shared ConcurrencyLimiter for both gateway and relay in "all" mode.
-	// Always create one (limit 0 = unlimited), so it's never nil.
 	concLimiter := relay.NewConcurrencyLimiter(cfg.Server.ConcurrencyLimit)
 
 	s := &Server{
@@ -53,6 +59,9 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 		pools:    pools,
 		billing:  billing,
 		affinity: affinity,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.quotaScheduler = quota.NewScheduler(database)
 	// Set up quota bucket reset auto-recovery hook
@@ -85,46 +94,14 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 			}
 		}
 	})
-	if cfg.Server.Mode == "all" || cfg.Server.Mode == "relay" {
-		s.relayer = relay.NewRelayer(database, pools, billing, affinity, cfg.Server.ConcurrencyLimit, cfg.Gateway.InternalSecret, cfg.Gateway.RequireInternal, cfg.Gateway.ControlURL, relay.WithConcurrencyLimiter(concLimiter), relay.WithTrustedProxies(cfg.Security.TrustedProxies), relay.WithStreamIdleTimeout(time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second))
-		s.relayer.SetQuotaScheduler(s.quotaScheduler)
-		// Load large payload threshold from database settings
-		largePayloadThresholdMB := appsettings.GetInt(database, appsettings.LargePayloadThresholdMB, 256)
-		s.relayer.SetLargePayloadThreshold(largePayloadThresholdMB)
-		s.relayer.StartConfigPuller(cfg.Gateway.RelayNodeID, pullInterval)
-	}
-	if cfg.Server.Mode == "all" || cfg.Server.Mode == "gateway" {
-		fallback := unavailableRelay
-		if s.relayer != nil {
-			fallback = s.relayer.HandleRelay
-		}
-		s.gateway = gateway.New(database, billing, fallback, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second, gateway.WithLocalFirst(cfg.Server.Mode == "all"))
-		refreshPool := makeRefreshPool(database, pools, func() {
-			if s.relayer != nil {
-				s.relayer.InvalidateChannelCache()
-			}
-		})
-		s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools, func() {
-			if s.relayer != nil {
-				s.relayer.InvalidateChannelCache()
-			}
-		}))
-		s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
-		if s.relayer != nil {
-			s.adminHandler.SetAccountRecovery(s.relayer)
-			s.adminHandler.SetLargePayloadThresholdUpdater(s.relayer)
-		}
-		s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
-		s.adminHandler.OAuthIdle = s.oauthIdle
-		if s.relayer != nil {
-			s.relayer.SetOAuthRefreshHook(s.oauthIdle.ScheduleAccountID)
-		}
-		s.userHandler = user.NewHandler(userSvc)
-		s.userHandler.SetQueueStatusFunc(concLimiter.PerTokenStats)
-	}
-	if cfg.Server.Mode == "all" && s.relayer != nil && database != nil {
-		s.wsHandler = relay.NewWSHandler(database, billing, s.relayer, cfg.WS)
-	}
+	s.gateway = gateway.New(database, billing, unavailableRelay, cfg.Gateway.InternalSecret, cfg.Gateway.GatewayID, concLimiter, cacheTTL, cfg.Security.TrustedProxies, time.Duration(cfg.Server.StreamIdleTimeoutSeconds)*time.Second)
+	refreshPool := makeRefreshPool(database, pools, nil)
+	s.adminHandler = admin.NewHandler(database, cfg, cfgPath, refreshPool, makeRemovePool(pools, nil))
+	s.adminHandler.SetQuotaScheduler(s.quotaScheduler)
+	s.oauthIdle = admin.StartOAuthIdleMaintenance(database, refreshPool)
+	s.adminHandler.OAuthIdle = s.oauthIdle
+	s.userHandler = user.NewHandler(userSvc)
+	s.userHandler.SetQueueStatusFunc(concLimiter.PerTokenStats)
 	s.setupRoutes()
 	return s
 }
@@ -132,7 +109,7 @@ func New(cfg *config.Config, database *gorm.DB, pools *relay.PoolManager, billin
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
 	maxBodySize := s.cfg.Server.MaxBodySizeMB * 1024 * 1024
-	logger.Infof("server", "server listening", logger.F("addr", addr), logger.F("mode", s.cfg.Server.Mode), logger.F("max_body_size_mb", s.cfg.Server.MaxBodySizeMB))
+	logger.Infof("server", "gateway listening", logger.F("addr", addr), logger.F("max_body_size_mb", s.cfg.Server.MaxBodySizeMB))
 
 	server := &fasthttp.Server{
 		Handler:            s.handler(),
@@ -149,9 +126,6 @@ func (s *Server) Close() {
 	if s.oauthIdle != nil {
 		s.oauthIdle.Stop()
 	}
-	if s.wsHandler != nil {
-		s.wsHandler.Close()
-	}
 }
 
 func (s *Server) handler() fasthttp.RequestHandler {
@@ -161,8 +135,12 @@ func (s *Server) handler() fasthttp.RequestHandler {
 		start := time.Now()
 		path := string(ctx.Path())
 		method := string(ctx.Method())
+		debugTrace := startGatewayDebugDump(ctx, method, path, start)
 		if path != "/healthz" {
 			defer func() {
+				if debugTrace != nil {
+					debugTrace.Finish(ctx)
+				}
 				logger.Debugf("server.request", "request completed",
 					logger.F("method", method),
 					logger.F("path", path),
@@ -188,15 +166,7 @@ func (s *Server) handler() fasthttp.RequestHandler {
 
 		// Relay paths — shortest path, no router/middleware
 		if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") {
-			if s.wsHandler != nil && path == "/v1/responses" && isWebSocketUpgrade(ctx) {
-				s.wsHandler.HandleUpgrade(ctx)
-				return
-			}
-			if s.cfg.Server.Mode == "relay" {
-				s.relayer.HandleRelay(ctx)
-			} else {
-				s.gateway.Handle(ctx)
-			}
+			s.gateway.Handle(ctx)
 			return
 		}
 
@@ -208,6 +178,9 @@ func (s *Server) handler() fasthttp.RequestHandler {
 		}
 		h, params := s.router.Lookup(method, path)
 		if h == nil {
+			if s.serveWeb(ctx, method, path) {
+				return
+			}
 			ctx.SetStatusCode(404)
 			ctx.SetBodyString(`{"code":404,"message":"not found"}`)
 			return
@@ -219,11 +192,78 @@ func (s *Server) handler() fasthttp.RequestHandler {
 	}
 }
 
-func (s *Server) setupRoutes() {
-	if s.cfg.Server.Mode == "relay" {
-		s.router = NewRouter()
-		return
+func (s *Server) serveWeb(ctx *fasthttp.RequestCtx, method, requestPath string) bool {
+	if s.webFS == nil {
+		return false
 	}
+	if method != fasthttp.MethodGet && method != fasthttp.MethodHead {
+		return false
+	}
+	if isReservedWebPath(requestPath) {
+		return false
+	}
+	fileName := webFileName(requestPath)
+	body, contentType, ok := readWebFile(s.webFS, fileName)
+	if !ok && !strings.HasSuffix(fileName, "/index.html") {
+		body, contentType, ok = readWebFile(s.webFS, path.Join(fileName, "index.html"))
+	}
+	if !ok {
+		body, contentType, ok = readWebFile(s.webFS, "index.html")
+	}
+	if !ok {
+		return false
+	}
+	ctx.SetContentType(contentType)
+	ctx.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
+	ctx.Response.Header.Set("Pragma", "no-cache")
+	ctx.Response.Header.Set("Expires", "0")
+	if method != fasthttp.MethodHead {
+		ctx.SetBody(body)
+	}
+	return true
+}
+
+func isReservedWebPath(requestPath string) bool {
+	return strings.HasPrefix(requestPath, "/api/") ||
+		strings.HasPrefix(requestPath, "/internal/") ||
+		strings.HasPrefix(requestPath, "/v1/") ||
+		strings.HasPrefix(requestPath, "/v1beta/") ||
+		requestPath == "/v1" ||
+		requestPath == "/v1beta"
+}
+
+func webFileName(requestPath string) string {
+	clean := path.Clean("/" + strings.TrimSpace(requestPath))
+	if clean == "/" || clean == "." {
+		return "index.html"
+	}
+	name := strings.TrimPrefix(clean, "/")
+	if strings.HasSuffix(requestPath, "/") {
+		return path.Join(name, "index.html")
+	}
+	if path.Ext(name) == "" {
+		return path.Join(name, "index.html")
+	}
+	return name
+}
+
+func readWebFile(webFS fs.FS, name string) ([]byte, string, bool) {
+	name = path.Clean(strings.TrimPrefix(name, "/"))
+	if name == "." || strings.HasPrefix(name, "../") {
+		return nil, "", false
+	}
+	body, err := fs.ReadFile(webFS, name)
+	if err != nil {
+		return nil, "", false
+	}
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return body, contentType, true
+}
+
+func (s *Server) setupRoutes() {
 	r := NewRouter()
 
 	// Admin auth (no JWT required)
@@ -234,9 +274,10 @@ func (s *Server) setupRoutes() {
 	r.GET("/api/public/settings", s.adminHandler.HandlePublicSettings)
 	r.GET("/api/public/wallpaper", s.adminHandler.HandlePublicWallpaper)
 	r.GET("/api/admin/channels/oauth/callback", s.adminHandler.OAuthCallback)
-	r.GET("/internal/relay/config", s.handleInternalAuth(s.adminHandler.RelayConfig))
-	r.POST("/internal/relay/usage-events", s.handleInternalAuth(s.adminHandler.UsageEvent))
-	r.POST("/internal/relay/account-update", s.handleInternalAuth(s.adminHandler.RelayAccountUpdate))
+	r.GET("/internal/config", s.handleInternalAuth(s.adminHandler.RelayConfig))
+	r.POST("/internal/usage", s.handleInternalAuth(s.adminHandler.UsageEvent))
+	r.POST("/internal/account", s.handleInternalAuth(s.adminHandler.RelayAccountUpdate))
+	r.POST("/internal/dumps", s.handleInternalAuth(s.adminHandler.RemoteDebugDumps))
 
 	// Admin CRUD (JWT checked inside handleAdminAuth + individual handlers)
 	r.GET("/api/admin/dashboard", s.handleAdminAuth(s.adminHandler.HandleDashboard))

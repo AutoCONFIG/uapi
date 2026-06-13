@@ -1,52 +1,77 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: uapi-db
+    container_name: uapi-db-dev
     restart: unless-stopped
     environment:
       POSTGRES_USER: uapi
       POSTGRES_PASSWORD: uapi_dev
       POSTGRES_DB: uapi
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata-dev:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U uapi -d uapi"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  uapi:
+  gateway:
+    image: uapi-gateway:dev
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: uapi-gateway
+      dockerfile: Dockerfile.gateway
+    container_name: uapi-gateway-dev
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      UAPI_RELAY_DEBUG_DUMP_DIR: /app/debug-dumps
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.gateway.yaml:/app/config.yaml:ro
       - ./assets:/app/assets
       - ./debug-dumps:/app/debug-dumps
-    expose:
-      - "8080"
+    ports:
+      - "127.0.0.1:1240:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
-  web:
+  relay:
+    image: uapi-relay:dev
     build:
-      context: ./web
-      dockerfile: Dockerfile
-    container_name: uapi-web
+      context: .
+      dockerfile: Dockerfile.relay
+    container_name: uapi-relay-dev
     restart: unless-stopped
     depends_on:
-      - uapi
+      gateway:
+        condition: service_healthy
+    volumes:
+      - ./config.relay.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: uapi-nginx-dev
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - ./server/dev/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "80:80"
 
 volumes:
-  pgdata:
+  pgdata-dev:
 
 networks:
   default:
-    name: uapi-net
+    name: uapi-dev-net

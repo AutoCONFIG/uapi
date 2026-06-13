@@ -1,0 +1,13 @@
+services:
+  relay:
+    image: ghcr.io/autoconfig/uapi-relay:latest
+    container_name: uapi-relay-2
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:8082:8081"
+
+networks:
+  default:
+    name: uapi-relay-2-net

@@ -1,5 +1,4 @@
 server:
-  mode: "gateway"
   host: "0.0.0.0"
   port: 8080
   max_body_size_mb: 256
@@ -26,6 +25,14 @@ gateway:
   control_url: ""
   relay_node_id: ""
   config_pull_interval: "5s"
+
+debug_dump:
+  enabled: false
+  mode: "local"
+  dir: "/app/debug-dumps"
+  max_entries: 7
+  accept_remote: true
+  max_upload_bytes_mb: 16
 
 ws:
   host: ""
