@@ -37,12 +37,11 @@ const (
 )
 
 type Gateway struct {
-	db         *gorm.DB
-	billing    *relay.BillingService
-	fallback   fasthttp.RequestHandler
-	client     *fasthttp.Client
-	limiter    *relay.ConcurrencyLimiter
-	localFirst bool
+	db                      *gorm.DB
+	billing                 *relay.BillingService
+	relayUnavailableHandler fasthttp.RequestHandler
+	client                  *fasthttp.Client
+	limiter                 *relay.ConcurrencyLimiter
 
 	internalSecret    string
 	gatewayID         string
@@ -196,15 +195,7 @@ type relayRequest struct {
 	MaxTokens int    `json:"max_tokens,omitempty"`
 }
 
-type Option func(*Gateway)
-
-func WithLocalFirst(localFirst bool) Option {
-	return func(g *Gateway) {
-		g.localFirst = localFirst
-	}
-}
-
-func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string, streamIdleTimeout time.Duration, opts ...Option) *Gateway {
+func New(database *gorm.DB, billing *relay.BillingService, relayUnavailableHandler fasthttp.RequestHandler, internalSecret, gatewayID string, concLimiter *relay.ConcurrencyLimiter, cacheTTL time.Duration, trustedProxies []string, streamIdleTimeout time.Duration) *Gateway {
 	if cacheTTL <= 0 {
 		cacheTTL = defaultCacheTTL
 	}
@@ -215,16 +206,16 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 		streamIdleTimeout = 1800 * time.Second
 	}
 	g := &Gateway{
-		db:                database,
-		billing:           billing,
-		fallback:          fallback,
-		cacheTTL:          cacheTTL,
-		internalSecret:    internalSecret,
-		gatewayID:         gatewayID,
-		limiter:           concLimiter,
-		trustedProxies:    trustedProxies,
-		streamIdleTimeout: streamIdleTimeout,
-		tokenCache:        newTokenLRUCache(defaultTokenCacheSize),
+		db:                      database,
+		billing:                 billing,
+		relayUnavailableHandler: relayUnavailableHandler,
+		cacheTTL:                cacheTTL,
+		internalSecret:          internalSecret,
+		gatewayID:               gatewayID,
+		limiter:                 concLimiter,
+		trustedProxies:          trustedProxies,
+		streamIdleTimeout:       streamIdleTimeout,
+		tokenCache:              newTokenLRUCache(defaultTokenCacheSize),
 		client: &fasthttp.Client{
 			ReadTimeout:                   0,
 			WriteTimeout:                  30 * time.Second,
@@ -233,9 +224,6 @@ func New(database *gorm.DB, billing *relay.BillingService, fallback fasthttp.Req
 			NoDefaultUserAgentHeader:      true,
 			DisableHeaderNamesNormalizing: true,
 		},
-	}
-	for _, opt := range opts {
-		opt(g)
 	}
 	return g
 }
@@ -250,11 +238,6 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		g.handleGeminiModels(ctx)
 		return
 	}
-	if g.localFirst && g.fallback != nil {
-		g.fallback(ctx)
-		return
-	}
-
 	body := ctx.PostBody()
 	var req relayRequest
 	_ = json.Unmarshal(body, &req)
@@ -298,7 +281,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	routeReq := channelcap.AnalyzeJSON(gatewayCapabilityKind(path), body)
 	route, releaseNode, ok := g.pickRoute(req.Model, routeReq)
 	if !ok {
-		g.fallback(ctx)
+		g.handleRelayUnavailable(ctx)
 		return
 	}
 	node := route.Node
@@ -392,7 +375,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 			Latency:        time.Since(start),
 		})
 		fasthttp.ReleaseResponse(upResp)
-		logger.Warnf("gateway.proxy", "relay proxy failed, trying local fallback", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
+		logger.Warnf("gateway.proxy", "relay proxy failed", logger.F("node", node.Name), logger.F("url", node.BaseURL), logger.Err(err))
 		releaseNode(true)
 		releaseNode = nil
 		if isDNSError(err) {
@@ -400,15 +383,10 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		}
 		if precharged {
 			if err := g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model); err != nil {
-				logger.Warnf("gateway.billing", "refund before local fallback failed", logger.F("token_id", tokenID), logger.Err(err))
+				logger.Warnf("gateway.billing", "refund after relay proxy failure failed", logger.F("token_id", tokenID), logger.Err(err))
 			}
 		}
-		// Fallback to local relayer when external relay fails
-		if g.fallback != nil {
-			g.fallback(ctx)
-			return
-		}
-		ctx.Error(`{"error":"relay node unavailable"}`, fasthttp.StatusBadGateway)
+		g.handleRelayUnavailable(ctx)
 		return
 	}
 
@@ -497,6 +475,14 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	fasthttp.ReleaseResponse(upResp)
 	ctx.SetBody(bodyCopy)
 	logProxy(node.Name, start, ctx.Response.StatusCode())
+}
+
+func (g *Gateway) handleRelayUnavailable(ctx *fasthttp.RequestCtx) {
+	if g.relayUnavailableHandler != nil {
+		g.relayUnavailableHandler(ctx)
+		return
+	}
+	ctx.Error(`{"error":"relay node unavailable"}`, fasthttp.StatusBadGateway)
 }
 
 func (g *Gateway) doRelayRequest(req *fasthttp.Request, resp *fasthttp.Response) (err error) {
