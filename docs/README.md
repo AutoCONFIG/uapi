@@ -4,12 +4,11 @@
 
 ## 阅读顺序
 
-1. [current/handoff.md](current/handoff.md)：当前实现概览、运行模式、命令和已知边界。
-2. [current/platform-design.md](current/platform-design.md)：后端架构、数据模型、鉴权、计费和协议转换。
-3. [current/gateway-relay.md](current/gateway-relay.md)：Gateway/Relay 分工、调度、配置同步和远程 Relay 行为。
-4. [current/frontend.md](current/frontend.md)：前端路由、页面职责和后端 API 对齐。
-5. [current/oauth-channels.md](current/oauth-channels.md)：OAuth 渠道、支持的 provider 和刷新规则。
-6. [deployment/nginx.md](deployment/nginx.md)：单机、Gateway/Relay、反向代理部署说明。
+1. [current/platform-design.md](current/platform-design.md)：后端架构、数据模型、鉴权、计费和协议转换。
+2. [current/gateway-relay.md](current/gateway-relay.md)：Gateway/Relay 分工、调度、通信路径和远程 Relay 行为。
+3. [current/frontend.md](current/frontend.md)：前端路由、页面职责和后端 API 对齐。
+4. [current/oauth-channels.md](current/oauth-channels.md)：OAuth 渠道、支持的 provider 和刷新规则。
+5. [deployment/nginx.md](deployment/nginx.md)：Gateway/Relay、反向代理和公网传输部署说明。
 
 ## 目录说明
 

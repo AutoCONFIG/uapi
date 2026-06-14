@@ -9,30 +9,74 @@ Gateway:
 - Serves embedded Web UI.
 - Serves admin/user API.
 - Accepts user `/v1/*` and `/v1beta/*` requests.
-- Authenticates API keys, applies policy, precharges usage, chooses Relay node/channel/account.
-- Calls Relay through `POST /internal/execute`.
+- Authenticates API keys, applies access policy, precharges usage, and owns billing.
+- Owns channel, account, Relay node, and node-channel binding management.
+- Chooses Relay node, channel, and account for each request.
+- Calls Relay through the original user API path, for example `POST /v1/responses`.
 - Receives Relay config, usage, and account update callbacks.
+- Stores PostgreSQL state and central debug dumps.
 
 Relay:
 
-- Does not expose user `/v1` APIs.
+- Serves signed Gateway execution requests on `/v1/*` and `/v1beta/*`.
 - Does not connect to PostgreSQL.
 - Pulls assigned runtime config from Gateway.
 - Executes upstream requests and streams responses back to Gateway.
+- Owns upstream authentication, request conversion, passthrough, response conversion, streaming normalization, and upstream error classification.
+- May perform execution-time account/channel failover, then reports the final result back to Gateway.
 - Reports usage and OAuth account updates back to Gateway.
 
 ## Request Flow
 
 ```text
 Client  -> Gateway: /v1/* or /v1beta/*
-Gateway -> Relay:   POST /internal/execute
+Gateway -> Relay:   same /v1/* or /v1beta/* path
 Relay   -> Upstream provider
 Relay   -> Gateway: response stream
 Relay   -> Gateway: POST /internal/usage
 Relay   -> Gateway: POST /internal/dumps (optional async debug dump upload)
 ```
 
-Gateway signs execution requests with HMAC. The original user URI is stored in `X-UAPI-Original-URI` and covered by the signature. Relay verifies the signature on `/internal/execute`, restores the original URI internally, then uses the existing Relay execution engine.
+Gateway signs execution requests with HMAC. Relay verifies the signature on the original business path, then uses that path directly for request type and protocol detection.
+
+## Communication Model
+
+Data plane:
+
+```text
+Client -> Gateway: /v1/* or /v1beta/*
+Gateway -> Relay: same /v1/* or /v1beta/* path, HMAC signed
+Relay -> Upstream: provider protocol
+```
+
+Control plane:
+
+```text
+Relay -> Gateway: /internal/config, /internal/usage, /internal/account, /internal/dumps
+Gateway -> Relay: /internal/reload
+```
+
+Public network links should use HTTPS. Nginx should restrict Relay business paths and internal paths to Gateway IPs. Nginx can advertise HTTP/3 and HTTP/2 so external clients try H3 first and fall back automatically. Gateway -> Relay is initiated by the Gateway application, so application-level H3-first/H2-fallback requires a future dedicated Relay client transport.
+
+## HTTP/SSE and WebSocket
+
+Normal model APIs use the original HTTP path all the way through Gateway and Relay:
+
+```text
+Client  -> Gateway: POST /v1/responses
+Gateway -> Relay:   POST /v1/responses
+Relay   -> Upstream: HTTP/SSE or provider HTTP protocol
+```
+
+WebSocket is not the default Gateway -> Relay transport. In the current split runtime, normal Gateway forwarding is HTTP/SSE. Provider-native WebSocket/realtime support should be treated as a separate endpoint capability, and it is only appropriate when the downstream client also initiates a WebSocket upgrade:
+
+```text
+Client  -> Gateway: GET /v1/... with Upgrade: websocket
+Gateway -> Relay:   same WebSocket path after auth, policy, billing, routing, and HMAC signing
+Relay   -> Upstream: provider WebSocket protocol when that provider endpoint requires it
+```
+
+Relay-side WebSocket code must not be exposed directly to users in split deployments; Gateway remains the only public API entry. If an upstream supports WebSocket as an optional alternative to HTTP/SSE, ordinary `/v1/responses` and `/v1/chat/completions` should keep using HTTP/SSE. HTTP-to-WebSocket bridging is avoided unless a provider has no HTTP-compatible path, because it weakens status/header semantics, complicates cancellation and dump correlation, and does not provide a general performance win for single request/response calls.
 
 ## Internal Paths
 
@@ -48,7 +92,8 @@ POST /internal/dumps
 Gateway -> Relay:
 
 ```text
-POST /internal/execute
+POST /v1/*
+POST /v1beta/*
 POST /internal/reload
 ```
 
@@ -61,7 +106,7 @@ Relay supports remote debug dumps for split deployments:
 - Relay uses `debug_dump.mode: "remote"` and does not write dump files to local disk.
 - Request traces are collected in memory, packed as `tar.gz`, and queued after terminal relay events.
 - Internal Gateway/Relay exchanges are also captured when debug dump is enabled:
-  `Gateway -> Relay /internal/execute` is stored on Gateway, while
+  `Gateway -> Relay` execution requests are stored on Gateway with their original API path, while
   `Relay -> Gateway /internal/config`, `/internal/usage`, and `/internal/account`
   are uploaded back to Gateway.
 - Upload is best-effort and asynchronous through `POST /internal/dumps`; a full queue or upload failure drops the dump without blocking the user request.

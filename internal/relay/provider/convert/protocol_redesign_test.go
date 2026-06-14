@@ -1579,6 +1579,74 @@ func TestResponsesToAnthropicPreservesCacheControlOnSupportedBlocks(t *testing.T
 	}
 }
 
+func TestResponsesPDFInputFileConvertsToAnthropicDocumentWithoutResponsesFields(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":[{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"summarize"},
+			{"type":"input_file","file_data":"data:application/pdf;base64,AA==","filename":"paper.pdf","file_type":"application/pdf","mime_type":"application/pdf"}
+		]}]
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{
+		`"messages"`,
+		`"type":"document"`,
+		`"media_type":"application/pdf"`,
+		`"data":"AA=="`,
+		`"title":"paper.pdf"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Anthropic document projection missing %s:\n%s", want, converted)
+		}
+	}
+	for _, rejected := range []string{`"input"`, `"input_file"`, `"file_type"`, `"mime_type"`} {
+		if strings.Contains(text, rejected) {
+			t.Fatalf("Responses-only field leaked into Anthropic request (%s):\n%s", rejected, converted)
+		}
+	}
+}
+
+func TestResponsesImplicitMessageImageConvertsToAnthropicImageWithoutResponsesFields(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"include":["reasoning.encrypted_content"],
+		"input":[
+			{"role":"developer","content":"extract text"},
+			{"role":"user","content":[
+				{"type":"input_image","image_url":"data:image/png;base64,AA=="}
+			]}
+		],
+		"store":false,
+		"stream":true
+	}`)
+	converted, err := convert.ConvertRequest(convert.FormatOpenAIResponses, convert.FormatAnthropic, body)
+	if err != nil {
+		t.Fatalf("Responses -> Anthropic: %v", err)
+	}
+	text := string(converted)
+	for _, want := range []string{
+		`"system"`,
+		`"extract text"`,
+		`"messages"`,
+		`"type":"image"`,
+		`"media_type":"image/png"`,
+		`"data":"AA=="`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Anthropic image projection missing %s:\n%s", want, converted)
+		}
+	}
+	for _, rejected := range []string{`"input"`, `"input_image"`, `"image_url"`, `"include"`, `"mime_type"`, `"store"`} {
+		if strings.Contains(text, rejected) {
+			t.Fatalf("Responses-only field leaked into Anthropic request (%s):\n%s", rejected, converted)
+		}
+	}
+}
+
 func TestOpenAIChatTopLevelCacheControlPreservedForAnthropicTarget(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-sonnet",

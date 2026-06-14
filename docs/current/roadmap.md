@@ -34,8 +34,9 @@
 - 分布式限流和分布式计费锁。
 - Redis 作为 Relay 热路径状态。
 - Relay 配置长连接推送。
+- Gateway -> Relay 独立 `RelayClient`，支持应用层优先 HTTP/3、失败退回 HTTP/2。
+- Provider-native WebSocket/realtime 桥接的完整支持矩阵和 dump 关联增强。
 - mTLS。
-- Gateway/Relay 跨节点 WebSocket relay。
 - usage event 和 OAuth account update 的持久重试队列。
 - 节点级凭据加密。
 - 在线支付。

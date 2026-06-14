@@ -346,9 +346,8 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseRequest(upReq)
 
 	clientIP := httputil.ClientIPForGatewayLog(ctx, g.trustedProxies)
-	originalURI := string(ctx.RequestURI())
 	if err := g.buildRequest(ctx, upReq, node.BaseURL, clientIP); err != nil {
-		fasthttp.ReleaseResponse(upResp)
+		releaseRelayResponse(upResp)
 		if precharged {
 			go g.billing.DBTransactionRefundPreConsume(tokenID, prechargedTokenPlanID, estimatedTokens, req.Model)
 		}
@@ -369,7 +368,6 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		RequestID:       uuid.NewString(),
 		ChannelID:       route.ChannelID.String(),
 		AccountID:       route.AccountID.String(),
-		OriginalURI:     originalURI,
 	}, time.Now()); err != nil {
 		fasthttp.ReleaseResponse(upResp)
 		if precharged {
@@ -380,12 +378,13 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 
 	start := time.Now()
-	if err := g.client.Do(upReq, upResp); err != nil {
+	relayEndpoint := string(upReq.URI().Path())
+	if err := g.doRelayRequest(upReq, upResp); err != nil {
 		relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
 			Direction:      "gateway_to_relay",
 			Method:         string(upReq.Header.Method()),
 			URL:            string(upReq.URI().FullURI()),
-			Endpoint:       "/internal/execute",
+			Endpoint:       relayEndpoint,
 			RequestHeaders: relay.HeaderMapFromRequest(upReq),
 			RequestBody:    upReq.Body(),
 			Err:            err,
@@ -421,12 +420,39 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	}
 
 	stream := upResp.BodyStream()
+	if stream != nil && upResp.StatusCode() >= 400 {
+		bodyCopy, readErr := io.ReadAll(stream)
+		if closer, ok := stream.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if readErr != nil {
+			bodyCopy = []byte(`{"error":"read relay error response failed"}`)
+		}
+		relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
+			Direction:       "gateway_to_relay",
+			Method:          string(upReq.Header.Method()),
+			URL:             string(upReq.URI().FullURI()),
+			Endpoint:        relayEndpoint,
+			RequestHeaders:  relay.HeaderMapFromRequest(upReq),
+			RequestBody:     upReq.Body(),
+			StatusCode:      upResp.StatusCode(),
+			ResponseHeaders: relay.HeaderMapFromResponse(upResp),
+			ResponseBody:    bodyCopy,
+			Err:             readErr,
+			StartedAt:       start,
+			Latency:         time.Since(start),
+		})
+		releaseRelayResponse(upResp)
+		ctx.SetBody(bodyCopy)
+		logProxy(node.Name, start, ctx.Response.StatusCode())
+		return
+	}
 	if stream != nil {
 		relay.RecordInternalExchangeDump(relay.InternalExchangeDump{
 			Direction:       "gateway_to_relay",
 			Method:          string(upReq.Header.Method()),
 			URL:             string(upReq.URI().FullURI()),
-			Endpoint:        "/internal/execute",
+			Endpoint:        relayEndpoint,
 			RequestHeaders:  relay.HeaderMapFromRequest(upReq),
 			RequestBody:     upReq.Body(),
 			StatusCode:      upResp.StatusCode(),
@@ -444,7 +470,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 			close: func() {
 				stopIdleTimeout()
 				rel(false)
-				fasthttp.ReleaseResponse(resp)
+				releaseRelayResponse(resp)
 			},
 		}, -1)
 		releaseNode = nil
@@ -459,7 +485,7 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 		Direction:       "gateway_to_relay",
 		Method:          string(upReq.Header.Method()),
 		URL:             string(upReq.URI().FullURI()),
-		Endpoint:        "/internal/execute",
+		Endpoint:        relayEndpoint,
 		RequestHeaders:  relay.HeaderMapFromRequest(upReq),
 		RequestBody:     upReq.Body(),
 		StatusCode:      upResp.StatusCode(),
@@ -471,6 +497,15 @@ func (g *Gateway) Handle(ctx *fasthttp.RequestCtx) {
 	fasthttp.ReleaseResponse(upResp)
 	ctx.SetBody(bodyCopy)
 	logProxy(node.Name, start, ctx.Response.StatusCode())
+}
+
+func (g *Gateway) doRelayRequest(req *fasthttp.Request, resp *fasthttp.Response) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("relay proxy panic: %v", recovered)
+		}
+	}()
+	return g.client.Do(req, resp)
 }
 
 type modelListResponse struct {
@@ -916,7 +951,7 @@ func isDNSError(err error) bool {
 }
 
 func (g *Gateway) buildRequest(ctx *fasthttp.RequestCtx, out *fasthttp.Request, baseURL, clientIP string) error {
-	target := strings.TrimRight(baseURL, "/") + "/internal/execute"
+	target := strings.TrimRight(baseURL, "/") + string(ctx.RequestURI())
 	if _, err := url.ParseRequestURI(target); err != nil {
 		return fmt.Errorf("invalid target URL: %w", err)
 	}
@@ -954,6 +989,13 @@ type releaseReader struct {
 	reader io.Reader
 	once   sync.Once
 	close  func()
+}
+
+func releaseRelayResponse(resp *fasthttp.Response) {
+	defer func() {
+		_ = recover()
+	}()
+	fasthttp.ReleaseResponse(resp)
 }
 
 func (r *releaseReader) Read(p []byte) (int, error) {

@@ -3,11 +3,22 @@
 Use separate domains for Gateway and Relay.
 
 ```text
-Client -> https://gateway.example.com
-Gateway -> https://relay-1.example.com/internal/execute
-Relay -> https://gateway.example.com/internal/config
-Relay -> https://gateway.example.com/internal/dumps
+Client  -> https://gateway.example.com
+Gateway -> https://relay-1.example.com/v1/... or /v1beta/...
+Relay   -> https://gateway.example.com/internal/config
+Relay   -> https://gateway.example.com/internal/dumps
 ```
+
+Recommended boundary:
+
+- Public client-to-Nginx links use HTTPS. Enable HTTP/3 and HTTP/2 on Nginx if available; clients can try H3 through Alt-Svc and automatically fall back to H2/H1.
+- Nginx -> local app can stay HTTP/1.1.
+- Gateway -> Relay data-plane requests are HMAC signed by the application.
+- Relay -> Gateway control-plane requests use `X-UAPI-Internal-Secret`.
+- Nginx allowlists should restrict Relay paths to Gateway IPs and Gateway `/internal/*` to Relay IPs.
+- WebSocket upgrade headers may be passed for future downstream WebSocket/realtime endpoints, but normal `/v1/*` data-plane calls remain HTTP/SSE.
+
+Current implementation note: Nginx can expose HTTP/3/HTTP/2 at the edge, but Gateway -> Relay is initiated by the Gateway application HTTP client. True application-level H3-first/H2-fallback for Gateway -> Relay requires a dedicated Relay client transport. Until then, keep Relay Nginx H3/H2 enabled for compatible clients and rely on the existing HTTPS + HMAC + allowlist security boundary. WebSocket is not a replacement transport for normal Gateway -> Relay forwarding, and split WS forwarding needs explicit Gateway support before being enabled.
 
 ## Gateway
 
@@ -27,6 +38,9 @@ server {
 
 server {
     listen 443 ssl http2;
+    # If your Nginx build supports QUIC/HTTP/3:
+    # listen 443 quic reuseport;
+    # add_header Alt-Svc 'h3=":443"; ma=86400' always;
     server_name gateway.example.com;
 
     ssl_certificate /etc/letsencrypt/live/gateway.example.com/fullchain.pem;
@@ -74,6 +88,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
     }
 
     location / {
@@ -90,6 +106,7 @@ server {
 ## Relay
 
 `uapi-relay` listens on `127.0.0.1:8081` in the compose examples. Relay should only be reachable by Gateway.
+If you copy the Relay server block into a separate Nginx config and keep the optional WebSocket headers, define the `map $http_upgrade $connection_upgrade` block in the `http` context as shown in the Gateway example.
 
 ```nginx
 server {
@@ -100,6 +117,9 @@ server {
 
 server {
     listen 443 ssl http2;
+    # If your Nginx build supports QUIC/HTTP/3:
+    # listen 443 quic reuseport;
+    # add_header Alt-Svc 'h3=":443"; ma=86400' always;
     server_name relay-1.example.com;
 
     ssl_certificate /etc/letsencrypt/live/relay-1.example.com/fullchain.pem;
@@ -129,13 +149,47 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    location /v1/ {
+        allow <GATEWAY_SERVER_PUBLIC_IP>;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+
+    location /v1beta/ {
+        allow <GATEWAY_SERVER_PUBLIC_IP>;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+
     location / {
         return 404;
     }
 }
 ```
 
-## HTTPS
+## Transport
 
 Use HTTPS for both directions:
 
@@ -145,7 +199,15 @@ Gateway -> Relay
 Relay -> Gateway
 ```
 
-Application-level internal auth is still required; TLS and Nginx allowlists are boundary protection.
+Application-level internal auth is still required; TLS and Nginx allowlists are boundary protection. WebSocket is not used for normal `/v1/*` data-plane requests because HTTP/SSE preserves status codes, headers, streaming, and dump visibility.
+
+WebSocket handling is provider-specific and should remain disabled for split deployments until Gateway-mediated WS forwarding is implemented:
+
+- Downstream clients must explicitly use a WebSocket/realtime path and send `Upgrade: websocket`.
+- Gateway still performs API-key auth, policy checks, billing setup, Relay selection, and HMAC signing before proxying to Relay.
+- Relay only connects to an upstream WebSocket when the selected provider endpoint requires or benefits from that protocol.
+- Relay WS entrypoints must not be exposed directly to public clients.
+- If the provider offers equivalent HTTP/SSE for a normal request, use HTTP/SSE.
 
 ## Remote Debug Dumps
 

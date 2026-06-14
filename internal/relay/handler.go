@@ -289,17 +289,6 @@ type relayRequest struct {
 func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
 	path := string(ctx.Path())
-	var internalClaims internalauth.Claims
-	var gatewayAuthenticated bool
-	if path == "/internal/execute" {
-		internalClaims, gatewayAuthenticated = internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
-		if !gatewayAuthenticated || strings.TrimSpace(internalClaims.OriginalURI) == "" {
-			ctx.Error(`{"error":"valid gateway signature required"}`, fasthttp.StatusUnauthorized)
-			return
-		}
-		ctx.Request.SetRequestURI(internalClaims.OriginalURI)
-		path = string(ctx.Path())
-	}
 	requestType := detectRelayRequestType(path)
 	if requestType == requestTypeUnsupported {
 		ctx.Error(`{"error":"unsupported route"}`, fasthttp.StatusBadRequest)
@@ -310,9 +299,7 @@ func (r *Relayer) HandleRelay(ctx *fasthttp.RequestCtx) {
 	clientFormat := requestType.clientFormat()
 
 	var token db.Token
-	if !gatewayAuthenticated {
-		internalClaims, gatewayAuthenticated = internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
-	}
+	internalClaims, gatewayAuthenticated := internalauth.VerifyRequest(ctx, r.internalSecret, time.Now())
 	if gatewayAuthenticated {
 		tokenID, err := uuid.Parse(internalClaims.TokenID)
 		if err != nil {
@@ -1012,6 +999,10 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			stopIdleTimeout()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			trace.Event("stream_result_bootstrap_error",
+				logger.F("status", fasthttp.StatusBadGateway),
+				logger.F("body_preview", compactLogBody(bodyCopy)),
+			)
 			r.refundOnError(ctx, token.ID.String(), estTokens, fasthttp.StatusBadGateway, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -1070,6 +1061,10 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			traceNoAlternativeChannel(trace, "stream_bootstrap_no_alternative_channel", bootstrapStatus, ch, nextErr)
+			trace.Event("stream_result_bootstrap_error",
+				logger.F("status", bootstrapStatus),
+				logger.F("body_preview", compactLogBody(bodyCopy)),
+			)
 			r.refundOnError(ctx, token.ID.String(), estTokens, bootstrapStatus, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -1131,6 +1126,10 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
 			traceNoAlternativeChannel(trace, "stream_bootstrap_terminal_no_alternative_channel", bootstrapStatus, ch, nextErr)
+			trace.Event("stream_result_bootstrap_error",
+				logger.F("status", bootstrapStatus),
+				logger.F("body_preview", compactLogBody(bodyCopy)),
+			)
 			r.refundOnError(ctx, token.ID.String(), estTokens, bootstrapStatus, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 
@@ -1139,6 +1138,10 @@ func (r *Relayer) handleStreamingAttempt(ctx *fasthttp.RequestCtx, token db.Toke
 			stopIdleTimeout()
 			fasthttp.ReleaseRequest(upReq)
 			fasthttp.ReleaseResponse(upResp)
+			trace.Event("stream_result_bootstrap_error",
+				logger.F("status", bootstrapStatus),
+				logger.F("body_preview", compactLogBody(bodyCopy)),
+			)
 			r.refundOnError(ctx, token.ID.String(), estTokens, bootstrapStatus, bodyCopy, ch, acc, model, true, start, clientFormat, claims, tokenPlanID)
 			return
 		}

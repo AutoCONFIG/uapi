@@ -62,20 +62,21 @@ func (s *Server) handler() fasthttp.RequestHandler {
 			ctx.Error(`{"error":"request body too large"}`, fasthttp.StatusRequestEntityTooLarge)
 			return
 		}
-		if method == fasthttp.MethodPost && path == "/internal/execute" {
-			s.handleExecute(ctx)
-			return
-		}
 		if method == fasthttp.MethodPost && path == "/internal/reload" {
 			s.handleReload(ctx)
 			return
 		}
-		ctx.SetStatusCode(fasthttp.StatusNotFound)
-		ctx.SetBodyString(`{"code":404,"message":"not found"}`)
+		if strings.HasPrefix(path, "/internal/") {
+			ctx.SetStatusCode(fasthttp.StatusNotFound)
+			ctx.SetBodyString(`{"code":404,"message":"not found"}`)
+			return
+		}
+		s.handleRelay(ctx)
+		return
 	}
 }
 
-func (s *Server) handleExecute(ctx *fasthttp.RequestCtx) {
+func (s *Server) handleRelay(ctx *fasthttp.RequestCtx) {
 	s.relayer.HandleRelay(ctx)
 }
 

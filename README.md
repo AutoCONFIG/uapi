@@ -5,7 +5,7 @@ Your Unified AI API Gateway.
 UAPI uses a strict Gateway / Relay split:
 
 - `uapi-gateway`: Web UI, admin/user API, API-key authentication, policy, billing, routing, and Gateway proxy.
-- `uapi-relay`: execution node for upstream providers. It does not expose user `/v1` APIs and does not connect to PostgreSQL.
+- `uapi-relay`: execution node for upstream providers. It accepts signed Gateway execution requests on `/v1/*` and `/v1beta/*` and does not connect to PostgreSQL.
 
 ## Features
 
@@ -14,6 +14,7 @@ UAPI uses a strict Gateway / Relay split:
 - Admin console for channels, accounts, relay nodes, policies, users, plans, logs, and settings.
 - Relay runtime config pulled from Gateway, with Gateway-triggered reload notifications.
 - Internal Gateway/Relay calls protected by HMAC/internal secret and intended to be IP-allowlisted at Nginx.
+- Normal request forwarding uses HTTP/SSE on the original API path. WebSocket is reserved as a provider-native realtime/Codex-style endpoint capability, and should only be enabled through Gateway-mediated forwarding when the downstream client also initiates a WebSocket upgrade.
 
 ## Quick Start
 
@@ -107,8 +108,11 @@ POST /internal/dumps
 Gateway calls Relay:
 
 ```text
-POST /internal/execute
+POST /v1/*
+POST /v1beta/*
 POST /internal/reload
 ```
+
+Normal `/v1/*` and `/v1beta/*` requests are not converted to WebSocket internally. If an upstream provider has an optional WebSocket protocol, Relay should only use it for matching downstream WebSocket/realtime paths after Gateway auth/routing support exists, while ordinary Responses/Chat requests stay on HTTP/SSE.
 
 See [docs/current/gateway-relay.md](docs/current/gateway-relay.md) and [docs/deployment/nginx.md](docs/deployment/nginx.md).

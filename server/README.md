@@ -29,6 +29,8 @@ Gateway accepts optional remote debug dumps under `./debug-dumps`. Relay nodes a
 
 `server/all` is still a split deployment: Gateway and Relay run as separate containers on one host. In Gateway admin, create a Relay Node with `base_url` set to `http://relay:8081` for this compose network.
 
+Normal Gateway -> Relay execution uses the original API paths such as `/v1/responses` and `/v1beta/models:generateContent`. WebSocket is not required by these compose examples. Relay WS entrypoints must not be exposed directly to public clients; provider-native WS should only be enabled later through Gateway-mediated forwarding.
+
 ## Start
 
 Single host:

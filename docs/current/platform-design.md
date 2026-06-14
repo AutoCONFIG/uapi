@@ -19,7 +19,7 @@ cmd/uapi-relay/           Relay 程序入口
 internal/server/          Gateway fasthttp 服务和路由
 internal/relayserver/     Relay 内部 HTTP 服务
 internal/gateway/         Gateway 鉴权、策略、模型列表、调度、反向代理
-internal/relay/           Relay 执行、计费、并发、流式、WS、运行时配置
+internal/relay/           Relay 执行、上游计量解析、并发、流式、provider-native WS/realtime、运行时配置
 internal/relay/provider/  上游适配器、协议 schema、IR 转换
 internal/admin/           管理 API、OAuth、导入导出、调度器
 internal/user/            用户 API
@@ -84,7 +84,7 @@ PolicyUsageWindow, UsageEvent, SystemSetting
 - 模型列表也接受 Anthropic SDK 常用的 `x-api-key`，但不能同时依赖匿名访问。
 - Gateway 会校验 key 是否启用、是否过期、IP 白名单、模型限制和 endpoint permission。
 
-Gateway 到 Relay 的 `/internal/execute` 使用 HMAC 签名；Relay 到 Gateway 的 `/internal/config`、`/internal/usage`、`/internal/account`、`/internal/dumps` 使用 `X-UAPI-Internal-Secret`。
+Gateway 到 Relay 的 `/v1/*`、`/v1beta/*` 等数据面请求使用 HMAC 签名；Relay 到 Gateway 的 `/internal/config`、`/internal/usage`、`/internal/account`、`/internal/dumps` 使用 `X-UAPI-Internal-Secret`。
 
 ## 套餐、策略和计费
 
@@ -149,6 +149,7 @@ POST /api/admin/channels/models/sync?id=<channel_id>
 - OpenAI-compatible Images/Audio/Embeddings/Moderations/Realtime HTTP/Video 只在明确支持的 provider 上处理。
 - Images generation/edit/variation 可转换到 Antigravity `requestType: "image_gen"`。
 - Audio、Embeddings、Moderations、Realtime、Video 目前只透传到 OpenAI-compatible 上游；其他 provider 返回 unsupported。
+- WebSocket 不作为普通 `/v1/*` Gateway -> Relay 内部传输。严格 split 部署下，Relay 不能把历史 WS 入口直接暴露给用户；后续只有在 Gateway 完成鉴权、策略、计费、路由和 HMAC 转发后，才允许作为 provider-native realtime/Codex 类专用能力启用。
 
 流式处理：
 

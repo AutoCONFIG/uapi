@@ -26,7 +26,6 @@ const (
 	HeaderRequestID       = "X-UAPI-Request-ID"
 	HeaderChannelID       = "X-UAPI-Channel-ID"
 	HeaderAccountID       = "X-UAPI-Account-ID"
-	HeaderOriginalURI     = "X-UAPI-Original-URI"
 )
 
 const MaxClockSkew = 5 * time.Minute
@@ -43,7 +42,6 @@ type Claims struct {
 	RequestID       string
 	ChannelID       string
 	AccountID       string
-	OriginalURI     string
 }
 
 func SignRequest(req *fasthttp.Request, secret string, claims Claims, now time.Time) error {
@@ -69,9 +67,6 @@ func SignRequest(req *fasthttp.Request, secret string, claims Claims, now time.T
 	req.Header.Set(HeaderRequestID, claims.RequestID)
 	req.Header.Set(HeaderChannelID, claims.ChannelID)
 	req.Header.Set(HeaderAccountID, claims.AccountID)
-	if claims.OriginalURI != "" {
-		req.Header.Set(HeaderOriginalURI, claims.OriginalURI)
-	}
 	sig := signature(string(req.Header.Method()), requestPath(req), timestamp, req.Body(), claims, secret)
 	req.Header.Set(HeaderSignature, sig)
 	return nil
@@ -105,7 +100,6 @@ func VerifyRequest(ctx *fasthttp.RequestCtx, secret string, now time.Time) (Clai
 		RequestID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderRequestID))),
 		ChannelID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderChannelID))),
 		AccountID:   strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderAccountID))),
-		OriginalURI: strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderOriginalURI))),
 	}
 	est, _ := strconv.Atoi(strings.TrimSpace(string(ctx.Request.Header.Peek(HeaderEstimatedTokens))))
 	claims.EstimatedTokens = est
@@ -118,7 +112,7 @@ func VerifyRequest(ctx *fasthttp.RequestCtx, secret string, now time.Time) (Clai
 }
 
 func StripHeaders(req *fasthttp.Request) {
-	for _, h := range []string{HeaderGatewayID, HeaderTimestamp, HeaderSignature, HeaderTokenID, HeaderTokenPlanID, HeaderUserID, HeaderModel, HeaderEstimatedTokens, HeaderPrecharged, HeaderClientIP, HeaderRequestID, HeaderChannelID, HeaderAccountID, HeaderOriginalURI} {
+	for _, h := range []string{HeaderGatewayID, HeaderTimestamp, HeaderSignature, HeaderTokenID, HeaderTokenPlanID, HeaderUserID, HeaderModel, HeaderEstimatedTokens, HeaderPrecharged, HeaderClientIP, HeaderRequestID, HeaderChannelID, HeaderAccountID} {
 		req.Header.Del(h)
 	}
 }
@@ -141,7 +135,6 @@ func signature(method, path, timestamp string, body []byte, claims Claims, secre
 		claims.RequestID,
 		claims.ChannelID,
 		claims.AccountID,
-		claims.OriginalURI,
 	}, "\n")
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
