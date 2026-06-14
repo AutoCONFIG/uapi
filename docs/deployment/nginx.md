@@ -234,7 +234,7 @@ WebSocket handling is provider-specific and should remain disabled for split dep
 
 ## Remote Debug Dumps
 
-Relay debug dumps are uploaded back to Gateway when enabled. Split `uapi-relay` deployments must either use `mode: "remote"` or keep debug dumps disabled; local dump mode is reserved for all-in-one or local development diagnostics.
+Relay debug dumps are uploaded back to Gateway when enabled. Production `uapi-relay` deployments should either use `mode: "remote"` or keep debug dumps disabled; Relay local dump mode is only for isolated developer diagnostics where the Relay filesystem is intentionally inspected directly.
 
 ```yaml
 # Gateway

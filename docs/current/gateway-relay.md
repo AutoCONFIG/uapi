@@ -97,6 +97,8 @@ POST /v1beta/*
 POST /internal/reload
 ```
 
+The split runtime does not use an internal execution wrapper. Do not route model execution through an internal control path; Gateway forwards the original business request path and Relay verifies that same path in the HMAC signature. Control paths are only for config, usage, account updates, dump upload, and reload notifications.
+
 `/internal/reload` is best-effort. If a reload notification fails, Relay still refreshes by periodic config pull.
 
 ## Debug Dumps
