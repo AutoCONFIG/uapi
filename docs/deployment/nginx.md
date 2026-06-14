@@ -16,7 +16,7 @@ Recommended boundary:
 - Gateway -> Relay data-plane requests are HMAC signed by the application.
 - Relay -> Gateway control-plane requests use `X-UAPI-Internal-Secret`.
 - Nginx allowlists should restrict Relay paths to Gateway IPs and Gateway `/internal/*` to Relay IPs.
-- WebSocket upgrade headers may be passed for future downstream WebSocket/realtime endpoints, but normal `/v1/*` data-plane calls remain HTTP/SSE.
+- WebSocket upgrade headers should only be passed on explicitly supported provider-native realtime endpoints; normal `/v1/*` data-plane calls remain HTTP/SSE.
 
 Current implementation note: Nginx can expose HTTP/3/HTTP/2 at the edge, but Gateway -> Relay is initiated by the Gateway application HTTP client. True application-level H3-first/H2-fallback for Gateway -> Relay requires a dedicated Relay client transport. Until then, keep Relay Nginx H3/H2 enabled for compatible clients and rely on the existing HTTPS + HMAC + allowlist security boundary. WebSocket is not a replacement transport for normal Gateway -> Relay forwarding, and split WS forwarding needs explicit Gateway support before being enabled.
 
@@ -64,7 +64,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location /v1/ {
+    location = /v1/responses {
         proxy_pass http://127.0.0.1:1240;
         proxy_http_version 1.1;
         proxy_buffering off;
@@ -78,6 +78,18 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
+    location /v1/ {
+        proxy_pass http://127.0.0.1:1240;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location /v1beta/ {
         proxy_pass http://127.0.0.1:1240;
         proxy_http_version 1.1;
@@ -88,8 +100,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
     }
 
     location / {
@@ -106,7 +116,7 @@ server {
 ## Relay
 
 `uapi-relay` listens on `127.0.0.1:8081` in the compose examples. Relay should only be reachable by Gateway.
-If you copy the Relay server block into a separate Nginx config and keep the optional WebSocket headers, define the `map $http_upgrade $connection_upgrade` block in the `http` context as shown in the Gateway example.
+If you copy the Relay server block into a separate Nginx config and enable a provider-native WebSocket/realtime endpoint, define the `map $http_upgrade $connection_upgrade` block in the `http` context as shown in the Gateway example and scope those headers to the exact realtime path.
 
 ```nginx
 server {
@@ -149,7 +159,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location /v1/ {
+    location = /v1/responses {
         allow <GATEWAY_SERVER_PUBLIC_IP>;
         deny all;
 
@@ -166,6 +176,21 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
+    location /v1/ {
+        allow <GATEWAY_SERVER_PUBLIC_IP>;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location /v1beta/ {
         allow <GATEWAY_SERVER_PUBLIC_IP>;
         deny all;
@@ -179,8 +204,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
     }
 
     location / {
@@ -211,7 +234,7 @@ WebSocket handling is provider-specific and should remain disabled for split dep
 
 ## Remote Debug Dumps
 
-Relay debug dumps are uploaded back to Gateway when enabled:
+Relay debug dumps are uploaded back to Gateway when enabled. Split `uapi-relay` deployments must either use `mode: "remote"` or keep debug dumps disabled; local dump mode is reserved for all-in-one or local development diagnostics.
 
 ```yaml
 # Gateway

@@ -331,6 +331,10 @@ func ValidateRelay(cfg *Config) error {
 	if isRepeatedUUID(cfg.Gateway.RelayNodeID) {
 		return fmt.Errorf("gateway.relay_node_id must not be a placeholder UUID")
 	}
+	cfg.DebugDump.normalize()
+	if cfg.DebugDump.Enabled && cfg.DebugDump.Mode != "remote" {
+		return fmt.Errorf("debug_dump.mode must be remote or debug_dump.enabled must be false for uapi-relay")
+	}
 	return nil
 }
 
